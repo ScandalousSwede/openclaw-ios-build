@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.2
 
 import PackageDescription
 
@@ -18,6 +18,7 @@ let package = Package(
         .default(enabledTraits: ["Talk"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/steipete/ElevenLabsKit.git", from: "0.1.1"),
         .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
     ],
     targets: [
@@ -30,6 +31,7 @@ let package = Package(
         .target(
             name: "OpenClawKit",
             dependencies: [
+                .product(name: "ElevenLabsKit", package: "ElevenLabsKit"),
                 "OpenClawProtocol",
             ],
             path: "Sources/OpenClawKit",
