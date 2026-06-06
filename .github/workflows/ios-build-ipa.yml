@@ -16,7 +16,11 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: "false"
+          install-deps: "false"
 
       - name: Install iOS build tools
         run: brew install xcodegen swiftlint swiftformat
