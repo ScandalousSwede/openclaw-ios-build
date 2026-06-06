@@ -9,10 +9,15 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: Select Xcode 16.4
+      - name: Select Xcode 26.2
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: '16.4'
+          xcode-version: '26.2'
+
+      - name: Show Swift toolchain
+        run: |
+          xcodebuild -version
+          swift --version
 
       - uses: actions/checkout@v4
 
