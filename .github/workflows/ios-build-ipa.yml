@@ -9,14 +9,14 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
+      - name: Select Xcode 16.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
+
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
-
-      - name: Select Xcode 16.4 (Swift 6.2)
-        run: |
-          sudo xcode-select -s /Applications/Xcode_16.4.app
-          xcodebuild -version
 
       - name: Install iOS build tools
         run: brew install xcodegen swiftlint swiftformat
