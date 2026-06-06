@@ -1,0 +1,61 @@
+name: Build iOS IPA (Debug/Personal Team)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Install iOS build tools
+        run: brew install xcodegen swiftlint swiftformat
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Configure signing if available
+        run: ./scripts/ios-configure-signing.sh || true
+
+      - name: Generate Xcode project
+        run: cd apps/ios && xcodegen generate
+
+      - name: Build IPA (unsigned/development)
+        run: |
+          set -euo pipefail
+          cd apps/ios
+          xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination generic/platform=iOS \
+            -archivePath /tmp/OpenClaw.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            || true
+
+          mkdir -p /tmp/Payload
+          if [ -d /tmp/OpenClaw.xcarchive/Products/Applications/OpenClaw.app ]; then
+            cp -R /tmp/OpenClaw.xcarchive/Products/Applications/OpenClaw.app /tmp/Payload/
+          elif [ -d build/Debug-iphoneos/OpenClaw.app ]; then
+            cp -R build/Debug-iphoneos/OpenClaw.app /tmp/Payload/
+          else
+            echo "OpenClaw.app was not produced by xcodebuild." >&2
+            exit 1
+          fi
+
+          cd /tmp
+          zip -r OpenClaw.ipa Payload/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenClaw-iOS-IPA
+          path: /tmp/OpenClaw.ipa
+          retention-days: 7
