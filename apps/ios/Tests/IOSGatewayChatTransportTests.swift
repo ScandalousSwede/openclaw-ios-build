@@ -26,6 +26,16 @@ import Testing
         #expect(IOSGatewayChatTransport.agentWaitRequestTimeoutSeconds(timeoutMs: 30000) == 35)
     }
 
+    @Test func reliabilityDiagnosticsValidateAndBoundPublicIdentifiers() {
+        #expect(
+            IOSGatewayChatTransport.diagnosticUUID("9B2D6A3B-1334-4D09-8606-7C8E19EAB625")
+                == "9b2d6a3b-1334-4d09-8606-7c8e19eab625")
+        #expect(IOSGatewayChatTransport.diagnosticUUID("not-a-uuid\nsecret") == "redacted")
+        #expect(IOSGatewayChatTransport.diagnosticToken("run_123:ok") == "run_123:ok")
+        #expect(IOSGatewayChatTransport.diagnosticToken("run\nsecret") == "redacted")
+        #expect(IOSGatewayChatTransport.diagnosticToken(String(repeating: "a", count: 129)) == "redacted")
+    }
+
     @Test func agentWaitCompletionDecodesFallbackRunId() throws {
         let data = Data(#"{"status":"completed"}"#.utf8)
         let completion = try IOSGatewayChatTransport.decodeAgentWaitCompletion(data, fallbackRunId: "run-local")

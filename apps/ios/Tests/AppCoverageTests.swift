@@ -16,6 +16,47 @@ import Testing
         #expect(appModel.isBackgrounded == false)
     }
 
+    @Test @MainActor func nodeAppModelReconcilesColdLaunchApplicationStateIdempotently() {
+        let appModel = NodeAppModel()
+
+        appModel.reconcileApplicationState(.background)
+        #expect(appModel.isBackgrounded == true)
+        appModel.reconcileApplicationState(.background)
+        #expect(appModel.isBackgrounded == true)
+
+        appModel.reconcileApplicationState(.inactive)
+        #expect(appModel.isBackgrounded == true)
+
+        appModel.reconcileApplicationState(.active)
+        #expect(appModel.isBackgrounded == false)
+        appModel.reconcileApplicationState(.active)
+        #expect(appModel.isBackgrounded == false)
+
+        appModel.reconcileApplicationState(.inactive)
+        #expect(appModel.isBackgrounded == false)
+    }
+
+    @Test @MainActor func lifecycleTransitionPreventsRepeatedAudioSuspension() {
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: false,
+            applicationState: .background) == .enterBackground)
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: true,
+            applicationState: .background) == .none)
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: true,
+            applicationState: .inactive) == .none)
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: true,
+            applicationState: .active) == .enterForeground)
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: false,
+            applicationState: .active) == .none)
+        #expect(NodeAppModel.lifecycleTransition(
+            isBackgrounded: false,
+            applicationState: .inactive) == .none)
+    }
+
     @Test @MainActor func voiceWakeStartReportsUnsupportedOnSimulator() async {
         let voiceWake = VoiceWakeManager()
         voiceWake.isEnabled = true

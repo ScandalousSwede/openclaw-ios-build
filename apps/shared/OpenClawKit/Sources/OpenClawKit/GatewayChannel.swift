@@ -350,6 +350,12 @@ public actor GatewayChannelActor {
         }
         self.isConnecting = true
         defer { self.isConnecting = false }
+        let attemptID = UUID().uuidString
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let connectStartMessage =
+            "gateway.trace event=connect_start attempt_id=\(attemptID) "
+                + "scheme=\(self.url.scheme ?? "unknown")"
+        self.logger.info("\(connectStartMessage, privacy: .public)")
 
         self.task?.cancel(with: .goingAway, reason: nil)
         self.task = self.session.makeWebSocketTask(url: self.url)
@@ -378,6 +384,10 @@ public actor GatewayChannelActor {
             for waiter in waiters {
                 waiter.resume(throwing: wrapped)
             }
+            let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            let connectFailedMessage =
+                "gateway.trace event=connect_failed attempt_id=\(attemptID) elapsed_ms=\(elapsedMs)"
+            self.logger.error("\(connectFailedMessage, privacy: .public)")
             self.logger.error("gateway ws connect failed \(wrapped.localizedDescription, privacy: .public)")
             throw wrapped
         }
@@ -393,6 +403,11 @@ public actor GatewayChannelActor {
         for waiter in waiters {
             waiter.resume(returning: ())
         }
+        let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+        let connectSucceededMessage =
+            "gateway.trace event=connect_succeeded attempt_id=\(attemptID) "
+                + "elapsed_ms=\(elapsedMs) role=\(self.connectOptions?.role ?? "unknown")"
+        self.logger.info("\(connectSucceededMessage, privacy: .public)")
     }
 
     private func startKeepalive() {
@@ -905,6 +920,10 @@ public actor GatewayChannelActor {
 
     private func handleReceiveFailure(_ err: Error) async {
         let wrapped = self.wrap(err, context: "gateway receive")
+        let disconnectedMessage =
+            "gateway.trace event=disconnected correlation=unavailable_without_socket_generation "
+                + "outcome=requests_failed"
+        self.logger.error("\(disconnectedMessage, privacy: .public)")
         self.logger.error("gateway ws receive failed \(wrapped.localizedDescription, privacy: .public)")
         self.connected = false
         self.keepaliveTask?.cancel()
@@ -1024,6 +1043,8 @@ public actor GatewayChannelActor {
         guard !self.reconnectPausedForAuthFailure else { return }
         let delay = self.backoffMs / 1000
         self.backoffMs = min(self.backoffMs * 2, 30000)
+        self.logger.info(
+            "gateway.trace event=reconnect_scheduled delay_ms=\(Int(delay * 1000), privacy: .public)")
         guard await self.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
         guard self.shouldReconnect else { return }
         guard !self.reconnectPausedForAuthFailure else { return }

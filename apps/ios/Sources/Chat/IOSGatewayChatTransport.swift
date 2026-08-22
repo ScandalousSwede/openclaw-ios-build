@@ -65,6 +65,17 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         }
     }
 
+    static func diagnosticUUID(_ value: String) -> String {
+        UUID(uuidString: value)?.uuidString.lowercased() ?? "redacted"
+    }
+
+    static func diagnosticToken(_ value: String, maximumLength: Int = 128) -> String {
+        guard !value.isEmpty, value.count <= maximumLength else { return "redacted" }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._:-"))
+        guard value.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return "redacted" }
+        return value
+    }
+
     init(gateway: GatewayNodeSession) {
         self.gateway = gateway
     }
@@ -199,9 +210,11 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         idempotencyKey: String,
         attachments: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let diagnosticCommandID = Self.diagnosticUUID(idempotencyKey)
         let startLogMessage =
-            "chat.send start sessionKey=\(sessionKey) "
-                + "len=\(message.count) attachments=\(attachments.count)"
+            "event=chat_send_start command_id=\(diagnosticCommandID) "
+                + "message_length=\(message.count) attachments=\(attachments.count)"
         Self.logger.info(
             "\(startLogMessage, privacy: .public)")
         GatewayDiagnostics.log(startLogMessage)
@@ -214,12 +227,25 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         do {
             let res = try await self.gateway.request(method: "chat.send", paramsJSON: json, timeoutSeconds: 35)
             let decoded = try JSONDecoder().decode(OpenClawChatSendResponse.self, from: res)
-            Self.logger.info("chat.send ok runId=\(decoded.runId, privacy: .public)")
-            GatewayDiagnostics.log("chat.send ok runId=\(decoded.runId) status=\(decoded.status)")
+            let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            let diagnosticRunID = Self.diagnosticToken(decoded.runId)
+            let diagnosticStatus = Self.diagnosticToken(decoded.status, maximumLength: 32)
+            let acceptedLogMessage =
+                "event=chat_send_accepted command_id=\(diagnosticCommandID) "
+                    + "run_id=\(diagnosticRunID) status=\(diagnosticStatus) elapsed_ms=\(elapsedMs)"
+            Self.logger.info("\(acceptedLogMessage, privacy: .public)")
+            GatewayDiagnostics.log(acceptedLogMessage)
             return decoded
         } catch {
-            Self.logger.error("chat.send failed \(error.localizedDescription, privacy: .public)")
-            GatewayDiagnostics.log("chat.send failed error=\(error.localizedDescription)")
+            let elapsedMs = Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            let nsError = error as NSError
+            let errorDomain = Self.diagnosticToken(nsError.domain, maximumLength: 80)
+            let uncertainLogMessage =
+                "event=chat_send_failed command_id=\(diagnosticCommandID) "
+                    + "outcome=send_failed_unclassified elapsed_ms=\(elapsedMs) "
+                    + "error_domain=\(errorDomain) error_code=\(nsError.code)"
+            Self.logger.error("\(uncertainLogMessage, privacy: .public)")
+            GatewayDiagnostics.log(uncertainLogMessage)
             throw error
         }
     }

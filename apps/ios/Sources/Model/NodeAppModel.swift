@@ -481,6 +481,70 @@ final class NodeAppModel {
         }
     }
 
+    /// Reconcile lifecycle state for cold notification/BGTask launches that can
+    /// arrive before SwiftUI emits a scene-phase change. Repeated background
+    /// callbacks must not overwrite voice/talk suspension ownership.
+    func reconcileApplicationState(_ state: UIApplication.State) {
+        self.applyLifecycleTransition(Self.lifecycleTransition(
+            isBackgrounded: self.isBackgrounded,
+            applicationState: state))
+    }
+
+    func reconcileScenePhase(_ phase: ScenePhase) {
+        self.applyLifecycleTransition(Self.lifecycleTransition(
+            isBackgrounded: self.isBackgrounded,
+            scenePhase: phase))
+    }
+
+    enum LifecycleTransition: Equatable {
+        case enterBackground
+        case enterForeground
+        case none
+    }
+
+    static func lifecycleTransition(
+        isBackgrounded: Bool,
+        applicationState: UIApplication.State) -> LifecycleTransition
+    {
+        switch applicationState {
+        case .background:
+            return isBackgrounded ? .none : .enterBackground
+        case .active:
+            return isBackgrounded ? .enterForeground : .none
+        case .inactive:
+            return .none
+        @unknown default:
+            return .none
+        }
+    }
+
+    static func lifecycleTransition(
+        isBackgrounded: Bool,
+        scenePhase: ScenePhase) -> LifecycleTransition
+    {
+        switch scenePhase {
+        case .background:
+            return isBackgrounded ? .none : .enterBackground
+        case .active:
+            return isBackgrounded ? .enterForeground : .none
+        case .inactive:
+            return .none
+        @unknown default:
+            return .none
+        }
+    }
+
+    private func applyLifecycleTransition(_ transition: LifecycleTransition) {
+        switch transition {
+        case .enterBackground:
+            self.setScenePhase(.background)
+        case .enterForeground:
+            self.setScenePhase(.active)
+        case .none:
+            return
+        }
+    }
+
     private func beginBackgroundConnectionGracePeriod(seconds: TimeInterval = 25) {
         self.grantBackgroundReconnectLease(seconds: seconds, reason: "scene_background_grace")
         self.endBackgroundConnectionGracePeriod(reason: "restart")

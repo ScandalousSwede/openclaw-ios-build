@@ -102,6 +102,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         if self.appModel == nil {
             self.appModel = OpenClawAppModelRegistry.appModel
         }
+        self.resolvedAppModel()?.reconcileApplicationState(application.applicationState)
         self.registerBackgroundWakeRefreshTask()
         let notificationCenter = UNUserNotificationCenter.current()
         notificationCenter.delegate = self
@@ -159,6 +160,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
                 completionHandler(.noData)
                 return
             }
+            appModel.reconcileApplicationState(application.applicationState)
             let handled = await appModel.handleSilentPushWake(userInfo)
             self.logger.info("APNs wake handled=\(handled, privacy: .public)")
             if !handled {
@@ -213,6 +215,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
 
         let wakeTask = Task { @MainActor [weak self] in
             guard let self, let appModel = self.resolvedAppModel() else { return false }
+            appModel.reconcileApplicationState(UIApplication.shared.applicationState)
             return await appModel.handleBackgroundRefreshWake(trigger: "bg_app_refresh")
         }
         self.backgroundWakeTask = wakeTask
@@ -626,6 +629,7 @@ struct OpenClawApp: App {
                 .task {
                     self.appDelegate.appModel = self.appModel
                     self.applyAppearancePreference()
+                    self.appModel.reconcileScenePhase(self.scenePhase)
                     self.gatewayController.setScenePhase(self.scenePhase)
                 }
                 .onOpenURL { url in
@@ -635,7 +639,7 @@ struct OpenClawApp: App {
                     self.applyAppearancePreference()
                 }
                 .onChange(of: self.scenePhase) { _, newValue in
-                    self.appModel.setScenePhase(newValue)
+                    self.appModel.reconcileScenePhase(newValue)
                     self.gatewayController.setScenePhase(newValue)
                     self.appDelegate.scenePhaseChanged(newValue)
                     self.applyAppearancePreference()
