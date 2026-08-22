@@ -964,16 +964,43 @@ final class TalkModeManager: NSObject {
             return
         }
 
+        let commandID = UUID().uuidString.lowercased()
+        var acceptedDiagnosticRunID: String?
         do {
             let startedAt = Date().timeIntervalSince1970
             let sessionKey = self.mainSessionKey
             await self.subscribeChatIfNeeded(sessionKey: sessionKey)
-            self.logger.info(
-                "chat.send start sessionKey=\(sessionKey, privacy: .public) chars=\(prompt.count, privacy: .public)")
-            GatewayDiagnostics.log("talk: chat.send start sessionKey=\(sessionKey) chars=\(prompt.count)")
-            let runId = try await self.sendChat(prompt, gateway: gateway)
-            self.logger.info("chat.send ok runId=\(runId, privacy: .public)")
-            GatewayDiagnostics.log("talk: chat.send ok runId=\(runId)")
+            let startLogMessage =
+                "event=talk_chat_send_start command_id=\(commandID) message_length=\(prompt.count)"
+            self.logger.info("\(startLogMessage, privacy: .public)")
+            GatewayDiagnostics.log(startLogMessage)
+            let runId: String
+            do {
+                runId = try await self.sendChat(
+                    prompt,
+                    gateway: gateway,
+                    idempotencyKey: commandID)
+            } catch {
+                self.statusText = "Talk failed: \(error.localizedDescription)"
+                let nsError = error as NSError
+                let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
+                let failedLogMessage =
+                    "event=talk_chat_send_unconfirmed command_id=\(commandID) "
+                        + "outcome=acceptance_not_observed error_domain=\(errorDomain) "
+                        + "error_code=\(nsError.code)"
+                self.logger.error("\(failedLogMessage, privacy: .public)")
+                GatewayDiagnostics.log(failedLogMessage)
+                if restartAfter {
+                    await self.start()
+                }
+                return
+            }
+            let diagnosticRunID = IOSGatewayChatTransport.diagnosticToken(runId)
+            acceptedDiagnosticRunID = diagnosticRunID
+            let acceptedLogMessage =
+                "event=talk_chat_send_accepted command_id=\(commandID) run_id=\(diagnosticRunID)"
+            self.logger.info("\(acceptedLogMessage, privacy: .public)")
+            GatewayDiagnostics.log(acceptedLogMessage)
             let shouldIncremental = self.shouldUseIncrementalTTS()
             var streamingTask: Task<Void, Never>?
             if shouldIncremental {
@@ -986,20 +1013,20 @@ final class TalkModeManager: NSObject {
             let completion = await waitForChatCompletion(runId: runId, gateway: gateway, timeoutSeconds: 120)
             if completion.state == .timeout {
                 self.logger.warning(
-                    "chat completion timeout runId=\(runId, privacy: .public); attempting history fallback")
-                GatewayDiagnostics.log("talk: chat completion timeout runId=\(runId)")
+                    "chat completion timeout run_id=\(diagnosticRunID, privacy: .public); attempting history fallback")
+                GatewayDiagnostics.log("talk: chat completion timeout run_id=\(diagnosticRunID)")
             } else if completion.state == .aborted {
                 self.statusText = "Aborted"
-                self.logger.warning("chat completion aborted runId=\(runId, privacy: .public)")
-                GatewayDiagnostics.log("talk: chat completion aborted runId=\(runId)")
+                self.logger.warning("chat completion aborted run_id=\(diagnosticRunID, privacy: .public)")
+                GatewayDiagnostics.log("talk: chat completion aborted run_id=\(diagnosticRunID)")
                 streamingTask?.cancel()
                 await self.finishIncrementalSpeech()
                 await self.start()
                 return
             } else if completion.state == .error {
                 self.statusText = "Chat error"
-                self.logger.warning("chat completion error runId=\(runId, privacy: .public)")
-                GatewayDiagnostics.log("talk: chat completion error runId=\(runId)")
+                self.logger.warning("chat completion error run_id=\(diagnosticRunID, privacy: .public)")
+                GatewayDiagnostics.log("talk: chat completion error run_id=\(diagnosticRunID)")
                 streamingTask?.cancel()
                 await self.finishIncrementalSpeech()
                 await self.start()
@@ -1021,8 +1048,8 @@ final class TalkModeManager: NSObject {
             }
             guard let assistantText else {
                 self.statusText = "No reply"
-                self.logger.warning("assistant text timeout runId=\(runId, privacy: .public)")
-                GatewayDiagnostics.log("talk: assistant text timeout runId=\(runId)")
+                self.logger.warning("assistant text timeout run_id=\(diagnosticRunID, privacy: .public)")
+                GatewayDiagnostics.log("talk: assistant text timeout run_id=\(diagnosticRunID)")
                 streamingTask?.cancel()
                 await self.finishIncrementalSpeech()
                 await self.start()
@@ -1038,8 +1065,15 @@ final class TalkModeManager: NSObject {
             }
         } catch {
             self.statusText = "Talk failed: \(error.localizedDescription)"
-            self.logger.error("finalize failed: \(error.localizedDescription, privacy: .public)")
-            GatewayDiagnostics.log("talk: failed error=\(error.localizedDescription)")
+            let nsError = error as NSError
+            let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
+            let failedLogMessage =
+                "event=talk_chat_response_failed command_id=\(commandID) "
+                    + "run_id=\(acceptedDiagnosticRunID ?? "unavailable") "
+                    + "outcome=response_unavailable error_domain=\(errorDomain) "
+                    + "error_code=\(nsError.code)"
+            self.logger.error("\(failedLogMessage, privacy: .public)")
+            GatewayDiagnostics.log(failedLogMessage)
         }
 
         if restartAfter {
@@ -1286,14 +1320,32 @@ final class TalkModeManager: NSObject {
         var assistantText: String?
     }
 
-    private func sendChat(_ message: String, gateway: GatewayNodeSession) async throws -> String {
+    private func sendChat(
+        _ message: String,
+        gateway: GatewayNodeSession,
+        idempotencyKey: String) async throws -> String
+    {
         struct SendResponse: Decodable { let runId: String }
+        let json = try Self.makeChatSendPayload(
+            message: message,
+            sessionKey: self.mainSessionKey,
+            idempotencyKey: idempotencyKey)
+        let res = try await gateway.request(method: "chat.send", paramsJSON: json, timeoutSeconds: 30)
+        let decoded = try JSONDecoder().decode(SendResponse.self, from: res)
+        return decoded.runId
+    }
+
+    private static func makeChatSendPayload(
+        message: String,
+        sessionKey: String,
+        idempotencyKey: String) throws -> String
+    {
         let payload: [String: Any] = [
-            "sessionKey": mainSessionKey,
+            "sessionKey": sessionKey,
             "message": message,
             "thinking": "low",
             "timeoutMs": 30000,
-            "idempotencyKey": UUID().uuidString,
+            "idempotencyKey": idempotencyKey,
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
         guard let json = String(bytes: data, encoding: .utf8) else {
@@ -1302,9 +1354,7 @@ final class TalkModeManager: NSObject {
                 code: 1,
                 userInfo: [NSLocalizedDescriptionKey: "Failed to encode chat payload"])
         }
-        let res = try await gateway.request(method: "chat.send", paramsJSON: json, timeoutSeconds: 30)
-        let decoded = try JSONDecoder().decode(SendResponse.self, from: res)
-        return decoded.runId
+        return json
     }
 
     private func waitForChatCompletion(
@@ -2885,6 +2935,17 @@ extension TalkModeManager: TalkRealtimeWebRTCSessionDelegate {
 
 #if DEBUG
 extension TalkModeManager {
+    static func _test_chatSendPayload(
+        message: String,
+        sessionKey: String,
+        idempotencyKey: String) throws -> String
+    {
+        try self.makeChatSendPayload(
+            message: message,
+            sessionKey: sessionKey,
+            idempotencyKey: idempotencyKey)
+    }
+
     static func _test_isPCMFormatRejectedByAPI(_ error: Error?) -> Bool {
         self.isPCMFormatRejectedByAPI(error)
     }

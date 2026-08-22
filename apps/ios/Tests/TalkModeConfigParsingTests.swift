@@ -4,6 +4,20 @@ import Testing
 
 @MainActor
 @Suite struct TalkModeManagerTests {
+    @Test func chatSendPayloadPreservesCallerIdentity() throws {
+        let commandID = "aies-command-123"
+        let json = try TalkModeManager._test_chatSendPayload(
+            message: "conference status",
+            sessionKey: "agent:main:main",
+            idempotencyKey: commandID)
+        let data = try #require(json.data(using: .utf8))
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(payload["idempotencyKey"] as? String == commandID)
+        #expect(payload["sessionKey"] as? String == "agent:main:main")
+        #expect(payload["message"] as? String == "conference status")
+    }
+
     @Test func parsesOpenAIRealtimeProviderModelAndVoice() {
         let config: [String: Any] = [
             "talk": [
