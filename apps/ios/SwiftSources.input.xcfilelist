@@ -1,3 +1,7 @@
+Sources/AIES/AIESAgendaContract.swift
+Sources/AIES/AIESAgendaStore.swift
+Sources/AIES/AIESAgendaTimeRendering.swift
+Sources/AIES/AIESAgendaView.swift
 Sources/Calendar/CalendarService.swift
 Sources/Camera/CameraController.swift
 Sources/Capabilities/NodeCapabilityRouter.swift
