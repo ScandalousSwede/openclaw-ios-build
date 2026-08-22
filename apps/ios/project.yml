@@ -105,11 +105,13 @@ targets:
         ENABLE_APP_INTENTS_METADATA_GENERATION: NO
       configs:
         Debug:
+          OPENCLAW_APNS_ENTITLEMENT_ENVIRONMENT: development
           OPENCLAW_PUSH_TRANSPORT: direct
           OPENCLAW_PUSH_DISTRIBUTION: local
           OPENCLAW_PUSH_RELAY_BASE_URL: ""
           OPENCLAW_PUSH_APNS_ENVIRONMENT: sandbox
         Release:
+          OPENCLAW_APNS_ENTITLEMENT_ENVIRONMENT: production
           OPENCLAW_PUSH_TRANSPORT: direct
           OPENCLAW_PUSH_DISTRIBUTION: local
           OPENCLAW_PUSH_RELAY_BASE_URL: ""
