@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import Testing
 @testable import OpenClaw
@@ -55,6 +56,17 @@ import Testing
         #expect(NodeAppModel.lifecycleTransition(
             isBackgrounded: false,
             applicationState: .inactive) == .none)
+    }
+
+    @Test @MainActor func apnsTokenUsesCurrentLaunchCallbackInsteadOfDurableCache() {
+        let key = "push.apns.deviceTokenHex"
+        UserDefaults.standard.set("stale-token", forKey: key)
+        defer { UserDefaults.standard.removeObject(forKey: key) }
+
+        let appModel = NodeAppModel()
+        #expect(UserDefaults.standard.string(forKey: key) == nil)
+        appModel.updateAPNsDeviceToken(Data([0x01, 0x02, 0x03]))
+        #expect(UserDefaults.standard.string(forKey: key) == nil)
     }
 
     @Test @MainActor func voiceWakeStartReportsUnsupportedOnSimulator() async {

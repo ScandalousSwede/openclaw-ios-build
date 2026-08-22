@@ -246,7 +246,9 @@ final class NodeAppModel {
         self.motionService = motionService
         self.watchMessagingService = watchMessagingService
         self.talkMode = talkMode
-        self.apnsDeviceTokenHex = UserDefaults.standard.string(forKey: Self.apnsDeviceTokenUserDefaultsKey)
+        // APNs tokens are launch-scoped addresses, not durable app state. Drop
+        // the fork's legacy cache and wait for the current system callback.
+        UserDefaults.standard.removeObject(forKey: Self.legacyAPNsDeviceTokenUserDefaultsKey)
         self.restorePersistedWatchExecApprovalBridgeState()
         GatewayDiagnostics.bootstrap()
         GatewayDiagnostics.log("node app model: init start")
@@ -793,7 +795,7 @@ final class NodeAppModel {
     }
 
     private static let defaultSeamColor = Color(red: 79 / 255.0, green: 122 / 255.0, blue: 154 / 255.0)
-    private static let apnsDeviceTokenUserDefaultsKey = "push.apns.deviceTokenHex"
+    private static let legacyAPNsDeviceTokenUserDefaultsKey = "push.apns.deviceTokenHex"
     private static let deepLinkKeyUserDefaultsKey = "deeplink.agent.key"
     private static let canvasUnattendedDeepLinkKey: String = NodeAppModel.generateDeepLinkKey()
 
@@ -3660,7 +3662,6 @@ extension NodeAppModel {
         let trimmed = tokenHex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         self.apnsDeviceTokenHex = trimmed
-        UserDefaults.standard.set(trimmed, forKey: Self.apnsDeviceTokenUserDefaultsKey)
         Task { [weak self] in
             await self?.registerAPNsTokenIfNeeded()
         }
