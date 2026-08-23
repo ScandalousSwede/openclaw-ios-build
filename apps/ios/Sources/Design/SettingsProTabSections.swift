@@ -416,6 +416,7 @@ extension SettingsProTab {
                 self.detailRow("Model", value: DeviceInfoHelper.modelIdentifier())
             }
 
+            self.crashDiagnosticExportCard
             self.diagnosticsAdvancedCard
         }
     }
@@ -857,6 +858,43 @@ extension SettingsProTab {
                     GatewayDiscoveryDebugLogView()
                 } label: {
                     self.simpleSettingsRow(title: "Discovery Logs", value: self.gatewayController.discoveryStatusText)
+                }
+            }
+        }
+        .padding(.horizontal, OpenClawProMetric.pagePadding)
+    }
+
+    var crashDiagnosticExportCard: some View {
+        ProCard(radius: SettingsLayout.cardRadius) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Crash Evidence", systemImage: "waveform.path.ecg.rectangle")
+                    .font(.headline)
+                Text(
+                    "Prepare a bounded metadata-only export from the protected rolling log. "
+                        + "Messages, prompts, tool payloads, credentials, and APNs tokens are excluded.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    self.prepareCrashDiagnosticExport()
+                } label: {
+                    Label(
+                        self.isPreparingCrashDiagnosticExport ? "Preparing…" : "Prepare Crash Export",
+                        systemImage: "doc.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .disabled(self.isPreparingCrashDiagnosticExport)
+
+                if let crashDiagnosticExportURL {
+                    ShareLink(item: crashDiagnosticExportURL) {
+                        Label("Share Crash Export", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if let crashDiagnosticExportStatus {
+                    Text(crashDiagnosticExportStatus)
+                        .font(.caption)
+                        .foregroundStyle(crashDiagnosticExportURL == nil ? OpenClawBrand.warn : .secondary)
                 }
             }
         }

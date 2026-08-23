@@ -103,8 +103,18 @@ targets:
         SUPPORTS_LIVE_ACTIVITIES: YES
         ENABLE_APPINTENTS_METADATA: NO
         ENABLE_APP_INTENTS_METADATA_GENERATION: NO
+        OPENCLAW_BUILD_GIT_SHA: unknown
+        OPENCLAW_BUILD_GIT_BRANCH: unknown
+        OPENCLAW_BUILD_TIMESTAMP: unknown
+        OPENCLAW_BUILD_XCODE_VERSION: unknown
+        OPENCLAW_BUILD_SWIFT_VERSION: unknown
+        OPENCLAW_BUILD_SDK_VERSION: unknown
+        OPENCLAW_BUILD_CONFIGURATION: "$(CONFIGURATION)"
+        OPENCLAW_BUILD_ARCHIVE_UUID: unknown
+        OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED: ""
       configs:
         Debug:
+          DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
           OPENCLAW_APNS_ENTITLEMENT_ENVIRONMENT: development
           OPENCLAW_PUSH_TRANSPORT: direct
           OPENCLAW_PUSH_DISTRIBUTION: local
@@ -160,6 +170,21 @@ targets:
         OpenClawPushDistribution: "$(OPENCLAW_PUSH_DISTRIBUTION)"
         OpenClawPushRelayBaseURL: "$(OPENCLAW_PUSH_RELAY_BASE_URL)"
         OpenClawPushAPNsEnvironment: "$(OPENCLAW_PUSH_APNS_ENVIRONMENT)"
+        OpenClawBuildGitSHA: "$(OPENCLAW_BUILD_GIT_SHA)"
+        OpenClawBuildGitBranch: "$(OPENCLAW_BUILD_GIT_BRANCH)"
+        OpenClawBuildTimestamp: "$(OPENCLAW_BUILD_TIMESTAMP)"
+        OpenClawBuildXcodeVersion: "$(OPENCLAW_BUILD_XCODE_VERSION)"
+        OpenClawBuildSwiftVersion: "$(OPENCLAW_BUILD_SWIFT_VERSION)"
+        OpenClawBuildSDKVersion: "$(OPENCLAW_BUILD_SDK_VERSION)"
+        OpenClawBuildConfiguration: "$(OPENCLAW_BUILD_CONFIGURATION)"
+        OpenClawBuildArchiveUUID: "$(OPENCLAW_BUILD_ARCHIVE_UUID)"
+        OpenClawBuildAPSEnvironmentIfSigned: "$(OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED)"
+        OpenClawBuildExtensionBundleIDs:
+          - "$(OPENCLAW_SHARE_BUNDLE_ID)"
+          - "$(OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID)"
+        OpenClawBuildWatchBundleIDs:
+          - "$(OPENCLAW_WATCH_APP_BUNDLE_ID)"
+          - "$(OPENCLAW_WATCH_EXTENSION_BUNDLE_ID)"
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationPortraitUpsideDown

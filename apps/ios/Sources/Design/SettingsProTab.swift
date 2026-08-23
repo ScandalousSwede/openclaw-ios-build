@@ -57,6 +57,9 @@ struct SettingsProTab: View {
     @State var notificationActionText = "Request Access"
     @State var diagnosticsLastRunText = "Not run"
     @State var diagnosticsIssueCount: Int?
+    @State var crashDiagnosticExportURL: URL?
+    @State var crashDiagnosticExportStatus: String?
+    @State var isPreparingCrashDiagnosticExport = false
 
     var body: some View {
         NavigationStack {

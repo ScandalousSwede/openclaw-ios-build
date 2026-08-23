@@ -34,6 +34,9 @@ Sources/Design/AgentProTab+Usage.swift
 Sources/Design/AgentProTab+DetailComponents.swift
 Sources/Design/AgentProTab+GatewayData.swift
 Sources/Design/AgentProModels.swift
+Sources/Diagnostics/AIESBuildManifest.swift
+Sources/Diagnostics/AIESCrashDiagnosticExporter.swift
+Sources/Diagnostics/AIESNetworkDiagnosticMonitor.swift
 Sources/EventKit/EventKitAuthorization.swift
 Sources/Gateway/DeepLinkAgentPromptAlert.swift
 Sources/Gateway/ExecApprovalPromptDialog.swift
@@ -140,6 +143,7 @@ WatchExtension/Sources/WatchInboxView.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/DeepLinks.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/JPEGTranscoder.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/NodeError.swift
+../shared/OpenClawKit/Sources/OpenClawKit/OpenClawDiagnosticEvent.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/ScreenCommands.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/StoragePaths.swift
 ../shared/OpenClawKit/Sources/OpenClawKit/SystemCommands.swift

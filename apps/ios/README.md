@@ -7,6 +7,7 @@ This iOS app is super-alpha and internal-use only. The first public App Store re
 - Public distribution: not available.
 - Internal beta distribution: local archive + TestFlight upload via Fastlane.
 - Local/manual deploy from source via Xcode remains the default development path.
+- Physical-device crashes from an attributable CI binary use the exact artifact and sanitized evidence contract in [CRASH_HANDOFF.md](CRASH_HANDOFF.md); local/TestFlight builds remain unsupported until they emit the same provenance.
 
 ## Super-Alpha Disclaimer
 

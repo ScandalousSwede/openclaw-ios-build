@@ -171,6 +171,20 @@ extension SettingsProTab {
         self.diagnosticsLastRunText = SettingsDiagnostics.timestamp(Date())
     }
 
+    @MainActor
+    func prepareCrashDiagnosticExport() {
+        guard !self.isPreparingCrashDiagnosticExport else { return }
+        self.isPreparingCrashDiagnosticExport = true
+        defer { self.isPreparingCrashDiagnosticExport = false }
+        do {
+            self.crashDiagnosticExportURL = try AIESCrashDiagnosticExporter.writeExport()
+            self.crashDiagnosticExportStatus = "Sanitized export ready"
+        } catch {
+            self.crashDiagnosticExportURL = nil
+            self.crashDiagnosticExportStatus = "Export failed: \(error.localizedDescription)"
+        }
+    }
+
     func syncSettingsState() {
         self.manualGatewayPortText = self.manualGatewayPort > 0 ? String(self.manualGatewayPort) : ""
         self.selectedAgentPickerId = self.appModel.selectedAgentId ?? ""

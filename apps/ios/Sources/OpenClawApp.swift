@@ -99,6 +99,10 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool
     {
         GatewayDiagnostics.log("app delegate: didFinishLaunching")
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "did_finish_launching"))
+        AIESNetworkDiagnosticMonitor.shared.start()
         if self.appModel == nil {
             self.appModel = OpenClawAppModelRegistry.appModel
         }
@@ -172,6 +176,9 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
 
     func scenePhaseChanged(_ phase: ScenePhase) {
         GatewayDiagnostics.log("app delegate: scene phase changed=\(String(describing: phase))")
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "scene_\(String(describing: phase))"))
         if phase == .background {
             self.scheduleBackgroundWakeRefresh(afterSeconds: 120, reason: "scene_background")
         }

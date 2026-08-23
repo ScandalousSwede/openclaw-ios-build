@@ -1,4 +1,5 @@
 import Foundation
+import OpenClawKit
 import os
 
 enum GatewaySettingsStore {
@@ -479,6 +480,8 @@ enum GatewaySettingsStore {
 enum GatewayDiagnostics {
     private static let logger = Logger(subsystem: "ai.openclaw.ios", category: "GatewayDiag")
     private static let queue = DispatchQueue(label: "ai.openclaw.gateway.diagnostics")
+    static let logFileName = "openclaw-gateway-aies-v1.log"
+    static let evidenceRecordMarker = "evidence-v1 "
     private static let maxLogBytes: Int64 = 512 * 1024
     private static let keepLogBytes: Int64 = 256 * 1024
     private static let logSizeCheckEveryWrites = 50
@@ -491,7 +494,7 @@ enum GatewayDiagnostics {
 
     private static var fileURL: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("openclaw-gateway.log")
+            .appendingPathComponent(self.logFileName)
     }
 
     private static func truncateLogIfNeeded(url: URL) {
@@ -520,6 +523,7 @@ enum GatewayDiagnostics {
             }
 
             try tail.write(to: url, options: .atomic)
+            self.applyFileProtection(url: url)
         } catch {
             // Best-effort only.
         }
@@ -545,22 +549,47 @@ enum GatewayDiagnostics {
 
     static func bootstrap() {
         guard let url = fileURL else { return }
+        OpenClawDiagnosticRecorder.installSink { record in
+            GatewayDiagnostics.logSanitizedRecord(record)
+        }
         self.queue.async {
             self.truncateLogIfNeeded(url: url)
             let timestamp = self.isoTimestamp()
-            let line = "[\(timestamp)] gateway diagnostics started\n"
+            let line = self.formatRawLogLine("gateway diagnostics started", timestamp: timestamp) + "\n"
             if let data = line.data(using: .utf8) {
                 self.appendToLog(url: url, data: data)
                 self.applyFileProtection(url: url)
             }
         }
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "diagnostics_started"))
     }
 
     static func log(_ message: String) {
         let timestamp = self.isoTimestamp()
-        let line = "[\(timestamp)] \(message)"
+        let line = self.formatRawLogLine(message, timestamp: timestamp)
         self.logger.info("\(line, privacy: .public)")
 
+        self.enqueueLogLine(line)
+    }
+
+    static func formatRawLogLine(_ message: String, timestamp: String) -> String {
+        let singleLine = message
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        // Raw diagnostics always carry this marker, so they cannot be parsed as
+        // allowlisted structured evidence even when their content resembles a record.
+        return "[\(timestamp)] raw=\(singleLine)"
+    }
+
+    private static func logSanitizedRecord(_ record: String) {
+        guard OpenClawDiagnosticRecorder.decodeRecord(record) != nil else { return }
+        let timestamp = self.isoTimestamp()
+        self.enqueueLogLine("[\(timestamp)] \(self.evidenceRecordMarker)\(record)")
+    }
+
+    private static func enqueueLogLine(_ line: String) {
         guard let url = fileURL else { return }
         self.queue.async {
             let shouldTruncate = self.logWritesSinceCheck.withLock { count in
@@ -576,7 +605,11 @@ enum GatewayDiagnostics {
             }
             let entry = line + "\n"
             if let data = entry.data(using: .utf8) {
+                let needsFileProtection = !FileManager.default.fileExists(atPath: url.path)
                 self.appendToLog(url: url, data: data)
+                if needsFileProtection {
+                    self.applyFileProtection(url: url)
+                }
             }
         }
     }
@@ -585,6 +618,54 @@ enum GatewayDiagnostics {
         guard let url = fileURL else { return }
         self.queue.async {
             try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    static func recentSanitizedEvents(limit: Int) -> [OpenClawDiagnosticEvent] {
+        guard limit > 0, let url = fileURL else { return [] }
+        return self.queue.sync {
+            guard let data = self.readLogTail(url: url, maximumBytes: 256 * 1024),
+                  let contents = String(data: data, encoding: .utf8)
+            else {
+                return []
+            }
+            return self.decodeSanitizedEvents(contents, limit: min(limit, 500))
+        }
+    }
+
+    static func decodeSanitizedEvents(_ contents: String, limit: Int) -> [OpenClawDiagnosticEvent] {
+        guard limit > 0 else { return [] }
+        let events = contents.split(separator: "\n").compactMap { line -> OpenClawDiagnosticEvent? in
+            guard line.first == "[", let closingBracket = line.firstIndex(of: "]") else { return nil }
+            let separator = line.index(after: closingBracket)
+            guard separator < line.endIndex, line[separator] == " " else { return nil }
+            let recordStart = line.index(after: separator)
+            let payload = String(line[recordStart...])
+            guard payload.hasPrefix(self.evidenceRecordMarker) else { return nil }
+            return OpenClawDiagnosticRecorder.decodeRecord(
+                String(payload.dropFirst(self.evidenceRecordMarker.count)))
+        }
+        return Array(events.suffix(limit))
+    }
+
+    static func readLogTail(url: URL, maximumBytes: UInt64) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let offset = try? handle.seekToEnd() else { return nil }
+        let start = offset > maximumBytes ? offset - maximumBytes : 0
+        do {
+            try handle.seek(toOffset: start)
+            var tail = try handle.readToEnd() ?? Data()
+            // The byte bound may begin inside a UTF-8 scalar or log line. Drop that
+            // fragment before decoding so later structured records remain readable.
+            if start > 0, let newline = tail.firstIndex(of: 10) {
+                tail = tail.suffix(from: tail.index(after: newline))
+            } else if start > 0 {
+                tail = Data()
+            }
+            return tail
+        } catch {
+            return nil
         }
     }
 }

@@ -1,4 +1,4 @@
-name: Build iOS IPA (Debug/Personal Team)
+name: Build iOS IPA (Debug/Unsigned)
 
 on:
   workflow_dispatch:
@@ -33,121 +33,176 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
-      - name: Detect signing secrets
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+      - name: Capture build provenance
         run: |
           set -euo pipefail
-          if [[ -n "${APPLE_CERTIFICATE_P12_BASE64}" && -n "${APPLE_CERTIFICATE_PASSWORD}" && -n "${APPLE_PROVISIONING_PROFILE_BASE64}" ]]; then
-            echo "SIGNING_SECRETS_AVAILABLE=true" >> "${GITHUB_ENV}"
-            echo "Signing secrets detected; this run will attempt a signed archive."
-          else
-            echo "SIGNING_SECRETS_AVAILABLE=false" >> "${GITHUB_ENV}"
-            echo "Signing secrets are incomplete or absent; falling back to unsigned IPA build."
-          fi
-
-      - name: Import signing assets
-        if: env.SIGNING_SECRETS_AVAILABLE == 'true'
-        env:
-          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-        run: |
-          set -euo pipefail
-
-          # Import cert to keychain
-          echo "${APPLE_CERTIFICATE_P12_BASE64}" | base64 --decode > /tmp/cert.p12
-          security create-keychain -p "" build.keychain
-          security unlock-keychain -p "" build.keychain
-          security import /tmp/cert.p12 -k build.keychain -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
-          security default-keychain -s build.keychain
-          security list-keychains -d user -s build.keychain
-
-          # Import provisioning profile
-          mkdir -p "${HOME}/Library/MobileDevice/Provisioning Profiles"
-          echo "${APPLE_PROVISIONING_PROFILE_BASE64}" | base64 --decode > "${HOME}/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision"
-          security cms -D -i "${HOME}/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision" > /tmp/profile.plist
-
-          profile_name="$(/usr/libexec/PlistBuddy -c 'Print Name' /tmp/profile.plist)"
-          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print UUID' /tmp/profile.plist)"
-          team_id="$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /tmp/profile.plist)"
-          get_task_allow="$(/usr/libexec/PlistBuddy -c 'Print Entitlements:get-task-allow' /tmp/profile.plist 2>/dev/null || echo false)"
-
-          cp "${HOME}/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision" "${HOME}/Library/MobileDevice/Provisioning Profiles/${profile_uuid}.mobileprovision"
-
-          if [[ "${get_task_allow}" == "true" ]]; then
-            code_sign_identity="Apple Development"
-          else
-            code_sign_identity="Apple Distribution"
-          fi
-
+          build_timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          archive_uuid="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          git_branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          xcode_version="$(xcodebuild -version | paste -sd ' ' -)"
+          swift_version="$(swift --version | sed -n '1p')"
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
           {
-            echo "IOS_DEVELOPMENT_TEAM=${team_id}"
-            echo "OPENCLAW_IOS_CODE_SIGN_STYLE=Manual"
-            echo "OPENCLAW_IOS_APP_PROFILE=${profile_name}"
-            echo "OPENCLAW_IOS_SHARE_PROFILE=${profile_name}"
-            echo "OPENCLAW_IOS_WATCH_APP_PROFILE=${profile_name}"
-            echo "OPENCLAW_IOS_WATCH_EXTENSION_PROFILE=${profile_name}"
-            echo "OPENCLAW_IOS_CODE_SIGN_IDENTITY=${code_sign_identity}"
+            echo "AIES_BUILD_TIMESTAMP=${build_timestamp}"
+            echo "AIES_ARCHIVE_UUID=${archive_uuid}"
+            echo "AIES_GIT_BRANCH=${git_branch}"
+            echo "AIES_XCODE_VERSION=${xcode_version}"
+            echo "AIES_SWIFT_VERSION=${swift_version}"
+            echo "AIES_SDK_VERSION=${sdk_version}"
+            echo "AIES_APS_ENVIRONMENT="
           } >> "${GITHUB_ENV}"
 
-          echo "Imported provisioning profile '${profile_name}' (${profile_uuid}) for team ${team_id}."
+      # This workflow intentionally proves compile/archive attribution without signing.
+      # App, share, widget, and Watch bundles require distinct provisioning profiles;
+      # signed multi-bundle distribution remains a separate physical-test gate.
+      - name: Declare unsigned archive boundary
+        run: echo "Building an unsigned multi-bundle archive; no signing credentials are consumed."
 
-      - name: Configure signing if available
-        run: ./scripts/ios-configure-signing.sh || true
+      - name: Test build manifest tooling
+        run: |
+          cd apps/ios/Tools
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_write_build_manifest.py
 
       - name: Generate Xcode project
         run: cd apps/ios && xcodegen generate
 
-      - name: Build IPA (unsigned/development)
+      - name: Run OpenClawKit tests
+        run: swift test --package-path apps/shared/OpenClawKit
+
+      - name: Run iOS tests
+        run: |
+          set -euo pipefail
+          simulator_udid="$({ xcrun simctl list devices available --json; } | python3 -c '
+          import json, sys
+          payload = json.load(sys.stdin)
+          devices = []
+          for runtime, entries in payload.get("devices", {}).items():
+              if ".iOS-" not in runtime:
+                  continue
+              devices.extend(
+                  entry for entry in entries
+                  if entry.get("isAvailable")
+                  and entry.get("udid")
+                  and str(entry.get("name", "")).startswith("iPhone")
+              )
+          if not devices:
+              raise SystemExit("No available iOS simulator")
+          print(devices[0]["udid"])
+          ' )"
+          cd apps/ios
+          xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            test \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Archive iOS app
         run: |
           set -euo pipefail
           cd apps/ios
 
-          if [[ "${SIGNING_SECRETS_AVAILABLE}" == "true" ]]; then
-            xcodebuild \
-              -project OpenClaw.xcodeproj \
-              -scheme OpenClaw \
-              -configuration Debug \
-              -destination generic/platform=iOS \
-              -archivePath /tmp/OpenClaw.xcarchive \
-              archive \
-              CODE_SIGN_STYLE=Manual \
-              DEVELOPMENT_TEAM="${IOS_DEVELOPMENT_TEAM}" \
-              CODE_SIGN_IDENTITY="${OPENCLAW_IOS_CODE_SIGN_IDENTITY}" \
-              PROVISIONING_PROFILE_SPECIFIER="${OPENCLAW_IOS_APP_PROFILE}"
-          else
-            xcodebuild \
-              -project OpenClaw.xcodeproj \
-              -scheme OpenClaw \
-              -configuration Debug \
-              -destination generic/platform=iOS \
-              -archivePath /tmp/OpenClaw.xcarchive \
-              archive \
-              CODE_SIGNING_ALLOWED=NO \
-              CODE_SIGN_IDENTITY="" \
-              PROVISIONING_PROFILE_SPECIFIER="" \
-              || true
-          fi
+          provenance_settings=(
+            "OPENCLAW_BUILD_GIT_SHA=${GITHUB_SHA}"
+            "OPENCLAW_BUILD_GIT_BRANCH=${AIES_GIT_BRANCH}"
+            "OPENCLAW_BUILD_TIMESTAMP=${AIES_BUILD_TIMESTAMP}"
+            "OPENCLAW_BUILD_XCODE_VERSION=${AIES_XCODE_VERSION}"
+            "OPENCLAW_BUILD_SWIFT_VERSION=${AIES_SWIFT_VERSION}"
+            "OPENCLAW_BUILD_SDK_VERSION=${AIES_SDK_VERSION}"
+            "OPENCLAW_BUILD_CONFIGURATION=Debug"
+            "OPENCLAW_BUILD_ARCHIVE_UUID=${AIES_ARCHIVE_UUID}"
+            "OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED=${AIES_APS_ENVIRONMENT}"
+          )
 
-          mkdir -p /tmp/Payload
-          if [ -d /tmp/OpenClaw.xcarchive/Products/Applications/OpenClaw.app ]; then
-            cp -R /tmp/OpenClaw.xcarchive/Products/Applications/OpenClaw.app /tmp/Payload/
-          elif [ -d build/Debug-iphoneos/OpenClaw.app ]; then
-            cp -R build/Debug-iphoneos/OpenClaw.app /tmp/Payload/
-          else
+          xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination generic/platform=iOS \
+            -archivePath /tmp/OpenClaw.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            "${provenance_settings[@]}"
+
+          app_path=/tmp/OpenClaw.xcarchive/Products/Applications/OpenClaw.app
+          if [[ ! -d "${app_path}" ]]; then
             echo "OpenClaw.app was not produced by xcodebuild." >&2
             exit 1
           fi
 
-          cd /tmp
-          zip -r OpenClaw.ipa Payload/
+          package_root="$(mktemp -d)"
+          mkdir -p "${package_root}/Payload"
+          ditto "${app_path}" "${package_root}/Payload/OpenClaw.app"
+          (
+            cd "${package_root}"
+            zip -qry /tmp/OpenClaw.ipa Payload
+          )
 
-      - uses: actions/upload-artifact@v4
+      - name: Package archive and symbols
+        run: |
+          set -euo pipefail
+          if ! find /tmp/OpenClaw.xcarchive/dSYMs -maxdepth 1 -name '*.dSYM' -print -quit | grep -q .; then
+            echo "OpenClaw archive contains no dSYMs." >&2
+            exit 1
+          fi
+          ditto -c -k --sequesterRsrc --keepParent \
+            /tmp/OpenClaw.xcarchive \
+            /tmp/OpenClaw.xcarchive.zip
+          ditto -c -k --sequesterRsrc --keepParent \
+            /tmp/OpenClaw.xcarchive/dSYMs \
+            /tmp/OpenClaw-dSYMs.zip
+
+      - name: Write build manifest
+        run: |
+          set -euo pipefail
+          python3 apps/ios/Tools/write_build_manifest.py \
+            --archive /tmp/OpenClaw.xcarchive \
+            --output /tmp/OpenClaw-build-manifest.json \
+            --git-sha "${GITHUB_SHA}" \
+            --git-branch "${AIES_GIT_BRANCH}" \
+            --build-timestamp "${AIES_BUILD_TIMESTAMP}" \
+            --xcode-version "${AIES_XCODE_VERSION}" \
+            --swift-version "${AIES_SWIFT_VERSION}" \
+            --sdk-version "${AIES_SDK_VERSION}" \
+            --configuration Debug \
+            --archive-uuid "${AIES_ARCHIVE_UUID}" \
+            --ipa /tmp/OpenClaw.ipa \
+            --archive-zip /tmp/OpenClaw.xcarchive.zip \
+            --dsym-zip /tmp/OpenClaw-dSYMs.zip \
+            --github-run-id "${GITHUB_RUN_ID}"
+          python3 -m json.tool /tmp/OpenClaw-build-manifest.json >/dev/null
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
-          name: OpenClaw-iOS-IPA
+          name: OpenClaw-iOS-IPA-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw.ipa
-          retention-days: 7
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload xcarchive
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClaw-iOS-xcarchive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/OpenClaw.xcarchive.zip
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload dSYMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClaw-iOS-dSYMs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/OpenClaw-dSYMs.zip
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload build manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenClaw-iOS-build-manifest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/OpenClaw-build-manifest.json
+          retention-days: 90
+          if-no-files-found: error
