@@ -11,6 +11,20 @@ private func chatTextMessage(role: String, text: String, timestamp: Double) -> A
     ])
 }
 
+private func canonicalChatTextMessage(
+    role: String,
+    text: String,
+    timestamp: Double,
+    transcriptMessageID: String) -> AnyCodable
+{
+    AnyCodable([
+        "role": role,
+        "content": [["type": "text", "text": text]],
+        "timestamp": timestamp,
+        "__openclaw": ["id": transcriptMessageID],
+    ])
+}
+
 private func chatErrorMessage(role: String, errorMessage: String, timestamp: Double) -> AnyCodable {
     AnyCodable([
         "role": role,
@@ -704,6 +718,33 @@ struct ChatViewModelTests {
                 errorMessage: toolUseAssistant.errorMessage) == nil)
     }
 
+    @Test func `history message coding preserves canonical transcript identity`() throws {
+        let data = Data(
+            #"{"role":"assistant","content":"hello","timestamp":1,"__openclaw":{"id":"message-1","seq":7}}"#.utf8)
+        let decoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: data)
+        let roundTripped = try JSONDecoder().decode(
+            OpenClawChatMessage.self,
+            from: JSONEncoder().encode(decoded))
+
+        #expect(decoded.transcriptMessageID == "message-1")
+        #expect(roundTripped.transcriptMessageID == "message-1")
+    }
+
+    @Test func `malformed identity metadata does not discard valid transcript row`() throws {
+        let malformedRows = [
+            #"{"role":"assistant","content":"kept","timestamp":12,"__openclaw":{"id":7}}"#,
+            #"{"role":"assistant","content":"kept","timestamp":12,"__openclaw":"future-shape"}"#,
+        ]
+
+        for row in malformedRows {
+            let decoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: Data(row.utf8))
+            #expect(decoded.role == "assistant")
+            #expect(decoded.content.first?.text == "kept")
+            #expect(decoded.timestamp == 12)
+            #expect(decoded.transcriptMessageID == nil)
+        }
+    }
+
     @Test func `streams assistant and clears on final`() async throws {
         let sessionId = "sess-main"
         let history1 = historyPayload(sessionId: sessionId)
@@ -851,6 +892,201 @@ struct ChatViewModelTests {
                         message.role == "assistant" &&
                             message.content.contains { $0.text == "completed from lifecycle" }
                     }
+            }
+        }
+    }
+
+    @Test(arguments: ["final", "aborted", "error"])
+    func `terminal event for another run preserves locally owned stream and tools`(state: String) async throws {
+        let history = historyPayload(sessionId: "sess-main")
+        let (transport, vm) = await makeViewModel(historyResponses: [history, history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+
+        await sendUserMessage(vm, text: "keep working")
+        try await waitUntil("local run is pending") {
+            await MainActor.run { vm.pendingRunCount == 1 && !vm.isSending }
+        }
+        let localRunID = try await waitForLastSentRunId(transport)
+        emitAssistantText(transport: transport, runId: localRunID, text: "still working")
+        emitToolStart(transport: transport, runId: localRunID)
+        try await waitUntil("local transient state is visible") {
+            await MainActor.run {
+                vm.streamingAssistantText == "still working" && vm.pendingToolCalls.count == 1
+            }
+        }
+
+        transport.emit(
+            .chat(
+                OpenClawChatEventPayload(
+                    runId: "foreign-run",
+                    sessionKey: "main",
+                    state: state,
+                    message: nil,
+                    errorMessage: state == "error" ? "foreign failure" : nil)))
+
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+        #expect(await MainActor.run { vm.streamingAssistantText } == "still working")
+        #expect(await MainActor.run { vm.pendingToolCalls.count } == 1)
+        #expect(await MainActor.run { vm.errorText } == nil)
+    }
+
+    @Test func `sequence gap with stale history preserves pending ownership and blocks second send`() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let baseline = [
+            chatTextMessage(role: "user", text: "old question", timestamp: now - 20),
+            chatTextMessage(role: "assistant", text: "old answer", timestamp: now - 10),
+        ]
+        let (transport, vm) = await makeViewModel(historyResponses: [
+            historyPayload(sessionId: "sess-initial", messages: baseline),
+            historyPayload(sessionId: "sess-send-refresh", messages: baseline),
+            historyPayload(sessionId: "sess-gap-stale", messages: baseline),
+            historyPayload(sessionId: "sess-cleanup", messages: baseline),
+        ])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
+
+        await sendUserMessage(vm, text: "local question")
+        let localRunID = try await waitForLastSentRunId(transport)
+        try await waitUntil("send refresh finishes with local run pending") {
+            await MainActor.run {
+                vm.sessionId == "sess-send-refresh" && vm.pendingRunCount == 1 && !vm.isSending
+            }
+        }
+        emitAssistantText(transport: transport, runId: localRunID, text: "partial answer")
+        emitToolStart(transport: transport, runId: localRunID)
+        try await waitUntil("run-owned transients are visible") {
+            await MainActor.run {
+                vm.streamingAssistantText == "partial answer" && vm.pendingToolCalls.count == 1
+            }
+        }
+
+        transport.emit(.seqGap)
+        try await waitUntil("stale gap history applies") {
+            await MainActor.run { vm.sessionId == "sess-gap-stale" }
+        }
+
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+        #expect(await MainActor.run { vm.streamingAssistantText } == "partial answer")
+        #expect(await MainActor.run { vm.pendingToolCalls.count } == 1)
+        let sentBeforeSecondAttempt = await transport.sentRunIds()
+        await sendUserMessage(vm, text: "must remain blocked")
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(await transport.sentRunIds() == sentBeforeSecondAttempt)
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+
+        emitAgentLifecycleEnd(transport: transport, runId: localRunID)
+        try await waitUntil("owned completion cleans up test run") {
+            await MainActor.run { vm.pendingRunCount == 0 }
+        }
+    }
+
+    @Test func `sequence gap clears pending transients only after durable assistant evidence`() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let baseline = [
+            chatTextMessage(role: "user", text: "old question", timestamp: now - 20),
+            chatTextMessage(role: "assistant", text: "old answer", timestamp: now - 10),
+        ]
+        let completed = baseline + [
+            chatTextMessage(role: "user", text: "local question", timestamp: now + 60_000),
+            canonicalChatTextMessage(
+                role: "assistant",
+                text: "durable answer",
+                timestamp: now + 60_001,
+                transcriptMessageID: "durable-gap-answer"),
+        ]
+        let (transport, vm) = await makeViewModel(historyResponses: [
+            historyPayload(sessionId: "sess-initial", messages: baseline),
+            historyPayload(sessionId: "sess-send-refresh", messages: baseline),
+            historyPayload(sessionId: "sess-gap-complete", messages: completed),
+            historyPayload(sessionId: "sess-gap-complete-again", messages: completed),
+        ])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
+
+        await sendUserMessage(vm, text: "local question")
+        let localRunID = try await waitForLastSentRunId(transport)
+        try await waitUntil("send refresh leaves run pending") {
+            await MainActor.run {
+                vm.sessionId == "sess-send-refresh" && vm.pendingRunCount == 1 && !vm.isSending
+            }
+        }
+        emitAssistantText(transport: transport, runId: localRunID, text: "partial answer")
+        emitToolStart(transport: transport, runId: localRunID)
+        try await waitUntil("pre-gap transients are visible") {
+            await MainActor.run {
+                vm.streamingAssistantText == "partial answer" && vm.pendingToolCalls.count == 1
+            }
+        }
+
+        transport.emit(.seqGap)
+        try await waitUntil("durable gap evidence retires pending state") {
+            await MainActor.run {
+                vm.sessionId == "sess-gap-complete" &&
+                    vm.pendingRunCount == 0 &&
+                    vm.streamingAssistantText == nil &&
+                    vm.pendingToolCalls.isEmpty
+            }
+        }
+
+        // Repeating the same evidence is idempotent and cannot disturb the
+        // already-converged state or synthesize another send.
+        transport.emit(.seqGap)
+        try await waitUntil("repeated durable evidence remains converged") {
+            await MainActor.run { vm.sessionId == "sess-gap-complete-again" }
+        }
+        #expect(await MainActor.run { vm.pendingRunCount } == 0)
+        #expect(await MainActor.run { vm.streamingAssistantText } == nil)
+        #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
+        #expect(await transport.sentRunIds() == [localRunID])
+    }
+
+    @Test func `parallel out of order activity burst leaves unattached runs isolated`() async throws {
+        let history = historyPayload(sessionId: "sess-main")
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [history, history, history, history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+
+        await sendUserMessage(vm, text: "stress main run")
+        try await waitUntil("stress run is pending") {
+            await MainActor.run { vm.pendingRunCount == 1 && !vm.isSending }
+        }
+        let localRunID = try await waitForLastSentRunId(transport)
+        emitAssistantText(transport: transport, runId: localRunID, text: "main still running", seq: 20)
+        emitToolStart(transport: transport, runId: localRunID, seq: 10)
+        try await waitUntil("main stress state is visible") {
+            await MainActor.run {
+                vm.streamingAssistantText == "main still running" && vm.pendingToolCalls.count == 1
+            }
+        }
+
+        for index in 0..<25 {
+            let runID = "unattached-\(index)"
+            emitAgentLifecycleEnd(transport: transport, runId: runID, seq: 3)
+            emitAssistantText(transport: transport, runId: runID, text: "foreign", seq: 1)
+            emitAssistantText(transport: transport, runId: runID, text: "foreign", seq: 1)
+            emitToolStart(transport: transport, runId: runID, seq: 2)
+            transport.emit(
+                .agent(
+                    OpenClawAgentEventPayload(
+                        runId: runID,
+                        seq: 2,
+                        stream: "future.activity",
+                        ts: Int(Date().timeIntervalSince1970 * 1000),
+                        data: ["phase": AnyCodable("unknown")])))
+        }
+        emitExternalFinal(transport: transport, runId: "unattached-0")
+        await MainActor.run { vm.resumeFromForeground() }
+
+        try await Task.sleep(for: .milliseconds(150))
+        #expect(await MainActor.run { vm.pendingRunCount } == 1)
+        #expect(await MainActor.run { vm.streamingAssistantText } == "main still running")
+        #expect(await MainActor.run { vm.pendingToolCalls.count } == 1)
+
+        emitAgentLifecycleEnd(transport: transport, runId: localRunID, seq: 30)
+        try await waitUntil("owned terminal converges stress state") {
+            await MainActor.run {
+                vm.pendingRunCount == 0 &&
+                    vm.streamingAssistantText == nil &&
+                    vm.pendingToolCalls.isEmpty
             }
         }
     }
@@ -1393,6 +1629,251 @@ struct ChatViewModelTests {
         }
     }
 
+    @Test func `live assistant and history replay share canonical transcript identity`() async throws {
+        let liveTimestamp = Date().timeIntervalSince1970 * 1000
+        let historyTimestamp = liveTimestamp + 5000
+        let canonicalID = "assistant-canonical-1"
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(),
+                historyPayload(messages: [canonicalChatTextMessage(
+                    role: "assistant",
+                    text: "one reply",
+                    timestamp: historyTimestamp,
+                    transcriptMessageID: canonicalID)]),
+            ])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        transport.emit(
+            .sessionMessage(
+                OpenClawSessionMessageEventPayload(
+                    sessionKey: "agent:main:main",
+                    message: OpenClawChatMessage(
+                        role: "assistant",
+                        content: [OpenClawChatMessageContent(
+                            type: "text",
+                            text: "one reply",
+                            mimeType: nil,
+                            fileName: nil,
+                            content: nil)],
+                        timestamp: liveTimestamp,
+                        transcriptMessageID: canonicalID),
+                    messageId: canonicalID,
+                    messageSeq: 1)))
+
+        try await waitUntil("live canonical assistant is visible") {
+            await MainActor.run { vm.messages.count == 1 }
+        }
+        let liveRowID = try #require(await MainActor.run { vm.messages.first?.id })
+
+        emitExternalFinal(transport: transport)
+
+        try await waitUntil("history canonical assistant replaces live payload") {
+            await MainActor.run {
+                vm.messages.count == 1 &&
+                    vm.messages.first?.timestamp == historyTimestamp &&
+                    vm.messages.first?.transcriptMessageID == canonicalID
+            }
+        }
+        #expect(await MainActor.run { vm.messages.first?.id } == liveRowID)
+    }
+
+    @Test func `messages without canonical identity keep distinct timestamps`() async throws {
+        let firstTimestamp = Date().timeIntervalSince1970 * 1000
+        let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        for timestamp in [firstTimestamp, firstTimestamp + 1000] {
+            transport.emit(
+                .sessionMessage(
+                    OpenClawSessionMessageEventPayload(
+                        sessionKey: "agent:main:main",
+                        message: OpenClawChatMessage(
+                            role: "assistant",
+                            content: [OpenClawChatMessageContent(
+                                type: "text",
+                                text: "same words",
+                                mimeType: nil,
+                                fileName: nil,
+                                content: nil)],
+                            timestamp: timestamp),
+                        messageId: nil,
+                        messageSeq: nil)))
+        }
+
+        try await waitUntil("unidentified messages remain distinct") {
+            await MainActor.run { vm.messages.count == 2 }
+        }
+    }
+
+    @Test func `canonical identity dedupes role casing variants`() async throws {
+        let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        for role in ["Assistant", "assistant"] {
+            transport.emit(.sessionMessage(OpenClawSessionMessageEventPayload(
+                sessionKey: "main",
+                message: OpenClawChatMessage(
+                    role: role,
+                    content: [OpenClawChatMessageContent(
+                        type: "text",
+                        text: "same canonical reply",
+                        mimeType: nil,
+                        fileName: nil,
+                        content: nil)],
+                    timestamp: Date().timeIntervalSince1970 * 1000,
+                    transcriptMessageID: "canonical-role-case"),
+                messageId: "canonical-role-case",
+                messageSeq: 1)))
+        }
+        transport.emit(.health(ok: false))
+
+        try await waitUntil("both role variants are consumed") {
+            await MainActor.run { !vm.healthOK }
+        }
+        #expect(await MainActor.run {
+            vm.messages.filter { $0.transcriptMessageID == "canonical-role-case" }.count
+        } == 1)
+    }
+
+    @Test func `sequence gap refresh reconciles live row by canonical identity`() async throws {
+        let liveTimestamp = Date().timeIntervalSince1970 * 1000
+        let historyTimestamp = liveTimestamp + 5000
+        let canonicalID = "assistant-after-gap"
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(),
+                historyPayload(messages: [canonicalChatTextMessage(
+                    role: "assistant",
+                    text: "survives reconnect",
+                    timestamp: historyTimestamp,
+                    transcriptMessageID: canonicalID)]),
+            ])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        transport.emit(
+            .sessionMessage(
+                OpenClawSessionMessageEventPayload(
+                    sessionKey: "main",
+                    message: OpenClawChatMessage(
+                        role: "assistant",
+                        content: [OpenClawChatMessageContent(
+                            type: "text",
+                            text: "survives reconnect",
+                            mimeType: nil,
+                            fileName: nil,
+                            content: nil)],
+                        timestamp: liveTimestamp,
+                        transcriptMessageID: canonicalID),
+                    messageId: canonicalID,
+                    messageSeq: 1)))
+        try await waitUntil("live row arrives before gap") {
+            await MainActor.run { vm.messages.count == 1 }
+        }
+
+        transport.emit(.seqGap)
+
+        try await waitUntil("gap refresh adopts canonical history row") {
+            await MainActor.run {
+                vm.messages.count == 1 &&
+                    vm.messages.first?.timestamp == historyTimestamp &&
+                    vm.messages.first?.transcriptMessageID == canonicalID
+            }
+        }
+    }
+
+    @Test(arguments: ["seqGap", "foreignTerminal"])
+    func `stale nonempty refresh retains trailing live canonical row until history acknowledges it`(
+        trigger: String) async throws
+    {
+        let baselineTimestamp = Date().timeIntervalSince1970 * 1000
+        let liveTimestamp = baselineTimestamp + 10
+        let durableTimestamp = baselineTimestamp + 20
+        let canonicalID = "assistant-live-trailing"
+        let baseline = [
+            chatTextMessage(role: "user", text: "earlier question", timestamp: baselineTimestamp),
+            chatTextMessage(role: "assistant", text: "earlier answer", timestamp: baselineTimestamp + 1),
+        ]
+        let historyCount = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(sessionId: "sess-initial", messages: baseline),
+                historyPayload(sessionId: "sess-stale", messages: baseline),
+                historyPayload(
+                    sessionId: "sess-complete",
+                    messages: baseline + [canonicalChatTextMessage(
+                        role: "assistant",
+                        text: "live answer",
+                        timestamp: durableTimestamp,
+                        transcriptMessageID: canonicalID)]),
+                historyPayload(sessionId: "sess-bounded", messages: baseline),
+            ],
+            requestHistoryHook: { _ in _ = await historyCount.increment() })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
+
+        transport.emit(.sessionMessage(OpenClawSessionMessageEventPayload(
+            sessionKey: "main",
+            message: OpenClawChatMessage(
+                role: "assistant",
+                content: [OpenClawChatMessageContent(
+                    type: "text",
+                    text: "live answer",
+                    mimeType: nil,
+                    fileName: nil,
+                    content: nil)],
+                timestamp: liveTimestamp,
+                transcriptMessageID: canonicalID),
+            messageId: canonicalID,
+            messageSeq: 1)))
+        try await waitUntil("trailing live canonical row arrives") {
+            await MainActor.run {
+                vm.messages.last?.transcriptMessageID == canonicalID
+            }
+        }
+        let liveRowID = try #require(await MainActor.run {
+            vm.messages.last(where: { $0.transcriptMessageID == canonicalID })?.id
+        })
+
+        if trigger == "seqGap" {
+            transport.emit(.seqGap)
+        } else {
+            emitExternalFinal(transport: transport, runId: "foreign-stale-refresh")
+        }
+
+        try await waitUntil("stale nonempty history applies without dropping live row") {
+            await MainActor.run {
+                vm.sessionId == "sess-stale" &&
+                    vm.messages.contains { message in
+                        message.id == liveRowID && message.transcriptMessageID == canonicalID
+                    }
+            }
+        }
+
+        emitExternalFinal(transport: transport, runId: "foreign-durable-refresh")
+        try await waitUntil("durable history acknowledges live canonical row") {
+            await MainActor.run {
+                vm.sessionId == "sess-complete" &&
+                    vm.messages.filter { $0.transcriptMessageID == canonicalID }.count == 1 &&
+                    vm.messages.first(where: { $0.transcriptMessageID == canonicalID })?.timestamp == durableTimestamp
+            }
+        }
+        #expect(await MainActor.run {
+            vm.messages.first(where: { $0.transcriptMessageID == canonicalID })?.id
+        } == liveRowID)
+
+        // Once durable history has acknowledged the row, a later bounded
+        // transcript is authoritative for its window; the provisional marker
+        // must not resurrect the now-older row.
+        transport.emit(.seqGap)
+        try await waitUntil("later bounded history does not resurrect acknowledged row") {
+            await MainActor.run {
+                vm.sessionId == "sess-bounded" &&
+                    !vm.messages.contains { $0.transcriptMessageID == canonicalID }
+            }
+        }
+        #expect(await historyCount.current() == 4)
+    }
+
     @Test func `dedupes gateway echo of local user message`() async throws {
         let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
 
@@ -1422,7 +1903,8 @@ struct ChatViewModelTests {
                                 fileName: nil,
                                 content: nil),
                         ],
-                        timestamp: Date().timeIntervalSince1970 * 1000 + 5000),
+                        timestamp: Date().timeIntervalSince1970 * 1000 + 5000,
+                        transcriptMessageID: "srv-echo-1"),
                     messageId: "srv-echo-1",
                     messageSeq: 1)))
 
@@ -1432,6 +1914,7 @@ struct ChatViewModelTests {
                 msg.role == "user" && msg.content.first?.text == "echo me"
             }) == 1
         })
+        #expect(await MainActor.run { vm.messages.first?.transcriptMessageID } == "srv-echo-1")
     }
 
     @Test func `appends same content user transcript when it is not local echo`() async throws {
@@ -1596,6 +2079,30 @@ struct ChatViewModelTests {
 
         let keys = await MainActor.run { vm.sessionChoices.map(\.key) }
         #expect(keys == ["main", "recent-1", "recent-2"])
+    }
+
+    @Test func `session choices do not expose duplicate gateway keys`() async throws {
+        let now = Date().timeIntervalSince1970 * 1000
+        let sessions = OpenClawChatSessionsListResponse(
+            ts: now,
+            path: nil,
+            count: 3,
+            defaults: nil,
+            sessions: [
+                sessionEntry(key: "main", updatedAt: now),
+                sessionEntry(key: "duplicate", updatedAt: now - 1),
+                sessionEntry(key: "duplicate", updatedAt: now - 2),
+            ])
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload()],
+            sessionsResponses: [sessions])
+
+        await MainActor.run { vm.load() }
+        try await waitUntil("duplicate sessions loaded") {
+            await MainActor.run { vm.sessions.count == 3 }
+        }
+
+        #expect(await MainActor.run { vm.sessionChoices.map(\.key) } == ["main", "duplicate"])
     }
 
     @Test func `session choices include current when missing`() async throws {

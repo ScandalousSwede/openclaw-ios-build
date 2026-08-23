@@ -47,6 +47,11 @@ public final class OpenClawChatViewModel {
     }
 
     private var pendingLocalUserEchoMessageIDsByRunID: [String: UUID] = [:]
+    // Canonical rows observed directly on the live session stream remain
+    // provisional until a history response acknowledges their transcript ID.
+    // This is deliberately scoped to a trailing live suffix so bounded history
+    // cannot resurrect arbitrary rows from an older transcript window.
+    private var liveCanonicalMessageIDsByIdentity: [String: UUID] = [:]
     private var sessionGeneration: UInt64 = 0
     private var bootstrapGeneration: UInt64 = 0
     // A newer same-session history request only invalidates older responses after it applies.
@@ -349,15 +354,18 @@ public final class OpenClawChatViewModel {
         syncThinkingOptions: Bool = false) -> Bool
     {
         guard self.canApplyHistory(request) else { return false }
+        let previous = self.messages
         let incoming = Self.decodeMessages(payload.messages ?? [])
         self.messages = if preservingOptimisticLocalMessages {
             Self.reconcileRunRefreshMessages(
-                previous: self.messages,
+                previous: previous,
                 incoming: incoming,
-                pendingLocalUserEchoIDs: Set(self.pendingLocalUserEchoMessageIDsByRunID.values))
+                pendingLocalUserEchoIDs: Set(self.pendingLocalUserEchoMessageIDsByRunID.values),
+                liveCanonicalMessageIDs: Set(self.liveCanonicalMessageIDsByIdentity.values))
         } else {
-            Self.reconcileMessageIDs(previous: self.messages, incoming: incoming)
+            Self.reconcileMessageIDs(previous: previous, incoming: incoming)
         }
+        self.reconcileLiveCanonicalMessageTracking(with: incoming)
         self.prunePendingLocalUserEchoMessageIDs()
         self.sessionId = payload.sessionId
         // Incomplete refreshes can arrive before durable assistant history.
@@ -508,6 +516,7 @@ public final class OpenClawChatViewModel {
             role: message.role,
             content: sanitizedContent,
             timestamp: message.timestamp,
+            transcriptMessageID: message.transcriptMessageID,
             toolCallId: message.toolCallId,
             toolName: message.toolName,
             usage: message.usage,
@@ -530,6 +539,10 @@ public final class OpenClawChatViewModel {
         let role = message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !role.isEmpty else { return nil }
 
+        if let canonicalKey = Self.canonicalTranscriptIdentityKey(for: message) {
+            return canonicalKey
+        }
+
         let timestamp: String = {
             guard let value = message.timestamp, value.isFinite else { return "" }
             return String(format: "%.3f", value)
@@ -542,6 +555,21 @@ public final class OpenClawChatViewModel {
             return nil
         }
         return [role, timestamp, toolCallId, toolName, contentFingerprint].joined(separator: "|")
+    }
+
+    private static func normalizedTranscriptMessageID(_ id: String?) -> String? {
+        let trimmed = id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func canonicalTranscriptIdentityKey(for message: OpenClawChatMessage) -> String? {
+        let role = message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !role.isEmpty,
+              let transcriptMessageID = Self.normalizedTranscriptMessageID(message.transcriptMessageID)
+        else {
+            return nil
+        }
+        return [role, "transcript", transcriptMessageID].joined(separator: "|")
     }
 
     private static func userRefreshIdentityKey(for message: OpenClawChatMessage) -> String? {
@@ -565,6 +593,34 @@ public final class OpenClawChatViewModel {
         }
     }
 
+    private func trackLiveCanonicalMessage(_ message: OpenClawChatMessage) {
+        guard let identityKey = Self.canonicalTranscriptIdentityKey(for: message),
+              let visible = self.messages.last(where: {
+                  Self.canonicalTranscriptIdentityKey(for: $0) == identityKey
+              })
+        else {
+            return
+        }
+        self.liveCanonicalMessageIDsByIdentity[identityKey] = visible.id
+    }
+
+    private func reconcileLiveCanonicalMessageTracking(with incoming: [OpenClawChatMessage]) {
+        guard !self.liveCanonicalMessageIDsByIdentity.isEmpty else { return }
+        let acknowledgedIdentityKeys = Set(incoming.compactMap(Self.canonicalTranscriptIdentityKey(for:)))
+        let visibleByID = self.messages.reduce(into: [UUID: OpenClawChatMessage]()) {
+            $0[$1.id] = $1
+        }
+        self.liveCanonicalMessageIDsByIdentity = self.liveCanonicalMessageIDsByIdentity.filter {
+            identityKey, messageID in
+            guard !acknowledgedIdentityKeys.contains(identityKey),
+                  let visible = visibleByID[messageID]
+            else {
+                return false
+            }
+            return Self.canonicalTranscriptIdentityKey(for: visible) == identityKey
+        }
+    }
+
     private func adoptPendingLocalUserEcho(incoming: OpenClawChatMessage) -> Bool {
         guard let incomingKey = Self.userRefreshIdentityKey(for: incoming) else { return false }
         guard let matchIndex = messages.lastIndex(where: { existing in
@@ -584,6 +640,7 @@ public final class OpenClawChatViewModel {
             role: incoming.role,
             content: incoming.content,
             timestamp: incoming.timestamp ?? existing.timestamp,
+            transcriptMessageID: incoming.transcriptMessageID ?? existing.transcriptMessageID,
             toolCallId: incoming.toolCallId,
             toolName: incoming.toolName,
             usage: incoming.usage,
@@ -625,6 +682,7 @@ public final class OpenClawChatViewModel {
                 role: message.role,
                 content: message.content,
                 timestamp: message.timestamp,
+                transcriptMessageID: message.transcriptMessageID,
                 toolCallId: message.toolCallId,
                 toolName: message.toolName,
                 usage: message.usage,
@@ -636,7 +694,8 @@ public final class OpenClawChatViewModel {
     private static func reconcileRunRefreshMessages(
         previous: [OpenClawChatMessage],
         incoming: [OpenClawChatMessage],
-        pendingLocalUserEchoIDs: Set<UUID>) -> [OpenClawChatMessage]
+        pendingLocalUserEchoIDs: Set<UUID>,
+        liveCanonicalMessageIDs: Set<UUID>) -> [OpenClawChatMessage]
     {
         guard !previous.isEmpty else { return incoming }
         guard !incoming.isEmpty else { return previous }
@@ -691,11 +750,37 @@ public final class OpenClawChatViewModel {
         }
         let optimisticUserMessages = pendingLocalUsers + trailingLocalUsers
 
-        guard !optimisticUserMessages.isEmpty else {
+        // Only retain canonical messages that were observed on the live stream
+        // and remain in the trailing provisional suffix. Once a history payload
+        // acknowledges the transcript ID, tracking is cleared by the caller.
+        // Encountering any unrelated older row ends the suffix, preventing a
+        // bounded history response from reviving arbitrary prior messages.
+        var trailingLiveCanonicalMessages: [OpenClawChatMessage] = []
+        for message in previous.reversed() {
+            if liveCanonicalMessageIDs.contains(message.id) {
+                if let identityKey = Self.canonicalTranscriptIdentityKey(for: message),
+                   !incomingIdentityKeys.contains(identityKey)
+                {
+                    trailingLiveCanonicalMessages.append(message)
+                }
+                continue
+            }
+            // A local echo is part of the same unconfirmed trailing turn and is
+            // retained separately by the optimistic-user path above.
+            if pendingLocalUserEchoIDs.contains(message.id) {
+                continue
+            }
+            break
+        }
+        trailingLiveCanonicalMessages.reverse()
+        let retainedMessages = optimisticUserMessages + trailingLiveCanonicalMessages
+
+        guard !retainedMessages.isEmpty else {
             return reconciled
         }
 
-        for message in optimisticUserMessages {
+        var insertedMessageIDs = Set<UUID>()
+        for message in retainedMessages where insertedMessageIDs.insert(message.id).inserted {
             guard let messageTimestamp = message.timestamp else {
                 reconciled.append(message)
                 continue
@@ -730,6 +815,9 @@ public final class OpenClawChatViewModel {
     }
 
     private static func dedupeKey(for message: OpenClawChatMessage) -> String? {
+        if let canonicalKey = self.canonicalTranscriptIdentityKey(for: message) {
+            return canonicalKey
+        }
         guard let timestamp = message.timestamp else { return nil }
         let text = message.content.compactMap(\.text).joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -948,6 +1036,7 @@ public final class OpenClawChatViewModel {
         self.modelSelectionID = Self.defaultModelSelectionID
         self.messages = []
         self.pendingLocalUserEchoMessageIDsByRunID.removeAll()
+        self.liveCanonicalMessageIDsByIdentity.removeAll()
         self.sessionId = nil
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
@@ -982,6 +1071,7 @@ public final class OpenClawChatViewModel {
         self.modelSelectionID = Self.defaultModelSelectionID
         self.messages = []
         self.pendingLocalUserEchoMessageIDsByRunID.removeAll()
+        self.liveCanonicalMessageIDsByIdentity.removeAll()
         self.sessionId = nil
         self.pendingToolCallsById = [:]
         self.streamingAssistantText = nil
@@ -1009,6 +1099,7 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        self.liveCanonicalMessageIDsByIdentity.removeAll()
         self.startBootstrap()
     }
 
@@ -1483,10 +1574,22 @@ public final class OpenClawChatViewModel {
             self.handleAgentEvent(agent)
         case .seqGap:
             self.errorText = nil
-            self.clearPendingRuns(reason: nil)
             let context = self.beginHistoryRequest()
             Task {
-                await self.refreshHistoryAfterRun(historyRequest: context)
+                let refreshed = await self.refreshHistoryAfterRun(historyRequest: context)
+                // A sequence gap is loss of observation, not proof that the
+                // admitted run ended. Retire run-owned transient state only
+                // after refreshed durable history proves an assistant response
+                // follows the latest user turn.
+                if refreshed,
+                   self.isCurrentSession(context.session),
+                   !self.pendingRuns.isEmpty,
+                   self.hasAssistantMessageAfterLatestUser()
+                {
+                    self.clearPendingRuns(reason: nil)
+                    self.pendingToolCallsById = [:]
+                    self.streamingAssistantText = nil
+                }
                 await self.pollHealthIfNeeded(force: true, sessionSnapshot: context.session)
             }
         }
@@ -1510,11 +1613,13 @@ public final class OpenClawChatViewModel {
         // Adopt the server record only onto a still-visible row created by this
         // client's pending send; same-content user turns from other clients must append.
         if self.adoptPendingLocalUserEcho(incoming: sanitized) {
+            self.trackLiveCanonicalMessage(sanitized)
             return
         }
 
         let reconciled = Self.reconcileMessageIDs(previous: self.messages, incoming: self.messages + [sanitized])
         self.messages = Self.dedupeMessages(reconciled)
+        self.trackLiveCanonicalMessage(sanitized)
     }
 
     private func handleChatEvent(_ chat: OpenClawChatEventPayload) {
@@ -1539,8 +1644,12 @@ public final class OpenClawChatViewModel {
             // Keep multiple clients in sync: if another client finishes a run for our session, refresh history.
             switch chat.state {
             case "final", "aborted", "error":
-                self.streamingAssistantText = nil
-                self.pendingToolCallsById = [:]
+                // An external terminal cannot retire transient state owned by
+                // the local run this client is still following.
+                if self.pendingRuns.isEmpty {
+                    self.streamingAssistantText = nil
+                    self.pendingToolCallsById = [:]
+                }
                 self.appendFinalChatMessageIfPresent(chat)
                 let context = self.beginHistoryRequest()
                 Task { await self.refreshHistoryAfterRun(historyRequest: context) }
@@ -1616,6 +1725,7 @@ public final class OpenClawChatViewModel {
             role: message.role,
             content: message.content,
             timestamp: Date().timeIntervalSince1970 * 1000,
+            transcriptMessageID: message.transcriptMessageID,
             toolCallId: message.toolCallId,
             toolName: message.toolName,
             usage: message.usage,

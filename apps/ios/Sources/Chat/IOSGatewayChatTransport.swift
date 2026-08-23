@@ -320,6 +320,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             else {
                 return nil
             }
+            Self.recordMappedChatEvent(chatPayload, frame: evt)
             return .chat(chatPayload)
         case "session.message":
             guard let payload = evt.payload else { return nil }
@@ -328,6 +329,28 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
                 as: OpenClawSessionMessageEventPayload.self)
             else {
                 return nil
+            }
+            let transcriptMessageID = Self.resolvedTranscriptMessageID(
+                embedded: message.message?.transcriptMessageID,
+                envelope: message.messageId)
+            Self.recordMappedSessionMessageEvent(
+                message,
+                transcriptMessageID: transcriptMessageID,
+                frame: evt)
+            if var canonicalMessage = message.message,
+               let transcriptMessageID,
+               canonicalMessage.transcriptMessageID != transcriptMessageID
+            {
+                // Prefer embedded canonical identity and use the live envelope
+                // only as a fallback. Keep mapping and diagnostic correlation on
+                // the exact same normalized identity.
+                canonicalMessage.transcriptMessageID = transcriptMessageID
+                return .sessionMessage(OpenClawSessionMessageEventPayload(
+                    sessionKey: message.sessionKey,
+                    agentId: message.agentId,
+                    message: canonicalMessage,
+                    messageId: message.messageId,
+                    messageSeq: message.messageSeq))
             }
             return .sessionMessage(message)
         case "agent":
@@ -338,9 +361,54 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             else {
                 return nil
             }
+            Self.recordMappedAgentEvent(agentPayload, frame: evt)
             return .agent(agentPayload)
         default:
             return nil
         }
+    }
+
+    private static func resolvedTranscriptMessageID(embedded: String?, envelope: String?) -> String? {
+        for candidate in [embedded, envelope] {
+            let normalized = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+        return nil
+    }
+
+    private static func recordMappedChatEvent(_ payload: OpenClawChatEventPayload, frame: EventFrame) {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "mapped_chat",
+            sessionIdentifier: payload.sessionKey,
+            runIdentifier: payload.runId,
+            sequence: frame.seq,
+            stream: "chat"))
+    }
+
+    private static func recordMappedSessionMessageEvent(
+        _ payload: OpenClawSessionMessageEventPayload,
+        transcriptMessageID: String?,
+        frame: EventFrame)
+    {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "mapped_session_message",
+            sessionIdentifier: payload.sessionKey,
+            messageIdentifier: transcriptMessageID,
+            sequence: payload.messageSeq ?? frame.seq,
+            stream: "session.message"))
+    }
+
+    private static func recordMappedAgentEvent(_ payload: OpenClawAgentEventPayload, frame: EventFrame) {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "mapped_agent",
+            runIdentifier: payload.runId,
+            eventIdentifier: payload.id,
+            sequence: payload.seq ?? frame.seq,
+            stream: payload.stream))
     }
 }

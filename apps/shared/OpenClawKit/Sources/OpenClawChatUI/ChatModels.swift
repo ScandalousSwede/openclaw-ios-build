@@ -136,7 +136,12 @@ public struct OpenClawChatMessageContent: Codable, Hashable, Sendable {
 }
 
 public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
+    private struct OpenClawMetadata: Codable {
+        let id: String?
+    }
+
     public var id: UUID = .init()
+    public var transcriptMessageID: String?
     public let role: String
     public let content: [OpenClawChatMessageContent]
     public let timestamp: Double?
@@ -150,6 +155,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         case role
         case content
         case timestamp
+        case openClaw = "__openclaw"
         case toolCallId
         case tool_call_id
         case toolName
@@ -164,6 +170,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         role: String,
         content: [OpenClawChatMessageContent],
         timestamp: Double?,
+        transcriptMessageID: String? = nil,
         toolCallId: String? = nil,
         toolName: String? = nil,
         usage: OpenClawChatUsage? = nil,
@@ -171,6 +178,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         errorMessage: String? = nil)
     {
         self.id = id
+        self.transcriptMessageID = transcriptMessageID
         self.role = role
         self.content = content
         self.timestamp = timestamp
@@ -185,6 +193,10 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedRole = try container.decode(String.self, forKey: .role)
         let decodedTimestamp = try container.decodeIfPresent(Double.self, forKey: .timestamp)
+        // Identity metadata is additive and may evolve independently of the
+        // transcript row. A malformed or future shape must not discard valid
+        // role/content/timestamp data.
+        let decodedOpenClaw = try? container.decode(OpenClawMetadata.self, forKey: .openClaw)
         let decodedToolCallId =
             try container.decodeIfPresent(String.self, forKey: .toolCallId) ??
             container.decodeIfPresent(String.self, forKey: .tool_call_id)
@@ -196,6 +208,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         let decodedErrorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
 
         self.role = decodedRole
+        self.transcriptMessageID = decodedOpenClaw?.id
         self.timestamp = decodedTimestamp
         self.toolCallId = decodedToolCallId
         self.toolName = decodedToolName
@@ -268,6 +281,11 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(self.role, forKey: .role)
         try container.encodeIfPresent(self.timestamp, forKey: .timestamp)
+        if self.transcriptMessageID != nil {
+            try container.encode(
+                OpenClawMetadata(id: self.transcriptMessageID),
+                forKey: .openClaw)
+        }
         try container.encodeIfPresent(self.toolCallId, forKey: .toolCallId)
         try container.encodeIfPresent(self.toolName, forKey: .toolName)
         try container.encodeIfPresent(self.usage, forKey: .usage)
