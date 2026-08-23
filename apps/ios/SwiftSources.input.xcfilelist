@@ -105,6 +105,7 @@ Sources/Voice/TalkPermissionPromptView.swift
 Sources/Voice/TalkRealtimeClientSession.swift
 Sources/Voice/TalkRealtimeWebRTCSession.swift
 Sources/Voice/TalkSpeechLocale.swift
+Sources/Voice/TalkTTSDiagnostics.swift
 Sources/Voice/VoiceWakeManager.swift
 Sources/Voice/VoiceWakePreferences.swift
 ShareExtension/ShareViewController.swift

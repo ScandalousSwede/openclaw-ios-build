@@ -61,6 +61,8 @@ struct SettingsProTab: View {
     @State var crashDiagnosticExportURL: URL?
     @State var crashDiagnosticExportStatus: String?
     @State var isPreparingCrashDiagnosticExport = false
+    @State var isTestingSystemVoice = false
+    @State var isTestingElevenLabsVoice = false
 
     var body: some View {
         NavigationStack {

@@ -379,6 +379,7 @@ extension SettingsProTab {
 
             self.voiceFeatureCard
             self.talkVoiceSettingsCard
+            self.ttsDiagnosticCard
             self.shareSettingsCard
         }
     }
@@ -417,6 +418,7 @@ extension SettingsProTab {
             }
 
             self.crashDiagnosticExportCard
+            self.ttsDiagnosticCard
             self.diagnosticsAdvancedCard
         }
     }
@@ -827,6 +829,99 @@ extension SettingsProTab {
                 self.detailRow("Transport", value: self.appModel.talkMode.gatewayTalkTransportLabel)
                 Divider()
                 self.detailRow("API Key", value: self.talkApiKeyStatus)
+            }
+        }
+        .padding(.horizontal, OpenClawProMetric.pagePadding)
+    }
+
+    var ttsDiagnosticCard: some View {
+        let diagnostics = self.appModel.talkMode.ttsDiagnostics
+        let route = self.appModel.talkMode.currentAudioRouteEvidence
+        return ProCard(radius: SettingsLayout.cardRadius) {
+            VStack(alignment: .leading, spacing: 12) {
+                Label("Local Speech Diagnostics", systemImage: "speaker.wave.3.fill")
+                    .font(.headline)
+                Text(diagnostics.userMessage)
+                    .font(.caption)
+                    .foregroundStyle(diagnostics.state == .failed ? OpenClawBrand.danger : .secondary)
+
+                HStack(spacing: 8) {
+                    Button {
+                        self.isTestingSystemVoice = true
+                        Task {
+                            await self.appModel.talkMode.testSystemVoice()
+                            self.isTestingSystemVoice = false
+                        }
+                    } label: {
+                        Label(
+                            self.isTestingSystemVoice ? "Testing…" : "Test iOS Voice",
+                            systemImage: "iphone.radiowaves.left.and.right")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(self.isTestingSystemVoice || self.isTestingElevenLabsVoice)
+
+                    Button {
+                        self.isTestingElevenLabsVoice = true
+                        Task {
+                            await self.appModel.talkMode.testElevenLabsVoice()
+                            self.isTestingElevenLabsVoice = false
+                        }
+                    } label: {
+                        Label(
+                            self.isTestingElevenLabsVoice ? "Testing…" : "Test ElevenLabs Voice",
+                            systemImage: "waveform.badge.mic")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(self.isTestingSystemVoice || self.isTestingElevenLabsVoice)
+                }
+                .controlSize(.small)
+
+                Divider()
+                self.detailRow("TTS State", value: diagnostics.state.rawValue)
+                Divider()
+                self.detailRow("Config", value: diagnostics.config.loaded ? "Loaded" : "Not loaded")
+                Divider()
+                self.detailRow("Secret Scope", value: diagnostics.config.secretsAccess.rawValue)
+                Divider()
+                self.detailRow(
+                    "operator.talk.secrets",
+                    value: diagnostics.config.operatorTalkSecrets.rawValue)
+                Divider()
+                self.detailRow("Provider", value: diagnostics.config.provider)
+                Divider()
+                self.detailRow("Model", value: diagnostics.config.modelPresent ? "Present" : "Absent")
+                Divider()
+                self.detailRow("Voice ID", value: diagnostics.config.voiceIDPresent ? "Present" : "Absent")
+                Divider()
+                self.detailRow("API Key", value: diagnostics.config.apiKeyPresent ? "Present" : "Absent")
+                Divider()
+                self.detailRow("Credential Source", value: diagnostics.config.credentialSource.rawValue)
+                Divider()
+                self.detailRow("Credentials", value: diagnostics.config.credentialOwnership.rawValue)
+                Divider()
+                self.detailRow("Audio Output", value: route.outputSummary)
+                Divider()
+                self.detailRow("Audio Session", value: "\(route.category) • \(route.mode)")
+                Divider()
+                self.detailRow(
+                    "OpenClaw Session",
+                    value: "\(route.activation.rawValue) • speakerphone \(route.speakerphonePreferred ? "on" : "off")")
+                Divider()
+                self.detailRow("ElevenLabs Outcome", value: diagnostics.providerAttemptOutcome.rawValue)
+                Divider()
+                self.detailRow(
+                    "Final Speech",
+                    value: "\(diagnostics.finalProvider.rawValue) • \(diagnostics.finalOutcome.rawValue)")
+                Divider()
+                self.detailRow("Audio Bytes", value: "\(diagnostics.totalAudioBytes)")
+                Divider()
+                self.detailRow(
+                    "PCM Rate",
+                    value: diagnostics.pcmSampleRate.map { "\($0) Hz" } ?? "Not used")
+                Divider()
+                self.detailRow(
+                    "Duration",
+                    value: diagnostics.durationMilliseconds.map { "\($0) ms" } ?? "Not measured")
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)

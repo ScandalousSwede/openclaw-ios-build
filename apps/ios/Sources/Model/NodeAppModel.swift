@@ -1428,8 +1428,8 @@ final class NodeAppModel {
 
         if params.speak ?? true {
             let toSpeak = text
-            Task { @MainActor in
-                try? await TalkSystemSpeechSynthesizer.shared.speak(text: toSpeak)
+            Task { @MainActor [weak self] in
+                await self?.talkMode.speakSystemNotificationText(toSpeak)
             }
         }
 

@@ -1,4 +1,5 @@
 #if Talk
+import ElevenLabsKit
 import Foundation
 
 public struct ElevenLabsVoice: Decodable, Sendable {
@@ -345,17 +346,21 @@ public struct StreamingPlaybackResult: Sendable {
 public final class StreamingAudioPlayer {
     public static let shared = StreamingAudioPlayer()
 
+    private let player: ElevenLabsKit.StreamingAudioPlayer
+
+    init(player: ElevenLabsKit.StreamingAudioPlayer = .shared) {
+        self.player = player
+    }
+
     public func play(stream: AsyncThrowingStream<Data, Error>) async -> StreamingPlaybackResult {
-        do {
-            for try await _ in stream {}
-            return StreamingPlaybackResult(finished: true, interruptedAt: nil)
-        } catch {
-            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
-        }
+        let result = await self.player.play(stream: stream)
+        return StreamingPlaybackResult(
+            finished: result.finished,
+            interruptedAt: result.interruptedAt)
     }
 
     public func stop() -> Double? {
-        nil
+        self.player.stop()
     }
 }
 
@@ -363,17 +368,21 @@ public final class StreamingAudioPlayer {
 public final class PCMStreamingAudioPlayer {
     public static let shared = PCMStreamingAudioPlayer()
 
+    private let player: ElevenLabsKit.PCMStreamingAudioPlayer
+
+    init(player: ElevenLabsKit.PCMStreamingAudioPlayer = .shared) {
+        self.player = player
+    }
+
     public func play(stream: AsyncThrowingStream<Data, Error>, sampleRate: Double) async -> StreamingPlaybackResult {
-        do {
-            for try await _ in stream {}
-            return StreamingPlaybackResult(finished: true, interruptedAt: nil)
-        } catch {
-            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
-        }
+        let result = await self.player.play(stream: stream, sampleRate: sampleRate)
+        return StreamingPlaybackResult(
+            finished: result.finished,
+            interruptedAt: result.interruptedAt)
     }
 
     public func stop() -> Double? {
-        nil
+        self.player.stop()
     }
 }
 #endif
