@@ -7,7 +7,9 @@ import OSLog
 struct IOSGatewayChatTransport: OpenClawChatTransport {
     static let logger = Logger(subsystem: "ai.openclaw", category: "ios.chat.transport")
     static let defaultChatSendTimeoutMs = 30000
+    private static let requiredOperatorScopes: Set<String> = ["operator.read", "operator.write"]
     private let gateway: GatewayNodeSession
+    private let stableGatewayID: String?
 
     private struct CreateSessionParams: Codable {
         var key: String
@@ -30,8 +32,37 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         var key: String
     }
 
+    private struct HistoryParams: Codable {
+        var sessionKey: String
+        var limit: Int?
+        var offset: Int?
+        var maxChars: Int?
+    }
+
+    private struct HistoryPageMetadata: Decodable {
+        var offset: Int?
+        var nextOffset: Int?
+        var hasMore: Bool?
+        var totalMessages: Int?
+    }
+
+    enum HistoryPageValidationError: Error, Equatable, Sendable {
+        case offsetMissing
+        case offsetInvalid(Int)
+        case offsetMismatch(expected: Int, actual: Int)
+        case totalMessagesMissing
+        case totalMessagesInvalid(Int)
+        case offsetOutsideTotal(offset: Int, totalMessages: Int)
+        case hasMoreMissing
+        case nextOffsetMissing
+        case nextOffsetDidNotAdvance(offset: Int, nextOffset: Int)
+        case nextOffsetOutsideTotal(nextOffset: Int, totalMessages: Int)
+        case unexpectedNextOffset(Int)
+    }
+
     private struct ChatSendParams: Codable {
         var sessionKey: String
+        var expectedSessionRoutingContract: String?
         var message: String
         var thinking: String
         var attachments: [OpenClawChatAttachmentPayload]?
@@ -76,8 +107,93 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         return value
     }
 
-    init(gateway: GatewayNodeSession) {
+    init(gateway: GatewayNodeSession, stableGatewayID: String? = nil) {
         self.gateway = gateway
+        let normalizedGatewayID = stableGatewayID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.stableGatewayID = normalizedGatewayID?.isEmpty == false ? normalizedGatewayID : nil
+    }
+
+    func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
+        guard let stableGatewayID else {
+            return .unavailable(reason: .gatewayIdentityUnavailable)
+        }
+        guard let route = await self.gateway.currentRoute() else {
+            return .unavailable(reason: .routeUnavailable)
+        }
+        guard await self.gateway.currentGatewayID(ifCurrentRoute: route) == stableGatewayID else {
+            return .unavailable(reason: .gatewayMismatch)
+        }
+        guard await self.gateway.supportsServerCapability(
+            .chatSendRoutingContract,
+            ifCurrentRoute: route) == true
+        else { return .unavailable(reason: .capabilityUnavailable) }
+        guard let serverCapabilities = await self.gateway.serverCapabilities(ifCurrentRoute: route) else {
+            return .unavailable(reason: .capabilityUnavailable)
+        }
+        guard let operatorScopes = await self.gateway.operatorScopes(ifCurrentRoute: route),
+              Self.requiredOperatorScopes.isSubset(of: operatorScopes)
+        else { return .unavailable(reason: .operatorScopesUnavailable) }
+
+        let routingContract: String
+        do {
+            routingContract = try await self.sessionRoutingContract(ifCurrentRoute: route)
+        } catch {
+            return .unavailable(reason: .routingContractUnavailable)
+        }
+        guard await self.gateway.currentGatewayID(ifCurrentRoute: route) == stableGatewayID,
+              await self.gateway.supportsServerCapability(
+                  .chatSendRoutingContract,
+                  ifCurrentRoute: route) == true
+        else { return .unavailable(reason: .routeUnavailable) }
+
+        let transport = self
+        return .available(OpenClawChatTransportRouteLease(
+            stableGatewayID: stableGatewayID,
+            sessionRoutingContract: routingContract,
+            capabilities: serverCapabilities.sorted(),
+            operatorScopes: operatorScopes.sorted(),
+            dispatchMessage: { sessionKey, message, thinking, idempotencyKey, attachments in
+                await transport.dispatchOutboxMessage(
+                    sessionKey: sessionKey,
+                    message: message,
+                    thinking: thinking,
+                    idempotencyKey: idempotencyKey,
+                    attachments: attachments,
+                    routingContract: routingContract,
+                    route: route)
+            },
+            requestHistoryPage: { sessionKey, limit, offset, maxChars in
+                try await transport.requestHistoryPage(
+                    sessionKey: sessionKey,
+                    limit: limit,
+                    offset: offset,
+                    maxChars: maxChars,
+                    ifCurrentRoute: route)
+            }))
+    }
+
+    private func sessionRoutingContract(ifCurrentRoute route: GatewayNodeSessionRoute) async throws -> String {
+        let data = try await self.gateway.request(
+            method: "agents.list",
+            paramsJSON: "{}",
+            timeoutSeconds: 15,
+            ifCurrentRoute: route)
+        return try Self.decodeSessionRoutingContract(data)
+    }
+
+    static func decodeSessionRoutingContract(_ data: Data) throws -> String {
+        let result = try JSONDecoder().decode(AgentsListResult.self, from: data)
+        guard let contract = OpenClawChatSessionRoutingContract.make(
+            scope: result.scope.value as? String,
+            mainKey: result.mainkey,
+            defaultAgentID: result.defaultid)
+        else {
+            throw NSError(
+                domain: "OpenClawChatTransport",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "gateway routing contract unavailable"])
+        }
+        return contract
     }
 
     static func agentWaitRequestTimeoutSeconds(timeoutMs: Int) -> Int {
@@ -93,10 +209,12 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         message: String,
         thinking: String,
         idempotencyKey: String,
+        expectedSessionRoutingContract: String? = nil,
         attachments: [OpenClawChatAttachmentPayload]) throws -> String
     {
         let params = ChatSendParams(
             sessionKey: sessionKey,
+            expectedSessionRoutingContract: expectedSessionRoutingContract,
             message: message,
             thinking: thinking,
             attachments: attachments.isEmpty ? nil : attachments,
@@ -134,9 +252,30 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         try self.encodeParams(SessionKeyParams(key: sessionKey))
     }
 
-    private static func makeHistoryParamsJSON(sessionKey: String) throws -> String {
-        struct Params: Codable { var sessionKey: String }
-        return try self.encodeParams(Params(sessionKey: sessionKey))
+    static func makeHistoryParamsJSON(
+        sessionKey: String,
+        limit: Int? = nil,
+        offset: Int? = nil,
+        maxChars: Int? = nil) throws -> String
+    {
+        try self.encodeParams(HistoryParams(
+            sessionKey: sessionKey,
+            limit: limit,
+            offset: offset,
+            maxChars: maxChars))
+    }
+
+    static func makeBoundedHistoryPageParamsJSON(
+        sessionKey: String,
+        limit: Int,
+        offset: Int,
+        maxChars: Int) throws -> String
+    {
+        try self.makeHistoryParamsJSON(
+            sessionKey: sessionKey,
+            limit: min(1000, max(1, limit)),
+            offset: max(0, offset),
+            maxChars: min(500_000, max(1, maxChars)))
     }
 
     private static func makeAgentWaitParamsJSON(runId: String, timeoutMs: Int) throws -> String {
@@ -198,9 +337,192 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     }
 
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload {
+        try await self.requestHistory(sessionKey: sessionKey, ifCurrentRoute: nil)
+    }
+
+    private func requestHistory(
+        sessionKey: String,
+        ifCurrentRoute route: GatewayNodeSessionRoute?) async throws -> OpenClawChatHistoryPayload
+    {
         let json = try Self.makeHistoryParamsJSON(sessionKey: sessionKey)
-        let res = try await self.gateway.request(method: "chat.history", paramsJSON: json, timeoutSeconds: 15)
+        let res = try await self.requestHistoryData(json: json, ifCurrentRoute: route)
         return try JSONDecoder().decode(OpenClawChatHistoryPayload.self, from: res)
+    }
+
+    private func requestHistoryPage(
+        sessionKey: String,
+        limit: Int,
+        offset: Int,
+        maxChars: Int,
+        ifCurrentRoute route: GatewayNodeSessionRoute) async throws -> OpenClawChatHistoryPage
+    {
+        let boundedOffset = max(0, offset)
+        let json = try Self.makeBoundedHistoryPageParamsJSON(
+            sessionKey: sessionKey,
+            limit: limit,
+            offset: boundedOffset,
+            maxChars: maxChars)
+        let data = try await self.requestHistoryData(json: json, ifCurrentRoute: route)
+        return try Self.decodeHistoryPage(data, requestedOffset: boundedOffset)
+    }
+
+    static func decodeHistoryPage(_ data: Data, requestedOffset: Int) throws -> OpenClawChatHistoryPage {
+        let payload = try JSONDecoder().decode(OpenClawChatHistoryPayload.self, from: data)
+        let metadata = try JSONDecoder().decode(HistoryPageMetadata.self, from: data)
+        let metadataAllAbsent = metadata.offset == nil
+            && metadata.nextOffset == nil
+            && metadata.hasMore == nil
+            && metadata.totalMessages == nil
+        if metadataAllAbsent,
+           requestedOffset == 0,
+           payload.sessionId == nil,
+           payload.messages?.isEmpty != false
+        {
+            return OpenClawChatHistoryPage(
+                payload: payload,
+                offset: 0,
+                nextOffset: nil,
+                hasMore: false,
+                totalMessages: 0)
+        }
+        guard let offset = metadata.offset else {
+            throw HistoryPageValidationError.offsetMissing
+        }
+        guard offset >= 0 else {
+            throw HistoryPageValidationError.offsetInvalid(offset)
+        }
+        guard offset == requestedOffset else {
+            throw HistoryPageValidationError.offsetMismatch(expected: requestedOffset, actual: offset)
+        }
+        guard let totalMessages = metadata.totalMessages else {
+            throw HistoryPageValidationError.totalMessagesMissing
+        }
+        guard totalMessages >= 0 else {
+            throw HistoryPageValidationError.totalMessagesInvalid(totalMessages)
+        }
+        guard offset <= totalMessages else {
+            throw HistoryPageValidationError.offsetOutsideTotal(
+                offset: offset,
+                totalMessages: totalMessages)
+        }
+        guard let hasMore = metadata.hasMore else {
+            throw HistoryPageValidationError.hasMoreMissing
+        }
+
+        if hasMore {
+            guard let nextOffset = metadata.nextOffset else {
+                throw HistoryPageValidationError.nextOffsetMissing
+            }
+            guard nextOffset > offset else {
+                throw HistoryPageValidationError.nextOffsetDidNotAdvance(
+                    offset: offset,
+                    nextOffset: nextOffset)
+            }
+            guard nextOffset < totalMessages else {
+                throw HistoryPageValidationError.nextOffsetOutsideTotal(
+                    nextOffset: nextOffset,
+                    totalMessages: totalMessages)
+            }
+        } else if let nextOffset = metadata.nextOffset {
+            throw HistoryPageValidationError.unexpectedNextOffset(nextOffset)
+        }
+
+        return OpenClawChatHistoryPage(
+            payload: payload,
+            offset: offset,
+            nextOffset: metadata.nextOffset,
+            hasMore: hasMore,
+            totalMessages: totalMessages)
+    }
+
+    private func requestHistoryData(
+        json: String,
+        ifCurrentRoute route: GatewayNodeSessionRoute?) async throws -> Data
+    {
+        if let route {
+            return try await self.gateway.request(
+                method: "chat.history",
+                paramsJSON: json,
+                timeoutSeconds: 15,
+                ifCurrentRoute: route)
+        }
+        return try await self.gateway.request(method: "chat.history", paramsJSON: json, timeoutSeconds: 15)
+    }
+
+    private func dispatchOutboxMessage(
+        sessionKey: String,
+        message: String,
+        thinking: String,
+        idempotencyKey: String,
+        attachments: [OpenClawChatAttachmentPayload],
+        routingContract: String,
+        route: GatewayNodeSessionRoute) async -> OpenClawChatDispatchOutcome
+    {
+        let json: String
+        do {
+            json = try Self.makeChatSendParamsJSON(
+                sessionKey: sessionKey,
+                message: message,
+                thinking: thinking,
+                idempotencyKey: idempotencyKey,
+                expectedSessionRoutingContract: routingContract,
+                attachments: attachments)
+        } catch {
+            return .notDispatched
+        }
+
+        let result = await self.gateway.requestTrackingDispatch(
+            method: "chat.send",
+            paramsJSON: json,
+            timeoutSeconds: 35,
+            ifCurrentRoute: route)
+        let outcome = Self.mapDispatchResult(result, rawCommandID: idempotencyKey)
+        Self.recordDispatchOutcome(outcome, rawCommandID: idempotencyKey)
+        return outcome
+    }
+
+    static func mapDispatchResult(
+        _ result: GatewayRequestDispatchResult,
+        rawCommandID: String) -> OpenClawChatDispatchOutcome
+    {
+        switch result {
+        case .notDispatched:
+            return .notDispatched
+        case let .ambiguous(code):
+            return .ambiguous(code: code)
+        case let .rejected(code, reason):
+            let normalizedCode = code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let normalizedReason = reason?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedCode == "INVALID_REQUEST",
+               normalizedReason == OpenClawChatSessionRoutingContract.changedErrorReason
+            {
+                return .blockedRouteChanged
+            }
+            return .dispatchRejected(code: normalizedCode, reason: normalizedReason)
+        case let .response(data):
+            guard let response = try? JSONDecoder().decode(OpenClawChatSendResponse.self, from: data) else {
+                return .ambiguous(code: "invalid-ack")
+            }
+            guard response.runId == rawCommandID else {
+                return .ambiguous(code: "ack-run-id-mismatch")
+            }
+            return .accepted(runID: response.runId, status: response.status)
+        }
+    }
+
+    private static func recordDispatchOutcome(
+        _ outcome: OpenClawChatDispatchOutcome,
+        rawCommandID: String)
+    {
+        let commandID = self.diagnosticToken(rawCommandID)
+        let state: String = switch outcome {
+        case .notDispatched: "not_dispatched"
+        case .dispatchRejected: "dispatch_rejected"
+        case .accepted: "accepted"
+        case .ambiguous: "ambiguous"
+        case .blockedRouteChanged: "blocked_route_changed"
+        }
+        GatewayDiagnostics.log("event=chat_outbox_dispatch command_id=\(commandID) outcome=\(state)")
     }
 
     func sendMessage(

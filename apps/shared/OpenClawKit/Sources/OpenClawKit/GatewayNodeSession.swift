@@ -96,6 +96,9 @@ public actor GatewayNodeSession {
     private var hasEverConnected = false
     private var hasNotifiedConnected = false
     private var snapshotReceived = false
+    private var serverCapabilities: Set<GatewayServerCapability>?
+    private var serverCapabilityNames: Set<String>?
+    private var authenticatedOperatorScopes: Set<String>?
     private var snapshotWaiters: [UUID: SnapshotWaiter] = [:]
     #if DEBUG
     private var testBeforePushAdmission: (@Sendable () async -> Void)?
@@ -200,6 +203,7 @@ public actor GatewayNodeSession {
         let clientId = options.clientId.trimmingCharacters(in: .whitespacesAndNewlines)
         let clientMode = options.clientMode.trimmingCharacters(in: .whitespacesAndNewlines)
         let clientDisplayName = (options.clientDisplayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let stableGatewayID = (options.stableGatewayID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let includeDeviceIdentity = options.includeDeviceIdentity ? "1" : "0"
         let permissions = options.permissions
             .map { key, value in
@@ -217,6 +221,7 @@ public actor GatewayNodeSession {
             clientId,
             clientMode,
             clientDisplayName,
+            stableGatewayID,
             includeDeviceIdentity,
             permissions,
         ].joined(separator: "|")
@@ -432,8 +437,14 @@ public actor GatewayNodeSession {
     }
 
     /// Captures the current route after both the session and physical socket have admitted it.
-    public func currentRoute() async -> GatewayNodeSessionRoute? {
+    public func currentRoute(ifGatewayID expectedGatewayID: String? = nil) async -> GatewayNodeSessionRoute? {
         guard let (channel, route) = self.activeRoute() else { return nil }
+        if let expectedGatewayID {
+            let expected = expectedGatewayID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let current = self.connectOptions?.stableGatewayID?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !expected.isEmpty, current == expected else { return nil }
+        }
         guard let socketGeneration = await channel.currentConnectionGeneration(),
               socketGeneration == route.socketGeneration,
               self.isCurrentRoute(route),
@@ -441,6 +452,34 @@ public actor GatewayNodeSession {
               self.activeSocketGeneration == socketGeneration
         else { return nil }
         return route
+    }
+
+    public func currentGatewayID(ifCurrentRoute route: GatewayNodeSessionRoute) -> String? {
+        guard self.isCurrentRoute(route), self.channel != nil else { return nil }
+        let value = self.connectOptions?.stableGatewayID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    public func supportsServerCapability(
+        _ capability: GatewayServerCapability,
+        ifCurrentRoute route: GatewayNodeSessionRoute) -> Bool?
+    {
+        guard self.isCurrentRoute(route),
+              self.channel != nil,
+              let serverCapabilities
+        else { return nil }
+        return serverCapabilities.contains(capability)
+    }
+
+    public func serverCapabilities(ifCurrentRoute route: GatewayNodeSessionRoute) -> Set<String>? {
+        guard self.isCurrentRoute(route), self.channel != nil else { return nil }
+        return self.serverCapabilityNames
+    }
+
+    public func operatorScopes(ifCurrentRoute route: GatewayNodeSessionRoute) -> Set<String>? {
+        guard self.isCurrentRoute(route), self.channel != nil else { return nil }
+        return self.authenticatedOperatorScopes
     }
 
     public func sendEvent(event: String, payloadJSON: String?) async {
@@ -534,6 +573,28 @@ public actor GatewayNodeSession {
         return data
     }
 
+    public func requestTrackingDispatch(
+        method: String,
+        paramsJSON: String?,
+        timeoutSeconds: Int = 15,
+        ifCurrentRoute expectedRoute: GatewayNodeSessionRoute) async -> GatewayRequestDispatchResult
+    {
+        guard self.isCurrentRoute(expectedRoute), let channel = self.channel else {
+            return .notDispatched
+        }
+        let params: [String: AnyCodable]?
+        do {
+            params = try self.decodeParamsJSON(paramsJSON)
+        } catch {
+            return .notDispatched
+        }
+        return await channel.requestTrackingDispatch(
+            method: method,
+            params: params,
+            timeoutMs: Double(timeoutSeconds * 1000),
+            ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+    }
+
     public func subscribeServerEvents(bufferingNewest: Int = 200) -> AsyncStream<EventFrame> {
         let id = UUID()
         let session = self
@@ -573,6 +634,26 @@ public actor GatewayNodeSession {
         case let .snapshot(ok):
             let admissionGeneration = self.admissionGeneration
             self.pluginSurfaceUrls = self.normalizePluginSurfaceUrls(ok.pluginsurfaceurls)
+            self.serverCapabilities = ok.advertisedServerCapabilities
+            self.serverCapabilityNames = ok.advertisedServerCapabilityNames
+            self.authenticatedOperatorScopes = ok.authenticatedOperatorScopes
+            let supportsRoutingGuard = self.serverCapabilities?.contains(.chatSendRoutingContract) == true
+            let hasOperatorRead = self.authenticatedOperatorScopes?.contains("operator.read") == true
+            let hasOperatorWrite = self.authenticatedOperatorScopes?.contains("operator.write") == true
+            let gatewayVersion = Self.diagnosticGatewayVersion(ok.server["version"]?.value as? String)
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .route,
+                state: Self.diagnosticHelloState(
+                    supportsRoutingGuard: supportsRoutingGuard,
+                    hasRequiredOperatorScopes: hasOperatorRead && hasOperatorWrite),
+                socketGeneration: socketGeneration,
+                routeGeneration: admissionGeneration,
+                sequence: ok._protocol,
+                stream: gatewayVersion))
+            GatewayDiagnostics.log(
+                "gateway hello protocol=\(ok._protocol) version=\(gatewayVersion) "
+                    + "chat_send_routing_contract=\(supportsRoutingGuard) "
+                    + "operator_read=\(hasOperatorRead) operator_write=\(hasOperatorWrite)")
             if self.hasEverConnected {
                 self.broadcastServerEvent(
                     EventFrame(type: "event", event: "seqGap", payload: nil, seq: nil, stateversion: nil))
@@ -592,9 +673,31 @@ public actor GatewayNodeSession {
         }
     }
 
+    private nonisolated static func diagnosticGatewayVersion(_ value: String?) -> String {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalized.isEmpty, normalized.count <= 64 else { return "redacted" }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_+"))
+        return normalized.unicodeScalars.allSatisfy { allowed.contains($0) } ? normalized : "redacted"
+    }
+
+    nonisolated static func diagnosticHelloState(
+        supportsRoutingGuard: Bool,
+        hasRequiredOperatorScopes: Bool) -> String
+    {
+        switch (supportsRoutingGuard, hasRequiredOperatorScopes) {
+        case (true, true): "hello_s3_ready"
+        case (false, true): "hello_s3_capability_missing"
+        case (true, false): "hello_s3_scope_missing"
+        case (false, false): "hello_s3_capability_scope_missing"
+        }
+    }
+
     private func resetConnectionState() {
         self.hasNotifiedConnected = false
         self.snapshotReceived = false
+        self.serverCapabilities = nil
+        self.serverCapabilityNames = nil
+        self.authenticatedOperatorScopes = nil
         self.drainSnapshotWaiters(returning: .invalidated)
     }
 

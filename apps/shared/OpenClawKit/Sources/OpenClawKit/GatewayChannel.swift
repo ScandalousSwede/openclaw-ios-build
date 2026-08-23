@@ -107,6 +107,9 @@ public struct GatewayConnectOptions: Sendable {
     public var clientId: String
     public var clientMode: String
     public var clientDisplayName: String?
+    /// Stable owner identity for route-bound client state. Nil keeps legacy
+    /// unscoped connections from being mistaken for a durable outbox route.
+    public var stableGatewayID: String?
     /// When false, the connection omits the signed device identity payload and cannot use
     /// device-scoped auth (role/scope upgrades will require pairing). Keep this true for
     /// role/scoped sessions such as operator UI clients.
@@ -122,6 +125,7 @@ public struct GatewayConnectOptions: Sendable {
         clientId: String,
         clientMode: String,
         clientDisplayName: String?,
+        stableGatewayID: String? = nil,
         includeDeviceIdentity: Bool = true)
     {
         self.role = role
@@ -133,6 +137,7 @@ public struct GatewayConnectOptions: Sendable {
         self.clientId = clientId
         self.clientMode = clientMode
         self.clientDisplayName = clientDisplayName
+        self.stableGatewayID = stableGatewayID
         self.includeDeviceIdentity = includeDeviceIdentity
     }
 }
@@ -172,6 +177,30 @@ private func gatewayErrorDetails(_ error: ErrorShape?) -> [String: ProtoAnyCodab
 
 private enum ConnectChallengeError: Error {
     case timeout
+}
+
+public enum GatewayRequestDispatchResult: Sendable, Equatable {
+    case response(Data)
+    case notDispatched
+    case rejected(code: String, reason: String?)
+    case ambiguous(code: String?)
+}
+
+private final class GatewayRequestDispatchProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var dispatchStarted = false
+
+    func markDispatchStarted() {
+        self.lock.lock()
+        self.dispatchStarted = true
+        self.lock.unlock()
+    }
+
+    func didStartDispatch() -> Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.dispatchStarted
+    }
 }
 
 private let defaultOperatorConnectScopes: [String] = [
@@ -1435,6 +1464,38 @@ public actor GatewayChannelActor {
             connectionGeneration: expectedGeneration)
     }
 
+    /// Classifies one route-bound request by whether physical dispatch began.
+    /// Once `task.send` starts, transport loss is ambiguous and callers must
+    /// reconcile against canonical history before replaying the same identity.
+    public func requestTrackingDispatch(
+        method: String,
+        params: [String: AnyCodable]?,
+        timeoutMs: Double? = nil,
+        ifCurrentConnectionGeneration expectedGeneration: UInt64) async -> GatewayRequestDispatchResult
+    {
+        guard self.isConnected(connectionGeneration: expectedGeneration),
+              let task = self.task,
+              task.state == .running
+        else { return .notDispatched }
+
+        let probe = GatewayRequestDispatchProbe()
+        do {
+            let data = try await self.request(
+                method: method,
+                params: params,
+                timeoutMs: timeoutMs,
+                task: task,
+                connectionGeneration: expectedGeneration,
+                dispatchProbe: probe)
+            return .response(data)
+        } catch let error as GatewayResponseError {
+            return .rejected(code: error.code, reason: error.detailsReason)
+        } catch {
+            guard probe.didStartDispatch() else { return .notDispatched }
+            return .ambiguous(code: Self.dispatchFailureCode(error))
+        }
+    }
+
     public func currentConnectionGeneration() -> UInt64? {
         let generation = self.connectionGeneration
         guard self.isConnected(connectionGeneration: generation),
@@ -1448,7 +1509,8 @@ public actor GatewayChannelActor {
         params: [String: AnyCodable]?,
         timeoutMs: Double?,
         task: WebSocketTaskBox,
-        connectionGeneration: UInt64) async throws -> Data
+        connectionGeneration: UInt64,
+        dispatchProbe: GatewayRequestDispatchProbe? = nil) async throws -> Data
     {
         let effectiveTimeout = timeoutMs ?? self.defaultRequestTimeoutMs
         let payload = try self.encodeRequest(method: method, params: params, kind: "request")
@@ -1475,6 +1537,7 @@ public actor GatewayChannelActor {
                     return
                 }
                 do {
+                    dispatchProbe?.markDispatchStarted()
                     try await task.send(.data(payload.data))
                     guard self.isConnected(connectionGeneration: connectionGeneration) else {
                         self.cancelRequest(id: payload.id, connectionGeneration: connectionGeneration)
@@ -1587,6 +1650,14 @@ public actor GatewayChannelActor {
         let ns = error as NSError
         let desc = ns.localizedDescription.isEmpty ? "unknown" : ns.localizedDescription
         return NSError(domain: ns.domain, code: ns.code, userInfo: [NSLocalizedDescriptionKey: "\(context): \(desc)"])
+    }
+
+    private nonisolated static func dispatchFailureCode(_ error: Error) -> String {
+        if error is CancellationError { return "cancelled" }
+        if let urlError = error as? URLError {
+            return "url:\(urlError.errorCode)"
+        }
+        return "transport:\((error as NSError).code)"
     }
 
     private func connectOrThrow(context: String) async throws {
