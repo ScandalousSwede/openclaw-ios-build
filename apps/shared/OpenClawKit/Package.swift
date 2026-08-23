@@ -19,6 +19,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/steipete/ElevenLabsKit.git", from: "0.1.1"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
         .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
     ],
     targets: [
@@ -45,6 +46,7 @@ let package = Package(
             name: "OpenClawChatUI",
             dependencies: [
                 "OpenClawKit",
+                .product(name: "GRDB", package: "GRDB.swift"),
                 .product(
                     name: "Textual",
                     package: "textual",
