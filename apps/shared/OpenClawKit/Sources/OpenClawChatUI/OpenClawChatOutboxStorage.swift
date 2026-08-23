@@ -55,7 +55,10 @@ public struct OpenClawChatOutboxRouteSnapshot: Hashable, Sendable {
         self.routingContract = routingContract
         self.capabilities = capabilities
         self.operatorScopes = operatorScopes
-        self.verifiedAt = verifiedAt
+        // SQLite stores this instant as Unix-epoch Double seconds. Canonicalize
+        // through that same representation so synthesized equality remains
+        // stable across persistence instead of differing by one reference-date ULP.
+        self.verifiedAt = Date(timeIntervalSince1970: verifiedAt.timeIntervalSince1970)
     }
 }
 

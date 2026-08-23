@@ -149,6 +149,22 @@ struct OpenClawChatOutboxStorageTests {
         try await secondDatabase.close()
     }
 
+    @Test("fractional route timestamp remains stable across SQLite round trip")
+    func fractionalRouteTimestampRoundTrip() async throws {
+        try await self.withFixture { fixture in
+            let route = self.route(
+                verifiedAt: Date(timeIntervalSinceReferenceDate: 810_000_000.000_000_1))
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+
+            let restoredRoute = try await fixture.store.loadVerifiedRouteSnapshot()
+            #expect(restoredRoute == route)
+            _ = try await fixture.store.persistBeforeDraftClear(
+                self.draft(id: "fractional-route", route: route))
+            let unresolved = try await fixture.store.loadUnresolved()
+            #expect(unresolved.map(\.rawCommandID) == ["fractional-route"])
+        }
+    }
+
     @Test("enqueue requires the separately persisted verified route")
     func routeSnapshotGate() async throws {
         try await self.withFixture { fixture in
