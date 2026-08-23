@@ -650,10 +650,6 @@ public actor GatewayNodeSession {
                 routeGeneration: admissionGeneration,
                 sequence: ok._protocol,
                 stream: gatewayVersion))
-            GatewayDiagnostics.log(
-                "gateway hello protocol=\(ok._protocol) version=\(gatewayVersion) "
-                    + "chat_send_routing_contract=\(supportsRoutingGuard) "
-                    + "operator_read=\(hasOperatorRead) operator_write=\(hasOperatorWrite)")
             if self.hasEverConnected {
                 self.broadcastServerEvent(
                     EventFrame(type: "event", event: "seqGap", payload: nil, seq: nil, stateversion: nil))
