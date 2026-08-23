@@ -66,8 +66,13 @@ jobs:
       - name: Generate Xcode project
         run: cd apps/ios && xcodegen generate
 
-      - name: Run OpenClawKit tests
-        run: swift test --package-path apps/shared/OpenClawKit
+      - name: Build OpenClawKit and run S0-S2 reliability tests
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/shared/OpenClawKit
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
+          swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
+          swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
 
       - name: Run iOS tests
         run: |
