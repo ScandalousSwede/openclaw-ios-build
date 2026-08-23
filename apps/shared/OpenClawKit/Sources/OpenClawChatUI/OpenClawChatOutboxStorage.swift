@@ -1101,7 +1101,7 @@ extension OpenClawChatOutboxDatabase {
     {
         try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
             try Self.expireCommands(in: queue, stableGatewayID: stableGatewayID, now: now)
-            try queue.write { db in
+            return try queue.write { db -> OpenClawChatOutboxClaim? in
                 guard let row = try Row.fetchOne(
                     db,
                     sql: """
