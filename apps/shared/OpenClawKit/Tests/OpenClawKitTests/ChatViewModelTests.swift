@@ -2709,10 +2709,11 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("two model patches complete") {
             let patched = await transport.patchedModels()
@@ -2809,10 +2810,11 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("older model completion wins after latest failure") {
             await MainActor.run {
@@ -2860,16 +2862,18 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("latest failure restores prior successful model") {
             await MainActor.run {
                 vm.modelSelectionID == "openai/gpt-5.4" &&
                     vm.sessions.first(where: { $0.key == "main" })?.model == "gpt-5.4" &&
-                    vm.sessions.first(where: { $0.key == "main" })?.modelProvider == "openai"
+                    vm.sessions.first(where: { $0.key == "main" })?.modelProvider == "openai" &&
+                    vm.errorText != nil
             }
         }
 
