@@ -712,7 +712,10 @@ extension OnboardingWizardView {
         }
 
         self.connectingGatewayID = "setup-code"
-        self.applyGatewayLink(link)
+        guard await self.applyGatewayLink(link) else {
+            self.connectingGatewayID = nil
+            return
+        }
         self.setupCode = ""
         self.setupCodeStatus = "Setup code applied. Connecting..."
         self.connectMessage = "Connecting via setup code..."
@@ -722,24 +725,31 @@ extension OnboardingWizardView {
     }
 
     private func handleScannedLink(_ link: GatewayConnectDeepLink) {
-        self.applyGatewayLink(link)
-        self.setupCodeStatus = nil
-        self.showQRScanner = false
-        self.connectMessage = "Connecting via QR code..."
-        self.statusLine = "QR loaded. Connecting to \(link.host):\(link.port)..."
-        Task { await self.connectManual() }
+        Task {
+            guard await self.applyGatewayLink(link) else { return }
+            self.setupCodeStatus = nil
+            self.showQRScanner = false
+            self.connectMessage = "Connecting via QR code..."
+            self.statusLine = "QR loaded. Connecting to \(link.host):\(link.port)..."
+            await self.connectManual()
+        }
     }
 
-    private func applyGatewayLink(_ link: GatewayConnectDeepLink) {
+    private func applyGatewayLink(_ link: GatewayConnectDeepLink) async -> Bool {
         self.manualHost = link.host
         self.manualPort = link.port
         self.manualPortText = String(link.port)
         self.manualTLS = link.tls
         let setupAuth = GatewayConnectionController.ManualAuthOverride.setupAuth(from: link)
         if setupAuth.hasBootstrapToken {
-            GatewayOnboardingReset.prepareForBootstrapPairing(
-                appModel: self.appModel,
-                instanceId: GatewaySettingsStore.currentInstanceID())
+            do {
+                try await GatewayOnboardingReset.prepareForBootstrapPairing(
+                    appModel: self.appModel,
+                    instanceId: GatewaySettingsStore.currentInstanceID())
+            } catch {
+                self.setupCodeStatus = "Could not securely clear queued messages. Setup was not applied."
+                return false
+            }
         }
         self.saveGatewayBootstrapToken(setupAuth.bootstrapToken)
         if setupAuth.shouldApplyTokenField {
@@ -753,6 +763,7 @@ extension OnboardingWizardView {
         if self.selectedMode == nil {
             self.selectedMode = link.tls ? .remoteDomain : .homeNetwork
         }
+        return true
     }
 
     private func handleScannedSetupCode(_ code: String) {
@@ -1030,7 +1041,12 @@ extension OnboardingWizardView {
 
     private func handleGatewayProblemPrimaryAction(_ problem: GatewayConnectionProblem) async {
         if problem.suggestsOnboardingReset {
-            GatewayOnboardingReset.reset(appModel: self.appModel, instanceId: self.instanceId)
+            do {
+                try await GatewayOnboardingReset.reset(appModel: self.appModel, instanceId: self.instanceId)
+            } catch {
+                self.statusLine = "Could not securely clear queued messages. Onboarding was not reset."
+                return
+            }
             self.gatewayToken = ""
             self.gatewayPassword = ""
             self.connectingGatewayID = nil

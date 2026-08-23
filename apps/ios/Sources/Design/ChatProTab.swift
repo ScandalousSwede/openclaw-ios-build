@@ -6,7 +6,7 @@ struct ChatProTab: View {
     @Environment(NodeAppModel.self) private var appModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var viewModel: OpenClawChatViewModel?
-    @State private var viewModelUsesAppleReviewDemoTransport = false
+    @State private var chatPreparationError: String?
 
     var body: some View {
         NavigationStack {
@@ -25,11 +25,23 @@ struct ChatProTab: View {
                             assistantAvatarTint: OpenClawBrand.accent,
                             showsAssistantAvatars: false,
                             composerChrome: .clean,
-                            isComposerEnabled: self.gatewayConnected,
+                            isComposerEnabled: self.gatewayConnected || viewModel.supportsDurableOutbox,
                             messagePlaceholder: self.messagePlaceholder,
                             talkControl: self.talkControl)
                             .id(ObjectIdentifier(viewModel))
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    } else if let chatPreparationError {
+                        ProCard {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Chat is unavailable")
+                                    .font(.headline)
+                                Text(chatPreparationError)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding()
+                        Spacer()
                     } else {
                         ProCard {
                             VStack(alignment: .leading, spacing: 8) {
@@ -49,19 +61,14 @@ struct ChatProTab: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .navigationBarHidden(true)
         }
-        .task {
-            self.syncChatViewModel()
+        .task(id: self.chatOwnerTaskID) {
+            await self.prepareChatViewModel(taskID: self.chatOwnerTaskID)
         }
         .onChange(of: self.appModel.chatSessionKey) { _, _ in
-            self.syncChatViewModel()
-        }
-        .onChange(of: self.appModel.isAppleReviewDemoModeEnabled) { _, _ in
-            self.syncChatViewModel()
-            self.viewModel?.refresh()
+            self.viewModel?.syncSession(to: self.appModel.chatSessionKey)
         }
         .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
             guard connected else { return }
-            self.syncChatViewModel()
             self.viewModel?.refresh()
         }
     }
@@ -106,16 +113,22 @@ struct ChatProTab: View {
         .padding(.bottom, 4)
     }
 
-    private func syncChatViewModel() {
-        let sessionKey = self.appModel.chatSessionKey
+    private var chatOwnerTaskID: String {
+        let owner = self.appModel.isAppleReviewDemoModeEnabled
+            ? "apple-review-demo"
+            : (self.appModel.chatOutboxGatewayOwnerID ?? "unavailable")
+        return "\(owner)|\(self.appModel.chatOutboxOwnerGeneration)"
+    }
+
+    private func prepareChatViewModel(taskID: String) async {
+        self.viewModel?.shutdown()
+        self.viewModel = nil
+        self.chatPreparationError = nil
         let usesDemoTransport = self.appModel.isAppleReviewDemoModeEnabled
-        guard let viewModel else {
-            self.viewModelUsesAppleReviewDemoTransport = usesDemoTransport
+        if usesDemoTransport {
             self.viewModel = OpenClawChatViewModel(
-                sessionKey: sessionKey,
-                transport: usesDemoTransport
-                    ? AppleReviewDemoChatTransport()
-                    : IOSGatewayChatTransport(gateway: self.appModel.operatorSession),
+                sessionKey: self.appModel.chatSessionKey,
+                transport: AppleReviewDemoChatTransport(),
                 onSessionChanged: { sessionKey in
                     self.appModel.focusChatSession(sessionKey)
                 },
@@ -124,23 +137,35 @@ struct ChatProTab: View {
                 })
             return
         }
-        if self.viewModelUsesAppleReviewDemoTransport != usesDemoTransport {
-            self.viewModelUsesAppleReviewDemoTransport = usesDemoTransport
+
+        guard let stableGatewayID = self.appModel.chatOutboxGatewayOwnerID else {
+            self.chatPreparationError = "Connect to a gateway once before using durable chat."
+            return
+        }
+        do {
+            let outboxStore = try await self.appModel.chatOutboxStore(stableGatewayID: stableGatewayID)
+            guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
+            // Session focus can change while the durable database is opening.
+            // Capture it only after the suspension, in the same MainActor turn
+            // that installs the view model.
+            let currentSessionKey = self.appModel.chatSessionKey
             self.viewModel = OpenClawChatViewModel(
-                sessionKey: sessionKey,
-                transport: usesDemoTransport
-                    ? AppleReviewDemoChatTransport()
-                    : IOSGatewayChatTransport(gateway: self.appModel.operatorSession),
+                sessionKey: currentSessionKey,
+                transport: IOSGatewayChatTransport(
+                    gateway: self.appModel.operatorSession,
+                    stableGatewayID: stableGatewayID),
+                outboxStore: outboxStore,
+                outboxStableGatewayID: stableGatewayID,
                 onSessionChanged: { sessionKey in
                     self.appModel.focusChatSession(sessionKey)
                 },
                 diagnosticsLog: { message in
                     GatewayDiagnostics.log(message)
                 })
-            return
+        } catch {
+            guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
+            self.chatPreparationError = "Durable chat storage could not be opened. Your draft was not sent."
         }
-        guard viewModel.sessionKey != sessionKey else { return }
-        viewModel.syncSession(to: sessionKey)
     }
 
     private var talkControl: OpenClawChatTalkControl {
@@ -190,7 +215,16 @@ struct ChatProTab: View {
     }
 
     private var messagePlaceholder: String {
-        self.gatewayConnected ? "Message \(self.agentDisplayName)..." : "Connect to a gateway"
+        if self.gatewayConnected {
+            return "Message \(self.agentDisplayName)..."
+        }
+        if self.viewModel?.canQueueOffline == true {
+            return "Message \(self.agentDisplayName) (queues offline)"
+        }
+        if self.viewModel?.supportsDurableOutbox == true {
+            return "Connect once to enable offline queueing"
+        }
+        return "Connect to a gateway"
     }
 
     private var chatUserAccent: Color {

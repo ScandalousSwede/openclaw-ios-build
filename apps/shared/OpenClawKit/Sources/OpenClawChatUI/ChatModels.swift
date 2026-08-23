@@ -138,6 +138,25 @@ public struct OpenClawChatMessageContent: Codable, Hashable, Sendable {
 public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
     private struct OpenClawMetadata: Codable {
         let id: String?
+        let idempotencyKey: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case idempotencyKey
+        }
+
+        init(id: String?, idempotencyKey: String?) {
+            self.id = id
+            self.idempotencyKey = idempotencyKey
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // Metadata evolves independently. One malformed future field must
+            // never erase another valid durable identity from the same row.
+            self.id = try? container.decode(String.self, forKey: .id)
+            self.idempotencyKey = try? container.decode(String.self, forKey: .idempotencyKey)
+        }
     }
 
     public var id: UUID = .init()
@@ -145,6 +164,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
     public let role: String
     public let content: [OpenClawChatMessageContent]
     public let timestamp: Double?
+    public let idempotencyKey: String?
     public let toolCallId: String?
     public let toolName: String?
     public let usage: OpenClawChatUsage?
@@ -155,6 +175,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         case role
         case content
         case timestamp
+        case idempotencyKey
         case openClaw = "__openclaw"
         case toolCallId
         case tool_call_id
@@ -171,6 +192,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         content: [OpenClawChatMessageContent],
         timestamp: Double?,
         transcriptMessageID: String? = nil,
+        idempotencyKey: String? = nil,
         toolCallId: String? = nil,
         toolName: String? = nil,
         usage: OpenClawChatUsage? = nil,
@@ -182,6 +204,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         self.role = role
         self.content = content
         self.timestamp = timestamp
+        self.idempotencyKey = idempotencyKey
         self.toolCallId = toolCallId
         self.toolName = toolName
         self.usage = usage
@@ -197,6 +220,8 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         // transcript row. A malformed or future shape must not discard valid
         // role/content/timestamp data.
         let decodedOpenClaw = try? container.decode(OpenClawMetadata.self, forKey: .openClaw)
+        let decodedIdempotencyKey = decodedOpenClaw?.idempotencyKey ??
+            (try? container.decode(String.self, forKey: .idempotencyKey))
         let decodedToolCallId =
             try container.decodeIfPresent(String.self, forKey: .toolCallId) ??
             container.decodeIfPresent(String.self, forKey: .tool_call_id)
@@ -210,6 +235,7 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         self.role = decodedRole
         self.transcriptMessageID = decodedOpenClaw?.id
         self.timestamp = decodedTimestamp
+        self.idempotencyKey = decodedIdempotencyKey
         self.toolCallId = decodedToolCallId
         self.toolName = decodedToolName
         self.usage = decodedUsage
@@ -283,9 +309,10 @@ public struct OpenClawChatMessage: Codable, Identifiable, Sendable {
         try container.encodeIfPresent(self.timestamp, forKey: .timestamp)
         if self.transcriptMessageID != nil {
             try container.encode(
-                OpenClawMetadata(id: self.transcriptMessageID),
+                OpenClawMetadata(id: self.transcriptMessageID, idempotencyKey: nil),
                 forKey: .openClaw)
         }
+        try container.encodeIfPresent(self.idempotencyKey, forKey: .idempotencyKey)
         try container.encodeIfPresent(self.toolCallId, forKey: .toolCallId)
         try container.encodeIfPresent(self.toolName, forKey: .toolName)
         try container.encodeIfPresent(self.usage, forKey: .usage)
@@ -300,6 +327,27 @@ public struct OpenClawChatHistoryPayload: Codable, Sendable {
     public let sessionId: String?
     public let messages: [AnyCodable]?
     public let thinkingLevel: String?
+    public let nextOffset: Int?
+    public let hasMore: Bool?
+    public let totalMessages: Int?
+
+    public init(
+        sessionKey: String,
+        sessionId: String?,
+        messages: [AnyCodable]?,
+        thinkingLevel: String?,
+        nextOffset: Int? = nil,
+        hasMore: Bool? = nil,
+        totalMessages: Int? = nil)
+    {
+        self.sessionKey = sessionKey
+        self.sessionId = sessionId
+        self.messages = messages
+        self.thinkingLevel = thinkingLevel
+        self.nextOffset = nextOffset
+        self.hasMore = hasMore
+        self.totalMessages = totalMessages
+    }
 }
 
 public struct OpenClawSessionPreviewItem: Codable, Hashable, Sendable {

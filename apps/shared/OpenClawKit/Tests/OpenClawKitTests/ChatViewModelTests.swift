@@ -730,6 +730,29 @@ struct ChatViewModelTests {
         #expect(roundTripped.transcriptMessageID == "message-1")
     }
 
+    @Test func `history message coding preserves canonical idempotency identity`() throws {
+        let rawCommandID = "aies-s3-probe-1f4fdfad-b75e-416e-b36b-ef664633d299"
+        let canonicalUserID = "\(rawCommandID):user"
+        let topLevel = Data(
+            """
+            {"role":"user","content":"hello","timestamp":1,"idempotencyKey":"\(canonicalUserID)"}
+            """.utf8)
+        let decoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: topLevel)
+        let roundTripped = try JSONDecoder().decode(
+            OpenClawChatMessage.self,
+            from: JSONEncoder().encode(decoded))
+
+        #expect(decoded.idempotencyKey == canonicalUserID)
+        #expect(roundTripped.idempotencyKey == canonicalUserID)
+
+        let embedded = Data(
+            """
+            {"role":"user","content":"hello","timestamp":1,"idempotencyKey":"wrong",\
+            "__openclaw":{"idempotencyKey":"\(canonicalUserID)"}}
+            """.utf8)
+        #expect(try JSONDecoder().decode(OpenClawChatMessage.self, from: embedded).idempotencyKey == canonicalUserID)
+    }
+
     @Test func `malformed identity metadata does not discard valid transcript row`() throws {
         let malformedRows = [
             #"{"role":"assistant","content":"kept","timestamp":12,"__openclaw":{"id":7}}"#,
@@ -743,6 +766,18 @@ struct ChatViewModelTests {
             #expect(decoded.timestamp == 12)
             #expect(decoded.transcriptMessageID == nil)
         }
+
+        let validTranscriptID = Data(
+            #"{"role":"user","content":"kept","timestamp":12,"__openclaw":{"id":"message-1","idempotencyKey":7}}"#.utf8)
+        let transcriptDecoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: validTranscriptID)
+        #expect(transcriptDecoded.transcriptMessageID == "message-1")
+        #expect(transcriptDecoded.idempotencyKey == nil)
+
+        let validIdempotencyKey = Data(
+            #"{"role":"user","content":"kept","timestamp":12,"__openclaw":{"id":7,"idempotencyKey":"command-1:user"}}"#.utf8)
+        let idempotencyDecoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: validIdempotencyKey)
+        #expect(idempotencyDecoded.transcriptMessageID == nil)
+        #expect(idempotencyDecoded.idempotencyKey == "command-1:user")
     }
 
     @Test func `streams assistant and clears on final`() async throws {

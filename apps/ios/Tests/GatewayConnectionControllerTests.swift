@@ -92,6 +92,7 @@ import UIKit
         let withoutApprovalScope = appModel._test_makeOperatorConnectOptions(
             clientId: "openclaw-ios",
             displayName: "OpenClaw iOS",
+            stableGatewayID: "gateway-a",
             includeApprovalScope: false)
         let withApprovalScope = appModel._test_makeOperatorConnectOptions(
             clientId: "openclaw-ios",
@@ -109,7 +110,8 @@ import UIKit
         #expect(withoutApprovalScope.scopes.contains("operator.write"))
         #expect(!withoutApprovalScope.scopes.contains("operator.approvals"))
         #expect(withoutApprovalScope.scopes.contains("operator.talk.secrets"))
-        #expect(!withoutApprovalScope.scopesAreExplicit)
+        #expect(withoutApprovalScope.scopesAreExplicit)
+        #expect(withoutApprovalScope.stableGatewayID == "gateway-a")
 
         #expect(withApprovalScope.scopes.contains("operator.approvals"))
         #expect(withAdminScope.scopes.contains("operator.admin"))

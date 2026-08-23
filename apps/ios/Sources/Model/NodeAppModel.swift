@@ -155,6 +155,8 @@ final class NodeAppModel {
     private let nodeGateway = GatewayNodeSession()
     // Secondary "operator" connection: used for chat/talk/config/voicewake requests.
     private let operatorGateway = GatewayNodeSession()
+    @ObservationIgnored private var chatOutboxDatabase: OpenClawChatOutboxDatabase?
+    private(set) var chatOutboxOwnerGeneration: UInt64 = 0
     private var nodeGatewayTask: Task<Void, Never>?
     private var operatorGatewayTask: Task<Void, Never>?
     private var forceOperatorTalkPermissionUpgradeRequest = false
@@ -205,6 +207,44 @@ final class NodeAppModel {
 
     var operatorSession: GatewayNodeSession {
         self.operatorGateway
+    }
+
+    var chatOutboxGatewayOwnerID: String? {
+        let candidates = [
+            self.activeGatewayConnectConfig?.effectiveStableID,
+            self.connectedGatewayID,
+            GatewaySettingsStore.loadLastGatewayConnection()?.stableID,
+        ]
+        return candidates.lazy.compactMap { candidate -> String? in
+            let normalized = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return normalized.isEmpty ? nil : normalized
+        }.first
+    }
+
+    func chatOutboxStore(stableGatewayID: String) async throws -> OpenClawChatOutboxStore {
+        let database: OpenClawChatOutboxDatabase
+        if let existing = self.chatOutboxDatabase {
+            database = existing
+        } else {
+            let opened = try OpenClawChatOutboxDatabase.openApplicationSupport()
+            self.chatOutboxDatabase = opened
+            database = opened
+        }
+        return try await database.store(stableGatewayID: stableGatewayID)
+    }
+
+    func securePurgeChatOutboxForCredentialReset() async throws {
+        self.chatOutboxOwnerGeneration &+= 1
+        let database: OpenClawChatOutboxDatabase
+        if let existing = self.chatOutboxDatabase {
+            database = existing
+        } else {
+            let opened = try OpenClawChatOutboxDatabase.openApplicationSupport()
+            self.chatOutboxDatabase = opened
+            database = opened
+        }
+        try await database.securePurgeAll()
+        self.chatOutboxOwnerGeneration &+= 1
     }
 
     private(set) var activeGatewayConnectConfig: GatewayConnectConfig?
@@ -2057,7 +2097,7 @@ extension NodeAppModel {
         await self.nodeGateway.disconnect()
     }
 
-    func disconnectGateway() {
+    private func prepareForGatewayDisconnect() {
         self.isAppleReviewDemoModeEnabled = false
         self.gatewayAutoReconnectEnabled = false
         self.gatewayPairingPaused = false
@@ -2072,10 +2112,6 @@ extension NodeAppModel {
         self.voiceWakeSyncTask = nil
         LiveActivityManager.shared.endActivity(reason: "manual_disconnect")
         self.gatewayHealthMonitor.stop()
-        Task {
-            await self.operatorGateway.disconnect()
-            await self.nodeGateway.disconnect()
-        }
         self.gatewayStatusText = "Offline"
         self.gatewayServerName = nil
         self.gatewayRemoteAddress = nil
@@ -2089,6 +2125,22 @@ extension NodeAppModel {
         self.talkMode.updateMainSessionKey(self.mainSessionKey)
         ShareGatewayRelaySettings.clearConfig()
         self.showLocalCanvasOnDisconnect()
+    }
+
+    func disconnectGateway() {
+        self.prepareForGatewayDisconnect()
+        Task {
+            await self.operatorGateway.disconnect()
+            await self.nodeGateway.disconnect()
+        }
+    }
+
+    /// Credential reset must not purge durable delivery state until every admitted
+    /// gateway route has been synchronously retired.
+    func disconnectGatewayAndAwaitRouteRetirement() async {
+        self.prepareForGatewayDisconnect()
+        await self.operatorGateway.disconnect()
+        await self.nodeGateway.disconnect()
     }
 }
 
@@ -2375,6 +2427,7 @@ extension NodeAppModel {
                 let operatorOptions = self.makeOperatorConnectOptions(
                     clientId: effectiveClientId,
                     displayName: nodeOptions.clientDisplayName,
+                    stableGatewayID: stableID,
                     includeAdminScope: self.shouldRequestOperatorAdminScope(
                         token: reconnectAuth.token,
                         password: reconnectAuth.password,
@@ -2383,7 +2436,7 @@ extension NodeAppModel {
                         token: reconnectAuth.token,
                         password: reconnectAuth.password,
                         forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest),
-                    forceExplicitScopes: talkPermissionUpgradeRequest)
+                    forceExplicitScopes: true)
 
                 do {
                     try await self.operatorGateway.connect(
@@ -2780,9 +2833,10 @@ extension NodeAppModel {
     private func makeOperatorConnectOptions(
         clientId: String,
         displayName: String?,
+        stableGatewayID: String? = nil,
         includeAdminScope: Bool = false,
         includeApprovalScope: Bool,
-        forceExplicitScopes: Bool = false) -> GatewayConnectOptions
+        forceExplicitScopes: Bool = true) -> GatewayConnectOptions
     {
         var scopes = ["operator.read", "operator.write", "operator.talk.secrets"]
         if includeAdminScope {
@@ -2803,6 +2857,7 @@ extension NodeAppModel {
             clientId: clientId,
             clientMode: "ui",
             clientDisplayName: displayName,
+            stableGatewayID: stableGatewayID,
             includeDeviceIdentity: true)
     }
 
@@ -4717,13 +4772,15 @@ extension NodeAppModel {
     func _test_makeOperatorConnectOptions(
         clientId: String,
         displayName: String?,
+        stableGatewayID: String? = nil,
         includeAdminScope: Bool = false,
         includeApprovalScope: Bool,
-        forceExplicitScopes: Bool = false) -> GatewayConnectOptions
+        forceExplicitScopes: Bool = true) -> GatewayConnectOptions
     {
         self.makeOperatorConnectOptions(
             clientId: clientId,
             displayName: displayName,
+            stableGatewayID: stableGatewayID,
             includeAdminScope: includeAdminScope,
             includeApprovalScope: includeApprovalScope,
             forceExplicitScopes: forceExplicitScopes)

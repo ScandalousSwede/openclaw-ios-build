@@ -6,9 +6,15 @@ enum GatewayOnboardingReset {
     static func prepareForBootstrapPairing(
         appModel: NodeAppModel,
         instanceId: String,
-        defaults: UserDefaults = .standard)
+        defaults: UserDefaults = .standard) async throws
     {
-        appModel.disconnectGateway()
+        try await self.retireRoutesThenPurge(
+            retireRoutes: {
+                await appModel.disconnectGatewayAndAwaitRouteRetirement()
+            },
+            purgeOutbox: {
+                try await appModel.securePurgeChatOutboxForCredentialReset()
+            })
 
         let trimmedInstanceId = instanceId.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedInstanceId.isEmpty {
@@ -27,12 +33,24 @@ enum GatewayOnboardingReset {
     }
 
     @MainActor
+    static func retireRoutesThenPurge(
+        retireRoutes: @MainActor () async -> Void,
+        purgeOutbox: @MainActor () async throws -> Void) async throws
+    {
+        await retireRoutes()
+        try await purgeOutbox()
+    }
+
+    @MainActor
     static func reset(
         appModel: NodeAppModel,
         instanceId: String,
-        defaults: UserDefaults = .standard)
+        defaults: UserDefaults = .standard) async throws
     {
-        self.prepareForBootstrapPairing(appModel: appModel, instanceId: instanceId, defaults: defaults)
+        try await self.prepareForBootstrapPairing(
+            appModel: appModel,
+            instanceId: instanceId,
+            defaults: defaults)
         OnboardingStateStore.reset(defaults: defaults)
 
         defaults.set(false, forKey: "gateway.onboardingComplete")
