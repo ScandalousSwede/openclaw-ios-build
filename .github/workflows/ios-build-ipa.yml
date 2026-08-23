@@ -69,13 +69,15 @@ jobs:
       - name: Generate Xcode project
         run: cd apps/ios && xcodegen generate
 
-      - name: Build OpenClawKit and run S0-S2 reliability tests
+      - name: Build OpenClawKit and run S0-S3 reliability tests
         run: |
           set -euo pipefail
           swift build --package-path apps/shared/OpenClawKit
           swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
           swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
           swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxStorageTests
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxIntegrationTests
 
       - name: Run iOS tests
         run: |
@@ -104,6 +106,8 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests \
+            -only-testing:OpenClawTests/GatewayOnboardingResetTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
