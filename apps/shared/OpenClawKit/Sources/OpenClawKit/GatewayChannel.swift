@@ -1626,7 +1626,7 @@ public actor GatewayChannelActor {
     }
 
     private func failPending(_ error: Error, connectionGeneration: UInt64?) async {
-        let requestIDs = self.pending.compactMap { id, pending in
+        let requestIDs: [String] = self.pending.compactMap { id, pending -> String? in
             if let connectionGeneration, pending.connectionGeneration != connectionGeneration {
                 return nil
             }
