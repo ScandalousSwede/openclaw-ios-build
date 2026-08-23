@@ -960,7 +960,7 @@ extension OpenClawChatOutboxDatabase {
         }
         return try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
             try Self.expireAllCommands(in: queue, now: now)
-            try queue.write { db in
+            return try queue.write { db in
                 guard let verifiedRoute = try Self.readVerifiedRouteSnapshot(
                     db,
                     stableGatewayID: stableGatewayID)
