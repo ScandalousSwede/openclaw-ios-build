@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/ios-beta-prepare.sh --build-number 7 [--team-id TEAMID]
+  scripts/ios-beta-prepare.sh --build-number 7 [--team-id TEAMID] [--push-mode relay|direct]
 
 Optional custom relay:
   OPENCLAW_PUSH_RELAY_BASE_URL=https://relay.example.com \
@@ -13,7 +13,8 @@ Optional custom relay:
 Prepares local beta-release inputs without touching local signing overrides:
 - reads apps/ios/version.json and writes apps/ios/build/Version.xcconfig
 - writes apps/ios/build/BetaRelease.xcconfig with canonical bundle IDs
-- configures the beta build for relay-backed APNs registration
+- configures relay-backed APNs registration by default
+- supports an explicit direct mode for the isolated AIES internal TestFlight lane
 - regenerates apps/ios/OpenClaw.xcodeproj via xcodegen
 EOF
 }
@@ -29,9 +30,12 @@ VERSION_SYNC_HELPER="${ROOT_DIR}/scripts/ios-sync-versioning.ts"
 
 BUILD_NUMBER=""
 TEAM_ID="${IOS_DEVELOPMENT_TEAM:-}"
+PUSH_MODE="relay"
 DEFAULT_IOS_PUSH_RELAY_BASE_URL="https://ios-push-relay.openclaw.ai"
 PUSH_RELAY_BASE_URL="${OPENCLAW_PUSH_RELAY_BASE_URL:-${IOS_PUSH_RELAY_BASE_URL:-${DEFAULT_IOS_PUSH_RELAY_BASE_URL}}}"
 PUSH_RELAY_BASE_URL_XCCONFIG=""
+PUSH_TRANSPORT=""
+PUSH_DISTRIBUTION=""
 IOS_VERSION=""
 
 prepare_build_dir() {
@@ -95,6 +99,10 @@ while [[ $# -gt 0 ]]; do
       TEAM_ID="${2:-}"
       shift 2
       ;;
+    --push-mode)
+      PUSH_MODE="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -113,8 +121,18 @@ if [[ -z "${BUILD_NUMBER}" ]]; then
   exit 1
 fi
 
+if [[ ! "${BUILD_NUMBER}" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --build-number: expected digits only." >&2
+  exit 1
+fi
+
 if [[ -z "${TEAM_ID}" ]]; then
   TEAM_ID="$(IOS_ALLOW_KEYCHAIN_TEAM_FALLBACK=1 bash "${TEAM_HELPER}")"
+fi
+
+if [[ ! "${TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
+  echo "Invalid Apple Team ID: expected exactly 10 uppercase letters or digits." >&2
+  exit 1
 fi
 
 if [[ -z "${TEAM_ID}" ]]; then
@@ -122,14 +140,33 @@ if [[ -z "${TEAM_ID}" ]]; then
   exit 1
 fi
 
-validate_push_relay_base_url "${PUSH_RELAY_BASE_URL}"
+case "${PUSH_MODE}" in
+  relay)
+    PUSH_TRANSPORT="relay"
+    PUSH_DISTRIBUTION="official"
+    validate_push_relay_base_url "${PUSH_RELAY_BASE_URL}"
 
-# `.xcconfig` treats `//` as a comment opener. Break the URL with a helper setting
-# so Xcode still resolves it back to `https://...` at build time.
-PUSH_RELAY_BASE_URL_XCCONFIG="$(
-  printf '%s' "${PUSH_RELAY_BASE_URL}" \
-    | sed 's#//#$(OPENCLAW_URL_SLASH)$(OPENCLAW_URL_SLASH)#g'
-)"
+    # `.xcconfig` treats `//` as a comment opener. Break the URL with a helper setting
+    # so Xcode still resolves it back to `https://...` at build time.
+    PUSH_RELAY_BASE_URL_XCCONFIG="$(
+      # The sed replacement intentionally contains literal xcconfig substitutions.
+      # shellcheck disable=SC2016
+      printf '%s' "${PUSH_RELAY_BASE_URL}" \
+        | sed 's#//#$(OPENCLAW_URL_SLASH)$(OPENCLAW_URL_SLASH)#g'
+    )"
+    ;;
+  direct)
+    # Direct mode publishes the production APNs token only to the authenticated
+    # Argus gateway. Keep relay distribution and URL settings empty by construction.
+    PUSH_TRANSPORT="direct"
+    PUSH_DISTRIBUTION="local"
+    PUSH_RELAY_BASE_URL_XCCONFIG=""
+    ;;
+  *)
+    echo "Invalid --push-mode '${PUSH_MODE}'. Expected relay or direct." >&2
+    exit 1
+    ;;
+esac
 
 prepare_build_dir
 
@@ -160,8 +197,8 @@ OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.watchkitapp
 OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.watchkitapp.extension
 OPENCLAW_APP_PROFILE =
 OPENCLAW_SHARE_PROFILE =
-OPENCLAW_PUSH_TRANSPORT = relay
-OPENCLAW_PUSH_DISTRIBUTION = official
+OPENCLAW_PUSH_TRANSPORT = ${PUSH_TRANSPORT}
+OPENCLAW_PUSH_DISTRIBUTION = ${PUSH_DISTRIBUTION}
 OPENCLAW_URL_SLASH = /
 OPENCLAW_PUSH_RELAY_BASE_URL = ${PUSH_RELAY_BASE_URL_XCCONFIG}
 OPENCLAW_PUSH_APNS_ENVIRONMENT = production
@@ -172,5 +209,5 @@ EOF
   xcodegen generate
 )
 
-echo "Prepared iOS beta release: version=${IOS_VERSION} build=${BUILD_NUMBER} team=${TEAM_ID}"
+echo "Prepared iOS beta release: version=${IOS_VERSION} build=${BUILD_NUMBER} team=${TEAM_ID} push=${PUSH_MODE}"
 echo "XCODE_XCCONFIG_FILE=${BETA_XCCONFIG}"

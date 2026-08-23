@@ -1,10 +1,75 @@
-name: Build iOS IPA (Debug/Unsigned)
+name: Build iOS IPA (Unsigned / Protected Internal TestFlight)
 
 on:
   workflow_dispatch:
+    inputs:
+      distribution:
+        description: Build lane (signed upload is internal TestFlight only)
+        required: true
+        default: unsigned-diagnostic
+        type: choice
+        options:
+          - unsigned-diagnostic
+          - signed-internal-testflight
+      expected_git_sha:
+        description: Exact 40-character SHA required for signed internal TestFlight
+        required: false
+        type: string
+      confirm_internal_only:
+        description: Confirm no external testers or public App Store submission
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  actions: read
+  contents: read
 
 jobs:
+  dispatch-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate requested lane
+        env:
+          AIES_CONFIRM_INTERNAL_ONLY: ${{ inputs.confirm_internal_only }}
+          AIES_DISTRIBUTION: ${{ inputs.distribution }}
+          AIES_EXPECTED_SHA: ${{ inputs.expected_git_sha }}
+          AIES_GITHUB_SHA: ${{ github.sha }}
+          AIES_REF_NAME: ${{ github.ref_name }}
+          AIES_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [[ "${AIES_DISTRIBUTION}" == "unsigned-diagnostic" ]]; then
+            exit 0
+          fi
+          if [[ "${AIES_DISTRIBUTION}" != "signed-internal-testflight" ]]; then
+            echo "Unsupported distribution lane." >&2
+            exit 1
+          fi
+          if [[ "${AIES_CONFIRM_INTERNAL_ONLY}" != "true" ]]; then
+            echo "Signed dispatch requires explicit internal-only confirmation." >&2
+            exit 1
+          fi
+          if [[ ! "${AIES_EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Signed dispatch requires an exact lowercase 40-character Git SHA." >&2
+            exit 1
+          fi
+          if [[ "${AIES_EXPECTED_SHA}" != "${AIES_GITHUB_SHA}" ]]; then
+            echo "Requested SHA does not match the workflow checkout SHA." >&2
+            exit 1
+          fi
+          if [[ "${AIES_REF_TYPE}" != "branch" ]]; then
+            echo "Signed AIES TestFlight dispatch must originate from a branch ref." >&2
+            exit 1
+          fi
+          if [[ "${AIES_REF_NAME}" != "aies/ios-tts-d1-testflight" ]]; then
+            echo "Signed AIES TestFlight dispatch is restricted to the isolated TTS branch." >&2
+            exit 1
+          fi
+
   build:
+    needs: dispatch-gate
+    if: inputs.distribution == 'unsigned-diagnostic'
     runs-on: macos-15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -13,7 +78,7 @@ jobs:
       OPENCLAW_SKIP_SOURCE_LINT: "YES"
     steps:
       - name: Select Xcode 26.2
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: '26.2'
 
@@ -22,13 +87,15 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node environment
         uses: ./.github/actions/setup-node-env
         with:
           install-bun: "false"
           install-deps: "false"
+          use-actions-cache: "false"
+          save-actions-cache: "false"
 
       - name: Install iOS build tools
         run: brew install xcodegen swiftlint swiftformat
@@ -107,6 +174,7 @@ jobs:
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
             test \
             CODE_SIGNING_ALLOWED=NO
 
@@ -188,7 +256,7 @@ jobs:
           python3 -m json.tool /tmp/OpenClaw-build-manifest.json >/dev/null
 
       - name: Upload IPA
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-iOS-IPA-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw.ipa
@@ -196,7 +264,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload xcarchive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-iOS-xcarchive-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw.xcarchive.zip
@@ -204,7 +272,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload dSYMs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-iOS-dSYMs-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw-dSYMs.zip
@@ -212,9 +280,353 @@ jobs:
           if-no-files-found: error
 
       - name: Upload build manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-iOS-build-manifest-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw-build-manifest.json
           retention-days: 90
           if-no-files-found: error
+
+  signed-internal-testflight:
+    needs: dispatch-gate
+    if: inputs.distribution == 'signed-internal-testflight' && github.ref_type == 'branch'
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: aies-testflight-internal
+    concurrency:
+      group: aies-ios-internal-testflight
+      cancel-in-progress: false
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      OPENCLAW_SKIP_SOURCE_LINT: "YES"
+    steps:
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Show Swift toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.expected_git_sha }}
+          fetch-depth: 1
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: "false"
+          install-deps: "false"
+          use-actions-cache: "false"
+          save-actions-cache: "false"
+
+      - name: Install iOS build tools
+        run: brew install fastlane xcodegen swiftlint swiftformat
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Verify protected environment policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          environment_json="${RUNNER_TEMP}/aies-environment.json"
+          branch_policies_json="${RUNNER_TEMP}/aies-environment-branches.json"
+          gh api \
+            --header "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/environments/aies-testflight-internal" \
+            > "${environment_json}"
+          gh api \
+            --header "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/environments/aies-testflight-internal/deployment-branch-policies?per_page=100" \
+            > "${branch_policies_json}"
+          python3 - "${environment_json}" "${branch_policies_json}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          environment = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          policies = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          reviewer_rules = [
+              rule for rule in environment.get("protection_rules", [])
+              if rule.get("type") == "required_reviewers"
+          ]
+          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
+              raise SystemExit("AIES environment must require at least one reviewer")
+          if reviewer_rules[0].get("prevent_self_review") is not True:
+              raise SystemExit("AIES environment must prevent self-review")
+          deployment_policy = environment.get("deployment_branch_policy") or {}
+          if deployment_policy.get("custom_branch_policies") is not True:
+              raise SystemExit("AIES environment must use a custom branch policy")
+          policy_items = policies.get("branch_policies", [])
+          policy_identity = {(item.get("name"), item.get("type")) for item in policy_items}
+          if policy_identity != {("aies/ios-tts-d1-testflight", "branch")}:
+              raise SystemExit(
+                  "AIES environment must allow only the isolated TTS branch as a branch policy"
+              )
+          PY
+          rm -f -- "${environment_json}" "${branch_policies_json}"
+
+      - name: Validate protected release metadata
+        env:
+          AIES_ENVIRONMENT_ENABLED: ${{ vars.AIES_TESTFLIGHT_INTERNAL_ENABLED }}
+          AIES_INTERNAL_TESTER_GROUP_VALUE: ${{ vars.AIES_INTERNAL_TESTER_GROUP }}
+          APP_BUNDLE_ID_VALUE: ${{ vars.APP_BUNDLE_ID }}
+          APP_STORE_CONNECT_APP_ID_VALUE: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+          APPLE_TEAM_ID_VALUE: ${{ vars.APPLE_TEAM_ID }}
+          ASC_ISSUER_ID_VALUE: ${{ vars.ASC_ISSUER_ID }}
+          ASC_KEY_ID_VALUE: ${{ vars.ASC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          [[ "${AIES_ENVIRONMENT_ENABLED}" == "true" ]] || {
+            echo "Protected environment is not explicitly enabled." >&2
+            exit 1
+          }
+          [[ "${APP_BUNDLE_ID_VALUE}" == "ai.openclaw.client" ]] || {
+            echo "APP_BUNDLE_ID does not match the isolated AIES app." >&2
+            exit 1
+          }
+          [[ "${APPLE_TEAM_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo "APPLE_TEAM_ID is missing or malformed." >&2
+            exit 1
+          }
+          [[ "${ASC_KEY_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
+            echo "ASC_KEY_ID is missing or malformed." >&2
+            exit 1
+          }
+          [[ "${ASC_ISSUER_ID_VALUE}" =~ ^[0-9a-fA-F-]{36}$ ]] || {
+            echo "ASC_ISSUER_ID is missing or malformed." >&2
+            exit 1
+          }
+          [[ "${APP_STORE_CONNECT_APP_ID_VALUE}" =~ ^[0-9]+$ ]] || {
+            echo "APP_STORE_CONNECT_APP_ID is missing or malformed." >&2
+            exit 1
+          }
+          [[ "${AIES_INTERNAL_TESTER_GROUP_VALUE}" =~ ^[A-Za-z0-9][A-Za-z0-9._\ /()-]{0,79}$ ]] || {
+            echo "AIES_INTERNAL_TESTER_GROUP is missing or contains unsafe characters." >&2
+            exit 1
+          }
+
+      - name: Capture signed-build provenance
+        env:
+          AIES_INTERNAL_TESTER_GROUP_VALUE: ${{ vars.AIES_INTERNAL_TESTER_GROUP }}
+          AIES_TESTFLIGHT_INTERNAL_ENABLED_VALUE: ${{ vars.AIES_TESTFLIGHT_INTERNAL_ENABLED }}
+          APP_BUNDLE_ID_VALUE: ${{ vars.APP_BUNDLE_ID }}
+          APP_STORE_CONNECT_APP_ID_VALUE: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+          APPLE_TEAM_ID_VALUE: ${{ vars.APPLE_TEAM_ID }}
+          ASC_ISSUER_ID_VALUE: ${{ vars.ASC_ISSUER_ID }}
+          ASC_KEY_ID_VALUE: ${{ vars.ASC_KEY_ID }}
+        run: |
+          set -euo pipefail
+          build_timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          archive_uuid="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+          xcode_version="$(xcodebuild -version | paste -sd ' ' -)"
+          swift_version="$(swift --version | sed -n '1p')"
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          output_directory="${RUNNER_TEMP}/openclaw-aies-testflight"
+          mkdir -p "${output_directory}"
+          {
+            echo "AIES_ARCHIVE_UUID=${archive_uuid}"
+            echo "AIES_BUILD_TIMESTAMP=${build_timestamp}"
+            echo "AIES_EXPECTED_GIT_BRANCH=${GITHUB_REF_NAME}"
+            echo "AIES_EXPECTED_GIT_SHA=${GITHUB_SHA}"
+            echo "AIES_INTERNAL_ONLY_CONFIRMED=true"
+            echo "AIES_INTERNAL_TESTER_GROUP=${AIES_INTERNAL_TESTER_GROUP_VALUE}"
+            echo "AIES_SDK_VERSION=${sdk_version}"
+            echo "AIES_SWIFT_VERSION=${swift_version}"
+            echo "AIES_TESTFLIGHT_INTERNAL_ENABLED=${AIES_TESTFLIGHT_INTERNAL_ENABLED_VALUE}"
+            echo "AIES_TESTFLIGHT_OUTPUT_DIR=${output_directory}"
+            echo "AIES_TESTFLIGHT_RESULT_PATH=${output_directory}/OpenClaw-TestFlight-delivery.json"
+            echo "AIES_XCODE_VERSION=${xcode_version}"
+            echo "ASC_APP_ID=${APP_STORE_CONNECT_APP_ID_VALUE}"
+            echo "ASC_APP_IDENTIFIER=${APP_BUNDLE_ID_VALUE}"
+            echo "ASC_ISSUER_ID=${ASC_ISSUER_ID_VALUE}"
+            echo "ASC_KEY_ID=${ASC_KEY_ID_VALUE}"
+            echo "IOS_DEVELOPMENT_TEAM=${APPLE_TEAM_ID_VALUE}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Test signing evidence tooling
+        run: |
+          set -euo pipefail
+          cd apps/ios/Tools
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_write_build_manifest.py \
+            test_verify_aies_internal_signing.py
+
+      - name: Parse Fastlane release configuration without credentials
+        working-directory: apps/ios
+        run: fastlane lanes >/dev/null
+
+      - name: Generate test project
+        run: cd apps/ios && xcodegen generate
+
+      - name: Build OpenClawKit and run reliability tests
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/shared/OpenClawKit
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
+          swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
+          swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
+
+      - name: Run focused iOS reliability tests
+        run: |
+          set -euo pipefail
+          simulator_udid="$({ xcrun simctl list devices available --json; } | python3 -c '
+          import json, sys
+          payload = json.load(sys.stdin)
+          devices = []
+          for runtime, entries in payload.get("devices", {}).items():
+              if ".iOS-" not in runtime:
+                  continue
+              devices.extend(
+                  entry for entry in entries
+                  if entry.get("isAvailable")
+                  and entry.get("udid")
+                  and str(entry.get("name", "")).startswith("iPhone")
+              )
+          if not devices:
+              raise SystemExit("No available iOS simulator")
+          print(devices[0]["udid"])
+          ' )"
+          cd apps/ios
+          xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
+            -only-testing:OpenClawTests/LiveActivityManagerTests \
+            -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/TalkModeManagerTests \
+            -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
+            -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
+            test \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Materialize ephemeral App Store Connect key
+        env:
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ASC_PRIVATE_KEY_P8}" ]]; then
+            echo "ASC_PRIVATE_KEY_P8 is not configured in the protected environment." >&2
+            exit 1
+          fi
+          if [[ "${ASC_PRIVATE_KEY_P8}" != *"BEGIN PRIVATE KEY"* ]] || \
+             [[ "${ASC_PRIVATE_KEY_P8}" != *"END PRIVATE KEY"* ]]; then
+            echo "ASC_PRIVATE_KEY_P8 is not a PEM private key." >&2
+            exit 1
+          fi
+          key_path="${RUNNER_TEMP}/aies-app-store-connect-key.p8"
+          umask 077
+          printf '%s\n' "${ASC_PRIVATE_KEY_P8}" > "${key_path}"
+          chmod 600 "${key_path}"
+          echo "ASC_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
+          unset ASC_PRIVATE_KEY_P8
+
+      - name: Build, verify, and upload internal TestFlight diagnostic
+        working-directory: apps/ios
+        run: fastlane ios aies_internal_testflight
+
+      - name: Validate retained release evidence
+        run: |
+          set -euo pipefail
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw.ipa"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw.xcarchive.zip"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-dSYMs.zip"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
+          python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" "${GITHUB_SHA}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = {
+              "asc_build_audience_type": "INTERNAL_ONLY",
+              "asc_processing_state": "VALID",
+              "beta_review_requested": False,
+              "distribution": "internal_only",
+              "external_distribution_requested": False,
+              "git_sha": sys.argv[2],
+              "status": "uploaded_processing_complete",
+              "testflight_internal_testing_only": True,
+          }
+          mismatches = {
+              key: {"expected": value, "actual": report.get(key)}
+              for key, value in expected.items()
+              if report.get(key) != value
+          }
+          if mismatches:
+              raise SystemExit(
+                  "retained TestFlight delivery evidence failed exact validation: "
+                  + json.dumps(mismatches, sort_keys=True)
+              )
+          PY
+
+      - name: Upload signed IPA
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-signed-IPA-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw.ipa
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload signed xcarchive
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-signed-xcarchive-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw.xcarchive.zip
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload signed dSYMs
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-signed-dSYMs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-dSYMs.zip
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload signed release evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-TestFlight-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-build-manifest.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-signing-entitlements.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      # Keep key deletion last: any archive/symbol evidence that exists is retained
+      # before cleanup can fail, including the post-upload validation failure path.
+      - name: Remove ephemeral App Store Connect key
+        if: always()
+        run: |
+          set -euo pipefail
+          key_path="${RUNNER_TEMP}/aies-app-store-connect-key.p8"
+          case "${key_path}" in
+            "${RUNNER_TEMP}"/*) rm -f -- "${key_path}" ;;
+            *) echo "Refusing to remove unexpected key path." >&2; exit 1 ;;
+          esac
+          if [[ -n "${ASC_KEY_ID:-}" ]]; then
+            fastlane_key_path="${HOME}/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+            case "${fastlane_key_path}" in
+              "${HOME}/.appstoreconnect/private_keys/"*) rm -f -- "${fastlane_key_path}" ;;
+              *) echo "Refusing to remove unexpected Fastlane key path." >&2; exit 1 ;;
+            esac
+          fi

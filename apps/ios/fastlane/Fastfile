@@ -1,6 +1,9 @@
 require "shellwords"
 require "open3"
 require "json"
+require "fileutils"
+require "time"
+require "spaceship"
 
 default_platform(:ios)
 
@@ -180,10 +183,13 @@ def beta_build_number_needs_asc_auth?
   !env_present?(explicit)
 end
 
-def prepare_beta_release!(version:, build_number:)
+def prepare_beta_release!(version:, build_number:, team_id: nil, push_mode: nil)
   script_path = File.join(repo_root, "scripts", "ios-beta-prepare.sh")
+  arguments = ["bash", script_path, "--build-number", build_number]
+  arguments += ["--team-id", team_id] if env_present?(team_id)
+  arguments += ["--push-mode", push_mode] if env_present?(push_mode)
   UI.message("Preparing iOS beta release #{version} (build #{build_number}).")
-  sh(shell_join(["bash", script_path, "--build-number", build_number]))
+  sh(shell_join(arguments))
 
   beta_xcconfig = File.join(ios_root, "build", "BetaRelease.xcconfig")
   UI.user_error!("Missing beta xcconfig at #{beta_xcconfig}.") unless File.exist?(beta_xcconfig)
@@ -194,8 +200,21 @@ end
 
 def build_beta_release(context)
   version = context[:version]
-  output_directory = File.join("build", "beta")
-  archive_path = File.join(output_directory, "OpenClaw-#{version}.xcarchive")
+  internal_distribution = context[:aies_internal] == true
+  output_directory = internal_distribution ? context.fetch(:output_directory) : File.join("build", "beta")
+  archive_name = internal_distribution ? "OpenClaw.xcarchive" : "OpenClaw-#{version}.xcarchive"
+  output_name = internal_distribution ? "OpenClaw.ipa" : "OpenClaw-#{version}.ipa"
+  archive_path = File.join(output_directory, archive_name)
+  xcode_arguments = context[:xcode_arguments] || ["-allowProvisioningUpdates"]
+  xcode_arguments += context.fetch(:provenance_arguments, [])
+  export_arguments = context[:xcode_arguments] || ["-allowProvisioningUpdates"]
+  export_options = { signingStyle: "automatic" }
+  export_options[:teamID] = context[:team_id] if env_present?(context[:team_id])
+  if internal_distribution
+    export_options["method"] = "app-store-connect"
+    export_options["manageAppVersionAndBuildNumber"] = false
+    export_options["testFlightInternalTestingOnly"] = true
+  end
 
   build_app(
     project: "OpenClaw.xcodeproj",
@@ -204,15 +223,14 @@ def build_beta_release(context)
     export_method: "app-store",
     clean: true,
     skip_profile_detection: true,
-    build_path: "build",
+    build_path: output_directory,
     archive_path: archive_path,
     output_directory: output_directory,
-    output_name: "OpenClaw-#{version}.ipa",
-    xcargs: "-allowProvisioningUpdates",
-    export_xcargs: "-allowProvisioningUpdates",
-    export_options: {
-      signingStyle: "automatic"
-    }
+    output_name: output_name,
+    include_symbols: true,
+    xcargs: shell_join(xcode_arguments),
+    export_xcargs: shell_join(export_arguments),
+    export_options: export_options
   )
 
   {
@@ -220,8 +238,264 @@ def build_beta_release(context)
     build_number: context[:build_number],
     ipa_path: lane_context[SharedValues::IPA_OUTPUT_PATH],
     short_version: context[:short_version],
+    testflight_internal_testing_only: internal_distribution,
     version: version
   }
+end
+
+def required_env!(key)
+  value = ENV[key]
+  UI.user_error!("Missing required #{key} for AIES internal TestFlight.") unless env_present?(value)
+  value.strip
+end
+
+def require_matching_checkout!(expected_sha, expected_branch)
+  sha, sha_error, sha_status = Open3.capture3("git", "rev-parse", "HEAD", chdir: repo_root)
+  UI.user_error!("Unable to resolve checkout SHA: #{sha_error.to_s.strip}") unless sha_status.success?
+  actual_sha = sha.strip.downcase
+  UI.user_error!("AIES expected SHA must be a 40-character hexadecimal commit.") unless expected_sha.match?(/\A[0-9a-f]{40}\z/)
+  UI.user_error!("Checkout SHA does not match AIES_EXPECTED_GIT_SHA.") unless actual_sha == expected_sha
+
+  branch, branch_error, branch_status = Open3.capture3(
+    "git",
+    "branch",
+    "--show-current",
+    chdir: repo_root
+  )
+  UI.user_error!("Unable to resolve checkout branch: #{branch_error.to_s.strip}") unless branch_status.success?
+  github_ref_name = ENV["GITHUB_REF_NAME"].to_s.strip
+  github_ref_type = ENV["GITHUB_REF_TYPE"].to_s.strip
+  UI.user_error!("AIES workflow must be dispatched from a branch ref.") unless github_ref_type == "branch"
+  UI.user_error!("Workflow ref does not match AIES_EXPECTED_GIT_BRANCH.") unless github_ref_name == expected_branch
+  # actions/checkout may leave an exact-SHA workflow in detached HEAD state.
+  UI.user_error!("Checkout branch does not match AIES_EXPECTED_GIT_BRANCH.") unless branch.strip.empty? || branch.strip == expected_branch
+
+  status, status_error, status_result = Open3.capture3(
+    "git",
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=normal",
+    chdir: repo_root
+  )
+  UI.user_error!("Unable to inspect checkout status: #{status_error.to_s.strip}") unless status_result.success?
+  UI.user_error!("AIES TestFlight checkout must be clean before release preparation.") unless status.empty?
+end
+
+def prepare_aies_internal_context!
+  UI.user_error!("AIES internal TestFlight lane is CI-only.") unless ENV["CI"] == "true" && ENV["GITHUB_ACTIONS"] == "true"
+  UI.user_error!("AIES internal TestFlight environment is not enabled.") unless ENV["AIES_TESTFLIGHT_INTERNAL_ENABLED"] == "true"
+  UI.user_error!("Internal-only dispatch confirmation is missing.") unless ENV["AIES_INTERNAL_ONLY_CONFIRMED"] == "true"
+
+  expected_sha = required_env!("AIES_EXPECTED_GIT_SHA").downcase
+  expected_branch = required_env!("AIES_EXPECTED_GIT_BRANCH")
+  UI.user_error!("AIES internal lane is restricted to the isolated TTS branch.") unless expected_branch == "aies/ios-tts-d1-testflight"
+  require_matching_checkout!(expected_sha, expected_branch)
+
+  main_bundle_id = required_env!("ASC_APP_IDENTIFIER")
+  UI.user_error!("AIES internal lane only supports #{BETA_APP_IDENTIFIER}.") unless main_bundle_id == BETA_APP_IDENTIFIER
+  app_store_id = required_env!("ASC_APP_ID")
+  UI.user_error!("ASC_APP_ID must contain digits only.") unless app_store_id.match?(/\A\d+\z/)
+  team_id = required_env!("IOS_DEVELOPMENT_TEAM")
+  UI.user_error!("IOS_DEVELOPMENT_TEAM must be a 10-character Apple Team ID.") unless team_id.match?(/\A[A-Z0-9]{10}\z/)
+  required_env!("ASC_KEY_ID")
+  required_env!("ASC_ISSUER_ID")
+  key_path = required_env!("ASC_KEY_PATH")
+  UI.user_error!("ASC_KEY_PATH does not point to a private runner file.") unless File.file?(key_path)
+  runner_temp = File.expand_path(required_env!("RUNNER_TEMP"))
+  expected_key_path = File.join(runner_temp, "aies-app-store-connect-key.p8")
+  UI.user_error!("ASC_KEY_PATH must use the bounded runner key path.") unless File.expand_path(key_path) == expected_key_path
+  output_directory = File.expand_path(required_env!("AIES_TESTFLIGHT_OUTPUT_DIR"))
+  expected_output_directory = File.join(runner_temp, "openclaw-aies-testflight")
+  UI.user_error!("AIES_TESTFLIGHT_OUTPUT_DIR must use the bounded runner output path.") unless output_directory == expected_output_directory
+  expected_result_path = File.join(output_directory, "OpenClaw-TestFlight-delivery.json")
+  UI.user_error!("AIES_TESTFLIGHT_RESULT_PATH must stay inside the bounded runner output path.") unless File.expand_path(required_env!("AIES_TESTFLIGHT_RESULT_PATH")) == expected_result_path
+
+  %w[OPENCLAW_PUSH_RELAY_BASE_URL IOS_PUSH_RELAY_BASE_URL].each do |key|
+    UI.user_error!("#{key} must be absent from the direct AIES lane.") if ENV.key?(key)
+  end
+  %w[OPENCLAW_APNS_PRIVATE_KEY_P8 OPENCLAW_APNS_PRIVATE_KEY_PATH].each do |key|
+    UI.user_error!("Gateway APNs provider credentials must never enter the build lane (#{key}).") if env_present?(ENV[key])
+  end
+
+  {
+    app_store_id: app_store_id,
+    expected_branch: expected_branch,
+    expected_sha: expected_sha,
+    internal_group: required_env!("AIES_INTERNAL_TESTER_GROUP"),
+    main_bundle_id: main_bundle_id,
+    output_directory: output_directory,
+    team_id: team_id
+  }
+end
+
+def aies_xcode_auth_arguments
+  [
+    "-allowProvisioningUpdates",
+    "-authenticationKeyPath",
+    required_env!("ASC_KEY_PATH"),
+    "-authenticationKeyID",
+    required_env!("ASC_KEY_ID"),
+    "-authenticationKeyIssuerID",
+    required_env!("ASC_ISSUER_ID")
+  ]
+end
+
+def aies_provenance_arguments(release_context)
+  {
+    "OPENCLAW_BUILD_GIT_SHA" => release_context[:expected_sha],
+    "OPENCLAW_BUILD_GIT_BRANCH" => release_context[:expected_branch],
+    "OPENCLAW_BUILD_TIMESTAMP" => required_env!("AIES_BUILD_TIMESTAMP"),
+    "OPENCLAW_BUILD_XCODE_VERSION" => required_env!("AIES_XCODE_VERSION"),
+    "OPENCLAW_BUILD_SWIFT_VERSION" => required_env!("AIES_SWIFT_VERSION"),
+    "OPENCLAW_BUILD_SDK_VERSION" => required_env!("AIES_SDK_VERSION"),
+    "OPENCLAW_BUILD_CONFIGURATION" => "Release",
+    "OPENCLAW_BUILD_ARCHIVE_UUID" => required_env!("AIES_ARCHIVE_UUID"),
+    "OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED" => "production"
+  }.map { |key, value| "#{key}=#{value}" }
+end
+
+def package_aies_internal_evidence!(build, release_context)
+  output_directory = release_context[:output_directory]
+  archive_path = File.expand_path(build[:archive_path], ios_root)
+  ipa_path = File.expand_path(build[:ipa_path], ios_root)
+  archive_zip = File.join(output_directory, "OpenClaw.xcarchive.zip")
+  dsym_zip = File.join(output_directory, "OpenClaw-dSYMs.zip")
+  signing_report = File.join(output_directory, "OpenClaw-signing-entitlements.json")
+  build_manifest = File.join(output_directory, "OpenClaw-build-manifest.json")
+  dsym_path = File.join(archive_path, "dSYMs")
+
+  UI.user_error!("Signed archive was not produced.") unless File.directory?(archive_path)
+  UI.user_error!("Signed IPA was not produced.") unless File.file?(ipa_path)
+  UI.user_error!("Signed archive contains no dSYMs.") unless File.directory?(dsym_path) && !Dir[File.join(dsym_path, "*.dSYM")].empty?
+
+  FileUtils.rm_f([archive_zip, dsym_zip, signing_report, build_manifest])
+  sh(shell_join(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", archive_path, archive_zip]))
+  sh(shell_join(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", dsym_path, dsym_zip]))
+
+  verifier = File.join(ios_root, "Tools", "verify_aies_internal_signing.py")
+  sh(shell_join([
+    "python3", verifier,
+    "--archive", archive_path,
+    "--ipa", ipa_path,
+    "--output", signing_report,
+    "--expected-main-bundle-id", release_context[:main_bundle_id],
+    "--expected-team-id", release_context[:team_id],
+    "--expected-git-sha", release_context[:expected_sha],
+    "--expected-archive-uuid", required_env!("AIES_ARCHIVE_UUID")
+  ]))
+
+  manifest_writer = File.join(ios_root, "Tools", "write_build_manifest.py")
+  sh(shell_join([
+    "python3", manifest_writer,
+    "--archive", archive_path,
+    "--output", build_manifest,
+    "--git-sha", release_context[:expected_sha],
+    "--git-branch", release_context[:expected_branch],
+    "--build-timestamp", required_env!("AIES_BUILD_TIMESTAMP"),
+    "--xcode-version", required_env!("AIES_XCODE_VERSION"),
+    "--swift-version", required_env!("AIES_SWIFT_VERSION"),
+    "--sdk-version", required_env!("AIES_SDK_VERSION"),
+    "--configuration", "Release",
+    "--archive-uuid", required_env!("AIES_ARCHIVE_UUID"),
+    "--ipa", ipa_path,
+    "--archive-zip", archive_zip,
+    "--dsym-zip", dsym_zip,
+    "--github-run-id", required_env!("GITHUB_RUN_ID")
+  ]))
+
+  {
+    archive_path: archive_path,
+    archive_zip: archive_zip,
+    build_manifest: build_manifest,
+    dsym_zip: dsym_zip,
+    ipa_path: ipa_path,
+    signing_report: signing_report
+  }
+end
+
+def verify_aies_asc_build!(build, release_context)
+  token = Spaceship::ConnectAPI.token
+  UI.user_error!("App Store Connect token is unavailable after upload.") if token.nil?
+  token.refresh! if token.respond_to?(:refresh!)
+
+  builds = Spaceship::ConnectAPI::Build.all(
+    app_id: release_context[:app_store_id],
+    version: build[:short_version],
+    build_number: build[:build_number],
+    platform: Spaceship::ConnectAPI::Platform::IOS,
+    processing_states: "PROCESSING,FAILED,INVALID,VALID",
+    limit: 2
+  )
+  unless builds.length == 1
+    UI.user_error!(
+      "Expected exactly one App Store Connect build for the uploaded app/version/build; " \
+      "found #{builds.length}."
+    )
+  end
+
+  asc_build = builds.first
+  exact_identity =
+    asc_build.app_id.to_s == release_context[:app_store_id] &&
+    asc_build.bundle_id == release_context[:main_bundle_id] &&
+    asc_build.app_version == build[:short_version] &&
+    asc_build.version == build[:build_number] &&
+    asc_build.platform == Spaceship::ConnectAPI::Platform::IOS
+  UI.user_error!("App Store Connect returned a mismatched build identity.") unless exact_identity
+
+  response = Spaceship::ConnectAPI.get_build(build_id: asc_build.id, includes: nil)
+  body = response.respond_to?(:body) ? response.body : nil
+  data = body.is_a?(Hash) ? body["data"] : nil
+  attributes = data.is_a?(Hash) ? data["attributes"] : nil
+  unless data.is_a?(Hash) && data["id"].to_s == asc_build.id.to_s && attributes.is_a?(Hash)
+    UI.user_error!("App Store Connect returned malformed exact-build evidence.")
+  end
+  processing_state = attributes["processingState"]
+  audience_type = attributes["buildAudienceType"]
+  UI.user_error!("Uploaded App Store Connect build is not VALID.") unless processing_state == "VALID"
+  unless audience_type == "INTERNAL_ONLY"
+    UI.user_error!("Uploaded build is not restricted to the INTERNAL_ONLY audience.")
+  end
+
+  {
+    asc_build_id: asc_build.id.to_s,
+    asc_processing_state: processing_state,
+    asc_build_audience_type: audience_type
+  }
+end
+
+def write_aies_delivery_report!(build, release_context, evidence, asc_evidence)
+  unless build[:testflight_internal_testing_only] == true
+    UI.user_error!("Refusing to report internal-only delivery without the immutable export option.")
+  end
+  report_path = required_env!("AIES_TESTFLIGHT_RESULT_PATH")
+  report = {
+    schema: "argus.openclaw-ios.testflight-delivery.v1",
+    status: "uploaded_processing_complete",
+    uploaded_at: Time.now.utc.iso8601,
+    git_sha: release_context[:expected_sha],
+    git_branch: release_context[:expected_branch],
+    version: build[:short_version],
+    build_number: build[:build_number],
+    app_bundle_id: release_context[:main_bundle_id],
+    app_store_connect_app_id: release_context[:app_store_id],
+    distribution: "internal_only",
+    testflight_internal_testing_only: true,
+    external_distribution_requested: false,
+    beta_review_requested: false,
+    asc_build_id: asc_evidence[:asc_build_id],
+    asc_processing_state: asc_evidence[:asc_processing_state],
+    asc_build_audience_type: asc_evidence[:asc_build_audience_type],
+    github_run_id: required_env!("GITHUB_RUN_ID"),
+    github_run_attempt: required_env!("GITHUB_RUN_ATTEMPT"),
+    workflow_run_url: "#{required_env!("GITHUB_SERVER_URL")}/#{required_env!("GITHUB_REPOSITORY")}/actions/runs/#{required_env!("GITHUB_RUN_ID")}",
+    processing_wait_timeout_seconds: 3600,
+    internal_tester_group: release_context[:internal_group],
+    internal_tester_status: "manual_assignment_required",
+    manual_action: "Assign this processed build to the named internal group in App Store Connect, then verify Ethan is a member.",
+    build_manifest: File.basename(evidence[:build_manifest]),
+    signing_report: File.basename(evidence[:signing_report])
+  }
+  File.write(report_path, JSON.pretty_generate(report) + "\n")
 end
 
 platform :ios do
@@ -281,7 +555,12 @@ platform :ios do
     version = version_metadata[:version]
     short_version = version_metadata[:short_version]
     build_number = resolve_beta_build_number(api_key: api_key, short_version: short_version)
-    beta_xcconfig = prepare_beta_release!(version: version, build_number: build_number)
+    beta_xcconfig = prepare_beta_release!(
+      version: version,
+      build_number: build_number,
+      team_id: options[:team_id],
+      push_mode: options[:push_mode]
+    )
 
     {
       api_key: api_key,
@@ -315,6 +594,54 @@ platform :ios do
     )
 
     UI.success("Uploaded iOS beta: version=#{build[:version]} short=#{build[:short_version]} build=#{build[:build_number]}")
+  ensure
+    ENV.delete("XCODE_XCCONFIG_FILE")
+  end
+
+  desc "Build, verify, and upload an exact-SHA AIES internal TestFlight diagnostic"
+  lane :aies_internal_testflight do
+    release_context = prepare_aies_internal_context!
+    setup_ci
+    context = prepare_beta_context(
+      require_api_key: true,
+      team_id: release_context[:team_id],
+      push_mode: "direct"
+    )
+    context[:aies_internal] = true
+    context[:output_directory] = release_context[:output_directory]
+    context[:provenance_arguments] = aies_provenance_arguments(release_context)
+    context[:team_id] = release_context[:team_id]
+    context[:xcode_arguments] = aies_xcode_auth_arguments
+
+    build = build_beta_release(context)
+    evidence = package_aies_internal_evidence!(build, release_context)
+
+    # Internal groups are managed in App Store Connect. Do not pass `groups`,
+    # because Fastlane defines that option for external TestFlight distribution.
+    upload_to_testflight(
+      api_key: context[:api_key],
+      ipa: evidence[:ipa_path],
+      app_identifier: release_context[:main_bundle_id],
+      apple_id: release_context[:app_store_id],
+      app_platform: "ios",
+      app_version: build[:short_version],
+      build_number: build[:build_number],
+      skip_submission: false,
+      skip_waiting_for_build_processing: false,
+      distribute_external: false,
+      notify_external_testers: false,
+      submit_beta_review: false,
+      wait_processing_interval: 30,
+      wait_processing_timeout_duration: 3600,
+      uses_non_exempt_encryption: false
+    )
+
+    asc_evidence = verify_aies_asc_build!(build, release_context)
+    write_aies_delivery_report!(build, release_context, evidence, asc_evidence)
+    UI.success(
+      "Uploaded processed AIES internal diagnostic: " \
+      "version=#{build[:version]} short=#{build[:short_version]} build=#{build[:build_number]}"
+    )
   ensure
     ENV.delete("XCODE_XCCONFIG_FILE")
   end

@@ -1,0 +1,639 @@
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import pathlib
+import plistlib
+import re
+import tempfile
+import unittest
+import zipfile
+from unittest import mock
+
+import verify_aies_internal_signing as verifier
+
+MAIN_ID = "ai.openclaw.client"
+TEAM_ID = "Y5PE65HELJ"
+GIT_SHA = "a" * 40
+ARCHIVE_UUID = "12345678-1234-5678-1234-567812345678"
+MACHO_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+OTHER_MACHO_UUID = "11111111-2222-3333-4444-555555555555"
+SIGNING_CERTIFICATE = b"aies-signing-certificate"
+SIGNING_CERTIFICATE_SHA256 = hashlib.sha256(SIGNING_CERTIFICATE).hexdigest()
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+BUNDLE_PATHS = {
+    MAIN_ID: pathlib.PurePosixPath("."),
+    f"{MAIN_ID}.share": pathlib.PurePosixPath("PlugIns/OpenClawShareExtension.appex"),
+    f"{MAIN_ID}.activitywidget": pathlib.PurePosixPath(
+        "PlugIns/OpenClawActivityWidget.appex"
+    ),
+    f"{MAIN_ID}.watchkitapp": pathlib.PurePosixPath("Watch/OpenClawWatchApp.app"),
+    f"{MAIN_ID}.watchkitapp.extension": pathlib.PurePosixPath(
+        "Watch/OpenClawWatchApp.app/PlugIns/OpenClawWatchExtension.appex"
+    ),
+}
+BUNDLE_EXECUTABLES = {
+    MAIN_ID: "OpenClaw",
+    f"{MAIN_ID}.share": "OpenClawShareExtension",
+    f"{MAIN_ID}.activitywidget": "OpenClawActivityWidget",
+    f"{MAIN_ID}.watchkitapp": "OpenClawWatchApp",
+    f"{MAIN_ID}.watchkitapp.extension": "OpenClawWatchExtension",
+}
+MISSING = object()
+
+
+class AIESInternalSigningTests(unittest.TestCase):
+    def test_valid_full_bundle_direct_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing():
+                report = verifier.build_report(args)
+            self.assertEqual(report["status"], "verified")
+            self.assertEqual(report["push_contract"]["transport"], "direct")
+            self.assertEqual(report["push_contract"]["relay_base_url"], "")
+            self.assertFalse(report["push_contract"]["relay_base_url_present"])
+            self.assertEqual(len(report["ipa"]["bundles"]), 5)
+            self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
+            for binding in report["binary_binding"]["bundles"]:
+                self.assertNotEqual(
+                    binding["archive_executable"]["raw_sha256"],
+                    binding["ipa_executable"]["raw_sha256"],
+                )
+                self.assertEqual(
+                    binding["archive_executable"]["signature_stripped_sha256"],
+                    binding["ipa_executable"]["signature_stripped_sha256"],
+                )
+                self.assertEqual(
+                    binding["archive_executable"]["uuids"],
+                    binding["dsym"]["uuids"],
+                )
+            self.assertTrue(
+                all(
+                    item["signing_identity"]["trust_verified"]
+                    for item in report["ipa"]["bundles"]
+                )
+            )
+            self.assertNotIn("private", str(report).lower())
+            self.assertTrue(
+                all(
+                    item["profile"]["beta_reports_active"]
+                    for item in report["ipa"]["bundles"]
+                )
+            )
+            self.assertNotIn("cms_signature_verified", str(report))
+
+    def test_rejects_relay_configuration_in_exported_ipa(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp), ipa_push_transport="relay")
+            with self.mock_signing():
+                with self.assertRaisesRegex(
+                    ValueError, "OpenClawPushTransport mismatch"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_whitespace_only_relay_value(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp), relay_value="   ")
+            with self.mock_signing():
+                with self.assertRaisesRegex(ValueError, "exact empty string"):
+                    verifier.build_report(args)
+
+    def test_rejects_missing_watch_extension(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(
+                pathlib.Path(raw_temp),
+                omit_bundle=f"{MAIN_ID}.watchkitapp.extension",
+            )
+            with self.mock_signing():
+                with self.assertRaisesRegex(
+                    ValueError, "packaged bundle topology mismatch"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_sixth_bundle_with_duplicate_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp), add_duplicate_bundle=True)
+            with self.mock_signing():
+                with self.assertRaisesRegex(
+                    ValueError, "packaged bundle topology mismatch"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_extra_archive_application(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(
+                pathlib.Path(raw_temp), add_archive_sibling_app=True
+            )
+            with self.mock_signing():
+                with self.assertRaisesRegex(ValueError, "archive must contain exactly"):
+                    verifier.build_report(args)
+
+    def test_rejects_nonproduction_main_aps_entitlement(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing(main_aps="development"):
+                with self.assertRaisesRegex(
+                    ValueError, "aps-environment is not production"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_wrong_signing_team(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing(team_id="WRONGTEAM1"):
+                with self.assertRaisesRegex(ValueError, "signed team mismatch"):
+                    verifier.build_report(args)
+
+    def test_rejects_expired_distribution_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            expiration = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
+            with self.mock_signing(profile_expiration=expiration):
+                with self.assertRaisesRegex(ValueError, "expired provisioning profile"):
+                    verifier.build_report(args)
+
+    def test_rejects_signing_certificate_not_bound_to_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing(profile_certificate=b"different-certificate"):
+                with self.assertRaisesRegex(
+                    ValueError, "signing certificate is not authorized"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_profile_without_beta_reports_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing(beta_reports_active=MISSING):
+                with self.assertRaisesRegex(
+                    ValueError, "not authorized for App Store Connect/TestFlight"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_profile_with_false_beta_reports_active(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing(beta_reports_active=False):
+                with self.assertRaisesRegex(
+                    ValueError, "not authorized for App Store Connect/TestFlight"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_signed_associated_domains_absent_from_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            signed_extra = {
+                "com.apple.developer.associated-domains": ["applinks:argus.example"]
+            }
+            with self.mock_signing(signed_extra=signed_extra):
+                with self.assertRaisesRegex(ValueError, "associated-domains"):
+                    verifier.build_report(args)
+
+    def test_profile_wildcards_authorize_narrow_signed_values(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            signed_extra = {
+                "com.apple.developer.associated-domains": ["applinks:argus.example"]
+            }
+            profile_extra = {"com.apple.developer.associated-domains": ["applinks:*"]}
+            with self.mock_signing(
+                profile_application_identifier=f"{TEAM_ID}.*",
+                signed_extra=signed_extra,
+                profile_extra=profile_extra,
+            ):
+                report = verifier.build_report(args)
+            main = next(
+                item
+                for item in report["ipa"]["bundles"]
+                if item["bundle_id"] == MAIN_ID
+            )
+            self.assertIn(
+                "com.apple.developer.associated-domains",
+                main["authorized_entitlement_keys"],
+            )
+
+    def test_rejects_archive_and_ipa_nested_executable_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(
+                pathlib.Path(raw_temp),
+                mismatched_ipa_bundle=f"{MAIN_ID}.activitywidget",
+            )
+            with self.mock_signing():
+                with self.assertRaisesRegex(
+                    ValueError, "executable identity differ.*activitywidget"
+                ):
+                    verifier.build_report(args)
+
+    def test_rejects_nested_archive_and_dsym_uuid_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(
+                pathlib.Path(raw_temp),
+                mismatched_dsym_bundle=f"{MAIN_ID}.watchkitapp.extension",
+            )
+            with self.mock_signing():
+                with self.assertRaisesRegex(
+                    ValueError, "dSYM UUIDs differ.*watchkitapp.extension"
+                ):
+                    verifier.build_report(args)
+
+    def test_signing_identity_verifies_entire_extracted_chain(self) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], *, combine_output: bool = False) -> bytes:
+            del combine_output
+            commands.append(command)
+            if command[0] == "codesign":
+                prefix = next(
+                    item.split("=", 1)[1]
+                    for item in command
+                    if item.startswith("--extract-certificates=")
+                )
+                pathlib.Path(f"{prefix}0").write_bytes(SIGNING_CERTIFICATE)
+                pathlib.Path(f"{prefix}1").write_bytes(b"apple-intermediate")
+            return b""
+
+        with mock.patch.object(verifier, "run_tool", side_effect=fake_run):
+            result = verifier.verify_signing_identity(
+                pathlib.Path("OpenClaw.app"), "codesign", "security"
+            )
+        self.assertEqual(result["certificate_chain_count"], 2)
+        self.assertEqual(result["leaf_certificate_sha256"], SIGNING_CERTIFICATE_SHA256)
+        trust_command = commands[-1]
+        self.assertEqual(trust_command[:2], ["security", "verify-cert"])
+        self.assertEqual(trust_command[-3:], ["-p", "codeSign", "-L"])
+        self.assertEqual(trust_command.count("-c"), 2)
+
+    def test_signing_identity_fails_when_leaf_trust_fails(self) -> None:
+        def fake_run(command: list[str], *, combine_output: bool = False) -> bytes:
+            del combine_output
+            if command[0] == "codesign":
+                prefix = next(
+                    item.split("=", 1)[1]
+                    for item in command
+                    if item.startswith("--extract-certificates=")
+                )
+                pathlib.Path(f"{prefix}0").write_bytes(SIGNING_CERTIFICATE)
+                return b""
+            raise ValueError("security verification failed")
+
+        with (
+            mock.patch.object(verifier, "run_tool", side_effect=fake_run),
+            self.assertRaisesRegex(ValueError, "security verification failed"),
+        ):
+            verifier.verify_signing_identity(
+                pathlib.Path("OpenClaw.app"), "codesign", "security"
+            )
+
+    def test_macho_uuid_binding_keeps_architecture(self) -> None:
+        output = (
+            f"UUID: {MACHO_UUID.upper()} (arm64) binary\n"
+            f"UUID: {OTHER_MACHO_UUID.upper()} (x86_64) binary\n"
+        ).encode()
+        with mock.patch.object(verifier, "run_tool", return_value=output):
+            values = verifier.macho_uuids(pathlib.Path("binary"), "dwarfdump")
+        self.assertEqual(
+            values,
+            [
+                {"architecture": "arm64", "uuid": MACHO_UUID},
+                {"architecture": "x86_64", "uuid": OTHER_MACHO_UUID},
+            ],
+        )
+
+    def test_rejects_unsafe_ipa_member(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp = pathlib.Path(raw_temp)
+            ipa = temp / "unsafe.ipa"
+            with zipfile.ZipFile(ipa, "w") as archive:
+                archive.writestr("../outside", b"unsafe")
+            with self.assertRaisesRegex(ValueError, "unsafe path"):
+                verifier.safely_extract_ipa(ipa, temp / "extract")
+
+    def test_main_removes_stale_report_when_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            args.output.write_text('{"status":"stale"}\n', encoding="utf-8")
+            with (
+                mock.patch.object(verifier, "parse_args", return_value=args),
+                mock.patch.object(
+                    verifier, "build_report", side_effect=ValueError("hostile fixture")
+                ),
+                self.assertRaisesRegex(ValueError, "hostile fixture"),
+            ):
+                verifier.main()
+            self.assertFalse(args.output.exists())
+            self.assertFalse(args.output.with_suffix(".json.tmp").exists())
+
+    def make_fixture(
+        self,
+        temp: pathlib.Path,
+        *,
+        ipa_push_transport: str = "direct",
+        relay_value: str = "",
+        omit_bundle: str | None = None,
+        add_duplicate_bundle: bool = False,
+        add_archive_sibling_app: bool = False,
+        mismatched_ipa_bundle: str | None = None,
+        mismatched_dsym_bundle: str | None = None,
+    ) -> argparse.Namespace:
+        archive = temp / "OpenClaw.xcarchive"
+        archive_app = archive / "Products" / "Applications" / "OpenClaw.app"
+        archive_executables = {
+            bundle_id: f"archive-signature:{bundle_id}".encode()
+            for bundle_id in BUNDLE_PATHS
+        }
+        self.write_app_tree(
+            archive_app,
+            relay_value=relay_value,
+            omit_bundle=omit_bundle,
+            executables=archive_executables,
+            add_duplicate_bundle=add_duplicate_bundle,
+        )
+        if add_archive_sibling_app:
+            self.write_bundle(
+                archive / "Products" / "Applications" / "Other.app",
+                "ai.openclaw.other",
+            )
+        for bundle_id, relative_path in BUNDLE_PATHS.items():
+            if bundle_id == omit_bundle:
+                continue
+            bundle_path = (
+                archive_app
+                if relative_path == pathlib.PurePosixPath(".")
+                else archive_app / relative_path
+            )
+            dsym = (
+                archive
+                / "dSYMs"
+                / f"{bundle_path.name}.dSYM"
+                / "Contents"
+                / "Resources"
+                / "DWARF"
+                / BUNDLE_EXECUTABLES[bundle_id]
+            )
+            dsym.parent.mkdir(parents=True, exist_ok=True)
+            dsym.write_bytes(
+                b"uuid-mismatch"
+                if bundle_id == mismatched_dsym_bundle
+                else f"matching-dsym:{bundle_id}".encode()
+            )
+
+        ipa_root = temp / "ipa-root" / "Payload" / "OpenClaw.app"
+        ipa_executables = {
+            bundle_id: f"ipa-signature:{bundle_id}".encode()
+            for bundle_id in BUNDLE_PATHS
+        }
+        if mismatched_ipa_bundle is not None:
+            ipa_executables[mismatched_ipa_bundle] = (
+                f"tampered-executable:{mismatched_ipa_bundle}".encode()
+            )
+        self.write_app_tree(
+            ipa_root,
+            push_transport=ipa_push_transport,
+            relay_value=relay_value,
+            omit_bundle=omit_bundle,
+            executables=ipa_executables,
+            add_duplicate_bundle=add_duplicate_bundle,
+        )
+        ipa = temp / "OpenClaw.ipa"
+        with zipfile.ZipFile(ipa, "w") as output:
+            for path in sorted((temp / "ipa-root").rglob("*")):
+                if path.is_file():
+                    output.write(path, path.relative_to(temp / "ipa-root"))
+        return argparse.Namespace(
+            archive=archive,
+            ipa=ipa,
+            output=temp / "report.json",
+            expected_main_bundle_id=MAIN_ID,
+            expected_team_id=TEAM_ID,
+            expected_git_sha=GIT_SHA,
+            expected_archive_uuid=ARCHIVE_UUID,
+            codesign="codesign",
+            dwarfdump="dwarfdump",
+            security="security",
+        )
+
+    @classmethod
+    def write_app_tree(
+        cls,
+        app: pathlib.Path,
+        *,
+        push_transport: str = "direct",
+        relay_value: str = "",
+        omit_bundle: str | None = None,
+        executables: dict[str, bytes] | None = None,
+        add_duplicate_bundle: bool = False,
+    ) -> None:
+        executables = executables or {
+            bundle_id: f"binary:{bundle_id}".encode() for bundle_id in BUNDLE_PATHS
+        }
+        cls.write_bundle(
+            app,
+            MAIN_ID,
+            main=True,
+            push_transport=push_transport,
+            relay_value=relay_value,
+            executable=executables[MAIN_ID],
+        )
+        for bundle_id, relative_path in BUNDLE_PATHS.items():
+            if bundle_id == MAIN_ID:
+                continue
+            path = app / relative_path
+            if bundle_id != omit_bundle:
+                cls.write_bundle(path, bundle_id, executable=executables[bundle_id])
+        if add_duplicate_bundle:
+            cls.write_bundle(
+                app / "PlugIns" / "UnexpectedDuplicate.appex", f"{MAIN_ID}.share"
+            )
+
+    @staticmethod
+    def write_bundle(
+        path: pathlib.Path,
+        bundle_id: str,
+        *,
+        main: bool = False,
+        push_transport: str = "direct",
+        relay_value: str = "",
+        executable: bytes = b"fixture-executable",
+    ) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+        executable_name = BUNDLE_EXECUTABLES.get(bundle_id, "Other")
+        info: dict[str, object] = {
+            "CFBundleExecutable": executable_name,
+            "CFBundleIdentifier": bundle_id,
+        }
+        (path / executable_name).write_bytes(executable)
+        if main:
+            info.update(
+                {
+                    "CFBundleShortVersionString": "2026.8.23",
+                    "CFBundleVersion": "17",
+                    "OpenClawPushTransport": push_transport,
+                    "OpenClawPushDistribution": "local",
+                    "OpenClawPushRelayBaseURL": relay_value,
+                    "OpenClawPushAPNsEnvironment": "production",
+                    "OpenClawBuildGitSHA": GIT_SHA,
+                    "OpenClawBuildConfiguration": "Release",
+                    "OpenClawBuildArchiveUUID": ARCHIVE_UUID,
+                    "OpenClawBuildAPSEnvironmentIfSigned": "production",
+                }
+            )
+        with (path / "Info.plist").open("wb") as handle:
+            plistlib.dump(info, handle)
+        (path / "embedded.mobileprovision").write_bytes(b"profile")
+
+    @staticmethod
+    def mock_signing(
+        *,
+        team_id: str = TEAM_ID,
+        main_aps: str = "production",
+        profile_expiration: dt.datetime = dt.datetime(
+            2027, 8, 23, tzinfo=dt.timezone.utc
+        ),
+        profile_certificate: bytes = SIGNING_CERTIFICATE,
+        profile_application_identifier: str | None = None,
+        beta_reports_active: object = True,
+        signed_extra: dict[str, object] | None = None,
+        profile_extra: dict[str, object] | None = None,
+    ):
+        def entitlements(path: pathlib.Path, _codesign: str) -> dict[str, object]:
+            bundle_id = verifier.read_plist(path / "Info.plist")["CFBundleIdentifier"]
+            result: dict[str, object] = {
+                "com.apple.developer.team-identifier": team_id,
+                "application-identifier": f"{team_id}.{bundle_id}",
+                "get-task-allow": False,
+            }
+            if bundle_id == MAIN_ID:
+                result["aps-environment"] = main_aps
+                result.update(signed_extra or {})
+            return result
+
+        def profile(path: pathlib.Path, _security: str) -> dict[str, object]:
+            bundle_id = verifier.read_plist(path / "Info.plist")["CFBundleIdentifier"]
+            profile_entitlements: dict[str, object] = {
+                "application-identifier": profile_application_identifier
+                or f"{team_id}.{bundle_id}",
+                "get-task-allow": False,
+            }
+            if beta_reports_active is not MISSING:
+                profile_entitlements["beta-reports-active"] = beta_reports_active
+            if bundle_id == MAIN_ID:
+                profile_entitlements["aps-environment"] = main_aps
+                profile_entitlements.update(profile_extra or {})
+            return {
+                "UUID": f"profile-{bundle_id}",
+                "Name": f"Profile {bundle_id}",
+                "TeamIdentifier": [team_id],
+                "ExpirationDate": profile_expiration,
+                "DeveloperCertificates": [profile_certificate],
+                "Entitlements": profile_entitlements,
+            }
+
+        def uuids(path: pathlib.Path, _dwarfdump: str) -> list[dict[str, str]]:
+            return (
+                [{"architecture": "arm64", "uuid": OTHER_MACHO_UUID}]
+                if path.read_bytes() == b"uuid-mismatch"
+                else [{"architecture": "arm64", "uuid": MACHO_UUID}]
+            )
+
+        def stripped_hash(path: pathlib.Path, _codesign: str) -> str:
+            content = path.read_bytes()
+            for prefix in (b"archive-signature:", b"ipa-signature:"):
+                if content.startswith(prefix):
+                    content = content[len(prefix) :]
+                    break
+            return hashlib.sha256(content).hexdigest()
+
+        return mock.patch.multiple(
+            verifier,
+            read_code_entitlements=mock.Mock(side_effect=entitlements),
+            read_profile=mock.Mock(side_effect=profile),
+            verify_code_signature=mock.Mock(return_value=None),
+            verify_signing_identity=mock.Mock(
+                return_value={
+                    "certificate_chain_count": 2,
+                    "leaf_certificate_sha256": SIGNING_CERTIFICATE_SHA256,
+                    "trust_verified": True,
+                }
+            ),
+            macho_uuids=mock.Mock(side_effect=uuids),
+            signature_stripped_sha256=mock.Mock(side_effect=stripped_hash),
+        )
+
+
+class AIESReleaseConfigurationTests(unittest.TestCase):
+    def test_workflow_pins_third_party_actions_and_defers_private_key(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
+        ).read_text(encoding="utf-8")
+        third_party_uses = re.findall(
+            r"^\s*uses:\s*([^./\s][^@\s]+)@([^\s#]+)", workflow, re.MULTILINE
+        )
+        self.assertTrue(third_party_uses)
+        self.assertTrue(
+            all(re.fullmatch(r"[0-9a-f]{40}", ref) for _, ref in third_party_uses)
+        )
+        self.assertGreaterEqual(workflow.count('use-actions-cache: "false"'), 2)
+        self.assertGreaterEqual(workflow.count('save-actions-cache: "false"'), 2)
+        self.assertIn("github.ref_type", workflow)
+        self.assertIn("prevent_self_review", workflow)
+        self.assertIn('("aies/ios-tts-d1-testflight", "branch")', workflow)
+        self.assertGreaterEqual(workflow.count("TalkTTSDiagnosticsTests"), 2)
+        key_step = workflow.index("name: Materialize ephemeral App Store Connect key")
+        fastlane_parse = workflow.index(
+            "name: Parse Fastlane release configuration without credentials"
+        )
+        ios_tests = workflow.index("name: Run focused iOS reliability tests")
+        release = workflow.index(
+            "name: Build, verify, and upload internal TestFlight diagnostic"
+        )
+        self.assertLess(fastlane_parse, key_step)
+        self.assertLess(ios_tests, key_step)
+        self.assertLess(key_step, release)
+        cleanup = workflow.index("name: Remove ephemeral App Store Connect key")
+        for artifact_step in (
+            "name: Upload signed IPA",
+            "name: Upload signed xcarchive",
+            "name: Upload signed dSYMs",
+            "name: Upload signed release evidence",
+        ):
+            self.assertLess(workflow.index(artifact_step), cleanup)
+        self.assertGreaterEqual(workflow.count("if: always() && !cancelled()"), 4)
+        self.assertIn("${ASC_KEY_ID:-}", workflow)
+
+    def test_fastlane_marks_export_internal_only(self) -> None:
+        fastfile = (REPO_ROOT / "apps" / "ios" / "fastlane" / "Fastfile").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'export_options["testFlightInternalTestingOnly"] = true', fastfile
+        )
+        self.assertIn(
+            'export_options["manageAppVersionAndBuildNumber"] = false', fastfile
+        )
+        self.assertIn("distribute_external: false", fastfile)
+        self.assertIn("submit_beta_review: false", fastfile)
+        self.assertIn("skip_waiting_for_build_processing: false", fastfile)
+        self.assertIn('audience_type == "INTERNAL_ONLY"', fastfile)
+        self.assertIn('processing_state == "VALID"', fastfile)
+        self.assertIn("unless builds.length == 1", fastfile)
+        self.assertIn("external_distribution_requested: false", fastfile)
+        self.assertIn("beta_review_requested: false", fastfile)
+        self.assertNotIn("external_testing_enabled:", fastfile)
+        self.assertNotIn("beta_review_submitted:", fastfile)
+
+    def test_beta_prepare_validates_build_number_and_team_before_xcconfig(self) -> None:
+        script = (REPO_ROOT / "scripts" / "ios-beta-prepare.sh").read_text(
+            encoding="utf-8"
+        )
+        build_validation = '[[ ! "${BUILD_NUMBER}" =~ ^[0-9]+$ ]]'
+        team_validation = '[[ ! "${TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]'
+        self.assertIn(build_validation, script)
+        self.assertIn(team_validation, script)
+        prepare_invocation = script.index("\nprepare_build_dir\n")
+        self.assertLess(script.index(build_validation), prepare_invocation)
+        self.assertLess(script.index(team_validation), prepare_invocation)
+
+
+if __name__ == "__main__":
+    unittest.main()
