@@ -2029,25 +2029,32 @@ struct ChatViewModelTests {
         #expect(await MainActor.run { vm.pendingToolCalls.isEmpty })
     }
 
-    @Test func `seq gap clears pending runs and auto refreshes history`() async throws {
+    @Test func `seq gap clears pending after durable history evidence`() async throws {
         let now = Date().timeIntervalSince1970 * 1000
-        let history1 = historyPayload()
-        let history2 = historyPayload(messages: [chatTextMessage(
-            role: "assistant",
-            text: "resynced after gap",
-            timestamp: now)])
+        let history1 = historyPayload(sessionId: "sess-initial")
+        let history2 = historyPayload(sessionId: "sess-send-refresh")
+        let history3 = historyPayload(sessionId: "sess-gap-complete", messages: [
+            chatTextMessage(role: "user", text: "hello", timestamp: now + 60_000),
+            chatTextMessage(role: "assistant", text: "resynced after gap", timestamp: now + 60_001),
+        ])
 
-        let (transport, vm) = await makeViewModel(historyResponses: [history1, history2])
+        let (transport, vm) = await makeViewModel(historyResponses: [history1, history2, history3])
 
-        try await loadAndWaitBootstrap(vm: vm)
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
 
         await sendUserMessage(vm, text: "hello")
-        try await waitUntil("pending run starts") { await MainActor.run { vm.pendingRunCount == 1 } }
+        try await waitUntil("post-send refresh leaves pending run unresolved") {
+            await MainActor.run {
+                vm.sessionId == "sess-send-refresh" && vm.pendingRunCount == 1 && !vm.isSending
+            }
+        }
 
         transport.emit(.seqGap)
 
-        try await waitUntil("pending run clears on seqGap") {
-            await MainActor.run { vm.pendingRunCount == 0 }
+        try await waitUntil("pending run clears after durable history evidence") {
+            await MainActor.run {
+                vm.sessionId == "sess-gap-complete" && vm.pendingRunCount == 0
+            }
         }
         try await waitUntil("history refreshes on seqGap") {
             await MainActor.run { vm.messages.contains(where: { $0.role == "assistant" }) }
