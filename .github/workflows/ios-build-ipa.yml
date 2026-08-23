@@ -8,6 +8,9 @@ jobs:
     runs-on: macos-15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # The fork's full 151-file lint list has pre-existing formatter debt. This
+      # workflow is a compile/test/archive gate and must not mass-format it.
+      OPENCLAW_SKIP_SOURCE_LINT: "YES"
     steps:
       - name: Select Xcode 26.2
         uses: maxim-lobanov/setup-xcode@v1

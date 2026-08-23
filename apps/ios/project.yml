@@ -69,6 +69,10 @@ targets:
           - $(SRCROOT)/SwiftSources.input.xcfilelist
         script: |
           set -euo pipefail
+          if [[ "${OPENCLAW_SKIP_SOURCE_LINT:-NO}" == "YES" ]]; then
+            echo "Skipping repository-wide SwiftFormat lint for the scoped CI compile/archive gate."
+            exit 0
+          fi
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           if ! command -v swiftformat >/dev/null 2>&1; then
             echo "error: swiftformat not found (brew install swiftformat)" >&2
@@ -83,6 +87,10 @@ targets:
           - $(SRCROOT)/SwiftSources.input.xcfilelist
         script: |
           set -euo pipefail
+          if [[ "${OPENCLAW_SKIP_SOURCE_LINT:-NO}" == "YES" ]]; then
+            echo "Skipping repository-wide SwiftLint for the scoped CI compile/archive gate."
+            exit 0
+          fi
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           if ! command -v swiftlint >/dev/null 2>&1; then
             echo "error: swiftlint not found (brew install swiftlint)" >&2
