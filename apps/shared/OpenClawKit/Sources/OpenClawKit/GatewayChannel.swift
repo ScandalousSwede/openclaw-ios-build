@@ -217,10 +217,19 @@ private enum GatewayConnectErrorCodes {
 public actor GatewayChannelActor {
     private let logger = Logger(subsystem: "ai.openclaw", category: "gateway")
     private var task: WebSocketTaskBox?
-    private var pending: [String: CheckedContinuation<GatewayFrame, Error>] = [:]
+    private struct PendingRequest {
+        let connectionGeneration: UInt64
+        let continuation: CheckedContinuation<GatewayFrame, Error>
+    }
+
+    private var pending: [String: PendingRequest] = [:]
     private var connected = false
     private var isConnecting = false
     private var connectWaiters: [CheckedContinuation<Void, Error>] = []
+    /// Physical socket epoch. Callbacks and operations retain the generation that admitted
+    /// them so a late socket cannot mutate or dispatch through its replacement.
+    private var connectionGeneration: UInt64 = 0
+    private var disconnectedConnectionGeneration: UInt64?
     private var url: URL
     private var token: String?
     private var bootstrapToken: String?
@@ -248,9 +257,9 @@ public actor GatewayChannelActor {
     private var deviceTokenRetryBudgetUsed = false
     private var reconnectPausedForAuthFailure = false
     private let defaultRequestTimeoutMs: Double = 15000
-    private let pushHandler: (@Sendable (GatewayPush) async -> Void)?
+    private let pushHandler: (@Sendable (GatewayPush, UInt64) async -> Void)?
     private let connectOptions: GatewayConnectOptions?
-    private let disconnectHandler: (@Sendable (String) async -> Void)?
+    private let disconnectHandler: (@Sendable (String, UInt64) async -> Void)?
 
     public init(
         url: URL,
@@ -267,9 +276,41 @@ public actor GatewayChannelActor {
         self.bootstrapToken = bootstrapToken
         self.password = password
         self.session = session?.session ?? URLSession(configuration: .default)
-        self.pushHandler = pushHandler
+        if let pushHandler {
+            self.pushHandler = { push, _ in await pushHandler(push) }
+        } else {
+            self.pushHandler = nil
+        }
         self.connectOptions = connectOptions
-        self.disconnectHandler = disconnectHandler
+        if let disconnectHandler {
+            self.disconnectHandler = { reason, _ in await disconnectHandler(reason) }
+        } else {
+            self.disconnectHandler = nil
+        }
+        Task { [weak self] in
+            await self?.startWatchdog()
+        }
+    }
+
+    /// Generation-aware transport callbacks for route owners that must fence stale sockets.
+    public init(
+        url: URL,
+        token: String?,
+        bootstrapToken: String? = nil,
+        password: String? = nil,
+        session: WebSocketSessionBox? = nil,
+        generationAwarePushHandler: (@Sendable (GatewayPush, UInt64) async -> Void)?,
+        connectOptions: GatewayConnectOptions? = nil,
+        generationAwareDisconnectHandler: (@Sendable (String, UInt64) async -> Void)? = nil)
+    {
+        self.url = url
+        self.token = token
+        self.bootstrapToken = bootstrapToken
+        self.password = password
+        self.session = session?.session ?? URLSession(configuration: .default)
+        self.pushHandler = generationAwarePushHandler
+        self.connectOptions = connectOptions
+        self.disconnectHandler = generationAwareDisconnectHandler
         Task { [weak self] in
             await self?.startWatchdog()
         }
@@ -281,7 +322,16 @@ public actor GatewayChannelActor {
 
     public func shutdown() async {
         self.shouldReconnect = false
+        if self.connected {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "shutdown",
+                socketGeneration: self.connectionGeneration))
+        }
         self.connected = false
+        // Retire callback ownership before cancellation can invoke an old receive handler.
+        self.connectionGeneration &+= 1
+        self.disconnectedConnectionGeneration = self.connectionGeneration
 
         self.watchdogTask?.cancel()
         self.watchdogTask = nil
@@ -298,7 +348,8 @@ public actor GatewayChannelActor {
         await self.failPending(NSError(
             domain: "Gateway",
             code: 0,
-            userInfo: [NSLocalizedDescriptionKey: "gateway channel shutdown"]))
+            userInfo: [NSLocalizedDescriptionKey: "gateway channel shutdown"]),
+            connectionGeneration: nil)
 
         let waiters = self.connectWaiters
         self.connectWaiters.removeAll()
@@ -341,6 +392,7 @@ public actor GatewayChannelActor {
     }
 
     public func connect() async throws {
+        guard self.shouldReconnect else { throw CancellationError() }
         if self.connected, self.task?.state == .running { return }
         if self.isConnecting {
             try await withCheckedThrowingContinuation { cont in
@@ -350,6 +402,19 @@ public actor GatewayChannelActor {
         }
         self.isConnecting = true
         defer { self.isConnecting = false }
+        if self.connected {
+            let staleGeneration = self.connectionGeneration
+            let staleError = NSError(
+                domain: "Gateway",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "gateway socket stopped before reconnect"])
+            await self.transitionToDisconnected(
+                reason: staleError.localizedDescription,
+                error: staleError,
+                connectionGeneration: staleGeneration,
+                shouldReconnect: false)
+            guard self.shouldReconnect else { throw CancellationError() }
+        }
         let attemptID = UUID().uuidString
         let startedAt = ProcessInfo.processInfo.systemUptime
         let connectStartMessage =
@@ -357,11 +422,20 @@ public actor GatewayChannelActor {
                 + "scheme=\(self.url.scheme ?? "unknown")"
         self.logger.info("\(connectStartMessage, privacy: .public)")
 
+        self.connectionGeneration &+= 1
+        let connectionGeneration = self.connectionGeneration
+        self.disconnectedConnectionGeneration = nil
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "connecting",
+            socketGeneration: connectionGeneration))
         self.task?.cancel(with: .goingAway, reason: nil)
-        self.task = self.session.makeWebSocketTask(url: self.url)
-        self.task?.resume()
+        let connectTask = self.session.makeWebSocketTask(url: self.url)
+        self.task = connectTask
+        connectTask.resume()
+        let connectHello: HelloOk
         do {
-            try await AsyncTimeout.withTimeout(
+            connectHello = try await AsyncTimeout.withTimeout(
                 seconds: self.connectTimeoutSeconds,
                 onTimeout: {
                     NSError(
@@ -369,16 +443,28 @@ public actor GatewayChannelActor {
                         code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "connect timed out"])
                 },
-                operation: { try await self.sendConnect() })
+                operation: {
+                    try await self.sendConnect(
+                        task: connectTask,
+                        connectionGeneration: connectionGeneration)
+                })
+            try self.requireCurrentSocket(connectTask, connectionGeneration: connectionGeneration)
         } catch {
+            guard self.ownsSocket(connectTask, connectionGeneration: connectionGeneration) else {
+                throw CancellationError()
+            }
             let wrapped: Error = if let authError = error as? GatewayConnectAuthError {
                 authError
             } else {
                 self.wrap(error, context: "connect to gateway @ \(self.url.absoluteString)")
             }
             self.connected = false
-            self.task?.cancel(with: .goingAway, reason: nil)
-            await self.disconnectHandler?("connect failed: \(wrapped.localizedDescription)")
+            self.disconnectedConnectionGeneration = connectionGeneration
+            connectTask.cancel(with: .goingAway, reason: nil)
+            if self.task?.task === connectTask.task {
+                self.task = nil
+            }
+            await self.disconnectHandler?("connect failed: \(wrapped.localizedDescription)", connectionGeneration)
             let waiters = self.connectWaiters
             self.connectWaiters.removeAll()
             for waiter in waiters {
@@ -391,12 +477,28 @@ public actor GatewayChannelActor {
             self.logger.error("gateway ws connect failed \(wrapped.localizedDescription, privacy: .public)")
             throw wrapped
         }
-        self.listen()
+        guard self.ownsSocket(connectTask, connectionGeneration: connectionGeneration),
+              self.disconnectedConnectionGeneration != connectionGeneration,
+              self.shouldReconnect
+        else { throw CancellationError() }
         self.connected = true
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "connected",
+            socketGeneration: connectionGeneration))
         self.reconnectPausedForAuthFailure = false
         self.backoffMs = 500
         self.lastSeq = nil
-        self.startKeepalive()
+        self.listen(task: connectTask, connectionGeneration: connectionGeneration)
+        self.startTickWatchdog(connectionGeneration: connectionGeneration)
+        self.startKeepalive(connectionGeneration: connectionGeneration)
+        // The channel must be admitted and listening before an onConnected callback
+        // can issue a route-bound request through the snapshot.
+        Task { [weak self] in
+            await self?.deliverPushIfCurrent(
+                .snapshot(connectHello),
+                connectionGeneration: connectionGeneration)
+        }
 
         let waiters = self.connectWaiters
         self.connectWaiters.removeAll()
@@ -410,21 +512,21 @@ public actor GatewayChannelActor {
         self.logger.info("\(connectSucceededMessage, privacy: .public)")
     }
 
-    private func startKeepalive() {
+    private func startKeepalive(connectionGeneration: UInt64) {
         self.keepaliveTask?.cancel()
         self.keepaliveTask = Task { [weak self] in
             guard let self else { return }
-            await self.keepaliveLoop()
+            await self.keepaliveLoop(connectionGeneration: connectionGeneration)
         }
     }
 
-    private func keepaliveLoop() async {
+    private func keepaliveLoop(connectionGeneration: UInt64) async {
         while self.shouldReconnect {
             guard await self.sleepUnlessCancelled(
                 nanoseconds: UInt64(self.keepaliveIntervalSeconds * 1_000_000_000))
             else { return }
             guard self.shouldReconnect else { return }
-            guard self.connected else { continue }
+            guard self.isConnected(connectionGeneration: connectionGeneration) else { return }
             guard let task = self.task else { continue }
             // Best-effort ping keeps NAT/proxy state alive without generating RPC load.
             do {
@@ -435,7 +537,10 @@ public actor GatewayChannelActor {
         }
     }
 
-    private func sendConnect() async throws {
+    private func sendConnect(
+        task: WebSocketTaskBox,
+        connectionGeneration: UInt64) async throws -> HelloOk
+    {
         let platform = InstanceIdentity.platformString
         let primaryLocale = Locale.preferredLanguages.first ?? Locale.current.identifier
         let options = self.connectOptions ?? GatewayConnectOptions(
@@ -515,7 +620,10 @@ public actor GatewayChannelActor {
             params["auth"] = ProtoAnyCodable(["password": ProtoAnyCodable(password)])
         }
         let signedAtMs = Int(Date().timeIntervalSince1970 * 1000)
-        let connectNonce = try await self.waitForConnectChallenge()
+        let connectNonce = try await self.waitForConnectChallenge(
+            task: task,
+            connectionGeneration: connectionGeneration)
+        try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
         if includeDeviceIdentity, let identity {
             let payload = GatewayDeviceAuthPayload.buildV3(
                 deviceId: identity.deviceId,
@@ -544,12 +652,22 @@ public actor GatewayChannelActor {
             method: "connect",
             params: ProtoAnyCodable(params))
         let data = try self.encoder.encode(frame)
-        try await self.task?.send(.data(data))
+        try await task.send(.data(data))
+        try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
         do {
-            let response = try await self.waitForConnectResponse(reqId: reqId)
-            try await self.handleConnectResponse(response, identity: identity, role: role)
+            let response = try await self.waitForConnectResponse(
+                reqId: reqId,
+                task: task,
+                connectionGeneration: connectionGeneration)
+            try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
+            let hello = try await self.handleConnectResponse(
+                response,
+                identity: identity,
+                role: role)
+            try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
             self.pendingDeviceTokenRetry = false
             self.deviceTokenRetryBudgetUsed = false
+            return hello
         } catch {
             let shouldRetryWithDeviceToken = self.shouldRetryWithStoredDeviceToken(
                 error: error,
@@ -811,7 +929,7 @@ public actor GatewayChannelActor {
     private func handleConnectResponse(
         _ res: ResponseFrame,
         identity: DeviceIdentity?,
-        role: String) async throws
+        role: String) async throws -> HelloOk
     {
         if res.ok == false {
             let error = res.error
@@ -893,47 +1011,147 @@ public actor GatewayChannelActor {
             }
         }
         self.lastTick = Date()
-        self.tickTask?.cancel()
-        self.tickTask = Task { [weak self] in
-            guard let self else { return }
-            await self.watchTicks()
-        }
-        if let pushHandler = self.pushHandler {
-            Task { await pushHandler(.snapshot(ok)) }
-        }
+        return ok
     }
 
-    private func listen() {
-        self.task?.receive { [weak self] result in
+    private func deliverPushIfCurrent(
+        _ push: GatewayPush,
+        connectionGeneration: UInt64) async
+    {
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration != connectionGeneration
+        else {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "stale_callback_ignored",
+                socketGeneration: connectionGeneration))
+            return
+        }
+        await self.pushHandler?(push, connectionGeneration)
+    }
+
+    private func listen(task: WebSocketTaskBox, connectionGeneration: UInt64) {
+        guard self.isConnected(connectionGeneration: connectionGeneration),
+              self.task?.task === task.task
+        else { return }
+        task.receive { [weak self] result in
             guard let self else { return }
             switch result {
             case let .failure(err):
-                Task { await self.handleReceiveFailure(err) }
+                Task {
+                    await self.handleReceiveFailure(
+                        err,
+                        connectionGeneration: connectionGeneration)
+                }
             case let .success(msg):
                 Task {
-                    await self.handle(msg)
-                    await self.listen()
+                    await self.handle(msg, connectionGeneration: connectionGeneration)
+                    await self.listen(task: task, connectionGeneration: connectionGeneration)
                 }
             }
         }
     }
 
-    private func handleReceiveFailure(_ err: Error) async {
+    private func handleReceiveFailure(
+        _ err: Error,
+        connectionGeneration: UInt64) async
+    {
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration != connectionGeneration
+        else {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "stale_callback_ignored",
+                socketGeneration: connectionGeneration))
+            return
+        }
         let wrapped = self.wrap(err, context: "gateway receive")
         let disconnectedMessage =
-            "gateway.trace event=disconnected correlation=unavailable_without_socket_generation "
+            "gateway.trace event=disconnected socket_generation=\(connectionGeneration) "
                 + "outcome=requests_failed"
         self.logger.error("\(disconnectedMessage, privacy: .public)")
         self.logger.error("gateway ws receive failed \(wrapped.localizedDescription, privacy: .public)")
-        self.connected = false
-        self.keepaliveTask?.cancel()
-        self.keepaliveTask = nil
-        await self.disconnectHandler?("receive failed: \(wrapped.localizedDescription)")
-        await self.failPending(wrapped)
-        await self.scheduleReconnect()
+        await self.transitionToDisconnected(
+            reason: "receive failed: \(wrapped.localizedDescription)",
+            error: wrapped,
+            connectionGeneration: connectionGeneration,
+            shouldReconnect: true)
     }
 
-    private func handle(_ msg: URLSessionWebSocketTask.Message) async {
+    private func transitionToDisconnected(
+        reason: String,
+        error: Error,
+        connectionGeneration: UInt64,
+        shouldReconnect: Bool) async
+    {
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration != connectionGeneration
+        else { return }
+
+        // Claim the transition before socket cancellation can enqueue another failure.
+        self.disconnectedConnectionGeneration = connectionGeneration
+        self.connected = false
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "disconnected",
+            socketGeneration: connectionGeneration))
+        self.tickTask?.cancel()
+        self.tickTask = nil
+        self.keepaliveTask?.cancel()
+        self.keepaliveTask = nil
+        let disconnectedTask = self.task
+        self.task = nil
+        disconnectedTask?.cancel(with: .goingAway, reason: nil)
+        await self.failPending(error, connectionGeneration: connectionGeneration)
+        await self.disconnectHandler?(reason, connectionGeneration)
+
+        guard shouldReconnect,
+              self.shouldReconnect,
+              self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration == connectionGeneration
+        else { return }
+        Task { [weak self] in
+            await self?.scheduleReconnect(after: connectionGeneration)
+        }
+    }
+
+    private func isConnected(connectionGeneration: UInt64) -> Bool {
+        self.connected &&
+            self.connectionGeneration == connectionGeneration &&
+            self.disconnectedConnectionGeneration != connectionGeneration
+    }
+
+    private func ownsSocket(
+        _ candidate: WebSocketTaskBox,
+        connectionGeneration: UInt64) -> Bool
+    {
+        guard self.connectionGeneration == connectionGeneration,
+              let task = self.task
+        else { return false }
+        return task.task === candidate.task
+    }
+
+    private func requireCurrentSocket(
+        _ candidate: WebSocketTaskBox,
+        connectionGeneration: UInt64) throws
+    {
+        try Task.checkCancellation()
+        guard self.ownsSocket(candidate, connectionGeneration: connectionGeneration),
+              self.disconnectedConnectionGeneration != connectionGeneration
+        else { throw CancellationError() }
+    }
+
+    private func handle(
+        _ msg: URLSessionWebSocketTask.Message,
+        connectionGeneration: UInt64) async
+    {
+        guard self.isConnected(connectionGeneration: connectionGeneration) else {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "stale_callback_ignored",
+                socketGeneration: connectionGeneration))
+            return
+        }
         let data: Data? = switch msg {
         case let .data(d): d
         case let .string(s): s.data(using: .utf8)
@@ -947,26 +1165,39 @@ public actor GatewayChannelActor {
         switch frame {
         case let .res(res):
             let id = res.id
-            if let waiter = pending.removeValue(forKey: id) {
-                waiter.resume(returning: .res(res))
+            if let pending = self.pending[id],
+               pending.connectionGeneration == connectionGeneration
+            {
+                self.pending.removeValue(forKey: id)
+                OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                    kind: .socket,
+                    state: "request_completed",
+                    socketGeneration: connectionGeneration,
+                    operationIdentifier: id))
+                pending.continuation.resume(returning: .res(res))
             }
         case let .event(evt):
             if evt.event == "connect.challenge" { return }
             if let seq = evt.seq {
                 if let last = lastSeq, seq > last + 1 {
-                    await self.pushHandler?(.seqGap(expected: last + 1, received: seq))
+                    await self.pushHandler?(
+                        .seqGap(expected: last + 1, received: seq),
+                        connectionGeneration)
+                    guard self.isConnected(connectionGeneration: connectionGeneration) else { return }
                 }
                 self.lastSeq = seq
             }
             if evt.event == "tick" { self.lastTick = Date() }
-            await self.pushHandler?(.event(evt))
+            await self.pushHandler?(.event(evt), connectionGeneration)
         default:
             break
         }
     }
 
-    private func waitForConnectChallenge() async throws -> String {
-        guard let task = self.task else { throw ConnectChallengeError.timeout }
+    private func waitForConnectChallenge(
+        task: WebSocketTaskBox,
+        connectionGeneration: UInt64) async throws -> String
+    {
         return try await AsyncTimeout.withTimeout(
             seconds: self.connectChallengeTimeoutSeconds,
             onTimeout: { ConnectChallengeError.timeout },
@@ -974,6 +1205,9 @@ public actor GatewayChannelActor {
                 guard let self else { throw ConnectChallengeError.timeout }
                 while true {
                     let msg = try await task.receive()
+                    try await self.requireCurrentSocket(
+                        task,
+                        connectionGeneration: connectionGeneration)
                     guard let data = self.decodeMessageData(msg) else { continue }
                     guard let frame = try? self.decoder.decode(GatewayFrame.self, from: data) else { continue }
                     if case let .event(evt) = frame, evt.event == "connect.challenge",
@@ -986,15 +1220,14 @@ public actor GatewayChannelActor {
             })
     }
 
-    private func waitForConnectResponse(reqId: String) async throws -> ResponseFrame {
-        guard let task = self.task else {
-            throw NSError(
-                domain: "Gateway",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "connect failed (no response)"])
-        }
+    private func waitForConnectResponse(
+        reqId: String,
+        task: WebSocketTaskBox,
+        connectionGeneration: UInt64) async throws -> ResponseFrame
+    {
         while true {
             let msg = try await task.receive()
+            try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
             guard let data = self.decodeMessageData(msg) else { continue }
             guard let frame = try? self.decoder.decode(GatewayFrame.self, from: data) else {
                 throw NSError(
@@ -1016,38 +1249,58 @@ public actor GatewayChannelActor {
         }
     }
 
-    private func watchTicks() async {
+    private func startTickWatchdog(connectionGeneration: UInt64) {
+        self.tickTask?.cancel()
+        self.tickTask = Task { [weak self] in
+            guard let self else { return }
+            await self.watchTicks(connectionGeneration: connectionGeneration)
+        }
+    }
+
+    private func watchTicks(connectionGeneration: UInt64) async {
         let tolerance = self.tickIntervalMs * 2
-        while self.connected {
+        while self.isConnected(connectionGeneration: connectionGeneration) {
             guard await self.sleepUnlessCancelled(nanoseconds: UInt64(tolerance * 1_000_000)) else { return }
-            guard self.connected else { return }
+            guard self.isConnected(connectionGeneration: connectionGeneration) else { return }
             if let last = self.lastTick {
                 let delta = Date().timeIntervalSince(last) * 1000
                 if delta > tolerance {
                     self.logger.error("gateway tick missed; reconnecting")
-                    self.connected = false
-                    await self.failPending(
-                        NSError(
-                            domain: "Gateway",
-                            code: 4,
-                            userInfo: [NSLocalizedDescriptionKey: "gateway tick missed; reconnecting"]))
-                    await self.scheduleReconnect()
+                    let error = NSError(
+                        domain: "Gateway",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "gateway tick missed; reconnecting"])
+                    await self.transitionToDisconnected(
+                        reason: error.localizedDescription,
+                        error: error,
+                        connectionGeneration: connectionGeneration,
+                        shouldReconnect: true)
                     return
                 }
             }
         }
     }
 
-    private func scheduleReconnect() async {
+    private func scheduleReconnect(after connectionGeneration: UInt64) async {
         guard self.shouldReconnect else { return }
         guard !self.reconnectPausedForAuthFailure else { return }
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration == connectionGeneration
+        else { return }
         let delay = self.backoffMs / 1000
         self.backoffMs = min(self.backoffMs * 2, 30000)
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .reconnect,
+            state: "scheduled",
+            socketGeneration: connectionGeneration))
         self.logger.info(
             "gateway.trace event=reconnect_scheduled delay_ms=\(Int(delay * 1000), privacy: .public)")
         guard await self.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
         guard self.shouldReconnect else { return }
         guard !self.reconnectPausedForAuthFailure else { return }
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration == connectionGeneration
+        else { return }
         do {
             try await self.connect()
         } catch {
@@ -1059,7 +1312,10 @@ public actor GatewayChannelActor {
             }
             let wrapped = self.wrap(error, context: "gateway reconnect")
             self.logger.error("gateway reconnect failed \(wrapped.localizedDescription, privacy: .public)")
-            await self.scheduleReconnect()
+            let failedGeneration = self.connectionGeneration
+            if self.disconnectedConnectionGeneration == failedGeneration {
+                await self.scheduleReconnect(after: failedGeneration)
+            }
         }
     }
 
@@ -1142,31 +1398,100 @@ public actor GatewayChannelActor {
         timeoutMs: Double? = nil) async throws -> Data
     {
         try await self.connectOrThrow(context: "gateway connect")
+        let connectionGeneration = self.connectionGeneration
+        guard self.isConnected(connectionGeneration: connectionGeneration),
+              let task = self.task,
+              task.state == .running
+        else {
+            throw NSError(
+                domain: "Gateway",
+                code: 5,
+                userInfo: [NSLocalizedDescriptionKey: "gateway socket unavailable"])
+        }
+        return try await self.request(
+            method: method,
+            params: params,
+            timeoutMs: timeoutMs,
+            task: task,
+            connectionGeneration: connectionGeneration)
+    }
+
+    /// Dispatches only through the already-connected physical socket generation.
+    public func request(
+        method: String,
+        params: [String: AnyCodable]?,
+        timeoutMs: Double? = nil,
+        ifCurrentConnectionGeneration expectedGeneration: UInt64) async throws -> Data
+    {
+        guard self.isConnected(connectionGeneration: expectedGeneration),
+              let task = self.task,
+              task.state == .running
+        else { throw CancellationError() }
+        return try await self.request(
+            method: method,
+            params: params,
+            timeoutMs: timeoutMs,
+            task: task,
+            connectionGeneration: expectedGeneration)
+    }
+
+    public func currentConnectionGeneration() -> UInt64? {
+        let generation = self.connectionGeneration
+        guard self.isConnected(connectionGeneration: generation),
+              self.task?.state == .running
+        else { return nil }
+        return generation
+    }
+
+    private func request(
+        method: String,
+        params: [String: AnyCodable]?,
+        timeoutMs: Double?,
+        task: WebSocketTaskBox,
+        connectionGeneration: UInt64) async throws -> Data
+    {
         let effectiveTimeout = timeoutMs ?? self.defaultRequestTimeoutMs
         let payload = try self.encodeRequest(method: method, params: params, kind: "request")
         let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<GatewayFrame, Error>) in
-            self.pending[payload.id] = cont
+            self.pending[payload.id] = PendingRequest(
+                connectionGeneration: connectionGeneration,
+                continuation: cont)
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "request_admitted",
+                socketGeneration: connectionGeneration,
+                operationIdentifier: payload.id))
             Task { [weak self] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: UInt64(effectiveTimeout * 1_000_000))
-                await self.timeoutRequest(id: payload.id, timeoutMs: effectiveTimeout)
+                await self.timeoutRequest(
+                    id: payload.id,
+                    timeoutMs: effectiveTimeout,
+                    connectionGeneration: connectionGeneration)
             }
             Task {
+                guard self.isConnected(connectionGeneration: connectionGeneration) else {
+                    self.cancelRequest(id: payload.id, connectionGeneration: connectionGeneration)
+                    return
+                }
                 do {
-                    try await self.task?.send(.data(payload.data))
+                    try await task.send(.data(payload.data))
+                    guard self.isConnected(connectionGeneration: connectionGeneration) else {
+                        self.cancelRequest(id: payload.id, connectionGeneration: connectionGeneration)
+                        return
+                    }
                 } catch {
                     let wrapped = self.wrap(error, context: "gateway send \(method)")
-                    let waiter = self.pending.removeValue(forKey: payload.id)
-                    // Treat send failures as a broken socket: mark disconnected and trigger reconnect.
-                    self.connected = false
-                    self.task?.cancel(with: .goingAway, reason: nil)
-                    Task { [weak self] in
-                        guard let self else { return }
-                        await self.scheduleReconnect()
-                    }
-                    if let waiter { waiter.resume(throwing: wrapped) }
+                    await self.transitionToDisconnected(
+                        reason: "send failed: \(wrapped.localizedDescription)",
+                        error: wrapped,
+                        connectionGeneration: connectionGeneration,
+                        shouldReconnect: true)
                 }
             }
+        }
+        guard self.isConnected(connectionGeneration: connectionGeneration) else {
+            throw CancellationError()
         }
         guard case let .res(res) = response else {
             throw NSError(domain: "Gateway", code: 2, userInfo: [NSLocalizedDescriptionKey: "unexpected frame"])
@@ -1186,8 +1511,36 @@ public actor GatewayChannelActor {
 
     public func send(method: String, params: [String: AnyCodable]?) async throws {
         try await self.connectOrThrow(context: "gateway connect")
+        try await self.send(
+            method: method,
+            params: params,
+            connectionGeneration: self.connectionGeneration)
+    }
+
+    /// Dispatches only through the socket that admitted the owning operation.
+    public func send(
+        method: String,
+        params: [String: AnyCodable]?,
+        ifCurrentConnectionGeneration expectedGeneration: UInt64) async throws
+    {
+        guard self.isConnected(connectionGeneration: expectedGeneration) else {
+            throw CancellationError()
+        }
+        try await self.send(
+            method: method,
+            params: params,
+            connectionGeneration: expectedGeneration)
+    }
+
+    private func send(
+        method: String,
+        params: [String: AnyCodable]?,
+        connectionGeneration: UInt64) async throws
+    {
         let payload = try self.encodeRequest(method: method, params: params, kind: "send")
-        guard let task = self.task else {
+        guard self.isConnected(connectionGeneration: connectionGeneration),
+              let task = self.task
+        else {
             throw NSError(
                 domain: "Gateway",
                 code: 5,
@@ -1195,21 +1548,26 @@ public actor GatewayChannelActor {
         }
         do {
             try await task.send(.data(payload.data))
+            guard self.isConnected(connectionGeneration: connectionGeneration) else {
+                throw CancellationError()
+            }
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             let wrapped = self.wrap(error, context: "gateway send \(method)")
-            self.connected = false
-            self.task?.cancel(with: .goingAway, reason: nil)
-            Task { [weak self] in
-                guard let self else { return }
-                await self.scheduleReconnect()
-            }
+            await self.transitionToDisconnected(
+                reason: "send failed: \(wrapped.localizedDescription)",
+                error: wrapped,
+                connectionGeneration: connectionGeneration,
+                shouldReconnect: true)
             throw wrapped
         }
     }
 
     /// Wrap low-level URLSession/WebSocket errors with context so UI can surface them.
     private func wrap(_ error: Error, context: String) -> Error {
-        if error is GatewayConnectAuthError ||
+        if error is CancellationError ||
+            error is GatewayConnectAuthError ||
             error is GatewayResponseError ||
             error is GatewayDecodingError ||
             error is GatewayTLSValidationError
@@ -1267,21 +1625,56 @@ public actor GatewayChannelActor {
         }
     }
 
-    private func failPending(_ error: Error) async {
-        let waiters = self.pending
-        self.pending.removeAll()
-        for (_, waiter) in waiters {
-            waiter.resume(throwing: error)
+    private func failPending(_ error: Error, connectionGeneration: UInt64?) async {
+        let requestIDs = self.pending.compactMap { id, pending in
+            if let connectionGeneration, pending.connectionGeneration != connectionGeneration {
+                return nil
+            }
+            return id
+        }
+        for id in requestIDs {
+            guard let pending = self.pending.removeValue(forKey: id) else { continue }
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "request_failed",
+                socketGeneration: pending.connectionGeneration,
+                operationIdentifier: id))
+            pending.continuation.resume(throwing: error)
         }
     }
 
-    private func timeoutRequest(id: String, timeoutMs: Double) async {
-        guard let waiter = self.pending.removeValue(forKey: id) else { return }
+    private func timeoutRequest(
+        id: String,
+        timeoutMs: Double,
+        connectionGeneration: UInt64) async
+    {
+        guard let pending = self.pending[id],
+              pending.connectionGeneration == connectionGeneration
+        else { return }
+        self.pending.removeValue(forKey: id)
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "request_timed_out",
+            socketGeneration: connectionGeneration,
+            operationIdentifier: id))
         let err = NSError(
             domain: "Gateway",
             code: 5,
             userInfo: [NSLocalizedDescriptionKey: "gateway request timed out after \(Int(timeoutMs))ms"])
-        waiter.resume(throwing: err)
+        pending.continuation.resume(throwing: err)
+    }
+
+    private func cancelRequest(id: String, connectionGeneration: UInt64) {
+        guard let pending = self.pending[id],
+              pending.connectionGeneration == connectionGeneration
+        else { return }
+        self.pending.removeValue(forKey: id)
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "request_cancelled",
+            socketGeneration: connectionGeneration,
+            operationIdentifier: id))
+        pending.continuation.resume(throwing: CancellationError())
     }
 }
 

@@ -103,6 +103,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
             kind: .appLifecycle,
             state: "did_finish_launching"))
         AIESNetworkDiagnosticMonitor.shared.start()
+        LiveActivityManager.shared.refreshFeatureFlag()
         if self.appModel == nil {
             self.appModel = OpenClawAppModelRegistry.appModel
         }

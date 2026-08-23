@@ -476,6 +476,20 @@ extension SettingsProTab {
                 }
             }
             .padding(.horizontal, OpenClawProMetric.pagePadding)
+
+            self.toggleCard(
+                icon: "rectangle.stack.badge.play",
+                title: "Live Activities",
+                detail: "Show connection and attention state on the Lock Screen. " +
+                    "Turning this off ends the current activity.",
+                isOn: Binding(
+                    get: { LiveActivityFeatureFlag.isEnabled() },
+                    set: { enabled in
+                        LiveActivityFeatureFlag.setRuntimeEnabled(enabled)
+                        self.liveActivityDisabled = !enabled
+                        LiveActivityManager.shared.refreshFeatureFlag()
+                    }))
+                .disabled(LiveActivityFeatureFlag.isHardDisabled())
         }
     }
 
