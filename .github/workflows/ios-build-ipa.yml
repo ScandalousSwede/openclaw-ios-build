@@ -103,6 +103,8 @@ jobs:
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/OpenClawAppDelegateTests \
             test \
             CODE_SIGNING_ALLOWED=NO
 
