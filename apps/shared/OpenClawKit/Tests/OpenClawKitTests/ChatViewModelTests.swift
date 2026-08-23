@@ -156,7 +156,7 @@ private func loadAndWaitBootstrap(
     await MainActor.run { vm.load() }
     try await waitUntil("bootstrap") {
         await MainActor.run {
-            vm.healthOK && (sessionId == nil || vm.sessionId == sessionId)
+            vm.healthOK && !vm.isLoading && (sessionId == nil || vm.sessionId == sessionId)
         }
     }
 }
