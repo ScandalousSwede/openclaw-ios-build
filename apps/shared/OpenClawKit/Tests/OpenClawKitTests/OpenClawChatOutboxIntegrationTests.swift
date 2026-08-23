@@ -476,7 +476,7 @@ struct OpenClawChatOutboxIntegrationTests {
         try await fixture.close()
     }
 
-    @Test func `status presentation distinguishes route change from gateway rejection`() {
+    @Test @MainActor func `status presentation distinguishes route change from gateway rejection`() {
         let routeChanged = OpenClawChatView.outboxPresentation(for: OpenClawChatOutboxStatus(
             blockedCount: 1,
             headOutcome: .blockedRouteChanged,

@@ -187,7 +187,8 @@ struct OpenClawChatOutboxStorageTests {
             await self.expectError(.missingOperatorScope("operator.read")) {
                 try await fixture.store.saveVerifiedRouteSnapshot(missingRead)
             }
-            #expect(try await fixture.store.loadVerifiedRouteSnapshot() == nil)
+            let persistedRoute = try await fixture.store.loadVerifiedRouteSnapshot()
+            #expect(persistedRoute == nil)
         }
     }
 
