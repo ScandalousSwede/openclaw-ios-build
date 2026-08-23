@@ -619,8 +619,8 @@ struct OpenClawChatOutboxStorageTests {
             let route = self.route()
             let other = try await fixture.database.store(stableGatewayID: "gateway-b")
             try await fixture.store.saveVerifiedRouteSnapshot(route)
-            try await other.saveVerifiedRouteSnapshot(route)
             _ = try await fixture.store.persistBeforeDraftClear(self.draft(id: "a", route: route))
+            try await other.saveVerifiedRouteSnapshot(route)
             _ = try await other.persistBeforeDraftClear(self.draft(id: "b", route: route))
 
             try await fixture.store.securePurge()
