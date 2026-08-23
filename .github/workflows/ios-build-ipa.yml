@@ -106,7 +106,8 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
-            -only-testing:OpenClawTests/GatewayConnectionControllerTests \
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests/operatorConnectOptionsOnlyRequestApprovalScopeWhenEnabled \
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests/operatorTalkPermissionUpgradeUsesExplicitLeastPrivilegeScopes \
             -only-testing:OpenClawTests/GatewayOnboardingResetTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
