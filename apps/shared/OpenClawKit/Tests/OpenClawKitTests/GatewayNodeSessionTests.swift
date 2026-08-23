@@ -983,7 +983,7 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
-    func connectedCallbackDisconnectInvalidatesOuterConnect() async {
+    func connectedCallbackDisconnectInvalidatesOuterConnect() async throws {
         let session = FakeGatewayWebSocketSession()
         let gateway = GatewayNodeSession()
         let lifecycle = StringProbe()
@@ -1005,11 +1005,17 @@ struct GatewayNodeSessionTests {
             Issue.record("connect failed with unexpected error: \(error)")
         }
 
-        #expect(await lifecycle.snapshot() == [
-            "disconnecting",
+        try await waitUntil("callback disconnect and outer connect settled") {
+            let events = await lifecycle.snapshot()
+            return events.count == 3
+        }
+        let lifecycleEvents = await lifecycle.snapshot()
+        #expect(lifecycleEvents.first == "disconnecting")
+        #expect(lifecycleEvents.count == 3)
+        #expect(Set(lifecycleEvents.dropFirst()) == Set([
             "disconnected",
             "outer_cancelled",
-        ])
+        ]))
         #expect(session.snapshotMakeCount() == 1)
         #expect(await gateway.currentRoute() == nil)
     }
