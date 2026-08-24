@@ -10,6 +10,20 @@ private enum DurableTalkTestError: Error {
     case rejected
 }
 
+private struct DurableTalkSendResponsePayload: Encodable {
+    let runId: String
+    let status: String
+}
+
+private func durableTalkSendResponse(
+    runID: String,
+    status: String) throws -> OpenClawChatSendResponse
+{
+    let payload = DurableTalkSendResponsePayload(runId: runID, status: status)
+    let data = try JSONEncoder().encode(payload)
+    return try JSONDecoder().decode(OpenClawChatSendResponse.self, from: data)
+}
+
 private actor DurableTalkGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -113,7 +127,7 @@ private final class DurableTalkOfflineTransport: @unchecked Sendable, OpenClawCh
         idempotencyKey: String,
         attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
-        OpenClawChatSendResponse(runId: idempotencyKey, status: "legacy")
+        try durableTalkSendResponse(runID: idempotencyKey, status: "legacy")
     }
 
     func requestHealth(timeoutMs _: Int) async throws -> Bool { true }
@@ -217,7 +231,7 @@ private final class DurableTalkSwitchableTransport: @unchecked Sendable, OpenCla
         idempotencyKey: String,
         attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
-        OpenClawChatSendResponse(runId: idempotencyKey, status: "started")
+        try durableTalkSendResponse(runID: idempotencyKey, status: "started")
     }
 
     func requestHealth(timeoutMs _: Int) async throws -> Bool { await self.connection.isConnected() }
@@ -238,18 +252,15 @@ private actor DurableTalkAcceptedTransportState {
         return .accepted(runID: rawCommandID, status: "started")
     }
 
-    func historyMessages() -> [OpenClawChatMessage] {
+    func historyMessages() -> [AnyCodable] {
         guard self.autoConfirmHistory, let rawCommandID else { return [] }
-        return [OpenClawChatMessage(
-            role: "user",
-            content: [OpenClawChatMessageContent(
-                type: "text",
-                text: "confirmed",
-                mimeType: nil,
-                fileName: nil,
-                content: nil)],
-            timestamp: Date().timeIntervalSince1970,
-            idempotencyKey: "\(rawCommandID):user")]
+        let message: [String: Any] = [
+            "role": "user",
+            "content": [["type": "text", "text": "confirmed"]],
+            "timestamp": Date().timeIntervalSince1970,
+            "idempotencyKey": "\(rawCommandID):user",
+        ]
+        return [AnyCodable(message)]
     }
 
     func dispatchedRawCommandID() -> String? { self.rawCommandID }
@@ -304,7 +315,7 @@ private final class DurableTalkAcceptedTransport: @unchecked Sendable, OpenClawC
         idempotencyKey: String,
         attachments _: [OpenClawChatAttachmentPayload]) async throws -> OpenClawChatSendResponse
     {
-        OpenClawChatSendResponse(runId: idempotencyKey, status: "started")
+        try durableTalkSendResponse(runID: idempotencyKey, status: "started")
     }
 
     func requestHealth(timeoutMs _: Int) async throws -> Bool { true }
