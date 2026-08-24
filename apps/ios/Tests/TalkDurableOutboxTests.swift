@@ -287,7 +287,7 @@ private final class DurableTalkAcceptedTransport: @unchecked Sendable, OpenClawC
             },
             requestHistoryPage: { [state] sessionKey, _, offset, _ in
                 let messages = await state.historyMessages()
-                OpenClawChatHistoryPage(
+                return OpenClawChatHistoryPage(
                     payload: OpenClawChatHistoryPayload(
                         sessionKey: sessionKey,
                         sessionId: "talk-test",
