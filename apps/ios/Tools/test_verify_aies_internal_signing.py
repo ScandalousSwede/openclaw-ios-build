@@ -588,6 +588,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(
             workflow.count("test_verify_aies_internal_signing.py"), 2
         )
+        self.assertEqual(workflow.count("TalkModeManagerTests"), 2)
+        self.assertEqual(workflow.count("TalkDurableOutboxTests"), 2)
+        self.assertEqual(workflow.count("TalkModeIncrementalSpeechBufferTests"), 2)
         self.assertGreaterEqual(workflow.count("TalkTTSDiagnosticsTests"), 2)
         key_step = workflow.index("name: Materialize ephemeral App Store Connect key")
         fastlane_parse = workflow.index(

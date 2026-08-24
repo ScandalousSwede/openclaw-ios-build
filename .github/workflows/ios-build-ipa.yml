@@ -190,6 +190,9 @@ jobs:
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/TalkModeManagerTests \
+            -only-testing:OpenClawTests/TalkDurableOutboxTests \
+            -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
             test \
             CODE_SIGNING_ALLOWED=NO
@@ -540,6 +543,7 @@ jobs:
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
+            -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
             test \
