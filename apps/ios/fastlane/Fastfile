@@ -7,7 +7,7 @@ require "spaceship"
 
 default_platform(:ios)
 
-BETA_APP_IDENTIFIER = "ai.openclaw.client"
+BETA_APP_IDENTIFIER = "ai.openclaw.client.J76B47MZ6V"
 
 def load_env_file(path)
   return unless File.exist?(path)

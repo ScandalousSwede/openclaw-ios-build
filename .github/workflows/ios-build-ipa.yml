@@ -422,7 +422,7 @@ jobs:
             echo "Protected environment is not explicitly enabled." >&2
             exit 1
           }
-          [[ "${APP_BUNDLE_ID_VALUE}" == "ai.openclaw.client" ]] || {
+          [[ "${APP_BUNDLE_ID_VALUE}" == "ai.openclaw.client.J76B47MZ6V" ]] || {
             echo "APP_BUNDLE_ID does not match the isolated AIES app." >&2
             exit 1
           }

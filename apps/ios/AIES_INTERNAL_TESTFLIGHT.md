@@ -20,7 +20,7 @@ variables:
 - `APPLE_TEAM_ID`
 - `ASC_KEY_ID`
 - `ASC_ISSUER_ID`
-- `APP_BUNDLE_ID=ai.openclaw.client`
+- `APP_BUNDLE_ID=ai.openclaw.client.J76B47MZ6V`
 - `APP_STORE_CONNECT_APP_ID`
 
 Add one environment secret:
