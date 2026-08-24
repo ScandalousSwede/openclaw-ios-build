@@ -390,7 +390,7 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
     info:
-      path: Tests/Info.plist
+      path: Tests/Logic/Info.plist
       properties:
         CFBundleDisplayName: OpenClawLogicTests
         CFBundleShortVersionString: "$(OPENCLAW_MARKETING_VERSION)"

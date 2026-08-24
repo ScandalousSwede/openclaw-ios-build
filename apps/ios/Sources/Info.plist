@@ -78,6 +78,34 @@
 	<string>OpenClaw uses on-device speech recognition for talk mode and voice wake.</string>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<key>OpenClawBuildAPSEnvironmentIfSigned</key>
+	<string>$(OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED)</string>
+	<key>OpenClawBuildArchiveUUID</key>
+	<string>$(OPENCLAW_BUILD_ARCHIVE_UUID)</string>
+	<key>OpenClawBuildConfiguration</key>
+	<string>$(OPENCLAW_BUILD_CONFIGURATION)</string>
+	<key>OpenClawBuildExtensionBundleIDs</key>
+	<array>
+		<string>$(OPENCLAW_SHARE_BUNDLE_ID)</string>
+		<string>$(OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID)</string>
+	</array>
+	<key>OpenClawBuildGitBranch</key>
+	<string>$(OPENCLAW_BUILD_GIT_BRANCH)</string>
+	<key>OpenClawBuildGitSHA</key>
+	<string>$(OPENCLAW_BUILD_GIT_SHA)</string>
+	<key>OpenClawBuildSDKVersion</key>
+	<string>$(OPENCLAW_BUILD_SDK_VERSION)</string>
+	<key>OpenClawBuildSwiftVersion</key>
+	<string>$(OPENCLAW_BUILD_SWIFT_VERSION)</string>
+	<key>OpenClawBuildTimestamp</key>
+	<string>$(OPENCLAW_BUILD_TIMESTAMP)</string>
+	<key>OpenClawBuildWatchBundleIDs</key>
+	<array>
+		<string>$(OPENCLAW_WATCH_APP_BUNDLE_ID)</string>
+		<string>$(OPENCLAW_WATCH_EXTENSION_BUNDLE_ID)</string>
+	</array>
+	<key>OpenClawBuildXcodeVersion</key>
+	<string>$(OPENCLAW_BUILD_XCODE_VERSION)</string>
 	<key>OpenClawCanonicalVersion</key>
 	<string>$(OPENCLAW_IOS_VERSION)</string>
 	<key>OpenClawPushAPNsEnvironment</key>

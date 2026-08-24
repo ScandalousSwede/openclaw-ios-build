@@ -569,6 +569,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         xcodegen_action = (
             REPO_ROOT / ".github" / "actions" / "setup-xcodegen" / "action.yml"
         ).read_text(encoding="utf-8")
+        project_spec = (REPO_ROOT / "apps" / "ios" / "project.yml").read_text(
+            encoding="utf-8"
+        )
         third_party_uses = re.findall(
             r"^\s*uses:\s*([^./\s][^@\s]+)@([^\s#]+)", workflow, re.MULTILINE
         )
@@ -613,6 +616,8 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             '[[ "${version_output}" != "Version: ${XCODEGEN_VERSION}" ]]',
             xcodegen_action,
         )
+        self.assertEqual(project_spec.count("path: Tests/Info.plist"), 1)
+        self.assertEqual(project_spec.count("path: Tests/Logic/Info.plist"), 1)
         conformance_job = workflow.split("\n  xcodegen-conformance:\n", maxsplit=1)[1]
         conformance_job = conformance_job.split("\n  build:\n", maxsplit=1)[0]
         self.assertNotIn("environment:", conformance_job)
