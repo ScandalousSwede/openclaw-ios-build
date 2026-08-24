@@ -156,7 +156,7 @@ private func loadAndWaitBootstrap(
     await MainActor.run { vm.load() }
     try await waitUntil("bootstrap") {
         await MainActor.run {
-            vm.healthOK && (sessionId == nil || vm.sessionId == sessionId)
+            vm.healthOK && !vm.isLoading && (sessionId == nil || vm.sessionId == sessionId)
         }
     }
 }
@@ -730,6 +730,29 @@ struct ChatViewModelTests {
         #expect(roundTripped.transcriptMessageID == "message-1")
     }
 
+    @Test func `history message coding preserves canonical idempotency identity`() throws {
+        let rawCommandID = "aies-s3-probe-1f4fdfad-b75e-416e-b36b-ef664633d299"
+        let canonicalUserID = "\(rawCommandID):user"
+        let topLevel = Data(
+            """
+            {"role":"user","content":"hello","timestamp":1,"idempotencyKey":"\(canonicalUserID)"}
+            """.utf8)
+        let decoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: topLevel)
+        let roundTripped = try JSONDecoder().decode(
+            OpenClawChatMessage.self,
+            from: JSONEncoder().encode(decoded))
+
+        #expect(decoded.idempotencyKey == canonicalUserID)
+        #expect(roundTripped.idempotencyKey == canonicalUserID)
+
+        let embedded = Data(
+            """
+            {"role":"user","content":"hello","timestamp":1,"idempotencyKey":"wrong",\
+            "__openclaw":{"idempotencyKey":"\(canonicalUserID)"}}
+            """.utf8)
+        #expect(try JSONDecoder().decode(OpenClawChatMessage.self, from: embedded).idempotencyKey == canonicalUserID)
+    }
+
     @Test func `malformed identity metadata does not discard valid transcript row`() throws {
         let malformedRows = [
             #"{"role":"assistant","content":"kept","timestamp":12,"__openclaw":{"id":7}}"#,
@@ -743,6 +766,18 @@ struct ChatViewModelTests {
             #expect(decoded.timestamp == 12)
             #expect(decoded.transcriptMessageID == nil)
         }
+
+        let validTranscriptID = Data(
+            #"{"role":"user","content":"kept","timestamp":12,"__openclaw":{"id":"message-1","idempotencyKey":7}}"#.utf8)
+        let transcriptDecoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: validTranscriptID)
+        #expect(transcriptDecoded.transcriptMessageID == "message-1")
+        #expect(transcriptDecoded.idempotencyKey == nil)
+
+        let validIdempotencyKey = Data(
+            #"{"role":"user","content":"kept","timestamp":12,"__openclaw":{"id":7,"idempotencyKey":"command-1:user"}}"#.utf8)
+        let idempotencyDecoded = try JSONDecoder().decode(OpenClawChatMessage.self, from: validIdempotencyKey)
+        #expect(idempotencyDecoded.transcriptMessageID == nil)
+        #expect(idempotencyDecoded.idempotencyKey == "command-1:user")
     }
 
     @Test func `streams assistant and clears on final`() async throws {
@@ -2674,10 +2709,11 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("two model patches complete") {
             let patched = await transport.patchedModels()
@@ -2774,10 +2810,11 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("older model completion wins after latest failure") {
             await MainActor.run {
@@ -2825,16 +2862,18 @@ struct ChatViewModelTests {
 
         try await loadAndWaitBootstrap(vm: vm)
 
-        await MainActor.run {
-            vm.selectModel("openai/gpt-5.4")
-            vm.selectModel("openai/gpt-5.4-pro")
+        await MainActor.run { vm.selectModel("openai/gpt-5.4") }
+        try await waitUntil("first model patch admitted") {
+            await transport.patchedModels() == ["openai/gpt-5.4"]
         }
+        await MainActor.run { vm.selectModel("openai/gpt-5.4-pro") }
 
         try await waitUntil("latest failure restores prior successful model") {
             await MainActor.run {
                 vm.modelSelectionID == "openai/gpt-5.4" &&
                     vm.sessions.first(where: { $0.key == "main" })?.model == "gpt-5.4" &&
-                    vm.sessions.first(where: { $0.key == "main" })?.modelProvider == "openai"
+                    vm.sessions.first(where: { $0.key == "main" })?.modelProvider == "openai" &&
+                    vm.errorText != nil
             }
         }
 

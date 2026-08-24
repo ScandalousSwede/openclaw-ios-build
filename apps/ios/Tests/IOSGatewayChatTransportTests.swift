@@ -45,6 +45,31 @@ import Testing
         #expect(completion.completed)
     }
 
+    @Test func helloBindsRoutingCapabilityAndAuthenticatedOperatorScopes() throws {
+        let data = Data(
+            #"""
+            {"type":"hello-ok","protocol":4,"server":{"version":"2026.7.1"},
+            "features":{"capabilities":["chat-send-routing-contract"]},
+            "snapshot":{"presence":[],"health":{},"stateVersion":{"presence":0,"health":0},"uptimeMs":0},
+            "auth":{"role":"operator","scopes":["operator.write","operator.talk.secrets","operator.read"]},
+            "policy":{}}
+            """#
+                .utf8)
+        let hello = try JSONDecoder().decode(HelloOk.self, from: data)
+
+        #expect(hello.supportsServerCapability(.chatSendRoutingContract))
+        #expect(hello.authenticatedOperatorScopes == [
+            "operator.read",
+            "operator.talk.secrets",
+            "operator.write",
+        ])
+    }
+
+    @Test func routingContractUsesNormalizedGatewayMainSemantics() throws {
+        let data = Data(#"{"defaultId":"Main","mainKey":"Primary","scope":"Per-Sender","agents":[]}"#.utf8)
+        #expect(try IOSGatewayChatTransport.decodeSessionRoutingContract(data) == "per-sender|primary|main")
+    }
+
     @Test func listSessionsParamsIncludeGlobalSessionsButNotUnknown() throws {
         let params = try self.object(from: IOSGatewayChatTransport.makeListSessionsParamsJSON(limit: 12))
         #expect(params["includeGlobal"] as? Bool == true)
@@ -66,6 +91,249 @@ import Testing
         #expect(params["idempotencyKey"] as? String == "send-1")
         #expect(params["timeoutMs"] as? Int == IOSGatewayChatTransport.defaultChatSendTimeoutMs)
         #expect(params["attachments"] == nil)
+    }
+
+    @Test func guardedChatSendIncludesExactRoutingContractAndRawCommandIdentity() throws {
+        let params = try self.object(
+            from: IOSGatewayChatTransport.makeChatSendParamsJSON(
+                sessionKey: "agent:main:main",
+                message: "hello",
+                thinking: "low",
+                idempotencyKey: "raw-command-id",
+                expectedSessionRoutingContract: "per-sender|main|main",
+                attachments: []))
+        #expect(params["idempotencyKey"] as? String == "raw-command-id")
+        #expect(params["expectedSessionRoutingContract"] as? String == "per-sender|main|main")
+    }
+
+    @Test func boundedHistoryPageRequestUsesDeployedSchemaFields() throws {
+        let params = try self.object(
+            from: IOSGatewayChatTransport.makeHistoryParamsJSON(
+                sessionKey: "agent:main:main",
+                limit: 250,
+                offset: 500,
+                maxChars: 400_000))
+        #expect(Set(params.keys) == ["sessionKey", "limit", "offset", "maxChars"])
+        #expect(params["sessionKey"] as? String == "agent:main:main")
+        #expect(params["limit"] as? Int == 250)
+        #expect(params["offset"] as? Int == 500)
+        #expect(params["maxChars"] as? Int == 400_000)
+    }
+
+    @Test func ordinaryHistoryRequestOmitsOptionalTailFields() throws {
+        let params = try self.object(
+            from: IOSGatewayChatTransport.makeHistoryParamsJSON(sessionKey: "agent:main:main"))
+        #expect(Set(params.keys) == ["sessionKey"])
+        #expect(params["sessionKey"] as? String == "agent:main:main")
+    }
+
+    @Test func pagedHistoryBoundsMatchDeployedLimits() throws {
+        let maximums = try self.object(
+            from: IOSGatewayChatTransport.makeBoundedHistoryPageParamsJSON(
+                sessionKey: "agent:main:main",
+                limit: 5000,
+                offset: -10,
+                maxChars: 2_000_000))
+        #expect(maximums["limit"] as? Int == 1000)
+        #expect(maximums["offset"] as? Int == 0)
+        #expect(maximums["maxChars"] as? Int == 500_000)
+
+        let minimums = try self.object(
+            from: IOSGatewayChatTransport.makeBoundedHistoryPageParamsJSON(
+                sessionKey: "agent:main:main",
+                limit: 0,
+                offset: 0,
+                maxChars: 0))
+        #expect(minimums["limit"] as? Int == 1)
+        #expect(minimums["maxChars"] as? Int == 1)
+    }
+
+    @Test func historyPageRequiresCoherentAdvancingMetadata() throws {
+        let page = try IOSGatewayChatTransport.decodeHistoryPage(
+            Data(
+                #"""
+                {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+                "offset":200,"nextOffset":400,"hasMore":true,"totalMessages":850}
+                """#
+                    .utf8),
+            requestedOffset: 200)
+        #expect(page.payload.sessionKey == "agent:main:main")
+        #expect(page.offset == 200)
+        #expect(page.nextOffset == 400)
+        #expect(page.hasMore)
+        #expect(page.totalMessages == 850)
+    }
+
+    @Test func historyTerminalPageRequiresAbsentNextOffset() throws {
+        let page = try IOSGatewayChatTransport.decodeHistoryPage(
+            Data(
+                #"""
+                {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+                "offset":800,"hasMore":false,"totalMessages":850}
+                """#
+                    .utf8),
+            requestedOffset: 800)
+        #expect(page.nextOffset == nil)
+        #expect(!page.hasMore)
+    }
+
+    @Test func historyPageAcceptsOnlyDeployedEmptySessionMetadataException() throws {
+        let emptySession = Data(
+            #"{"sessionKey":"agent:main:new-session","messages":[]}"#.utf8)
+        let page = try IOSGatewayChatTransport.decodeHistoryPage(emptySession, requestedOffset: 0)
+        #expect(page.offset == 0)
+        #expect(page.totalMessages == 0)
+        #expect(!page.hasMore)
+        #expect(page.nextOffset == nil)
+
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.offsetMissing) {
+            try IOSGatewayChatTransport.decodeHistoryPage(emptySession, requestedOffset: 1)
+        }
+
+        let nonemptySessionless = Data(
+            #"""
+            {"sessionKey":"agent:main:new-session","messages":[{"role":"user","content":"redacted"}]}
+            """#
+                .utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.offsetMissing) {
+            try IOSGatewayChatTransport.decodeHistoryPage(nonemptySessionless, requestedOffset: 0)
+        }
+    }
+
+    @Test func historyPageFailsClosedOnMissingOrMismatchedMetadata() {
+        let missingMetadata = Data(
+            #"{"sessionKey":"agent:main:main","sessionId":"session-1","messages":[]}"#.utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.offsetMissing) {
+            try IOSGatewayChatTransport.decodeHistoryPage(missingMetadata, requestedOffset: 0)
+        }
+
+        let mismatchedOffset = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":200,"hasMore":false,"totalMessages":200}
+            """#
+                .utf8)
+        let mismatch = IOSGatewayChatTransport.HistoryPageValidationError.offsetMismatch(
+            expected: 0,
+            actual: 200)
+        #expect(throws: mismatch) {
+            try IOSGatewayChatTransport.decodeHistoryPage(mismatchedOffset, requestedOffset: 0)
+        }
+    }
+
+    @Test func historyPageRejectsLoopsAndInconsistentNextOffset() {
+        let looping = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":200,"nextOffset":200,"hasMore":true,"totalMessages":850}
+            """#
+                .utf8)
+        let loop = IOSGatewayChatTransport.HistoryPageValidationError.nextOffsetDidNotAdvance(
+            offset: 200,
+            nextOffset: 200)
+        #expect(throws: loop) {
+            try IOSGatewayChatTransport.decodeHistoryPage(looping, requestedOffset: 200)
+        }
+
+        let terminalWithNext = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":800,"nextOffset":850,"hasMore":false,"totalMessages":850}
+            """#
+                .utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.unexpectedNextOffset(850)) {
+            try IOSGatewayChatTransport.decodeHistoryPage(terminalWithNext, requestedOffset: 800)
+        }
+    }
+
+    @Test func historyPageRequiresTotalHasMoreAndAdvancingNextOffset() {
+        let missingHasMore = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":0,"totalMessages":850}
+            """#
+                .utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.hasMoreMissing) {
+            try IOSGatewayChatTransport.decodeHistoryPage(missingHasMore, requestedOffset: 0)
+        }
+
+        let negativeTotal = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":0,"hasMore":false,"totalMessages":-1}
+            """#
+                .utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.totalMessagesInvalid(-1)) {
+            try IOSGatewayChatTransport.decodeHistoryPage(negativeTotal, requestedOffset: 0)
+        }
+
+        let missingNext = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":0,"hasMore":true,"totalMessages":850}
+            """#
+                .utf8)
+        #expect(throws: IOSGatewayChatTransport.HistoryPageValidationError.nextOffsetMissing) {
+            try IOSGatewayChatTransport.decodeHistoryPage(missingNext, requestedOffset: 0)
+        }
+
+        let nextOutsideTotal = Data(
+            #"""
+            {"sessionKey":"agent:main:main","sessionId":"session-1","messages":[],
+            "offset":800,"nextOffset":850,"hasMore":true,"totalMessages":850}
+            """#
+                .utf8)
+        let outside = IOSGatewayChatTransport.HistoryPageValidationError.nextOffsetOutsideTotal(
+            nextOffset: 850,
+            totalMessages: 850)
+        #expect(throws: outside) {
+            try IOSGatewayChatTransport.decodeHistoryPage(nextOutsideTotal, requestedOffset: 800)
+        }
+    }
+
+    @Test func dispatchMappingPreservesEveryDurableOutcome() {
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            .notDispatched,
+            rawCommandID: "raw-1") == .notDispatched)
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            .ambiguous(code: "url:-1005"),
+            rawCommandID: "raw-1") == .ambiguous(code: "url:-1005"))
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            .rejected(code: "INVALID_REQUEST", reason: "session-routing-changed"),
+            rawCommandID: "raw-1") == .blockedRouteChanged)
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            .rejected(code: "INVALID_REQUEST", reason: "invalid-session"),
+            rawCommandID: "raw-1") == .dispatchRejected(
+                code: "INVALID_REQUEST",
+                reason: "invalid-session"))
+    }
+
+    @Test func dispatchAcceptsOnlyAckRunIDEqualToRawCommandID() {
+        let accepted = GatewayRequestDispatchResult.response(
+            Data(#"{"runId":"raw-1","status":"started"}"#.utf8))
+        let mismatched = GatewayRequestDispatchResult.response(
+            Data(#"{"runId":"raw-1:user","status":"started"}"#.utf8))
+        let malformed = GatewayRequestDispatchResult.response(Data(#"{"status":"started"}"#.utf8))
+
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            accepted,
+            rawCommandID: "raw-1") == .accepted(runID: "raw-1", status: "started"))
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            mismatched,
+            rawCommandID: "raw-1") == .ambiguous(code: "ack-run-id-mismatch"))
+        #expect(IOSGatewayChatTransport.mapDispatchResult(
+            malformed,
+            rawCommandID: "raw-1") == .ambiguous(code: "invalid-ack"))
+    }
+
+    @Test func outboxLeaseFailsClosedWithoutStableGatewayIdentity() async {
+        let transport = IOSGatewayChatTransport(gateway: GatewayNodeSession())
+        switch await transport.acquireOutboxRouteLease() {
+        case .unavailable(reason: .gatewayIdentityUnavailable):
+            break
+        default:
+            Issue.record("missing gateway identity must fail closed")
+        }
     }
 
     @Test func requestsFailFastWhenGatewayNotConnected() async {

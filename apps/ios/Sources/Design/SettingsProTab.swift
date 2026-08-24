@@ -164,7 +164,7 @@ struct SettingsProTab: View {
         }
         .alert("Reset Onboarding?", isPresented: self.$showResetOnboardingAlert) {
             Button("Reset", role: .destructive) {
-                self.resetOnboarding()
+                Task { await self.resetOnboarding() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {

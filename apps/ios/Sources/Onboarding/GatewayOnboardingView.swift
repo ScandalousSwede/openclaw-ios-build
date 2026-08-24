@@ -126,7 +126,7 @@ private struct ManualEntryStep: View {
                     .autocorrectionDisabled()
 
                 Button("Apply setup code") {
-                    self.applySetupCode()
+                    Task { await self.applySetupCode() }
                 }
                 .disabled(self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
@@ -248,7 +248,7 @@ private struct ManualEntryStep: View {
         self.manualPassword = ""
     }
 
-    private func applySetupCode() {
+    private func applySetupCode() async {
         let raw = self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else {
             self.setupStatusText = "Paste a setup code to continue."
@@ -282,9 +282,14 @@ private struct ManualEntryStep: View {
         let trimmedInstanceId = GatewaySettingsStore.currentInstanceID()
         if !trimmedInstanceId.isEmpty {
             if setupAuth.hasBootstrapToken {
-                GatewayOnboardingReset.prepareForBootstrapPairing(
-                    appModel: self.appModel,
-                    instanceId: trimmedInstanceId)
+                do {
+                    try await GatewayOnboardingReset.prepareForBootstrapPairing(
+                        appModel: self.appModel,
+                        instanceId: trimmedInstanceId)
+                } catch {
+                    self.setupStatusText = "Could not securely clear queued messages. Setup was not applied."
+                    return
+                }
             }
             GatewaySettingsStore.saveGatewayBootstrapToken(setupAuth.bootstrapToken, instanceId: trimmedInstanceId)
         }

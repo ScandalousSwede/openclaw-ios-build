@@ -23,6 +23,7 @@ public struct OpenClawChatView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var isPinnedToBottom = true
     @State private var lastUserMessageID: UUID?
+    @State private var showsOutboxRetryConfirmation = false
     private let showsSessionSwitcher: Bool
     private let drawsBackground: Bool
     private let style: Style
@@ -112,6 +113,20 @@ public struct OpenClawChatView: View {
             if self.showsSessionSwitcher {
                 ChatSessionsSheet(viewModel: self.viewModel)
             }
+        }
+        .confirmationDialog(
+            "Retry unresolved delivery?",
+            isPresented: self.$showsOutboxRetryConfirmation,
+            titleVisibility: .visible)
+        {
+            Button("Retry with Same Identity") {
+                self.viewModel.retryHeadOutboxCommand()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "Canonical history has not confirmed this message. Retry preserves the exact command identity, "
+                    + "but delivery may already have occurred.")
         }
     }
 
@@ -261,6 +276,11 @@ public struct OpenClawChatView: View {
 
     @ViewBuilder
     private var messageListRows: some View {
+        if let presentation = self.outboxPresentation {
+            self.outboxStatusCard(presentation)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
         if let introText = self.visibleEmptyAssistantIntro {
             ChatAssistantIntroCard(text: introText)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -327,6 +347,135 @@ public struct OpenClawChatView: View {
                 assistantAvatarTint: self.assistantAvatarTint,
                 showsAssistantAvatar: self.showsAssistantAvatars)
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    struct OutboxPresentation {
+        let title: String
+        let message: String
+        let systemImage: String
+        let tint: Color
+        let offersRetry: Bool
+        let offersCancel: Bool
+    }
+
+    private var outboxPresentation: OutboxPresentation? {
+        Self.outboxPresentation(for: self.viewModel.outboxStatus)
+    }
+
+    static func outboxPresentation(for status: OpenClawChatOutboxStatus) -> OutboxPresentation? {
+        if status.blockedCount > 0 {
+            let routeChanged = status.headOutcome == .blockedRouteChanged
+            return OutboxPresentation(
+                title: routeChanged ? "Delivery route changed" : "Gateway rejected message",
+                message: routeChanged
+                    ? "Review the verified destination route. A retry uses the same command identity."
+                    : "The gateway rejected this message before acceptance. Retry keeps the same command identity.",
+                systemImage: "exclamationmark.shield.fill",
+                tint: .orange,
+                offersRetry: status.retryableRawCommandID != nil,
+                offersCancel: status.cancellableRawCommandID != nil)
+        }
+        if status.confirmingCount > 0 {
+            let ambiguous = status.headOutcome == .ambiguous
+            return OutboxPresentation(
+                title: "Confirming delivery",
+                message: ambiguous
+                    ? "Delivery is unresolved. Canonical history must confirm it; absence is not proof it was unsent."
+                    : "The gateway accepted this message. Waiting for canonical history confirmation.",
+                systemImage: "checkmark.arrow.trianglehead.counterclockwise",
+                tint: .blue,
+                offersRetry: status.retryableRawCommandID != nil,
+                offersCancel: false)
+        }
+        if status.deliveryGate == .offline, !status.hasVerifiedRouteSnapshot {
+            return OutboxPresentation(
+                title: "Offline queue not yet available",
+                message: "Connect once to verify this gateway before queueing messages offline.",
+                systemImage: "wifi.exclamationmark",
+                tint: .orange,
+                offersRetry: false,
+                offersCancel: false)
+        }
+        if let gate = status.deliveryGate, gate != .offline {
+            let message = switch gate {
+            case .capabilityUnavailable:
+                "The paired client Hello does not advertise durable chat routing. Delivery is disabled."
+            case .operatorScopesUnavailable:
+                "The authenticated connection is missing required operator chat scopes. Delivery is disabled."
+            case .routingContractUnavailable:
+                "The gateway did not provide a routing contract. Delivery is disabled."
+            case .gatewayIdentityUnavailable, .gatewayMismatch:
+                "The verified gateway identity is unavailable or changed. Delivery is disabled."
+            case .unsupportedClient:
+                "This client transport does not support the durable delivery contract."
+            case .offline:
+                "The verified gateway route is offline."
+            }
+            return OutboxPresentation(
+                title: "Durable delivery unavailable",
+                message: message,
+                systemImage: "exclamationmark.shield.fill",
+                tint: .orange,
+                offersRetry: false,
+                offersCancel: status.cancellableRawCommandID != nil)
+        }
+        if status.queuedCount > 0 {
+            let message = status.deliveryGate == .offline
+                ? "Queued on this device using the last verified route. It will send after reconnecting."
+                : "Queued on this device and waiting for the verified gateway route."
+            return OutboxPresentation(
+                title: "Message queued",
+                message: message,
+                systemImage: "tray.full.fill",
+                tint: .blue,
+                offersRetry: false,
+                offersCancel: status.cancellableRawCommandID != nil)
+        }
+        if status.recentExpiredCount > 0 {
+            return OutboxPresentation(
+                title: "Queued message expired",
+                message: "An unconfirmed message exceeded the 48-hour local retention window and was not retried.",
+                systemImage: "clock.badge.exclamationmark.fill",
+                tint: .orange,
+                offersRetry: false,
+                offersCancel: false)
+        }
+        return nil
+    }
+
+    @ViewBuilder
+    private func outboxStatusCard(_ presentation: OutboxPresentation) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(presentation.title, systemImage: presentation.systemImage)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(presentation.tint)
+            Text(presentation.message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if presentation.offersRetry || presentation.offersCancel {
+                HStack(spacing: 12) {
+                    if presentation.offersRetry {
+                        Button("Review and Retry") {
+                            self.showsOutboxRetryConfirmation = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    if presentation.offersCancel {
+                        Button("Discard Unsent", role: .destructive) {
+                            self.viewModel.cancelHeadOutboxCommand()
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .font(.footnote.weight(.semibold))
+            }
+        }
+        .padding(12)
+        .background(presentation.tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(presentation.tint.opacity(0.22), lineWidth: 1)
         }
     }
 
@@ -533,6 +682,8 @@ public struct OpenClawChatView: View {
                 role: last.role,
                 content: content,
                 timestamp: last.timestamp,
+                transcriptMessageID: last.transcriptMessageID,
+                idempotencyKey: last.idempotencyKey,
                 toolCallId: last.toolCallId,
                 toolName: last.toolName,
                 usage: last.usage,

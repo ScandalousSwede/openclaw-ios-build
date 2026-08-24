@@ -50,6 +50,7 @@ private final class DoubleCallbackPingWebSocketTask: WebSocketTasking, @unchecke
 private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Sendable {
     private let lock = NSLock()
     private let helloAuth: [String: Any]?
+    private let helloCapabilities: [String]
     private let deliversReceiveFailureOnCancel: Bool
     private let requestSendGate: GatewayAsyncGate?
     private var _state: URLSessionTask.State = .suspended
@@ -62,10 +63,12 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
 
     init(
         helloAuth: [String: Any]? = nil,
+        helloCapabilities: [String] = [],
         deliversReceiveFailureOnCancel: Bool = true,
         requestSendGate: GatewayAsyncGate? = nil)
     {
         self.helloAuth = helloAuth
+        self.helloCapabilities = helloCapabilities
         self.deliversReceiveFailureOnCancel = deliversReceiveFailureOnCancel
         self.requestSendGate = requestSendGate
     }
@@ -120,6 +123,15 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         self.lock.withLock { self.connectAuth }
     }
 
+    func latestConnectScopes() -> [String] {
+        self.lock.withLock {
+            guard let request = self.sentRequests.last(where: { $0["method"] as? String == "connect" }),
+                  let params = request["params"] as? [String: Any]
+            else { return [] }
+            return params["scopes"] as? [String] ?? []
+        }
+    }
+
     func sentRequestCount(method: String) -> Int {
         self.lock.withLock {
             self.sentRequests.filter { $0["method"] as? String == method }.count
@@ -148,11 +160,17 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         for _ in 0..<50 {
             let id = self.lock.withLock { self.connectRequestId }
             if let id {
-                return .data(Self.connectOkData(id: id, auth: self.helloAuth))
+                return .data(Self.connectOkData(
+                    id: id,
+                    auth: self.helloAuth,
+                    capabilities: self.helloCapabilities))
             }
             try await Task.sleep(nanoseconds: 1_000_000)
         }
-        return .data(Self.connectOkData(id: "connect", auth: self.helloAuth))
+        return .data(Self.connectOkData(
+            id: "connect",
+            auth: self.helloAuth,
+            capabilities: self.helloCapabilities))
     }
 
     func receive(
@@ -213,6 +231,26 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         self.emit(.success(.data(data)))
     }
 
+    func emitErrorResponse(
+        id: String,
+        code: String,
+        message: String,
+        reason: String? = nil) throws
+    {
+        var error: [String: Any] = ["code": code, "message": message]
+        if let reason {
+            error["details"] = ["reason": reason]
+        }
+        let frame: [String: Any] = [
+            "type": "res",
+            "id": id,
+            "ok": false,
+            "error": error,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: frame)
+        self.emit(.success(.data(data)))
+    }
+
     private func emit(_ result: Result<URLSessionWebSocketTask.Message, Error>) {
         let handler = self.lock.withLock { () -> (@Sendable (Result<URLSessionWebSocketTask.Message, Error>) -> Void)? in
             defer { self.pendingReceiveHandler = nil }
@@ -230,7 +268,11 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         return (try? JSONSerialization.data(withJSONObject: frame)) ?? Data()
     }
 
-    private static func connectOkData(id: String, auth: [String: Any]? = nil) -> Data {
+    private static func connectOkData(
+        id: String,
+        auth: [String: Any]? = nil,
+        capabilities: [String] = []) -> Data
+    {
         var payload: [String: Any] = [
             "type": "hello-ok",
             "protocol": 2,
@@ -241,6 +283,7 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
             "features": [
                 "methods": [],
                 "events": [],
+                "capabilities": capabilities,
             ],
             "snapshot": [
                 "presence": [["ts": 1]],
@@ -274,6 +317,7 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
 private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked Sendable {
     private let lock = NSLock()
     private let helloAuth: [String: Any]?
+    private let helloCapabilities: [String]
     private let deliversReceiveFailureOnCancel: Bool
     private let requestSendGate: GatewayAsyncGate?
     private var tasks: [FakeGatewayWebSocketTask] = []
@@ -281,10 +325,12 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
 
     init(
         helloAuth: [String: Any]? = nil,
+        helloCapabilities: [String] = [],
         deliversReceiveFailureOnCancel: Bool = true,
         requestSendGate: GatewayAsyncGate? = nil)
     {
         self.helloAuth = helloAuth
+        self.helloCapabilities = helloCapabilities
         self.deliversReceiveFailureOnCancel = deliversReceiveFailureOnCancel
         self.requestSendGate = requestSendGate
     }
@@ -310,6 +356,7 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
             self.makeCount += 1
             let task = FakeGatewayWebSocketTask(
                 helloAuth: self.helloAuth,
+                helloCapabilities: self.helloCapabilities,
                 deliversReceiveFailureOnCancel: self.deliversReceiveFailureOnCancel,
                 requestSendGate: self.requestSendGate)
             self.tasks.append(task)
@@ -348,6 +395,19 @@ private actor StringProbe {
     }
 }
 
+private final class DiagnosticLineProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        self.lock.withLock { self.values.append(value) }
+    }
+
+    func snapshot() -> [String] {
+        self.lock.withLock { self.values }
+    }
+}
+
 private actor GatewayAsyncGate {
     private var continuation: CheckedContinuation<Void, Never>?
     private var released = false
@@ -372,16 +432,20 @@ private actor GatewayAsyncGate {
     }
 }
 
-private func generationTestOptions() -> GatewayConnectOptions {
+private func generationTestOptions(
+    scopes: [String] = ["operator.read"],
+    stableGatewayID: String? = nil) -> GatewayConnectOptions
+{
     GatewayConnectOptions(
         role: "operator",
-        scopes: ["operator.read"],
+        scopes: scopes,
         caps: [],
         commands: [],
         permissions: [:],
         clientId: "openclaw-ios-generation-test",
         clientMode: "ui",
         clientDisplayName: "iOS Generation Test",
+        stableGatewayID: stableGatewayID,
         includeDeviceIdentity: false)
 }
 
@@ -389,6 +453,7 @@ private func connectForGenerationTest(
     _ gateway: GatewayNodeSession,
     session: FakeGatewayWebSocketSession,
     endpoint: String,
+    options: GatewayConnectOptions = generationTestOptions(),
     onConnected: @escaping @Sendable () async -> Void = {},
     onDisconnected: @escaping @Sendable (String) async -> Void = { _ in },
     onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse = { request in
@@ -400,7 +465,7 @@ private func connectForGenerationTest(
         token: nil,
         bootstrapToken: nil,
         password: nil,
-        connectOptions: generationTestOptions(),
+        connectOptions: options,
         sessionBox: WebSocketSessionBox(session: session),
         onConnected: onConnected,
         onDisconnected: onDisconnected,
@@ -918,7 +983,7 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
-    func connectedCallbackDisconnectInvalidatesOuterConnect() async {
+    func connectedCallbackDisconnectInvalidatesOuterConnect() async throws {
         let session = FakeGatewayWebSocketSession()
         let gateway = GatewayNodeSession()
         let lifecycle = StringProbe()
@@ -940,11 +1005,17 @@ struct GatewayNodeSessionTests {
             Issue.record("connect failed with unexpected error: \(error)")
         }
 
-        #expect(await lifecycle.snapshot() == [
-            "disconnecting",
+        try await waitUntil("callback disconnect and outer connect settled") {
+            let events = await lifecycle.snapshot()
+            return events.count == 3
+        }
+        let lifecycleEvents = await lifecycle.snapshot()
+        #expect(lifecycleEvents.first == "disconnecting")
+        #expect(lifecycleEvents.count == 3)
+        #expect(Set(lifecycleEvents.dropFirst()) == Set([
             "disconnected",
             "outer_cancelled",
-        ])
+        ]))
         #expect(session.snapshotMakeCount() == 1)
         #expect(await gateway.currentRoute() == nil)
     }
@@ -1155,6 +1226,200 @@ struct GatewayNodeSessionTests {
         #expect(replacementTask.sentRequestCount(method: "sessions.list") == 0)
 
         await gateway.disconnect()
+    }
+
+    @Test
+    func routeBindsStableGatewayHelloCapabilityAndAuthenticatedScopeUnion() async throws {
+        let diagnostics = DiagnosticLineProbe()
+        OpenClawDiagnosticRecorder.installSink { diagnostics.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+        let session = FakeGatewayWebSocketSession(
+            helloAuth: [
+                "role": "operator",
+                "scopes": ["operator.read", "operator.write", "operator.talk.secrets"],
+            ],
+            helloCapabilities: [
+                GatewayServerCapability.chatSendRoutingContract.rawValue,
+                "future-capability",
+            ])
+        let gateway = GatewayNodeSession()
+        let options = generationTestOptions(
+            scopes: ["operator.talk.secrets", "operator.write", "operator.read"],
+            stableGatewayID: "gateway-a")
+
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid",
+            options: options)
+
+        let route = try #require(await gateway.currentRoute(ifGatewayID: "gateway-a"))
+        #expect(await gateway.currentRoute(ifGatewayID: "gateway-b") == nil)
+        #expect(await gateway.currentGatewayID(ifCurrentRoute: route) == "gateway-a")
+        #expect(await gateway.supportsServerCapability(
+            .chatSendRoutingContract,
+            ifCurrentRoute: route) == true)
+        #expect(await gateway.serverCapabilities(ifCurrentRoute: route) == [
+            "chat-send-routing-contract",
+            "future-capability",
+        ])
+        #expect(await gateway.operatorScopes(ifCurrentRoute: route) == [
+            "operator.read",
+            "operator.talk.secrets",
+            "operator.write",
+        ])
+        #expect(Set(try #require(session.latestTask()).latestConnectScopes()) == [
+            "operator.read",
+            "operator.talk.secrets",
+            "operator.write",
+        ])
+        let helloDiagnostic = try #require(diagnostics.snapshot()
+            .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+            .first { $0.state == "hello_s3_ready" })
+        #expect(helloDiagnostic.kind == .route)
+        #expect(helloDiagnostic.socketGeneration != nil)
+        #expect(helloDiagnostic.routeGeneration != nil)
+        #expect(helloDiagnostic.sequence == 2)
+        #expect(helloDiagnostic.stream == "test")
+
+        await gateway.disconnect()
+        #expect(await gateway.supportsServerCapability(
+            .chatSendRoutingContract,
+            ifCurrentRoute: route) == nil)
+        #expect(await gateway.operatorScopes(ifCurrentRoute: route) == nil)
+    }
+
+    @Test
+    func helloDiagnosticStateDistinguishesCapabilityAndScopeReadiness() {
+        #expect(GatewayNodeSession.diagnosticHelloState(
+            supportsRoutingGuard: true,
+            hasRequiredOperatorScopes: true) == "hello_s3_ready")
+        #expect(GatewayNodeSession.diagnosticHelloState(
+            supportsRoutingGuard: false,
+            hasRequiredOperatorScopes: true) == "hello_s3_capability_missing")
+        #expect(GatewayNodeSession.diagnosticHelloState(
+            supportsRoutingGuard: true,
+            hasRequiredOperatorScopes: false) == "hello_s3_scope_missing")
+        #expect(GatewayNodeSession.diagnosticHelloState(
+            supportsRoutingGuard: false,
+            hasRequiredOperatorScopes: false) == "hello_s3_capability_scope_missing")
+    }
+
+    @Test
+    func trackedRequestReturnsResponseFromExactRoute() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        let task = try #require(session.latestTask())
+
+        let request = Task {
+            await gateway.requestTrackingDispatch(
+                method: "chat.send",
+                paramsJSON: #"{"idempotencyKey":"raw-1"}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("tracked request physically dispatched") {
+            task.latestRequestID(method: "chat.send") != nil
+        }
+        try task.emitResponse(
+            id: try #require(task.latestRequestID(method: "chat.send")),
+            payload: ["runId": "raw-1", "status": "started"])
+
+        guard case let .response(data) = await request.value else {
+            Issue.record("expected a tracked response")
+            await gateway.disconnect()
+            return
+        }
+        let payload = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(payload["runId"] as? String == "raw-1")
+        await gateway.disconnect()
+    }
+
+    @Test
+    func trackedRequestPreservesExplicitGatewayRejection() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        let task = try #require(session.latestTask())
+
+        let request = Task {
+            await gateway.requestTrackingDispatch(
+                method: "chat.send",
+                paramsJSON: #"{"idempotencyKey":"raw-2"}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("tracked request physically dispatched") {
+            task.latestRequestID(method: "chat.send") != nil
+        }
+        try task.emitErrorResponse(
+            id: try #require(task.latestRequestID(method: "chat.send")),
+            code: "INVALID_REQUEST",
+            message: "session routing changed; review and retry",
+            reason: "session-routing-changed")
+
+        #expect(await request.value == .rejected(
+            code: "INVALID_REQUEST",
+            reason: "session-routing-changed"))
+        await gateway.disconnect()
+    }
+
+    @Test
+    func trackedRequestMakesPostAdmissionTransportLossAmbiguous() async throws {
+        let sendGate = GatewayAsyncGate()
+        let session = FakeGatewayWebSocketSession(requestSendGate: sendGate)
+        let gateway = GatewayNodeSession()
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        let task = try #require(session.latestTask())
+
+        let request = Task {
+            await gateway.requestTrackingDispatch(
+                method: "chat.send",
+                paramsJSON: #"{"idempotencyKey":"raw-3"}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("tracked request began physical dispatch") {
+            await sendGate.hasStarted()
+        }
+        task.emitReceiveFailure()
+        let outcome = await request.value
+        await sendGate.release()
+
+        guard case .ambiguous = outcome else {
+            Issue.record("post-admission loss must be ambiguous, got \(outcome)")
+            await gateway.disconnect()
+            return
+        }
+        await gateway.disconnect()
+    }
+
+    @Test
+    func retiredRouteBeforePhysicalDispatchIsNotDispatched() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        await gateway.disconnect()
+
+        let outcome = await gateway.requestTrackingDispatch(
+            method: "chat.send",
+            paramsJSON: #"{"idempotencyKey":"raw-4"}"#,
+            ifCurrentRoute: route)
+        #expect(outcome == .notDispatched)
     }
 
     @Test
