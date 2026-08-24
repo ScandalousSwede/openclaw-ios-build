@@ -77,8 +77,40 @@ jobs:
             exit 1
           fi
 
-  build:
+  xcodegen-conformance:
     needs: dispatch-gate
+    runs-on: macos-15
+    steps:
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.2'
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup pinned XcodeGen
+        uses: ./.github/actions/setup-xcodegen
+
+      - name: Generate Xcode project and verify tracked outputs
+        run: |
+          set -euo pipefail
+          cd apps/ios
+          xcodegen generate
+          if ! git -C ../.. diff --exit-code; then
+            echo "XcodeGen changed tracked outputs; commit deterministic generated changes first." >&2
+            exit 1
+          fi
+          untracked_outputs="$(git -C ../.. ls-files --others --exclude-standard)"
+          if [[ -n "${untracked_outputs}" ]]; then
+            echo "XcodeGen left untracked outputs:" >&2
+            printf '%s\n' "${untracked_outputs}" >&2
+            exit 1
+          fi
+
+  build:
+    needs:
+      - dispatch-gate
+      - xcodegen-conformance
     if: inputs.distribution == 'unsigned-diagnostic'
     runs-on: macos-15
     env:
@@ -108,7 +140,10 @@ jobs:
           save-actions-cache: "false"
 
       - name: Install iOS build tools
-        run: brew install xcodegen swiftlint swiftformat
+        run: brew install swiftlint swiftformat
+
+      - name: Setup pinned XcodeGen
+        uses: ./.github/actions/setup-xcodegen
 
       - name: Install dependencies
         run: pnpm install
@@ -307,7 +342,9 @@ jobs:
           if-no-files-found: error
 
   signed-internal-testflight:
-    needs: dispatch-gate
+    needs:
+      - dispatch-gate
+      - xcodegen-conformance
     if: >-
       inputs.distribution == 'signed-internal-testflight' &&
       github.ref_type == 'branch' &&
@@ -358,7 +395,10 @@ jobs:
           save-actions-cache: "false"
 
       - name: Install iOS build tools
-        run: brew install fastlane xcodegen swiftlint swiftformat
+        run: brew install fastlane swiftlint swiftformat
+
+      - name: Setup pinned XcodeGen
+        uses: ./.github/actions/setup-xcodegen
 
       - name: Install dependencies
         run: pnpm install

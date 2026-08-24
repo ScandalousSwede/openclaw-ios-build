@@ -566,6 +566,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
         ).read_text(encoding="utf-8")
+        xcodegen_action = (
+            REPO_ROOT / ".github" / "actions" / "setup-xcodegen" / "action.yml"
+        ).read_text(encoding="utf-8")
         third_party_uses = re.findall(
             r"^\s*uses:\s*([^./\s][^@\s]+)@([^\s#]+)", workflow, re.MULTILINE
         )
@@ -587,6 +590,34 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("name: Verify exact release checkout", workflow)
         self.assertGreaterEqual(
             workflow.count("test_verify_aies_internal_signing.py"), 2
+        )
+        self.assertEqual(workflow.count("uses: ./.github/actions/setup-xcodegen"), 3)
+        self.assertEqual(workflow.count("xcodegen generate"), 3)
+        self.assertEqual(workflow.count("git -C ../.. diff --exit-code"), 1)
+        self.assertEqual(
+            workflow.count("git -C ../.. ls-files --others --exclude-standard"), 1
+        )
+        self.assertIn("XCODEGEN_VERSION: 2.46.0", xcodegen_action)
+        self.assertIn(
+            "XCODEGEN_SHA256: "
+            "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806",
+            xcodegen_action,
+        )
+        self.assertIn(
+            '[[ "${version_output}" != "Version: ${XCODEGEN_VERSION}" ]]',
+            xcodegen_action,
+        )
+        conformance_job = workflow.split("\n  xcodegen-conformance:\n", maxsplit=1)[1]
+        conformance_job = conformance_job.split("\n  build:\n", maxsplit=1)[0]
+        self.assertNotIn("environment:", conformance_job)
+        self.assertNotIn("secrets.", conformance_job)
+        self.assertIn("git -C ../.. diff --exit-code", conformance_job)
+        build_job = workflow.split("\n  build:\n", maxsplit=1)[1]
+        build_job = build_job.split("\n  signed-internal-testflight:\n", maxsplit=1)[0]
+        self.assertIn("xcodegen-conformance", build_job)
+        self.assertIn(
+            "xcodegen-conformance",
+            workflow.split("\n  signed-internal-testflight:\n", maxsplit=1)[1],
         )
         self.assertEqual(workflow.count("TalkModeManagerTests"), 2)
         self.assertEqual(workflow.count("TalkDurableOutboxTests"), 2)
