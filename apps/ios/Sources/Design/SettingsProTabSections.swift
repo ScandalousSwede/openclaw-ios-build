@@ -876,6 +876,32 @@ extension SettingsProTab {
                 }
                 .controlSize(.small)
 
+                if self.appModel.talkMode.hasPendingDurableMessage {
+                    Divider()
+                    Text("A recognized Talk message was not queued. Retry preserves its original command identity.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button {
+                            Task {
+                                _ = await self.appModel.talkMode.retryPendingDurableMessage()
+                            }
+                        } label: {
+                            Label("Retry Talk Message", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button(role: .destructive) {
+                            self.appModel.talkMode.discardPendingDurableMessage()
+                        } label: {
+                            Label("Discard", systemImage: "trash")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.small)
+                    .disabled(self.appModel.talkMode.isPersistingDurableMessage)
+                }
+
                 Divider()
                 self.detailRow("TTS State", value: diagnostics.state.rawValue)
                 Divider()

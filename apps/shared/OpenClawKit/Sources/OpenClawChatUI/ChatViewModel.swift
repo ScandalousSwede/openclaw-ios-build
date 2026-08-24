@@ -39,7 +39,8 @@ public final class OpenClawChatViewModel {
     public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
     public private(set) var sessions: [OpenClawChatSessionEntry] = []
     private let transport: any OpenClawChatTransport
-    private let outboxCoordinator: OpenClawChatOutboxCoordinator?
+    private let outboxCoordinator: OpenClawChatOutboxDeliveryOwner?
+    private let ownsOutboxCoordinator: Bool
     private var sessionDefaults: OpenClawChatSessionsDefaults?
     private let prefersExplicitThinkingLevel: Bool
     private let onSessionChanged: (@MainActor (String) -> Void)?
@@ -48,16 +49,20 @@ public final class OpenClawChatViewModel {
 
     @ObservationIgnored
     private nonisolated(unsafe) var eventTask: Task<Void, Never>?
+    private var eventSubscriptionGeneration: UInt64 = 0
     @ObservationIgnored
     private nonisolated(unsafe) var bootstrapTask: Task<Void, Never>?
     @ObservationIgnored
     private nonisolated(unsafe) var outboxWorkerTask: Task<Void, Never>?
+    @ObservationIgnored
+    private nonisolated(unsafe) var outboxUpdateTask: Task<Void, Never>?
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
     }
     private var isShutDown = false
     private var outboxWorkerGeneration: UInt64 = 0
     private var outboxWakeRequested = false
+    private var lastAppliedOutboxUpdateSequence: UInt64 = 0
     private var draftRevision: UInt64 = 0
 
     private var pendingLocalUserEchoMessageIDsByRunID: [String: UUID] = [:]
@@ -104,7 +109,7 @@ public final class OpenClawChatViewModel {
         case externalSync
     }
 
-    private struct SessionSnapshot {
+    private struct SessionSnapshot: Sendable {
         var key: String
         var generation: UInt64
     }
@@ -143,6 +148,7 @@ public final class OpenClawChatViewModel {
         sessionKey: String,
         transport: any OpenClawChatTransport,
         initialThinkingLevel: String? = nil,
+        outboxDeliveryOwner: OpenClawChatOutboxDeliveryOwner? = nil,
         outboxStore: OpenClawChatOutboxStore? = nil,
         outboxStableGatewayID: String? = nil,
         onSessionChanged: (@MainActor (String) -> Void)? = nil,
@@ -153,16 +159,21 @@ public final class OpenClawChatViewModel {
         self.transport = transport
         let normalizedGatewayID = outboxStableGatewayID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let outboxStore,
+        if let outboxDeliveryOwner {
+            self.outboxCoordinator = outboxDeliveryOwner
+            self.ownsOutboxCoordinator = false
+        } else if let outboxStore,
            let stableGatewayID = normalizedGatewayID,
            !stableGatewayID.isEmpty
         {
-            self.outboxCoordinator = OpenClawChatOutboxCoordinator(
+            self.outboxCoordinator = OpenClawChatOutboxDeliveryOwner(
                 store: outboxStore,
                 stableGatewayID: stableGatewayID,
                 transport: transport)
+            self.ownsOutboxCoordinator = true
         } else {
             self.outboxCoordinator = nil
+            self.ownsOutboxCoordinator = false
         }
         let normalizedThinkingLevel = Self.normalizedThinkingLevel(initialThinkingLevel)
         let initialResolvedThinkingLevel = normalizedThinkingLevel ?? "off"
@@ -175,13 +186,15 @@ public final class OpenClawChatViewModel {
         self.onThinkingLevelChanged = onThinkingLevelChanged
         self.diagnosticsLog = diagnosticsLog
 
-        let eventTransport = transport
-        self.eventTask = Task { [weak self, eventTransport] in
-            let stream = eventTransport.events()
-            for await evt in stream {
-                if Task.isCancelled { return }
-                await MainActor.run { [weak self] in
-                    self?.handleTransportEvent(evt)
+        self.startEventSubscription()
+        if let outboxCoordinator = self.outboxCoordinator {
+            self.outboxUpdateTask = Task { [weak self, outboxCoordinator] in
+                let updates = await outboxCoordinator.updates()
+                for await update in updates {
+                    if Task.isCancelled { return }
+                    await MainActor.run { [weak self] in
+                        self?.applyOutboxResult(update)
+                    }
                 }
             }
         }
@@ -191,6 +204,10 @@ public final class OpenClawChatViewModel {
         self.eventTask?.cancel()
         self.bootstrapTask?.cancel()
         self.outboxWorkerTask?.cancel()
+        self.outboxUpdateTask?.cancel()
+        if self.ownsOutboxCoordinator, let outboxCoordinator = self.outboxCoordinator {
+            Task { await outboxCoordinator.retire() }
+        }
         for (_, task) in self.pendingRunTimeoutTasks {
             task.cancel()
         }
@@ -199,10 +216,16 @@ public final class OpenClawChatViewModel {
     public func shutdown() {
         guard !self.isShutDown else { return }
         self.isShutDown = true
+        self.eventSubscriptionGeneration &+= 1
         self.outboxWorkerGeneration &+= 1
         self.outboxWakeRequested = false
         self.outboxWorkerTask?.cancel()
         self.outboxWorkerTask = nil
+        self.outboxUpdateTask?.cancel()
+        self.outboxUpdateTask = nil
+        if self.ownsOutboxCoordinator, let outboxCoordinator = self.outboxCoordinator {
+            Task { await outboxCoordinator.retire() }
+        }
         self.eventTask?.cancel()
         self.eventTask = nil
         self.bootstrapTask?.cancel()
@@ -430,7 +453,9 @@ public final class OpenClawChatViewModel {
     }
 
     private func isCurrentSession(_ snapshot: SessionSnapshot) -> Bool {
-        self.sessionKey == snapshot.key && self.sessionGeneration == snapshot.generation
+        !self.isShutDown &&
+            self.sessionKey == snapshot.key &&
+            self.sessionGeneration == snapshot.generation
     }
 
     private func isCurrentBootstrap(_ context: BootstrapContext) -> Bool {
@@ -443,6 +468,78 @@ public final class OpenClawChatViewModel {
 
     private func advanceSessionGeneration() {
         self.sessionGeneration &+= 1
+        self.startEventSubscription()
+    }
+
+    private func startEventSubscription() {
+        guard !self.isShutDown else { return }
+        self.eventSubscriptionGeneration &+= 1
+        let subscriptionGeneration = self.eventSubscriptionGeneration
+        self.eventTask?.cancel()
+        let eventTransport = self.transport
+        self.eventTask = Task { [weak self, eventTransport] in
+            let stream = eventTransport.events()
+            for await evt in stream {
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    self?.applyTransportEvent(
+                        evt,
+                        admittedSubscriptionGeneration: subscriptionGeneration)
+                }
+            }
+        }
+    }
+
+    private func applyTransportEvent(
+        _ event: OpenClawChatTransportEvent,
+        admittedSubscriptionGeneration: UInt64)
+    {
+        guard !self.isShutDown,
+              self.eventSubscriptionGeneration == admittedSubscriptionGeneration
+        else { return }
+        self.handleTransportEvent(event)
+    }
+
+    #if DEBUG
+    func _test_eventSubscriptionGeneration() -> UInt64 {
+        self.eventSubscriptionGeneration
+    }
+
+    func _test_applyTransportEvent(
+        _ event: OpenClawChatTransportEvent,
+        admittedSubscriptionGeneration: UInt64)
+    {
+        self.applyTransportEvent(
+            event,
+            admittedSubscriptionGeneration: admittedSubscriptionGeneration)
+    }
+
+    func _test_applyOutboxResult(_ result: OpenClawChatOutboxDeliveryUpdate) {
+        self.applyOutboxResult(result)
+    }
+
+    func _test_performReset(preserving commandInput: String) async {
+        await self.performReset(preserving: commandInput, clearInputOnAdmission: true)
+    }
+
+    func _test_performCompact(preserving commandInput: String) async {
+        await self.performCompact(preserving: commandInput)
+    }
+
+    func _test_performStartNewSession(preserving commandInput: String) async {
+        await self.performStartNewSession(preserving: commandInput)
+    }
+    #endif
+
+    private func applySuccessfulDestructiveSessionMutation() {
+        self.advanceSessionGeneration()
+        self.messages = []
+        self.pendingLocalUserEchoMessageIDsByRunID.removeAll()
+        self.liveCanonicalMessageIDsByIdentity.removeAll()
+        self.sessionId = nil
+        self.pendingToolCallsById = [:]
+        self.streamingAssistantText = nil
+        self.clearPendingRuns(reason: nil)
     }
 
     private func beginHistoryRequest(
@@ -994,18 +1091,15 @@ public final class OpenClawChatViewModel {
 
         let command = trimmed.lowercased()
         if command == "/new" {
-            self.input = ""
-            await self.performStartNewSession()
+            await self.performStartNewSession(preserving: self.input)
             return
         }
         if Self.resetTriggers.contains(command) {
-            self.input = ""
-            await self.performReset()
+            await self.performReset(preserving: self.input, clearInputOnAdmission: true)
             return
         }
         if Self.compactTriggers.contains(command) {
-            self.input = ""
-            await self.performCompact()
+            await self.performCompact(preserving: self.input)
             return
         }
 
@@ -1138,7 +1232,7 @@ public final class OpenClawChatViewModel {
 
     private func performDurableSend(
         trimmed: String,
-        coordinator: OpenClawChatOutboxCoordinator) async
+        coordinator: OpenClawChatOutboxDeliveryOwner) async
     {
         let sessionSnapshot = self.currentSessionSnapshot()
         let capturedInput = self.input
@@ -1216,15 +1310,13 @@ public final class OpenClawChatViewModel {
     }
 
     private func runOutboxWorker(
-        coordinator: OpenClawChatOutboxCoordinator,
+        coordinator: OpenClawChatOutboxDeliveryOwner,
         generation: UInt64) async
     {
         while self.isCurrentOutboxWorker(generation), self.outboxWakeRequested {
             self.outboxWakeRequested = false
             do {
-                let result = try await coordinator.processAvailableWork()
-                guard self.isCurrentOutboxWorker(generation), !Task.isCancelled else { return }
-                self.applyOutboxResult(result)
+                try await coordinator.wake()
             } catch {
                 guard self.isCurrentOutboxWorker(generation), !Task.isCancelled else { return }
                 self.errorText = error.localizedDescription
@@ -1243,7 +1335,11 @@ public final class OpenClawChatViewModel {
         !self.isShutDown && !Task.isCancelled && generation == self.outboxWorkerGeneration
     }
 
-    private func applyOutboxResult(_ result: OpenClawChatOutboxProcessingResult) {
+    private func applyOutboxResult(_ result: OpenClawChatOutboxDeliveryUpdate) {
+        guard !self.isShutDown,
+              result.sequence > self.lastAppliedOutboxUpdateSequence
+        else { return }
+        self.lastAppliedOutboxUpdateSequence = result.sequence
         self.outboxStatus = result.status
         for receipt in result.terminalReceipts
             where receipt.outcome == .expired || receipt.outcome == .cancelled
@@ -1410,25 +1506,52 @@ public final class OpenClawChatViewModel {
         self.kickOutboxWorker(reason: "session-switch")
     }
 
-    private func performStartNewSession() async {
+    private func performStartNewSession(preserving commandInput: String) async {
+        let admittedSession = self.currentSessionSnapshot()
+        guard await self.destructiveSessionActionIsAllowed(for: admittedSession),
+              self.isCurrentSession(admittedSession)
+        else { return }
+        self.input = ""
         let requested = self.generatedNewSessionKey()
-        let parentSessionKey = self.sessionKey
+        let parentSessionKey = admittedSession.key
         let next: String
         do {
-            let created = try await transport.createSession(
-                key: requested,
-                label: nil,
-                parentSessionKey: parentSessionKey)
+            let transport = self.transport
+            let created: OpenClawChatCreateSessionResponse
+            if let outboxCoordinator = self.outboxCoordinator {
+                created = try await outboxCoordinator.performDestructiveSessionAction(
+                    admissionCheck: { [weak self] in
+                        guard await MainActor.run(body: {
+                            self?.isCurrentSession(admittedSession) == true
+                        }) else { throw CancellationError() }
+                    }) {
+                        try await transport.createSession(
+                            key: requested,
+                            label: nil,
+                            parentSessionKey: parentSessionKey)
+                    }
+            } else {
+                guard self.isCurrentSession(admittedSession) else { throw CancellationError() }
+                created = try await transport.createSession(
+                    key: requested,
+                    label: nil,
+                    parentSessionKey: parentSessionKey)
+            }
+            guard self.isCurrentSession(admittedSession) else { return }
             let createdKey = created.key.trimmingCharacters(in: .whitespacesAndNewlines)
             next = createdKey.isEmpty ? requested : createdKey
         } catch {
+            guard self.isCurrentSession(admittedSession) else { return }
             if Self.isUnsupportedCreateSessionError(error) {
                 chatUILogger.info("sessions.create unsupported; falling back to sessions.reset")
-                await self.performReset()
+                await self.performReset(preserving: commandInput, clearInputOnAdmission: false)
                 return
             }
             chatUILogger.error("sessions.create failed \(error.localizedDescription, privacy: .public)")
             self.errorText = error.localizedDescription
+            if self.input.isEmpty {
+                self.input = commandInput
+            }
             return
         }
         self.advanceSessionGeneration()
@@ -1453,24 +1576,75 @@ public final class OpenClawChatViewModel {
             && nsError.localizedDescription == "sessions.create not supported by this transport"
     }
 
-    private func performReset() async {
+    private func performReset(
+        preserving commandInput: String,
+        clearInputOnAdmission: Bool) async
+    {
+        let admittedSession = self.currentSessionSnapshot()
         self.isLoading = true
         self.errorText = nil
 
         do {
-            try await self.transport.resetSession(sessionKey: self.sessionKey)
+            let transport = self.transport
+            if let outboxCoordinator = self.outboxCoordinator {
+                try await outboxCoordinator.performDestructiveSessionAction(admissionCheck: { [weak self] in
+                    guard await MainActor.run(body: {
+                        self?.isCurrentSession(admittedSession) == true
+                    }) else { throw CancellationError() }
+                }) {
+                    try await transport.resetSession(sessionKey: admittedSession.key)
+                }
+            } else {
+                guard self.isCurrentSession(admittedSession) else { throw CancellationError() }
+                try await transport.resetSession(sessionKey: admittedSession.key)
+            }
         } catch {
+            guard self.isCurrentSession(admittedSession) else { return }
             self.isLoading = false
-            self.errorText = error.localizedDescription
+            if error is OpenClawChatOutboxDeliveryOwnerError {
+                self.errorText =
+                    "Wait for queued messages to be confirmed before changing this session."
+            } else {
+                self.errorText = error.localizedDescription
+            }
+            if self.input.isEmpty {
+                self.input = commandInput
+            }
             chatUILogger.error("session reset failed \(error.localizedDescription, privacy: .public)")
             return
         }
 
-        self.liveCanonicalMessageIDsByIdentity.removeAll()
+        guard self.isCurrentSession(admittedSession) else { return }
+        if clearInputOnAdmission, self.input == commandInput {
+            self.input = ""
+        }
+        self.applySuccessfulDestructiveSessionMutation()
         self.startBootstrap()
     }
 
-    private func performCompact() async {
+    private func destructiveSessionActionIsAllowed(
+        for admittedSession: SessionSnapshot? = nil) async -> Bool
+    {
+        let admittedSession = admittedSession ?? self.currentSessionSnapshot()
+        guard self.isCurrentSession(admittedSession) else { return false }
+        guard let outboxCoordinator else { return true }
+        do {
+            guard try await outboxCoordinator.unresolvedCommands().isEmpty else {
+                guard self.isCurrentSession(admittedSession) else { return false }
+                self.errorText =
+                    "Wait for queued messages to be confirmed before changing this session."
+                return false
+            }
+            return self.isCurrentSession(admittedSession)
+        } catch {
+            guard self.isCurrentSession(admittedSession) else { return false }
+            self.errorText =
+                "Unable to verify queued messages. Reconnect before changing this session."
+            return false
+        }
+    }
+
+    private func performCompact(preserving commandInput: String) async {
         guard !self.isCompacting else { return }
         guard !self.isSending, self.pendingRuns.isEmpty, !self.isAborting else {
             self.errorText = "Wait for the current response before compacting the session."
@@ -1483,6 +1657,7 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        let admittedSession = self.currentSessionSnapshot()
         self.isCompacting = true
         self.isLoading = true
         self.errorText = nil
@@ -1491,10 +1666,31 @@ public final class OpenClawChatViewModel {
         }
 
         do {
-            try await self.transport.compactSession(sessionKey: self.sessionKey)
+            let transport = self.transport
+            if let outboxCoordinator = self.outboxCoordinator {
+                try await outboxCoordinator.performDestructiveSessionAction(admissionCheck: { [weak self] in
+                    guard await MainActor.run(body: {
+                        self?.isCurrentSession(admittedSession) == true
+                    }) else { throw CancellationError() }
+                }) {
+                    try await transport.compactSession(sessionKey: admittedSession.key)
+                }
+            } else {
+                guard self.isCurrentSession(admittedSession) else { throw CancellationError() }
+                try await transport.compactSession(sessionKey: admittedSession.key)
+            }
         } catch {
+            guard self.isCurrentSession(admittedSession) else { return }
             self.isLoading = false
-            self.errorText = "Unable to compact the session. Please try again."
+            if error is OpenClawChatOutboxDeliveryOwnerError {
+                self.errorText =
+                    "Wait for queued messages to be confirmed before changing this session."
+            } else {
+                self.errorText = "Unable to compact the session. Please try again."
+            }
+            if self.input.isEmpty {
+                self.input = commandInput
+            }
             let nsError = error as NSError
             chatUILogger.error(
                 "compact failed domain=\(nsError.domain, privacy: .public) code=\(nsError.code, privacy: .public)")
@@ -1502,7 +1698,12 @@ public final class OpenClawChatViewModel {
             return
         }
 
+        guard self.isCurrentSession(admittedSession) else { return }
+        if self.input == commandInput {
+            self.input = ""
+        }
         lastCompactAt = Date()
+        self.applySuccessfulDestructiveSessionMutation()
         self.startBootstrap()
     }
 

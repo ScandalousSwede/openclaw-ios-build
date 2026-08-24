@@ -156,7 +156,25 @@ final class NodeAppModel {
     // Secondary "operator" connection: used for chat/talk/config/voicewake requests.
     private let operatorGateway = GatewayNodeSession()
     @ObservationIgnored private var chatOutboxDatabase: OpenClawChatOutboxDatabase?
+    @ObservationIgnored private var chatOutboxDeliveryOwner: OpenClawChatOutboxDeliveryOwner?
+    private var chatOutboxDeliveryStableGatewayID: String?
+    private var chatOutboxDeliveryDesiredStableGatewayID: String?
+    private var chatOutboxDeliveryGeneration: UInt64 = 0
+    private var chatOutboxDeliverySelectionGeneration: UInt64 = 0
+    private var chatOutboxPurgeInProgress = false
+    @ObservationIgnored private var chatOutboxRecoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var chatOutboxRetirementTask: Task<Void, Never>?
     private(set) var chatOutboxOwnerGeneration: UInt64 = 0
+    #if DEBUG
+    private var testChatOutboxGatewayOwnerOverrideEnabled = false
+    private var testChatOutboxGatewayOwnerID: String?
+    @ObservationIgnored private var testChatOutboxStoreProvider:
+        (@MainActor @Sendable (String) async throws -> OpenClawChatOutboxStore)?
+    @ObservationIgnored private var testChatOutboxTransportProvider:
+        (@MainActor @Sendable (String) -> any OpenClawChatTransport)?
+    @ObservationIgnored private var testChatOutboxDatabaseProvider:
+        (@MainActor @Sendable () throws -> OpenClawChatOutboxDatabase)?
+    #endif
     private var nodeGatewayTask: Task<Void, Never>?
     private var operatorGatewayTask: Task<Void, Never>?
     private var forceOperatorTalkPermissionUpgradeRequest = false
@@ -177,7 +195,9 @@ final class NodeAppModel {
     private let remindersService: any RemindersServicing
     private let motionService: any MotionServicing
     private let watchMessagingService: any WatchMessagingServicing
-    private var pttVoiceWakeSuspended = false
+    private var pttVoiceWakeLeaseCount = 0
+    private var pttVoiceWakeWasSuspended = false
+    private var pttVoiceWakeCaptureID: String?
     private var talkVoiceWakeSuspended = false
     private var backgroundVoiceWakeSuspended = false
     private var backgroundTalkSuspended = false
@@ -210,6 +230,11 @@ final class NodeAppModel {
     }
 
     var chatOutboxGatewayOwnerID: String? {
+        #if DEBUG
+        if self.testChatOutboxGatewayOwnerOverrideEnabled {
+            return self.testChatOutboxGatewayOwnerID
+        }
+        #endif
         let candidates = [
             self.activeGatewayConnectConfig?.effectiveStableID,
             self.connectedGatewayID,
@@ -222,30 +247,343 @@ final class NodeAppModel {
     }
 
     func chatOutboxStore(stableGatewayID: String) async throws -> OpenClawChatOutboxStore {
+        #if DEBUG
+        if let testChatOutboxStoreProvider {
+            return try await testChatOutboxStoreProvider(stableGatewayID)
+        }
+        #endif
         let database: OpenClawChatOutboxDatabase
         if let existing = self.chatOutboxDatabase {
             database = existing
         } else {
-            let opened = try OpenClawChatOutboxDatabase.openApplicationSupport()
+            let opened = try self.openChatOutboxDatabase()
             self.chatOutboxDatabase = opened
             database = opened
         }
         return try await database.store(stableGatewayID: stableGatewayID)
     }
 
-    func securePurgeChatOutboxForCredentialReset() async throws {
-        self.chatOutboxOwnerGeneration &+= 1
-        let database: OpenClawChatOutboxDatabase
-        if let existing = self.chatOutboxDatabase {
-            database = existing
-        } else {
-            let opened = try OpenClawChatOutboxDatabase.openApplicationSupport()
-            self.chatOutboxDatabase = opened
-            database = opened
+    func chatOutboxDelivery(stableGatewayID: String) async throws -> OpenClawChatOutboxDeliveryOwner {
+        let normalizedID = stableGatewayID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedID.isEmpty else {
+            throw OpenClawChatOutboxError.invalidField("stableGatewayID")
         }
-        try await database.securePurgeAll()
-        self.chatOutboxOwnerGeneration &+= 1
+        guard !Task.isCancelled,
+              !self.chatOutboxPurgeInProgress,
+              self.isCurrentChatOutboxGateway(normalizedID)
+        else {
+            throw OpenClawChatOutboxError.retired
+        }
+        if let owner = self.chatOutboxDeliveryOwner,
+           self.chatOutboxDeliveryStableGatewayID == normalizedID
+        {
+            return owner
+        }
+
+        if self.chatOutboxDeliveryDesiredStableGatewayID != normalizedID {
+            self.chatOutboxDeliverySelectionGeneration &+= 1
+            self.chatOutboxDeliveryDesiredStableGatewayID = normalizedID
+        }
+        let selectionGeneration = self.chatOutboxDeliverySelectionGeneration
+        if let oldOwner = self.chatOutboxDeliveryOwner {
+            self.chatOutboxDeliveryGeneration &+= 1
+            self.talkMode.invalidateDurableChatDeliveryOwner()
+            self.chatOutboxRecoveryTask?.cancel()
+            self.chatOutboxRecoveryTask = nil
+            self.chatOutboxDeliveryOwner = nil
+            self.chatOutboxDeliveryStableGatewayID = nil
+            self.enqueueChatOutboxRetirement(oldOwner)
+        }
+        await self.awaitChatOutboxRetirements()
+        guard !Task.isCancelled,
+              !self.chatOutboxPurgeInProgress,
+              self.isCurrentChatOutboxGateway(normalizedID)
+        else {
+            throw OpenClawChatOutboxError.retired
+        }
+        guard self.chatOutboxDeliverySelectionGeneration == selectionGeneration else {
+            if let owner = self.chatOutboxDeliveryOwner,
+               self.chatOutboxDeliveryStableGatewayID == normalizedID
+            {
+                return owner
+            }
+            throw OpenClawChatOutboxError.retired
+        }
+        let store = try await self.chatOutboxStore(stableGatewayID: normalizedID)
+        guard !Task.isCancelled,
+              !self.chatOutboxPurgeInProgress,
+              self.isCurrentChatOutboxGateway(normalizedID)
+        else {
+            throw OpenClawChatOutboxError.retired
+        }
+        guard self.chatOutboxDeliverySelectionGeneration == selectionGeneration else {
+            if let owner = self.chatOutboxDeliveryOwner,
+               self.chatOutboxDeliveryStableGatewayID == normalizedID
+            {
+                return owner
+            }
+            throw OpenClawChatOutboxError.retired
+        }
+        if let owner = self.chatOutboxDeliveryOwner,
+           self.chatOutboxDeliveryStableGatewayID == normalizedID
+        {
+            return owner
+        }
+        guard self.chatOutboxDeliveryOwner == nil else {
+            throw OpenClawChatOutboxError.retired
+        }
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: store,
+            stableGatewayID: normalizedID,
+            transport: self.makeChatOutboxTransport(stableGatewayID: normalizedID))
+        self.chatOutboxDeliveryOwner = owner
+        self.chatOutboxDeliveryStableGatewayID = normalizedID
+        self.chatOutboxDeliveryGeneration &+= 1
+        return owner
     }
+
+    private func isCurrentChatOutboxGateway(_ stableGatewayID: String) -> Bool {
+        let current = self.chatOutboxGatewayOwnerID?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return current == stableGatewayID
+    }
+
+    private func openChatOutboxDatabase() throws -> OpenClawChatOutboxDatabase {
+        #if DEBUG
+        if let testChatOutboxDatabaseProvider {
+            return try testChatOutboxDatabaseProvider()
+        }
+        #endif
+        return try OpenClawChatOutboxDatabase.openApplicationSupport()
+    }
+
+    private func makeChatOutboxTransport(
+        stableGatewayID: String) -> any OpenClawChatTransport
+    {
+        #if DEBUG
+        if let testChatOutboxTransportProvider {
+            return testChatOutboxTransportProvider(stableGatewayID)
+        }
+        #endif
+        return IOSGatewayChatTransport(
+            gateway: self.operatorGateway,
+            stableGatewayID: stableGatewayID)
+    }
+
+    private func persistDurableTalkMessage(
+        _ request: TalkDurableChatRequest) async throws -> TalkDurableChatPersistence
+    {
+        guard let rawStableGatewayID = self.chatOutboxGatewayOwnerID else {
+            throw OpenClawChatOutboxError.routeSnapshotUnavailable
+        }
+        let stableGatewayID = rawStableGatewayID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard request.stableGatewayID == stableGatewayID else {
+            throw OpenClawChatOutboxError.routeSnapshotChanged
+        }
+        let owner = try await self.chatOutboxDelivery(stableGatewayID: stableGatewayID)
+        let ownerGeneration = self.chatOutboxDeliveryGeneration
+
+        // Register every observer before enqueue. Enqueue wakes the shared
+        // worker immediately, so even an ACK/final in the next turn is buffered.
+        let gatewayEvents = await self.operatorGateway.subscribeServerEvents(bufferingNewest: 200)
+        let incrementalEvents = await self.operatorGateway.subscribeServerEvents(bufferingNewest: 200)
+        let outboxUpdates = await owner.updates(bufferingNewest: 32)
+        let command = try await owner.enqueue(
+            rawCommandID: request.rawCommandID,
+            sessionKey: request.sessionKey,
+            text: request.message,
+            attachments: [],
+            thinkingLevel: request.thinkingLevel,
+            expectedDestructiveSessionAdmissionToken: request.destructiveSessionAdmissionToken,
+            expectedCaptureRouteSnapshot: request.captureRouteSnapshot)
+        guard command.rawCommandID == request.rawCommandID,
+              command.stableGatewayID == stableGatewayID
+        else {
+            throw OpenClawChatOutboxError.canonicalIdentityMismatch
+        }
+        return TalkDurableChatPersistence(
+            request: request,
+            ownerGeneration: ownerGeneration,
+            owner: owner,
+            gatewayEvents: gatewayEvents,
+            incrementalEvents: incrementalEvents,
+            outboxUpdates: outboxUpdates)
+    }
+
+    private func startChatOutboxRecovery(stableGatewayID: String, reason: String) async {
+        do {
+            let owner = try await self.chatOutboxDelivery(stableGatewayID: stableGatewayID)
+            let generation = self.chatOutboxDeliveryGeneration
+            self.chatOutboxRecoveryTask?.cancel()
+            self.chatOutboxRecoveryTask = Task { @MainActor [weak self, owner] in
+                guard let self else { return }
+                let delays: [UInt64] = [0, 2, 5, 15, 30, 60, 120]
+                for delay in delays {
+                    if delay > 0 {
+                        try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+                    }
+                    guard !Task.isCancelled,
+                          self.chatOutboxDeliveryGeneration == generation,
+                          self.chatOutboxDeliveryOwner === owner
+                    else { return }
+                    do {
+                        try await owner.wake()
+                        if try await owner.unresolvedCommands().isEmpty { return }
+                    } catch {
+                        return
+                    }
+                }
+            }
+            GatewayDiagnostics.log("chat.outbox lifecycle wake reason=\(reason)")
+        } catch {
+            let nsError = error as NSError
+            let errorDomain = IOSGatewayChatTransport.diagnosticToken(
+                nsError.domain,
+                maximumLength: 80)
+            GatewayDiagnostics.log(
+                "chat.outbox lifecycle unavailable reason=\(reason) "
+                    + "error_domain=\(errorDomain) error_code=\(nsError.code)")
+        }
+    }
+
+    private func retireChatOutboxDeliveryOwner() async {
+        self.chatOutboxDeliverySelectionGeneration &+= 1
+        self.chatOutboxDeliveryGeneration &+= 1
+        self.talkMode.invalidateDurableChatDeliveryOwner()
+        self.chatOutboxRecoveryTask?.cancel()
+        self.chatOutboxRecoveryTask = nil
+        let owner = self.chatOutboxDeliveryOwner
+        self.chatOutboxDeliveryOwner = nil
+        self.chatOutboxDeliveryStableGatewayID = nil
+        self.chatOutboxDeliveryDesiredStableGatewayID = nil
+        if let owner {
+            self.enqueueChatOutboxRetirement(owner)
+        }
+        await self.awaitChatOutboxRetirements()
+    }
+
+    private func invalidateChatOutboxDeliveryOwnerIfChanged(stableGatewayID: String) {
+        let normalizedID = stableGatewayID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard self.chatOutboxDeliveryStableGatewayID != normalizedID,
+              self.chatOutboxDeliveryDesiredStableGatewayID != normalizedID
+        else { return }
+        self.chatOutboxDeliverySelectionGeneration &+= 1
+        self.chatOutboxDeliveryDesiredStableGatewayID = normalizedID
+        self.chatOutboxDeliveryGeneration &+= 1
+        self.talkMode.invalidateDurableChatDeliveryOwner()
+        self.chatOutboxRecoveryTask?.cancel()
+        self.chatOutboxRecoveryTask = nil
+        let owner = self.chatOutboxDeliveryOwner
+        self.chatOutboxDeliveryOwner = nil
+        self.chatOutboxDeliveryStableGatewayID = nil
+        if let owner {
+            self.enqueueChatOutboxRetirement(owner)
+        }
+    }
+
+    private func enqueueChatOutboxRetirement(_ owner: OpenClawChatOutboxDeliveryOwner) {
+        let previous = self.chatOutboxRetirementTask
+        self.chatOutboxRetirementTask = Task {
+            await previous?.value
+            await owner.retire()
+        }
+    }
+
+    private func awaitChatOutboxRetirements() async {
+        await self.chatOutboxRetirementTask?.value
+    }
+
+    func securePurgeChatOutboxForCredentialReset() async throws {
+        guard !self.chatOutboxPurgeInProgress else {
+            throw OpenClawChatOutboxError.retired
+        }
+        self.chatOutboxPurgeInProgress = true
+        self.talkMode.beginCredentialReset()
+        self.releaseAllPTTVoiceWakeLeases()
+        await self.retireChatOutboxDeliveryOwner()
+        self.chatOutboxOwnerGeneration &+= 1
+        do {
+            let database: OpenClawChatOutboxDatabase
+            if let existing = self.chatOutboxDatabase {
+                database = existing
+            } else {
+                let opened = try self.openChatOutboxDatabase()
+                self.chatOutboxDatabase = opened
+                database = opened
+            }
+            try await database.securePurgeAll()
+            await self.retireChatOutboxDeliveryOwner()
+            self.chatOutboxOwnerGeneration &+= 1
+            self.chatOutboxPurgeInProgress = false
+        } catch {
+            await self.retireChatOutboxDeliveryOwner()
+            // A failed secure purge deliberately poisons that database actor
+            // fail-closed. Drop it so a later explicit retry can reopen a new
+            // actor instead of reusing a permanently unavailable instance.
+            self.chatOutboxDatabase = nil
+            self.chatOutboxPurgeInProgress = false
+            self.chatOutboxOwnerGeneration &+= 1
+            throw error
+        }
+    }
+
+    #if DEBUG
+    func _test_configureChatOutbox(
+        stableGatewayID: String?,
+        storeProvider:
+            (@MainActor @Sendable (String) async throws -> OpenClawChatOutboxStore)?,
+        transportProvider:
+            @escaping @MainActor @Sendable (String) -> any OpenClawChatTransport)
+    {
+        self.testChatOutboxGatewayOwnerOverrideEnabled = true
+        self.testChatOutboxGatewayOwnerID = stableGatewayID
+        self.testChatOutboxStoreProvider = storeProvider
+        self.testChatOutboxTransportProvider = transportProvider
+    }
+
+    func _test_setChatOutboxGatewayOwnerID(_ stableGatewayID: String?) {
+        self.testChatOutboxGatewayOwnerOverrideEnabled = true
+        self.testChatOutboxGatewayOwnerID = stableGatewayID
+        guard let stableGatewayID else { return }
+        self.invalidateChatOutboxDeliveryOwnerIfChanged(stableGatewayID: stableGatewayID)
+    }
+
+    func _test_setChatOutboxDatabase(
+        _ database: OpenClawChatOutboxDatabase?,
+        reopenProvider:
+            (@MainActor @Sendable () throws -> OpenClawChatOutboxDatabase)? = nil)
+    {
+        self.chatOutboxDatabase = database
+        self.testChatOutboxDatabaseProvider = reopenProvider
+    }
+
+    func _test_chatOutboxOwnerState() -> (
+        owner: OpenClawChatOutboxDeliveryOwner?,
+        stableGatewayID: String?,
+        desiredStableGatewayID: String?,
+        selectionGeneration: UInt64,
+        ownerGeneration: UInt64,
+        purgeInProgress: Bool,
+        hasDatabase: Bool)
+    {
+        (
+            owner: self.chatOutboxDeliveryOwner,
+            stableGatewayID: self.chatOutboxDeliveryStableGatewayID,
+            desiredStableGatewayID: self.chatOutboxDeliveryDesiredStableGatewayID,
+            selectionGeneration: self.chatOutboxDeliverySelectionGeneration,
+            ownerGeneration: self.chatOutboxOwnerGeneration,
+            purgeInProgress: self.chatOutboxPurgeInProgress,
+            hasDatabase: self.chatOutboxDatabase != nil)
+    }
+
+    func _test_startChatOutboxRecovery(stableGatewayID: String, reason: String = "test") async {
+        await self.startChatOutboxRecovery(stableGatewayID: stableGatewayID, reason: reason)
+    }
+
+    func _test_retireChatOutboxDeliveryOwner() async {
+        await self.retireChatOutboxDeliveryOwner()
+    }
+    #endif
 
     private(set) var activeGatewayConnectConfig: GatewayConnectConfig?
 
@@ -339,6 +677,36 @@ final class NodeAppModel {
         let enabled = UserDefaults.standard.bool(forKey: "voiceWake.enabled")
         self.voiceWake.setEnabled(enabled)
         self.talkMode.attachGateway(self.operatorGateway)
+        self.talkMode.attachDurableChatOutbox(
+            gatewayOwnerID: { [weak self] in self?.chatOutboxGatewayOwnerID },
+            captureAdmission: { [weak self] in
+                guard let self, let stableGatewayID = self.chatOutboxGatewayOwnerID else {
+                    throw OpenClawChatOutboxError.routeSnapshotUnavailable
+                }
+                let owner = try await self.chatOutboxDelivery(stableGatewayID: stableGatewayID)
+                return try await owner.admitCapture()
+            },
+            captureAdmissionToken: { [weak self] in
+                guard let self, let stableGatewayID = self.chatOutboxGatewayOwnerID else {
+                    throw OpenClawChatOutboxError.routeSnapshotUnavailable
+                }
+                let owner = try await self.chatOutboxDelivery(stableGatewayID: stableGatewayID)
+                return try await owner.destructiveSessionAdmissionToken()
+            },
+            captureAdmissionIsCurrent: { [weak self] stableGatewayID, token in
+                guard let self,
+                      self.chatOutboxGatewayOwnerID == stableGatewayID,
+                      let owner = try? await self.chatOutboxDelivery(stableGatewayID: stableGatewayID),
+                      let currentToken = try? await owner.destructiveSessionAdmissionToken()
+                else { return false }
+                return currentToken == token
+            },
+            persist: { [weak self] request in
+                guard let self else {
+                    throw OpenClawChatOutboxError.storageUnavailable
+                }
+                return try await self.persistDurableTalkMessage(request)
+            })
         self.refreshLastShareEventFromRelay()
         let talkEnabled = UserDefaults.standard.bool(forKey: "talk.enabled")
         self.setTalkEnabled(talkEnabled)
@@ -447,9 +815,15 @@ final class NodeAppModel {
             self.backgroundedAt = Date()
             self.reconnectAfterBackgroundArmed = true
             self.beginBackgroundConnectionGracePeriod()
+            // A background transition ends explicit PTT ownership before the
+            // scene-level suspension takes over.
+            let pttVoiceWakeTransferred = self.transferPTTVoiceWakeOwnershipToBackground()
             // Release voice wake mic in background.
-            self.backgroundVoiceWakeSuspended = self.voiceWake.suspendForExternalAudioCapture()
-            let shouldKeepTalkActive = keepTalkActive && self.talkMode.isEnabled
+            self.backgroundVoiceWakeSuspended = pttVoiceWakeTransferred ||
+                self.voiceWake.suspendForExternalAudioCapture()
+            let shouldKeepTalkActive = keepTalkActive && self.talkMode.isEnabled &&
+                self.talkMode.canUseBackgroundTalkOptIn
+            self.talkMode.setForegroundAudioCaptureAllowed(shouldKeepTalkActive)
             self.backgroundTalkKeptActive = shouldKeepTalkActive
             self.backgroundTalkSuspended = self.talkMode.suspendForBackground(keepActive: shouldKeepTalkActive)
         case .active, .inactive:
@@ -460,6 +834,7 @@ final class NodeAppModel {
                 self.startGatewayHealthMonitor()
             }
             if phase == .active {
+                self.talkMode.setForegroundAudioCaptureAllowed(true)
                 self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.backgroundVoiceWakeSuspended)
                 self.backgroundVoiceWakeSuspended = false
                 Task { [weak self] in
@@ -474,6 +849,13 @@ final class NodeAppModel {
                 }
                 Task { [weak self] in
                     await self?.resumePendingForegroundNodeActionsIfNeeded(trigger: "scene_active")
+                }
+                if self.operatorConnected, let stableGatewayID = self.chatOutboxGatewayOwnerID {
+                    Task { [weak self] in
+                        await self?.startChatOutboxRecovery(
+                            stableGatewayID: stableGatewayID,
+                            reason: "scene_active")
+                    }
                 }
             }
             if phase == .active, self.reconnectAfterBackgroundArmed {
@@ -697,6 +1079,7 @@ final class NodeAppModel {
     func setTalkEnabled(_ enabled: Bool) {
         if self.isAppleReviewDemoModeEnabled {
             UserDefaults.standard.set(false, forKey: "talk.enabled")
+            self.releasePTTVoiceWakeCaptureLease()
             self.talkMode.setEnabled(false)
             self.talkMode.statusText = "Demo mode only"
             return
@@ -708,6 +1091,7 @@ final class NodeAppModel {
             self.voiceWake.setSuppressedByTalk(true)
             self.talkVoiceWakeSuspended = self.voiceWake.suspendForExternalAudioCapture()
         } else {
+            self.releasePTTVoiceWakeCaptureLease()
             self.voiceWake.setSuppressedByTalk(false)
             self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.talkVoiceWakeSuspended)
             self.talkVoiceWakeSuspended = false
@@ -1666,27 +2050,36 @@ final class NodeAppModel {
     private func handleTalkInvoke(_ req: BridgeInvokeRequest) async throws -> BridgeInvokeResponse {
         switch req.command {
         case OpenClawTalkCommand.pttStart.rawValue:
-            self.pttVoiceWakeSuspended = self.voiceWake.suspendForExternalAudioCapture()
-            let payload = try await self.talkMode.beginPushToTalk()
+            self.acquirePTTVoiceWakeLease()
+            let payload: OpenClawTalkPTTStartPayload
+            do {
+                payload = try await self.talkMode.beginPushToTalk()
+            } catch {
+                self.releasePTTVoiceWakeLease()
+                throw error
+            }
+            if self.pttVoiceWakeCaptureID == payload.captureId {
+                // Duplicate start shares the already-owned capture lease.
+                self.releasePTTVoiceWakeLease()
+            } else {
+                self.pttVoiceWakeCaptureID = payload.captureId
+            }
             let json = try Self.encodePayload(payload)
             return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: json)
         case OpenClawTalkCommand.pttStop.rawValue:
             let payload = await self.talkMode.endPushToTalk()
-            self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.pttVoiceWakeSuspended)
-            self.pttVoiceWakeSuspended = false
+            self.releasePTTVoiceWakeCaptureLease()
             let json = try Self.encodePayload(payload)
             return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: json)
         case OpenClawTalkCommand.pttCancel.rawValue:
             let payload = await self.talkMode.cancelPushToTalk()
-            self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.pttVoiceWakeSuspended)
-            self.pttVoiceWakeSuspended = false
+            self.releasePTTVoiceWakeCaptureLease()
             let json = try Self.encodePayload(payload)
             return BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: json)
         case OpenClawTalkCommand.pttOnce.rawValue:
-            self.pttVoiceWakeSuspended = self.voiceWake.suspendForExternalAudioCapture()
+            self.acquirePTTVoiceWakeLease()
             defer {
-                self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.pttVoiceWakeSuspended)
-                self.pttVoiceWakeSuspended = false
+                self.releasePTTVoiceWakeLease()
             }
             let payload = try await self.talkMode.runPushToTalkOnce()
             let json = try Self.encodePayload(payload)
@@ -1697,6 +2090,47 @@ final class NodeAppModel {
                 ok: false,
                 error: OpenClawNodeError(code: .invalidRequest, message: "INVALID_REQUEST: unknown command"))
         }
+    }
+
+    private func acquirePTTVoiceWakeLease() {
+        if self.pttVoiceWakeLeaseCount == 0 {
+            self.pttVoiceWakeWasSuspended = self.voiceWake.suspendForExternalAudioCapture()
+        }
+        self.pttVoiceWakeLeaseCount += 1
+    }
+
+    private func releasePTTVoiceWakeLease() {
+        guard self.pttVoiceWakeLeaseCount > 0 else { return }
+        self.pttVoiceWakeLeaseCount -= 1
+        guard self.pttVoiceWakeLeaseCount == 0 else { return }
+        self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: self.pttVoiceWakeWasSuspended)
+        self.pttVoiceWakeWasSuspended = false
+    }
+
+    private func releasePTTVoiceWakeCaptureLease() {
+        guard self.pttVoiceWakeCaptureID != nil else { return }
+        self.pttVoiceWakeCaptureID = nil
+        self.releasePTTVoiceWakeLease()
+    }
+
+    private func releaseAllPTTVoiceWakeLeases() {
+        let shouldResume = self.pttVoiceWakeWasSuspended
+        self.pttVoiceWakeLeaseCount = 0
+        self.pttVoiceWakeCaptureID = nil
+        self.pttVoiceWakeWasSuspended = false
+        self.voiceWake.resumeAfterExternalAudioCapture(wasSuspended: shouldResume)
+    }
+
+    private func transferPTTVoiceWakeOwnershipToBackground() -> Bool {
+        let shouldResumeOnForeground = self.pttVoiceWakeWasSuspended
+        if self.pttVoiceWakeCaptureID != nil {
+            self.pttVoiceWakeCaptureID = nil
+            self.pttVoiceWakeLeaseCount = max(0, self.pttVoiceWakeLeaseCount - 1)
+        }
+        // Remaining pttOnce handlers may release while backgrounded. They no
+        // longer own permission to restart VoiceWake; the scene does.
+        self.pttVoiceWakeWasSuspended = false
+        return shouldResumeOnForeground
     }
 }
 
@@ -2146,6 +2580,7 @@ extension NodeAppModel {
 
 extension NodeAppModel {
     private func prepareForGatewayConnect(url: URL, stableID: String) {
+        self.invalidateChatOutboxDeliveryOwnerIfChanged(stableGatewayID: stableID)
         self.isAppleReviewDemoModeEnabled = false
         self.gatewayAutoReconnectEnabled = true
         self.gatewayPairingPaused = false
@@ -2459,6 +2894,9 @@ extension NodeAppModel {
                             guard shouldUseConnection else { return }
                             GatewayDiagnostics.log(
                                 "operator gateway connected host=\(url.host ?? "?") scheme=\(url.scheme ?? "?")")
+                            await self.startChatOutboxRecovery(
+                                stableGatewayID: stableID,
+                                reason: "operator_connected")
                             await self.talkMode.reloadConfig()
                             await self.talkMode.prefetchRealtimeSessionIfReady(reason: "operator_connected")
                             await self.refreshBrandingFromGateway()
@@ -4708,6 +5146,29 @@ extension NodeAppModel {
 
 #if DEBUG
 extension NodeAppModel {
+    func _test_acquirePTTVoiceWakeLease(captureID: String? = nil) {
+        self.acquirePTTVoiceWakeLease()
+        if let captureID {
+            self.pttVoiceWakeCaptureID = captureID
+        }
+    }
+
+    func _test_releasePTTVoiceWakeLease() {
+        self.releasePTTVoiceWakeLease()
+    }
+
+    func _test_releasePTTVoiceWakeCaptureLease() {
+        self.releasePTTVoiceWakeCaptureLease()
+    }
+
+    func _test_transferPTTVoiceWakeOwnershipToBackground() -> Bool {
+        self.transferPTTVoiceWakeOwnershipToBackground()
+    }
+
+    func _test_pttVoiceWakeLeaseState() -> (count: Int, captureID: String?) {
+        (self.pttVoiceWakeLeaseCount, self.pttVoiceWakeCaptureID)
+    }
+
     func _test_handleInvoke(_ req: BridgeInvokeRequest) async -> BridgeInvokeResponse {
         await self.handleInvoke(req)
     }

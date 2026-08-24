@@ -98,6 +98,9 @@ final class VoiceWakeManager: NSObject {
     private var onCommand: (@Sendable (String) async -> Void)?
     private var userDefaultsObserver: NSObjectProtocol?
     private var suppressedByTalk: Bool = false
+    #if DEBUG
+    private var resumeAfterExternalAudioCaptureCallCount = 0
+    #endif
 
     override init() {
         super.init()
@@ -232,6 +235,9 @@ final class VoiceWakeManager: NSObject {
 
     func resumeAfterExternalAudioCapture(wasSuspended: Bool) {
         guard wasSuspended else { return }
+        #if DEBUG
+        self.resumeAfterExternalAudioCaptureCallCount += 1
+        #endif
         Task { await self.start() }
     }
 
@@ -466,6 +472,14 @@ final class VoiceWakeManager: NSObject {
         return "\(kind) permission denied"
     }
 }
+
+#if DEBUG
+extension VoiceWakeManager {
+    func _test_resumeAfterExternalAudioCaptureCallCount() -> Int {
+        self.resumeAfterExternalAudioCaptureCallCount
+    }
+}
+#endif
 
 #if DEBUG
 extension VoiceWakeManager {

@@ -2,11 +2,29 @@ import OpenClawChatUI
 import OpenClawProtocol
 import SwiftUI
 
+struct ChatPreparationRetryState: Equatable {
+    private(set) var nonce: UInt64 = 0
+
+    mutating func request() {
+        self.nonce &+= 1
+    }
+
+    mutating func gatewayDidConnect(hasAttachedViewModel: Bool) {
+        guard !hasAttachedViewModel else { return }
+        self.request()
+    }
+
+    func taskID(owner: String, ownerGeneration: UInt64) -> String {
+        "\(owner)|\(ownerGeneration)|\(self.nonce)"
+    }
+}
+
 struct ChatProTab: View {
     @Environment(NodeAppModel.self) private var appModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var viewModel: OpenClawChatViewModel?
     @State private var chatPreparationError: String?
+    @State private var chatPreparationRetry = ChatPreparationRetryState()
 
     var body: some View {
         NavigationStack {
@@ -38,6 +56,11 @@ struct ChatProTab: View {
                                 Text(chatPreparationError)
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
+                                Button("Retry") {
+                                    self.requestChatPreparationRetry()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .accessibilityHint("Retries opening protected durable chat storage")
                             }
                         }
                         .padding()
@@ -69,7 +92,13 @@ struct ChatProTab: View {
         }
         .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
             guard connected else { return }
-            self.viewModel?.refresh()
+            if let viewModel = self.viewModel {
+                viewModel.refresh()
+            } else {
+                // One retry per reconnect edge. Persistent failures remain a
+                // stable error with an explicit user action; never spin.
+                self.chatPreparationRetry.gatewayDidConnect(hasAttachedViewModel: false)
+            }
         }
     }
 
@@ -117,7 +146,13 @@ struct ChatProTab: View {
         let owner = self.appModel.isAppleReviewDemoModeEnabled
             ? "apple-review-demo"
             : (self.appModel.chatOutboxGatewayOwnerID ?? "unavailable")
-        return "\(owner)|\(self.appModel.chatOutboxOwnerGeneration)"
+        return self.chatPreparationRetry.taskID(
+            owner: owner,
+            ownerGeneration: self.appModel.chatOutboxOwnerGeneration)
+    }
+
+    private func requestChatPreparationRetry() {
+        self.chatPreparationRetry.request()
     }
 
     private func prepareChatViewModel(taskID: String) async {
@@ -143,7 +178,8 @@ struct ChatProTab: View {
             return
         }
         do {
-            let outboxStore = try await self.appModel.chatOutboxStore(stableGatewayID: stableGatewayID)
+            let outboxDeliveryOwner = try await self.appModel.chatOutboxDelivery(
+                stableGatewayID: stableGatewayID)
             guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
             // Session focus can change while the durable database is opening.
             // Capture it only after the suspension, in the same MainActor turn
@@ -154,8 +190,7 @@ struct ChatProTab: View {
                 transport: IOSGatewayChatTransport(
                     gateway: self.appModel.operatorSession,
                     stableGatewayID: stableGatewayID),
-                outboxStore: outboxStore,
-                outboxStableGatewayID: stableGatewayID,
+                outboxDeliveryOwner: outboxDeliveryOwner,
                 onSessionChanged: { sessionKey in
                     self.appModel.focusChatSession(sessionKey)
                 },

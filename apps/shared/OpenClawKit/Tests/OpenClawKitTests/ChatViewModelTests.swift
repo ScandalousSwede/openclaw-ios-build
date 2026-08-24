@@ -2373,6 +2373,151 @@ struct ChatViewModelTests {
         #expect(await transport.lastSentRunId() == nil)
     }
 
+    @Test func `new completion for old session cannot replace newly selected session`() async throws {
+        let createGate = AsyncGate()
+        let createCalls = AsyncCounter()
+        let main = historyPayload(
+            sessionKey: "main",
+            sessionId: "sess-main",
+            messages: [chatTextMessage(role: "assistant", text: "main history", timestamp: 1)])
+        let other = historyPayload(
+            sessionKey: "other",
+            sessionId: "sess-other",
+            messages: [chatTextMessage(role: "assistant", text: "other history", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [main, other],
+            createSessionHook: { _, parent in
+                #expect(parent == "main")
+                _ = await createCalls.increment()
+                await createGate.wait()
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        let create = Task { @MainActor in
+            await vm._test_performStartNewSession(preserving: "/new")
+        }
+        try await waitUntil("new session creation waits for A") {
+            await createCalls.current() == 1
+        }
+
+        await MainActor.run { vm.syncSession(to: "other") }
+        try await waitUntil("B bootstrap settles during new session creation") {
+            await MainActor.run {
+                vm.sessionKey == "other" &&
+                    vm.messages.first?.content.first?.text == "other history" &&
+                    !vm.isLoading
+            }
+        }
+        let otherSubscription = await MainActor.run { () -> UInt64 in
+            vm.input = "other draft"
+            vm.errorText = "other sentinel"
+            return vm._test_eventSubscriptionGeneration()
+        }
+        await createGate.open()
+        await create.value
+
+        #expect(await transport.createdParentSessionKeys() == ["main"])
+        #expect(await transport.resetSessionKeys().isEmpty)
+        #expect(await MainActor.run {
+            vm.sessionKey == "other" &&
+                vm.input == "other draft" &&
+                vm.errorText == "other sentinel" &&
+                vm.messages.first?.content.first?.text == "other history" &&
+                vm._test_eventSubscriptionGeneration() == otherSubscription
+        })
+    }
+
+    @Test func `unsupported new completion for old session cannot reset newly selected session`() async throws {
+        let createGate = AsyncGate()
+        let createCalls = AsyncCounter()
+        let unsupported = NSError(
+            domain: "OpenClawChatTransport",
+            code: 0,
+            userInfo: [NSLocalizedDescriptionKey: "sessions.create not supported by this transport"])
+        let main = historyPayload(sessionKey: "main", sessionId: "sess-main")
+        let other = historyPayload(
+            sessionKey: "other",
+            sessionId: "sess-other",
+            messages: [chatTextMessage(role: "assistant", text: "other history", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [main, other],
+            createSessionHook: { _, parent in
+                #expect(parent == "main")
+                _ = await createCalls.increment()
+                await createGate.wait()
+                throw unsupported
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        let create = Task { @MainActor in
+            await vm._test_performStartNewSession(preserving: "/new")
+        }
+        try await waitUntil("unsupported create waits for A") {
+            await createCalls.current() == 1
+        }
+
+        await MainActor.run { vm.syncSession(to: "other") }
+        try await waitUntil("B bootstrap settles before unsupported fallback") {
+            await MainActor.run {
+                vm.sessionKey == "other" &&
+                    vm.messages.first?.content.first?.text == "other history" &&
+                    !vm.isLoading
+            }
+        }
+        let otherSubscription = await MainActor.run { () -> UInt64 in
+            vm.input = "other draft"
+            vm.errorText = "other sentinel"
+            return vm._test_eventSubscriptionGeneration()
+        }
+        await createGate.open()
+        await create.value
+
+        #expect(await transport.createdSessionKeys().isEmpty)
+        #expect(await transport.resetSessionKeys().isEmpty)
+        #expect(await MainActor.run {
+            vm.sessionKey == "other" &&
+                vm.input == "other draft" &&
+                vm.errorText == "other sentinel" &&
+                vm.messages.first?.content.first?.text == "other history" &&
+                vm._test_eventSubscriptionGeneration() == otherSubscription
+        })
+    }
+
+    @Test func `new completion cannot resurrect a shut down view model`() async throws {
+        for unsupported in [false, true] {
+            let createGate = AsyncGate()
+            let createCalls = AsyncCounter()
+            let unsupportedError = NSError(
+                domain: "OpenClawChatTransport",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "sessions.create not supported by this transport"])
+            let (transport, vm) = await makeViewModel(
+                historyResponses: [historyPayload()],
+                createSessionHook: { _, _ in
+                    _ = await createCalls.increment()
+                    await createGate.wait()
+                    if unsupported { throw unsupportedError }
+                })
+            try await loadAndWaitBootstrap(vm: vm)
+            let create = Task { @MainActor in
+                await vm._test_performStartNewSession(preserving: "/new")
+            }
+            try await waitUntil("new session creation waits before shutdown") {
+                await createCalls.current() == 1
+            }
+            let shutdownSubscription = await MainActor.run { () -> UInt64 in
+                vm.shutdown()
+                return vm._test_eventSubscriptionGeneration()
+            }
+            await createGate.open()
+            await create.value
+
+            #expect(await transport.resetSessionKeys().isEmpty)
+            #expect(await MainActor.run {
+                vm.sessionKey == "main" &&
+                    vm._test_eventSubscriptionGeneration() == shutdownSubscription
+            })
+        }
+    }
+
     @Test func `send attempts request when cached health is stale false`() async throws {
         let (transport, vm) = await makeViewModel(
             historyResponses: [historyPayload()],
@@ -2420,6 +2565,112 @@ struct ChatViewModelTests {
         #expect(await transport.lastSentRunId() == nil)
     }
 
+    @Test func `successful reset clears transient stream state and rejects pre-reset callbacks`() async throws {
+        let before = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "before reset", timestamp: 1)])
+        let after = historyPayload(
+            messages: [chatTextMessage(role: "assistant", text: "after reset", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(historyResponses: [before, after, after])
+        try await loadAndWaitBootstrap(vm: vm)
+
+        // Legacy session-scoped streams can populate transient rendering state
+        // without owning a local pending run, so reset remains admissible.
+        emitAssistantText(transport: transport, runId: "sess-main", text: "pre-reset partial")
+        emitToolStart(transport: transport, runId: "sess-main")
+        try await waitUntil("pre-reset transient stream state is visible") {
+            await MainActor.run {
+                vm.pendingRunCount == 0 &&
+                    vm.streamingAssistantText == "pre-reset partial" &&
+                    vm.pendingToolCalls.count == 1
+            }
+        }
+        let oldEventSubscription = await MainActor.run {
+            vm._test_eventSubscriptionGeneration()
+        }
+
+        await MainActor.run {
+            vm.input = "/reset"
+            vm.send()
+        }
+        try await waitUntil("reset advances logical session boundary") {
+            await MainActor.run {
+                vm.pendingRunCount == 0 &&
+                    vm._test_eventSubscriptionGeneration() > oldEventSubscription
+            }
+        }
+
+        await MainActor.run {
+            vm._test_applyTransportEvent(
+                .chat(OpenClawChatEventPayload(
+                    runId: "stale-pre-reset-run",
+                    sessionKey: "main",
+                    state: "final",
+                    message: chatTextMessage(
+                        role: "assistant",
+                        text: "stale pre-reset callback",
+                        timestamp: 3),
+                    errorMessage: nil)),
+                admittedSubscriptionGeneration: oldEventSubscription)
+        }
+        #expect(await MainActor.run {
+            vm.pendingRunCount == 0 &&
+                vm.pendingToolCalls.isEmpty &&
+                vm.streamingAssistantText == nil &&
+                !vm.messages.contains { message in
+                    message.content.contains { $0.text == "stale pre-reset callback" }
+                }
+        })
+    }
+
+    @Test func `reset completion for old session cannot mutate newly selected session`() async throws {
+        let resetGate = AsyncGate()
+        let main = historyPayload(
+            sessionKey: "main",
+            sessionId: "sess-main",
+            messages: [chatTextMessage(role: "assistant", text: "main history", timestamp: 1)])
+        let other = historyPayload(
+            sessionKey: "other",
+            sessionId: "sess-other",
+            messages: [chatTextMessage(role: "assistant", text: "other history", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [main, other],
+            resetSessionHook: { _ in await resetGate.wait() })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        await MainActor.run { vm.input = "/reset" }
+        let reset = Task { @MainActor in
+            await vm._test_performReset(preserving: "/reset")
+        }
+        try await waitUntil("main reset reaches transport gate") {
+            await transport.resetSessionKeys() == ["main"]
+        }
+
+        await MainActor.run {
+            vm.syncSession(to: "other")
+        }
+        try await waitUntil("other session bootstrap applies") {
+            await MainActor.run {
+                vm.sessionKey == "other" &&
+                    vm.messages.first?.content.first?.text == "other history" &&
+                    !vm.isLoading
+            }
+        }
+        let otherSubscription = await MainActor.run { () -> UInt64 in
+            vm.input = "other draft"
+            vm.errorText = "other sentinel"
+            return vm._test_eventSubscriptionGeneration()
+        }
+        await resetGate.open()
+        await reset.value
+
+        #expect(await MainActor.run {
+            vm.sessionKey == "other" &&
+                vm.input == "other draft" &&
+                vm.errorText == "other sentinel" &&
+                vm.messages.first?.content.first?.text == "other history" &&
+                vm._test_eventSubscriptionGeneration() == otherSubscription
+        })
+    }
+
     @Test func `compact trigger compacts session and reloads history`() async throws {
         let before = historyPayload(
             messages: [
@@ -2435,6 +2686,9 @@ struct ChatViewModelTests {
         try await waitUntil("initial history loaded") {
             await MainActor.run { vm.messages.first?.content.first?.text == "before compact" }
         }
+        let oldEventSubscription = await MainActor.run {
+            vm._test_eventSubscriptionGeneration()
+        }
 
         await MainActor.run {
             vm.input = "/compact"
@@ -2447,7 +2701,173 @@ struct ChatViewModelTests {
         try await waitUntil("history reloaded") {
             await MainActor.run { vm.messages.first?.content.first?.text == "after compact" }
         }
+        #expect(await MainActor.run {
+            vm._test_eventSubscriptionGeneration() > oldEventSubscription
+        })
+        await MainActor.run {
+            vm._test_applyTransportEvent(
+                .sessionMessage(OpenClawSessionMessageEventPayload(
+                    sessionKey: "main",
+                    message: OpenClawChatMessage(
+                        role: "assistant",
+                        content: [OpenClawChatMessageContent(
+                            type: "text",
+                            text: "stale pre-compact callback",
+                            mimeType: nil,
+                            fileName: nil,
+                            content: nil)],
+                        timestamp: 3),
+                    messageId: "stale-pre-compact",
+                    messageSeq: 1)),
+                admittedSubscriptionGeneration: oldEventSubscription)
+        }
+        #expect(await MainActor.run {
+            !vm.messages.contains { message in
+                message.content.contains { $0.text == "stale pre-compact callback" }
+            }
+        })
         #expect(await transport.lastSentRunId() == nil)
+    }
+
+    @Test func `compact completion for old session cannot mutate newly selected session`() async throws {
+        let compactGate = AsyncGate()
+        let main = historyPayload(
+            sessionKey: "main",
+            sessionId: "sess-main",
+            messages: [chatTextMessage(role: "assistant", text: "main history", timestamp: 1)])
+        let other = historyPayload(
+            sessionKey: "other",
+            sessionId: "sess-other",
+            messages: [chatTextMessage(role: "assistant", text: "other history", timestamp: 2)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [main, other],
+            compactSessionHook: { _ in await compactGate.wait() })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        await MainActor.run { vm.input = "/compact" }
+        let compact = Task { @MainActor in
+            await vm._test_performCompact(preserving: "/compact")
+        }
+        try await waitUntil("main compact reaches transport gate") {
+            await transport.compactSessionKeys() == ["main"]
+        }
+
+        await MainActor.run {
+            vm.syncSession(to: "other")
+        }
+        try await waitUntil("other session bootstrap applies during compact") {
+            await MainActor.run {
+                vm.sessionKey == "other" &&
+                    vm.messages.first?.content.first?.text == "other history" &&
+                    !vm.isLoading
+            }
+        }
+        let otherSubscription = await MainActor.run { () -> UInt64 in
+            vm.input = "other draft"
+            vm.errorText = "other sentinel"
+            return vm._test_eventSubscriptionGeneration()
+        }
+        await compactGate.open()
+        await compact.value
+
+        #expect(await MainActor.run {
+            vm.sessionKey == "other" &&
+                vm.input == "other draft" &&
+                vm.errorText == "other sentinel" &&
+                vm.messages.first?.content.first?.text == "other history" &&
+                vm._test_eventSubscriptionGeneration() == otherSubscription
+        })
+    }
+
+    @Test func `reset and compact completion cannot resurrect a shut down view model`() async throws {
+        for action in ["reset", "compact"] {
+            let mutationGate = AsyncGate()
+            let historyCalls = AsyncCounter()
+            let history = historyPayload(
+                sessionKey: "main",
+                sessionId: "sess-main",
+                messages: [chatTextMessage(role: "assistant", text: "stable history", timestamp: 1)])
+            let (transport, vm) = await makeViewModel(
+                historyResponses: [history, history],
+                requestHistoryHook: { _ in _ = await historyCalls.increment() },
+                resetSessionHook: { _ in await mutationGate.wait() },
+                compactSessionHook: { _ in await mutationGate.wait() })
+            try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+            let command = "/\(action)"
+            await MainActor.run { vm.input = command }
+            let mutation = Task { @MainActor in
+                if action == "reset" {
+                    await vm._test_performReset(preserving: command)
+                } else {
+                    await vm._test_performCompact(preserving: command)
+                }
+            }
+            try await waitUntil("\(action) reaches transport before shutdown") {
+                if action == "reset" {
+                    return await transport.resetSessionKeys() == ["main"]
+                }
+                return await transport.compactSessionKeys() == ["main"]
+            }
+
+            let shutdownGeneration = await MainActor.run { () -> UInt64 in
+                vm.shutdown()
+                return vm._test_eventSubscriptionGeneration()
+            }
+            await mutationGate.open()
+            await mutation.value
+
+            #expect(await historyCalls.current() == 1)
+            #expect(await MainActor.run {
+                vm.input == command &&
+                    vm.messages.first?.content.first?.text == "stable history" &&
+                    vm._test_eventSubscriptionGeneration() == shutdownGeneration
+            })
+        }
+    }
+
+    @Test func `queued transport and outbox callbacks cannot mutate a shut down view model`() async throws {
+        let history = historyPayload(
+            sessionKey: "main",
+            sessionId: "sess-main",
+            messages: [chatTextMessage(role: "assistant", text: "stable", timestamp: 1)])
+        let (_, vm) = await makeViewModel(historyResponses: [history])
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        let admittedSubscription = await MainActor.run {
+            vm._test_eventSubscriptionGeneration()
+        }
+
+        await MainActor.run {
+            vm.shutdown()
+            vm._test_applyTransportEvent(
+                .sessionMessage(OpenClawSessionMessageEventPayload(
+                    sessionKey: "main",
+                    message: OpenClawChatMessage(
+                        role: "assistant",
+                        content: [OpenClawChatMessageContent(
+                            type: "text",
+                            text: "late transport mutation",
+                            mimeType: nil,
+                            fileName: nil,
+                            content: nil)],
+                        timestamp: 2),
+                    messageId: "late-after-shutdown",
+                    messageSeq: 2)),
+                admittedSubscriptionGeneration: admittedSubscription)
+            vm._test_applyOutboxResult(OpenClawChatOutboxDeliveryUpdate(
+                sequence: 99,
+                status: OpenClawChatOutboxStatus(
+                    queuedCount: 1,
+                    hasVerifiedRouteSnapshot: true),
+                unresolvedCommands: [],
+                transitions: [.dispatched(rawCommandID: "late-outbox")],
+                terminalReceipts: []))
+        }
+
+        #expect(await MainActor.run {
+            vm.messages.count == 1 &&
+                vm.messages.first?.content.first?.text == "stable" &&
+                vm.pendingRunCount == 0 &&
+                vm.outboxStatus == .empty
+        })
     }
 
     @Test func `compact trigger shows generic error message on failure`() async throws {

@@ -4,12 +4,56 @@ import OpenClawKit
 import OpenClawProtocol
 import OSLog
 
+struct IOSGatewaySessionMutationRoute: Sendable {
+    typealias Request = @Sendable (
+        _ method: String,
+        _ paramsJSON: String?,
+        _ timeoutSeconds: Int) async throws -> Data
+
+    let stableGatewayID: String
+    private let requestImpl: Request
+
+    init(stableGatewayID: String, request: @escaping Request) {
+        self.stableGatewayID = stableGatewayID
+        self.requestImpl = request
+    }
+
+    func request(method: String, paramsJSON: String?, timeoutSeconds: Int) async throws -> Data {
+        try await self.requestImpl(method, paramsJSON, timeoutSeconds)
+    }
+}
+
+protocol IOSGatewaySessionMutationRouting: Sendable {
+    func currentSessionMutationRoute(ifGatewayID stableGatewayID: String)
+        async -> IOSGatewaySessionMutationRoute?
+}
+
+private struct LiveIOSGatewaySessionMutationRouter: IOSGatewaySessionMutationRouting {
+    let gateway: GatewayNodeSession
+
+    func currentSessionMutationRoute(ifGatewayID stableGatewayID: String)
+        async -> IOSGatewaySessionMutationRoute?
+    {
+        guard let route = await self.gateway.currentRoute(ifGatewayID: stableGatewayID) else {
+            return nil
+        }
+        return IOSGatewaySessionMutationRoute(stableGatewayID: stableGatewayID) { method, paramsJSON, timeout in
+            try await self.gateway.request(
+                method: method,
+                paramsJSON: paramsJSON,
+                timeoutSeconds: timeout,
+                ifCurrentRoute: route)
+        }
+    }
+}
+
 struct IOSGatewayChatTransport: OpenClawChatTransport {
     static let logger = Logger(subsystem: "ai.openclaw", category: "ios.chat.transport")
     static let defaultChatSendTimeoutMs = 30000
     private static let requiredOperatorScopes: Set<String> = ["operator.read", "operator.write"]
     private let gateway: GatewayNodeSession
     private let stableGatewayID: String?
+    private let sessionMutationRouter: any IOSGatewaySessionMutationRouting
 
     private struct CreateSessionParams: Codable {
         var key: String
@@ -107,10 +151,15 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         return value
     }
 
-    init(gateway: GatewayNodeSession, stableGatewayID: String? = nil) {
+    init(
+        gateway: GatewayNodeSession,
+        stableGatewayID: String? = nil,
+        sessionMutationRouter: (any IOSGatewaySessionMutationRouting)? = nil)
+    {
         self.gateway = gateway
         let normalizedGatewayID = stableGatewayID?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.stableGatewayID = normalizedGatewayID?.isEmpty == false ? normalizedGatewayID : nil
+        self.sessionMutationRouter = sessionMutationRouter ?? LiveIOSGatewaySessionMutationRouter(gateway: gateway)
     }
 
     func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
@@ -301,7 +350,17 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             key: key,
             label: label,
             parentSessionKey: parentSessionKey)
-        let res = try await self.gateway.request(method: "sessions.create", paramsJSON: json, timeoutSeconds: 15)
+        guard let stableGatewayID = self.stableGatewayID,
+              let route = await self.sessionMutationRouter.currentSessionMutationRoute(
+                ifGatewayID: stableGatewayID),
+              route.stableGatewayID == stableGatewayID
+        else {
+            throw CancellationError()
+        }
+        let res = try await route.request(
+            method: "sessions.create",
+            paramsJSON: json,
+            timeoutSeconds: 15)
         return try JSONDecoder().decode(OpenClawChatCreateSessionResponse.self, from: res)
     }
 
@@ -328,12 +387,32 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
 
     func resetSession(sessionKey: String) async throws {
         let json = try Self.makeSessionKeyParamsJSON(sessionKey)
-        _ = try await self.gateway.request(method: "sessions.reset", paramsJSON: json, timeoutSeconds: 10)
+        guard let stableGatewayID = self.stableGatewayID,
+              let route = await self.sessionMutationRouter.currentSessionMutationRoute(
+                ifGatewayID: stableGatewayID),
+              route.stableGatewayID == stableGatewayID
+        else {
+            throw CancellationError()
+        }
+        _ = try await route.request(
+            method: "sessions.reset",
+            paramsJSON: json,
+            timeoutSeconds: 10)
     }
 
     func compactSession(sessionKey: String) async throws {
         let json = try Self.makeSessionKeyParamsJSON(sessionKey)
-        _ = try await self.gateway.request(method: "sessions.compact", paramsJSON: json, timeoutSeconds: 10)
+        guard let stableGatewayID = self.stableGatewayID,
+              let route = await self.sessionMutationRouter.currentSessionMutationRoute(
+                ifGatewayID: stableGatewayID),
+              route.stableGatewayID == stableGatewayID
+        else {
+            throw CancellationError()
+        }
+        _ = try await route.request(
+            method: "sessions.compact",
+            paramsJSON: json,
+            timeoutSeconds: 10)
     }
 
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload {

@@ -22,6 +22,22 @@ private actor S3TestGate {
     func waiterCount() -> Int { self.waiters.count }
 }
 
+private actor S3TestFlag {
+    private var value = false
+    func set() { self.value = true }
+    func get() -> Bool { self.value }
+}
+
+private actor S3TestUpdateBox {
+    private var update: OpenClawChatOutboxDeliveryUpdate?
+
+    func set(_ update: OpenClawChatOutboxDeliveryUpdate) {
+        self.update = update
+    }
+
+    func get() -> OpenClawChatOutboxDeliveryUpdate? { self.update }
+}
+
 private actor S3TestRouteState {
     struct Route: Sendable {
         var stableGatewayID = "gateway-test"
@@ -42,9 +58,14 @@ private actor S3TestRouteState {
     private var dispatchedRawIDs: [String] = []
     private var acquireCalls = 0
     private var healthCalls = 0
+    private var createCalls = 0
+    private var resetCalls = 0
+    private var compactCalls = 0
     private var acquireGate: S3TestGate?
     private var dispatchGate: S3TestGate?
     private var modelPatchGate: S3TestGate?
+    private var createGate: S3TestGate?
+    private var resetGate: S3TestGate?
 
     func setRoute(_ route: Route) { self.availability = .available(route) }
     func setUnavailable(_ reason: OpenClawChatTransportRouteLeaseUnavailableReason) {
@@ -57,11 +78,25 @@ private actor S3TestRouteState {
     func setAcquireGate(_ gate: S3TestGate?) { self.acquireGate = gate }
     func setDispatchGate(_ gate: S3TestGate?) { self.dispatchGate = gate }
     func setModelPatchGate(_ gate: S3TestGate?) { self.modelPatchGate = gate }
+    func setCreateGate(_ gate: S3TestGate?) { self.createGate = gate }
+    func setResetGate(_ gate: S3TestGate?) { self.resetGate = gate }
     func dispatchedIDs() -> [String] { self.dispatchedRawIDs }
     func acquireCallCount() -> Int { self.acquireCalls }
     func healthCallCount() -> Int { self.healthCalls }
+    func createCallCount() -> Int { self.createCalls }
+    func resetCallCount() -> Int { self.resetCalls }
+    func compactCallCount() -> Int { self.compactCalls }
     func requestedHistoryOffsets() -> [Int] { self.historyOffsets }
     func recordHealthCall() { self.healthCalls += 1 }
+    func recordCreateCall() async {
+        self.createCalls += 1
+        if let createGate { await createGate.wait() }
+    }
+    func recordResetCall() async {
+        self.resetCalls += 1
+        if let resetGate { await resetGate.wait() }
+    }
+    func recordCompactCall() { self.compactCalls += 1 }
 
     func patchModel() async {
         let gate = self.modelPatchGate
@@ -158,8 +193,22 @@ private final class S3TestTransport: @unchecked Sendable, OpenClawChatTransport 
         await self.state.recordHealthCall()
         return true
     }
+    func createSession(
+        key: String,
+        label _: String?,
+        parentSessionKey _: String?) async throws -> OpenClawChatCreateSessionResponse
+    {
+        await self.state.recordCreateCall()
+        return OpenClawChatCreateSessionResponse(ok: true, key: key, sessionId: "created-\(key)")
+    }
     func setSessionModel(sessionKey _: String, model _: String?) async throws {
         await self.state.patchModel()
+    }
+    func resetSession(sessionKey _: String) async throws {
+        await self.state.recordResetCall()
+    }
+    func compactSession(sessionKey _: String) async throws {
+        await self.state.recordCompactCall()
     }
     func events() -> AsyncStream<OpenClawChatTransportEvent> { self.stream }
 }
@@ -222,6 +271,134 @@ private func s3HistoryMessage(
 
 @Suite("S3 durable outbox integration")
 struct OpenClawChatOutboxIntegrationTests {
+    @Test func `concurrent Chat and Talk route refreshes persist both FIFO rows`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let firstPersistGate = S3TestGate()
+        let transport = S3TestTransport()
+        let coordinator = OpenClawChatOutboxCoordinator(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            afterEnqueueRouteSaveBeforePersist: { rawCommandID in
+                if rawCommandID == "chat-first" {
+                    await firstPersistGate.wait()
+                }
+            })
+
+        let chat = Task {
+            try await coordinator.enqueue(
+                rawCommandID: "chat-first",
+                sessionKey: "main",
+                text: "chat",
+                attachments: [],
+                thinkingLevel: "off")
+        }
+        try await waitUntil("first enqueue owns route-store transaction") {
+            await firstPersistGate.waiterCount() == 1
+        }
+        let talk = Task {
+            try await coordinator.enqueue(
+                rawCommandID: "talk-second",
+                sessionKey: "main",
+                text: "talk",
+                attachments: [],
+                thinkingLevel: "off")
+        }
+        try await waitUntil("second enqueue waits behind exact route evidence") {
+            await coordinator._test_routeStoreOperationWaiterCount() == 1
+        }
+        #expect(await transport.state.acquireCallCount() == 1)
+
+        await firstPersistGate.open()
+        _ = try await chat.value
+        _ = try await talk.value
+        let rows = try await fixture.store.loadUnresolved()
+        #expect(rows.map(\.rawCommandID) == ["chat-first", "talk-second"])
+        #expect(await transport.state.acquireCallCount() == 2)
+        try await fixture.close()
+    }
+
+    @Test func `worker route refresh cannot split enqueue route save from persistence`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let persistGate = S3TestGate()
+        let transport = S3TestTransport()
+        let coordinator = OpenClawChatOutboxCoordinator(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            afterEnqueueRouteSaveBeforePersist: { _ in await persistGate.wait() })
+
+        let enqueue = Task {
+            try await coordinator.enqueue(
+                rawCommandID: "talk-before-worker-refresh",
+                sessionKey: "main",
+                text: "preserve",
+                attachments: [],
+                thinkingLevel: "off")
+        }
+        try await waitUntil("enqueue waits between route save and persistence") {
+            await persistGate.waiterCount() == 1
+        }
+        let worker = Task { try await coordinator.processAvailableWork() }
+        try await waitUntil("worker waits behind enqueue route-store transaction") {
+            await coordinator._test_routeStoreOperationWaiterCount() == 1
+        }
+        #expect(await transport.state.acquireCallCount() == 1)
+
+        await persistGate.open()
+        _ = try await enqueue.value
+        _ = try await worker.value
+        let rows = try await fixture.store.loadUnresolved()
+        #expect(rows.map(\.rawCommandID) == ["talk-before-worker-refresh"])
+        #expect(await transport.state.acquireCallCount() == 2)
+        try await fixture.close()
+    }
+
+    @Test func `cancelled route-store waiter drains without persisting or leaking the gate`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let firstPersistGate = S3TestGate()
+        let transport = S3TestTransport()
+        let coordinator = OpenClawChatOutboxCoordinator(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            afterEnqueueRouteSaveBeforePersist: { rawCommandID in
+                if rawCommandID == "gate-owner" { await firstPersistGate.wait() }
+            })
+        let owner = Task {
+            try await coordinator.enqueue(
+                rawCommandID: "gate-owner",
+                sessionKey: "main",
+                text: "first",
+                attachments: [],
+                thinkingLevel: "off")
+        }
+        try await waitUntil("first caller owns route-store gate") {
+            await firstPersistGate.waiterCount() == 1
+        }
+        let cancelled = Task {
+            try await coordinator.enqueue(
+                rawCommandID: "cancelled-waiter",
+                sessionKey: "main",
+                text: "second",
+                attachments: [],
+                thinkingLevel: "off")
+        }
+        try await waitUntil("second caller is queued on route-store gate") {
+            await coordinator._test_routeStoreOperationWaiterCount() == 1
+        }
+        cancelled.cancel()
+        await firstPersistGate.open()
+        _ = try await owner.value
+        await #expect(throws: CancellationError.self) {
+            _ = try await cancelled.value
+        }
+        #expect(await coordinator._test_routeStoreOperationWaiterCount() == 0)
+        let rows = try await fixture.store.loadUnresolved()
+        #expect(rows.map(\.rawCommandID) == ["gate-owner"])
+        try await fixture.close()
+    }
+
     @Test func `ACK loss parks until exact canonical user identity appears`() async throws {
         let fixture = try await S3TestStoreFixture.make()
         let transport = S3TestTransport()
@@ -425,6 +602,123 @@ struct OpenClawChatOutboxIntegrationTests {
         try await fixture.close()
     }
 
+    @Test func `owner retry self wakes after caller disappears`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let rawID = UUID().uuidString.lowercased()
+        let transport = S3TestTransport()
+        await transport.state.setDispatchOutcomes([
+            .ambiguous(code: "timeout"),
+            .accepted(runID: rawID, status: "ok"),
+        ])
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        _ = try await owner.enqueue(
+            rawCommandID: rawID,
+            sessionKey: "main",
+            text: "retry without a view",
+            attachments: [],
+            thinkingLevel: "off")
+        try await waitUntil("first dispatch parks ambiguous") {
+            (try? await fixture.store.loadUnresolved().first?.outcome) == .ambiguous
+        }
+
+        let shortLivedCaller = Task {
+            try await owner.retrySameIdentity(rawCommandID: rawID)
+        }
+        try await shortLivedCaller.value
+        try await waitUntil("owner dispatches retry without another wake") {
+            await transport.state.dispatchedIDs() == [rawID, rawID]
+        }
+
+        let retryRows = try await fixture.store.loadUnresolved()
+        #expect(retryRows.first?.rawCommandID == rawID)
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `new subscriber receives preexisting offline FIFO snapshot without external wake`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let route = s3Route()
+        let rawID = UUID().uuidString.lowercased()
+        try await fixture.store.saveVerifiedRouteSnapshot(route)
+        _ = try await fixture.store.persistBeforeDraftClear(
+            s3Draft(rawCommandID: rawID, route: route))
+        let state = S3TestRouteState()
+        await state.setUnavailable(.routeUnavailable)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport(state: state),
+            confirmationDelaysNanoseconds: [])
+        let stream = await owner.updates()
+        let updateBox = S3TestUpdateBox()
+        let observer = Task {
+            for await update in stream {
+                await updateBox.set(update)
+                return
+            }
+        }
+
+        try await waitUntil("post-registration wake publishes offline snapshot") {
+            await updateBox.get() != nil
+        }
+        let observedUpdate = await updateBox.get()
+        let update = try #require(observedUpdate)
+        #expect(update.status.deliveryGate == .offline)
+        #expect(update.unresolvedCommands.map(\.rawCommandID) == [rawID])
+        observer.cancel()
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `owner cancellation self wakes the newly exposed FIFO head`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let first = UUID().uuidString.lowercased()
+        let second = UUID().uuidString.lowercased()
+        let transport = S3TestTransport()
+        await transport.state.setDispatchOutcomes([
+            .dispatchRejected(code: "rejected", reason: "operator rejected"),
+            .accepted(runID: second, status: "ok"),
+        ])
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        _ = try await owner.enqueue(
+            rawCommandID: first,
+            sessionKey: "main",
+            text: "cancel this rejected head",
+            attachments: [],
+            thinkingLevel: "off")
+        _ = try await owner.enqueue(
+            rawCommandID: second,
+            sessionKey: "main",
+            text: "deliver the next row",
+            attachments: [],
+            thinkingLevel: "off")
+        try await waitUntil("first head blocks FIFO") {
+            (try? await fixture.store.loadUnresolved().first?.outcome) == .dispatchRejected
+        }
+        #expect(await transport.state.dispatchedIDs() == [first])
+
+        let shortLivedCaller = Task {
+            try await owner.cancelProvablyUnaccepted(rawCommandID: first)
+        }
+        try await shortLivedCaller.value
+        try await waitUntil("owner dispatches exposed head without another wake") {
+            await transport.state.dispatchedIDs() == [first, second]
+        }
+
+        let unresolved = try await fixture.store.loadUnresolved()
+        #expect(unresolved.map(\.rawCommandID) == [second])
+        await owner.retire()
+        try await fixture.close()
+    }
+
     @Test func `capability failure is explicit and fail closed`() async throws {
         let fixture = try await S3TestStoreFixture.make()
         let state = S3TestRouteState()
@@ -563,16 +857,19 @@ struct OpenClawChatOutboxIntegrationTests {
         try await fixture.close()
     }
 
-    @Test @MainActor func `view model shutdown fences admitted worker as ambiguous`() async throws {
+    @Test @MainActor func `view model shutdown leaves shared owner delivery running`() async throws {
         let fixture = try await S3TestStoreFixture.make()
         let dispatchGate = S3TestGate()
         let transport = S3TestTransport()
         await transport.state.setDispatchGate(dispatchGate)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport)
         let vm = OpenClawChatViewModel(
             sessionKey: "main",
             transport: transport,
-            outboxStore: fixture.store,
-            outboxStableGatewayID: "gateway-test")
+            outboxDeliveryOwner: owner)
         vm.input = "shutdown during dispatch"
         vm.send()
         try await waitUntil("view model worker admitted dispatch") {
@@ -581,10 +878,11 @@ struct OpenClawChatOutboxIntegrationTests {
 
         vm.shutdown()
         await dispatchGate.open()
-        try await waitUntil("cancelled admitted worker parked") {
-            (try? await fixture.store.loadUnresolved().first?.outcome) == .ambiguous
+        try await waitUntil("shared owner records accepted delivery") {
+            (try? await fixture.store.loadUnresolved().first?.outcome) == .accepted
         }
         #expect(await transport.state.dispatchedIDs().count == 1)
+        await owner.retire()
         try await fixture.close()
     }
 
@@ -734,5 +1032,717 @@ struct OpenClawChatOutboxIntegrationTests {
         await modelGate.open()
         vm.shutdown()
         try await fixture.close()
+    }
+
+    @Test func `shared delivery owner coalesces concurrent chat and talk wakes`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let dispatchGate = S3TestGate()
+        let transport = S3TestTransport()
+        await transport.state.setDispatchGate(dispatchGate)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport)
+        let updates = await owner.updates()
+
+        _ = try await owner.enqueue(
+            rawCommandID: "talk-one-owner",
+            sessionKey: "main",
+            text: "durable talk",
+            attachments: [],
+            thinkingLevel: "low")
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<20 {
+                group.addTask { try? await owner.wake() }
+            }
+        }
+        try await waitUntil("one shared worker reaches dispatch") {
+            await transport.state.dispatchedIDs().count == 1
+        }
+        await dispatchGate.open()
+        try await waitUntil("shared worker records accepted") {
+            (try? await fixture.store.loadUnresolved().first?.outcome) == .accepted
+        }
+        #expect(await transport.state.dispatchedIDs() == ["talk-one-owner"])
+
+        var iterator = updates.makeAsyncIterator()
+        let update = await iterator.next()
+        #expect(update?.unresolvedCommands.first?.outcome == .accepted)
+        #expect(update?.transitions == [.dispatched(rawCommandID: "talk-one-owner")])
+        await owner.retire()
+        let finished = await iterator.next()
+        #expect(finished == nil)
+        try await fixture.close()
+    }
+
+    @Test func `subscribing after owner retirement finishes immediately`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport())
+        await owner.retire()
+
+        let updates = await owner.updates()
+        var iterator = updates.makeAsyncIterator()
+        let finished = await iterator.next()
+        #expect(finished == nil)
+        try await fixture.close()
+    }
+
+    @Test func `shared owner confirms accepted row without a chat view wake`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let rawID = "talk-no-chat-confirmation"
+        let transport = S3TestTransport()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [100_000_000, 100_000_000])
+
+        _ = try await owner.enqueue(
+            rawCommandID: rawID,
+            sessionKey: "main",
+            text: "fresh Talk send",
+            attachments: [],
+            thinkingLevel: "low")
+        try await waitUntil("fresh Talk row reaches accepted before history exists") {
+            (try? await fixture.store.loadUnresolved().first?.outcome) == .accepted
+        }
+        await transport.state.setHistoryMessages([
+            s3HistoryMessage(role: "user", idempotencyKey: "\(rawID):user"),
+        ])
+
+        try await waitUntil("owner confirms exact user history without Chat UI") {
+            (try? await fixture.store.loadUnresolved().isEmpty) == true &&
+                (try? await fixture.store.loadRecentReceipts().first?.outcome) ==
+                .canonicalHistoryConfirmed
+        }
+        #expect(await transport.state.dispatchedIDs() == [rawID])
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `shared owner bounds negative confirmation scans`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let transport = S3TestTransport()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [0, 0])
+        _ = try await owner.enqueue(
+            rawCommandID: "talk-bounded-negative-history",
+            sessionKey: "main",
+            text: "remain ambiguous without replay",
+            attachments: [],
+            thinkingLevel: "low")
+
+        try await waitUntil("bounded owner confirmation attempts finish") {
+            await transport.state.acquireCallCount() == 4
+        }
+        let boundedRows = try await fixture.store.loadUnresolved()
+        #expect(boundedRows.first?.outcome == .accepted)
+        #expect(await transport.state.dispatchedIDs() == ["talk-bounded-negative-history"])
+        try await Task.sleep(nanoseconds: 20_000_000)
+        #expect(await transport.state.acquireCallCount() == 4)
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `owner retirement after enqueue admission parks ambiguous`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let dispatchGate = S3TestGate()
+        let transport = S3TestTransport()
+        await transport.state.setDispatchGate(dispatchGate)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport)
+        _ = try await owner.enqueue(
+            rawCommandID: "talk-retire-admitted",
+            sessionKey: "main",
+            text: "persist first",
+            attachments: [],
+            thinkingLevel: "low")
+        try await waitUntil("owner worker admits dispatch") {
+            await transport.state.dispatchedIDs() == ["talk-retire-admitted"]
+        }
+        let retired = S3TestFlag()
+        let retirement = Task {
+            await owner.retire()
+            await retired.set()
+        }
+        try await waitUntil("owner retirement fences new wakes") {
+            do {
+                try await owner.wake()
+                return false
+            } catch {
+                return true
+            }
+        }
+        #expect(!(await retired.get()))
+        await dispatchGate.open()
+        await retirement.value
+        let retiredRows = try await fixture.store.loadUnresolved()
+        #expect(retiredRows.first?.outcome == .ambiguous)
+        #expect(await transport.state.dispatchedIDs().count == 1)
+        try await fixture.close()
+    }
+
+    @Test func `retire during enqueue still reports the one committed gateway row`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let acquireGate = S3TestGate()
+        let transport = S3TestTransport()
+        await transport.state.setAcquireGate(acquireGate)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport)
+        let enqueueTask = Task {
+            try await owner.enqueue(
+                rawCommandID: "talk-retire-enqueue",
+                sessionKey: "main",
+                text: "one gateway only",
+                attachments: [],
+                thinkingLevel: "low")
+        }
+        try await waitUntil("enqueue waits on route evidence") {
+            await transport.state.acquireCallCount() == 1
+        }
+        let retired = S3TestFlag()
+        let retirement = Task {
+            await owner.retire()
+            await retired.set()
+        }
+        try await waitUntil("retirement fences enqueue replacement") {
+            do {
+                try await owner.wake()
+                return false
+            } catch {
+                return true
+            }
+        }
+        #expect(!(await retired.get()))
+        await acquireGate.open()
+        let committed = try await enqueueTask.value
+        await retirement.value
+        #expect(committed.rawCommandID == "talk-retire-enqueue")
+        let committedRows = try await fixture.store.loadUnresolved()
+        #expect(committedRows.map(\.rawCommandID) == ["talk-retire-enqueue"])
+
+        let replacementStore = try await fixture.database.store(stableGatewayID: "gateway-replacement")
+        let replacementRows = try await replacementStore.loadUnresolved()
+        #expect(replacementRows.isEmpty)
+        try await fixture.close()
+    }
+
+    @Test func `retire waits for admitted capture route verification`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let acquireGate = S3TestGate()
+        let transport = S3TestTransport()
+        await transport.state.setAcquireGate(acquireGate)
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        let admission = Task { try await owner.admitCapture() }
+        try await waitUntil("capture admission waits on live route") {
+            await transport.state.acquireCallCount() == 1
+        }
+        let retired = S3TestFlag()
+        let retirement = Task {
+            await owner.retire()
+            await retired.set()
+        }
+        try await waitUntil("capture owner is fenced while retirement waits") {
+            do {
+                try await owner.wake()
+                return false
+            } catch {
+                return true
+            }
+        }
+        #expect(!(await retired.get()))
+        await acquireGate.open()
+        await #expect(throws: OpenClawChatOutboxError.self) {
+            _ = try await admission.value
+        }
+        await retirement.value
+        #expect(await retired.get())
+        try await fixture.close()
+    }
+
+    @Test func `destructive session action waits for admitted enqueue and then refuses reset`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let acquireGate = S3TestGate()
+        let transport = S3TestTransport()
+        await transport.state.setDispatchOutcomes([.notDispatched])
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        let captureAdmission = try await owner.admitCapture()
+        await transport.state.setAcquireGate(acquireGate)
+        let enqueue = Task {
+            try await owner.enqueue(
+                rawCommandID: "talk-before-reset",
+                sessionKey: "main",
+                text: "must survive",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken:
+                    captureAdmission.destructiveSessionAdmissionToken,
+                expectedCaptureRouteSnapshot: captureAdmission.routeSnapshot)
+        }
+        try await waitUntil("enqueue is admitted before reset") {
+            await transport.state.acquireCallCount() == 2
+        }
+        let destructive = Task {
+            try await owner.performDestructiveSessionAction {
+                await transport.state.recordResetCall()
+            }
+        }
+        await acquireGate.open()
+        _ = try await enqueue.value
+        await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+            try await destructive.value
+        }
+        #expect(await transport.state.resetCallCount() == 0)
+        let refusedRows = try await fixture.store.loadUnresolved()
+        let tokenAfterRefusal = try await owner.destructiveSessionAdmissionToken()
+        #expect(refusedRows.count == 1)
+        #expect(tokenAfterRefusal == captureAdmission.destructiveSessionAdmissionToken)
+
+        try await waitUntil("refused reset leaves captured row safely cancellable") {
+            (try? await owner.currentOutcome(rawCommandID: "talk-before-reset")) == .notDispatched
+        }
+        try await owner.cancelProvablyUnaccepted(rawCommandID: "talk-before-reset")
+        let committedAfterRefusal = try await owner.enqueue(
+            rawCommandID: "talk-captured-before-refused-reset",
+            sessionKey: "main",
+            text: "capture remains admitted",
+            attachments: [],
+            thinkingLevel: "low",
+            expectedDestructiveSessionAdmissionToken:
+                captureAdmission.destructiveSessionAdmissionToken,
+            expectedCaptureRouteSnapshot: captureAdmission.routeSnapshot)
+        #expect(committedAfterRefusal.rawCommandID == "talk-captured-before-refused-reset")
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test
+    @MainActor
+    func `new session barrier refuses create when an admitted Talk enqueue commits`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let acquireGate = S3TestGate()
+        let transport = S3TestTransport()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        let captureAdmission = try await owner.admitCapture()
+        await transport.state.setAcquireGate(acquireGate)
+        let enqueue = Task {
+            try await owner.enqueue(
+                rawCommandID: "talk-before-new",
+                sessionKey: "main",
+                text: "must not cross session creation",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken:
+                    captureAdmission.destructiveSessionAdmissionToken,
+                expectedCaptureRouteSnapshot: captureAdmission.routeSnapshot)
+        }
+        try await waitUntil("Talk enqueue is admitted before new-session barrier") {
+            await transport.state.acquireCallCount() == 2
+        }
+        let vm = OpenClawChatViewModel(
+            sessionKey: "main",
+            transport: transport,
+            outboxDeliveryOwner: owner)
+        vm.input = "/new"
+        let create = Task { @MainActor in
+            await vm._test_performStartNewSession(preserving: "/new")
+        }
+        try await waitUntil("new-session action waits for admitted Talk enqueue") {
+            do {
+                _ = try await owner.destructiveSessionAdmissionToken()
+                return false
+            } catch let error as OpenClawChatOutboxDeliveryOwnerError {
+                return error == .destructiveSessionActionInProgress
+            } catch {
+                return false
+            }
+        }
+
+        await acquireGate.open()
+        _ = try await enqueue.value
+        await create.value
+
+        #expect(await transport.state.createCallCount() == 0)
+        #expect(vm.sessionKey == "main")
+        #expect(vm.input == "/new")
+        #expect(vm.errorText?.localizedCaseInsensitiveContains("queued") == true)
+        let tokenAfterRefusal = try await owner.destructiveSessionAdmissionToken()
+        #expect(tokenAfterRefusal == captureAdmission.destructiveSessionAdmissionToken)
+        vm.shutdown()
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test
+    @MainActor
+    func `successful new session rotates the owner token before create`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let transport = S3TestTransport()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        let captureAdmission = try await owner.admitCapture()
+        let vm = OpenClawChatViewModel(
+            sessionKey: "main",
+            transport: transport,
+            outboxDeliveryOwner: owner)
+
+        await vm._test_performStartNewSession(preserving: "/new")
+
+        #expect(await transport.state.createCallCount() == 1)
+        #expect(vm.sessionKey.hasPrefix("ios-"))
+        let tokenAfterCreate = try await owner.destructiveSessionAdmissionToken()
+        #expect(tokenAfterCreate != captureAdmission.destructiveSessionAdmissionToken)
+        await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+            _ = try await owner.enqueue(
+                rawCommandID: "stale-capture-after-new",
+                sessionKey: "main",
+                text: "must not enqueue",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken:
+                    captureAdmission.destructiveSessionAdmissionToken,
+                expectedCaptureRouteSnapshot: captureAdmission.routeSnapshot)
+        }
+        vm.shutdown()
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `replacement owner rejects an admission token captured by its predecessor`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let firstOwner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport(),
+            confirmationDelaysNanoseconds: [])
+        let staleToken = try await firstOwner.destructiveSessionAdmissionToken()
+        await firstOwner.retire()
+
+        let replacementOwner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport(),
+            confirmationDelaysNanoseconds: [])
+        let replacementToken = try await replacementOwner.destructiveSessionAdmissionToken()
+        #expect(replacementToken != staleToken)
+        await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+            _ = try await replacementOwner.enqueue(
+                rawCommandID: "talk-from-retired-owner",
+                sessionKey: "main",
+                text: "must be reviewed",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken: staleToken)
+        }
+        let replacementRows = try await fixture.store.loadUnresolved()
+        #expect(replacementRows.isEmpty)
+        await replacementOwner.retire()
+        try await fixture.close()
+    }
+
+    @Test func `destructive session lease rejects concurrent and pre-reset Talk admission`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let actionGate = S3TestGate()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport(),
+            confirmationDelaysNanoseconds: [])
+        let capturedAdmissionToken = try await owner.destructiveSessionAdmissionToken()
+        let destructive = Task {
+            try await owner.performDestructiveSessionAction {
+                await actionGate.wait()
+            }
+        }
+        try await waitUntil("destructive session action owns admission") {
+            await actionGate.waiterCount() == 1
+        }
+
+        await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+            _ = try await owner.enqueue(
+                rawCommandID: "talk-during-reset",
+                sessionKey: "main",
+                text: "blocked during reset",
+                attachments: [],
+                thinkingLevel: "low")
+        }
+        await actionGate.open()
+        try await destructive.value
+        await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+            _ = try await owner.enqueue(
+                rawCommandID: "talk-captured-before-reset",
+                sessionKey: "main",
+                text: "old capture",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken: capturedAdmissionToken)
+        }
+        let destructiveRows = try await fixture.store.loadUnresolved()
+        #expect(destructiveRows.isEmpty)
+        await owner.retire()
+        try await fixture.close()
+    }
+
+    @Test
+    @MainActor
+    func `session switch before destructive admission preserves capture and has zero effect`() async throws {
+        for action in ["reset", "compact"] {
+            let fixture = try await S3TestStoreFixture.make()
+            let routeGate = S3TestGate()
+            let transport = S3TestTransport()
+            let owner = OpenClawChatOutboxDeliveryOwner(
+                store: fixture.store,
+                stableGatewayID: "gateway-test",
+                transport: transport,
+                confirmationDelaysNanoseconds: [])
+            let capturedAdmission = try await owner.admitCapture()
+            await transport.state.setAcquireGate(routeGate)
+            let holdingAdmission = Task { try await owner.admitCapture() }
+            try await waitUntil("capture admission holds (action) before destructive preflight") {
+                await transport.state.acquireCallCount() == 2
+            }
+            let vm = OpenClawChatViewModel(
+                sessionKey: "main",
+                transport: transport,
+                outboxDeliveryOwner: owner)
+            vm.input = "/\(action)"
+            let mutation = Task { @MainActor in
+                if action == "reset" {
+                    await vm._test_performReset(preserving: "/reset")
+                } else {
+                    await vm._test_performCompact(preserving: "/compact")
+                }
+            }
+            try await waitUntil("destructive action waits behind admitted capture") {
+                do {
+                    _ = try await owner.destructiveSessionAdmissionToken()
+                    return false
+                } catch let error as OpenClawChatOutboxDeliveryOwnerError {
+                    return error == .destructiveSessionActionInProgress
+                } catch {
+                    return false
+                }
+            }
+
+            vm.syncSession(to: "other")
+            try await waitUntil("other bootstrap settles before destructive admission resumes") {
+                await MainActor.run {
+                    vm.sessionKey == "other" && !vm.isLoading
+                }
+            }
+            vm.input = "other draft"
+            vm.errorText = "other sentinel"
+            let otherSubscription = vm._test_eventSubscriptionGeneration()
+            await routeGate.open()
+            await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+                _ = try await holdingAdmission.value
+            }
+            await mutation.value
+
+            #expect(await transport.state.resetCallCount() == 0)
+            #expect(await transport.state.compactCallCount() == 0)
+            let tokenAfterSessionSwitch = try await owner.destructiveSessionAdmissionToken()
+            #expect(tokenAfterSessionSwitch == capturedAdmission.destructiveSessionAdmissionToken)
+            #expect(vm.sessionKey == "other")
+            #expect(vm.input == "other draft")
+            #expect(vm.errorText == "other sentinel")
+            #expect(vm._test_eventSubscriptionGeneration() == otherSubscription)
+
+            let committed = try await owner.enqueue(
+                rawCommandID: "talk-after-refused-\(action)",
+                sessionKey: "main",
+                text: "capture remains valid",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken:
+                    capturedAdmission.destructiveSessionAdmissionToken,
+                expectedCaptureRouteSnapshot: capturedAdmission.routeSnapshot)
+            #expect(committed.rawCommandID == "talk-after-refused-\(action)")
+            vm.shutdown()
+            await owner.retire()
+            try await fixture.close()
+        }
+    }
+
+    @Test
+    @MainActor
+    func `view shutdown before destructive admission preserves capture and has zero effect`() async throws {
+        for action in ["reset", "compact"] {
+            let fixture = try await S3TestStoreFixture.make()
+            let routeGate = S3TestGate()
+            let transport = S3TestTransport()
+            let owner = OpenClawChatOutboxDeliveryOwner(
+                store: fixture.store,
+                stableGatewayID: "gateway-test",
+                transport: transport,
+                confirmationDelaysNanoseconds: [])
+            let capturedAdmission = try await owner.admitCapture()
+            await transport.state.setAcquireGate(routeGate)
+            let holdingAdmission = Task { try await owner.admitCapture() }
+            try await waitUntil("capture admission holds (action) before shutdown preflight") {
+                await transport.state.acquireCallCount() == 2
+            }
+            let vm = OpenClawChatViewModel(
+                sessionKey: "main",
+                transport: transport,
+                outboxDeliveryOwner: owner)
+            let mutation = Task { @MainActor in
+                if action == "reset" {
+                    await vm._test_performReset(preserving: "/reset")
+                } else {
+                    await vm._test_performCompact(preserving: "/compact")
+                }
+            }
+            try await waitUntil("destructive action waits behind capture before shutdown") {
+                do {
+                    _ = try await owner.destructiveSessionAdmissionToken()
+                    return false
+                } catch let error as OpenClawChatOutboxDeliveryOwnerError {
+                    return error == .destructiveSessionActionInProgress
+                } catch {
+                    return false
+                }
+            }
+            vm.shutdown()
+            let shutdownSubscription = vm._test_eventSubscriptionGeneration()
+            await routeGate.open()
+            await #expect(throws: OpenClawChatOutboxDeliveryOwnerError.self) {
+                _ = try await holdingAdmission.value
+            }
+            await mutation.value
+
+            #expect(await transport.state.resetCallCount() == 0)
+            #expect(await transport.state.compactCallCount() == 0)
+            #expect(vm._test_eventSubscriptionGeneration() == shutdownSubscription)
+            let tokenAfterShutdown = try await owner.destructiveSessionAdmissionToken()
+            #expect(tokenAfterShutdown == capturedAdmission.destructiveSessionAdmissionToken)
+            let committed = try await owner.enqueue(
+                rawCommandID: "talk-after-shutdown-\(action)",
+                sessionKey: "main",
+                text: "capture remains valid",
+                attachments: [],
+                thinkingLevel: "low",
+                expectedDestructiveSessionAdmissionToken:
+                    capturedAdmission.destructiveSessionAdmissionToken,
+                expectedCaptureRouteSnapshot: capturedAdmission.routeSnapshot)
+            #expect(committed.rawCommandID == "talk-after-shutdown-\(action)")
+            await owner.retire()
+            try await fixture.close()
+        }
+    }
+
+    @Test func `owner retirement waits for admitted destructive session action`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        let actionGate = S3TestGate()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store,
+            stableGatewayID: "gateway-test",
+            transport: S3TestTransport(),
+            confirmationDelaysNanoseconds: [])
+        let destructive = Task {
+            try await owner.performDestructiveSessionAction {
+                await actionGate.wait()
+            }
+        }
+        try await waitUntil("destructive action reaches network gate") {
+            await actionGate.waiterCount() == 1
+        }
+        let retired = S3TestFlag()
+        let retirement = Task {
+            await owner.retire()
+            await retired.set()
+        }
+        try await waitUntil("retirement rejects new work while waiting on action") {
+            do {
+                try await owner.wake()
+                return false
+            } catch {
+                return true
+            }
+        }
+        #expect(!(await retired.get()))
+        await actionGate.open()
+        try await destructive.value
+        await retirement.value
+        try await fixture.close()
+    }
+
+    @Test @MainActor func `reset and compact preserve commands for every unresolved outcome`() async throws {
+        for outcome in [
+            OpenClawChatOutboxOutcome.notDispatched,
+            .dispatchRejected,
+            .accepted,
+            .ambiguous,
+            .blockedRouteChanged,
+        ] {
+            let fixture = try await S3TestStoreFixture.make()
+            let route = s3Route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            let rawID = "destructive-guard-\(outcome.rawValue)"
+            _ = try await fixture.store.persistBeforeDraftClear(
+                s3Draft(rawCommandID: rawID, route: route))
+            if outcome != .notDispatched {
+                let claimed = try await fixture.store.claimNext()
+                let claim = try #require(claimed)
+                _ = try await fixture.store.recordDispatchOutcome(outcome, for: claim)
+            }
+            let transport = S3TestTransport()
+            let owner = OpenClawChatOutboxDeliveryOwner(
+                store: fixture.store,
+                stableGatewayID: "gateway-test",
+                transport: transport,
+                confirmationDelaysNanoseconds: [])
+            let vm = OpenClawChatViewModel(
+                sessionKey: "main",
+                transport: transport,
+                outboxDeliveryOwner: owner)
+
+            vm.input = "/reset"
+            vm.send()
+            try await waitUntil("reset is refused for \(outcome.rawValue)") {
+                await MainActor.run {
+                    vm.input == "/reset" && vm.errorText?.contains("queued messages") == true
+                }
+            }
+            #expect(await transport.state.resetCallCount() == 0)
+
+            vm.errorText = nil
+            vm.input = "/compact"
+            vm.send()
+            try await waitUntil("compact is refused for \(outcome.rawValue)") {
+                await MainActor.run {
+                    vm.input == "/compact" && vm.errorText?.contains("queued messages") == true
+                }
+            }
+            #expect(await transport.state.compactCallCount() == 0)
+            vm.shutdown()
+            await owner.retire()
+            try await fixture.close()
+        }
     }
 }

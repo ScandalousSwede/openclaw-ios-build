@@ -5,6 +5,86 @@ import os
 import Testing
 @testable import OpenClaw
 
+private actor IOSSessionMutationGate {
+    private var open = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !self.open else { return }
+        await withCheckedContinuation { self.waiters.append($0) }
+    }
+
+    func release() {
+        self.open = true
+        let waiters = self.waiters
+        self.waiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waiterCount() -> Int { self.waiters.count }
+}
+
+private actor IOSSessionMutationRouterSpy: IOSGatewaySessionMutationRouting {
+    private var gatewayID: String
+    private var generation: UInt64 = 1
+    private var methods: [String] = []
+    private let gate: IOSSessionMutationGate?
+    private let returnedGatewayID: String?
+
+    init(
+        gatewayID: String,
+        gate: IOSSessionMutationGate? = nil,
+        returnedGatewayID: String? = nil)
+    {
+        self.gatewayID = gatewayID
+        self.gate = gate
+        self.returnedGatewayID = returnedGatewayID
+    }
+
+    func currentSessionMutationRoute(ifGatewayID stableGatewayID: String)
+        -> IOSGatewaySessionMutationRoute?
+    {
+        guard stableGatewayID == self.gatewayID else { return nil }
+        let admittedGeneration = self.generation
+        return IOSGatewaySessionMutationRoute(
+            stableGatewayID: self.returnedGatewayID ?? stableGatewayID) { [weak self] method, _, _ in
+            guard let self else { throw CancellationError() }
+            return try await self.perform(method: method, admittedGeneration: admittedGeneration)
+        }
+    }
+
+    func replaceGateway(with gatewayID: String) {
+        self.gatewayID = gatewayID
+        self.generation &+= 1
+    }
+
+    func recordedMethods() -> [String] { self.methods }
+
+    private func perform(method: String, admittedGeneration: UInt64) async throws -> Data {
+        await self.gate?.wait()
+        guard admittedGeneration == self.generation else { throw CancellationError() }
+        self.methods.append(method)
+        if method == "sessions.create" {
+            return Data(#"{"ok":true,"key":"session-new","sessionId":"session-id"}"#.utf8)
+        }
+        return Data("{}".utf8)
+    }
+}
+
+private func waitForIOSSessionMutation(
+    _ description: String,
+    condition: @escaping @Sendable () async -> Bool) async throws
+{
+    for _ in 0..<500 {
+        if await condition() { return }
+        await Task.yield()
+        try await Task.sleep(nanoseconds: 1_000_000)
+    }
+    throw NSError(domain: "IOSGatewayChatTransportTests", code: 1, userInfo: [
+        NSLocalizedDescriptionKey: "Timed out: \(description)",
+    ])
+}
+
 @Suite(.serialized) struct IOSGatewayChatTransportTests {
     private func object(from json: String) throws -> [String: Any] {
         let data = try #require(json.data(using: .utf8))
@@ -366,9 +446,95 @@ import Testing
         } catch {}
 
         do {
+            _ = try await transport.createSession(
+                key: "session-new",
+                label: nil,
+                parentSessionKey: "node-test")
+            Issue.record("Expected createSession to throw when gateway not connected")
+        } catch {}
+
+        do {
             try await transport.setActiveSessionKey("node-test")
             Issue.record("Expected setActiveSessionKey to throw when gateway not connected")
         } catch {}
+    }
+
+    @Test func sessionMutationsDispatchOnlyThroughTheCapturedStableRoute() async throws {
+        let router = IOSSessionMutationRouterSpy(gatewayID: "gateway-a")
+        let transport = IOSGatewayChatTransport(
+            gateway: GatewayNodeSession(),
+            stableGatewayID: "gateway-a",
+            sessionMutationRouter: router)
+
+        let created = try await transport.createSession(
+            key: "session-new",
+            label: "New",
+            parentSessionKey: "session-a")
+        try await transport.resetSession(sessionKey: "session-a")
+        try await transport.compactSession(sessionKey: "session-a")
+
+        #expect(created.key == "session-new")
+        #expect(await router.recordedMethods() == [
+            "sessions.create",
+            "sessions.reset",
+            "sessions.compact",
+        ])
+    }
+
+    @Test func replacementGatewayCannotReceiveCapturedSessionMutation() async throws {
+        for action in ["create", "reset", "compact"] {
+            let gate = IOSSessionMutationGate()
+            let router = IOSSessionMutationRouterSpy(gatewayID: "gateway-a", gate: gate)
+            let transport = IOSGatewayChatTransport(
+                gateway: GatewayNodeSession(),
+                stableGatewayID: "gateway-a",
+                sessionMutationRouter: router)
+            let request = Task {
+                if action == "create" {
+                    _ = try await transport.createSession(
+                        key: "session-new",
+                        label: nil,
+                        parentSessionKey: "session-a")
+                } else if action == "reset" {
+                    try await transport.resetSession(sessionKey: "session-a")
+                } else {
+                    try await transport.compactSession(sessionKey: "session-a")
+                }
+            }
+            try await waitForIOSSessionMutation("\(action) reaches captured route") {
+                await gate.waiterCount() == 1
+            }
+            await router.replaceGateway(with: "gateway-b")
+            await gate.release()
+            await #expect(throws: CancellationError.self) {
+                try await request.value
+            }
+            #expect(await router.recordedMethods().isEmpty)
+        }
+    }
+
+    @Test func mismatchedMutationRouteFailsClosedBeforeAnyEffect() async {
+        let router = IOSSessionMutationRouterSpy(
+            gatewayID: "gateway-a",
+            returnedGatewayID: "gateway-b")
+        let transport = IOSGatewayChatTransport(
+            gateway: GatewayNodeSession(),
+            stableGatewayID: "gateway-a",
+            sessionMutationRouter: router)
+
+        await #expect(throws: CancellationError.self) {
+            _ = try await transport.createSession(
+                key: "session-new",
+                label: nil,
+                parentSessionKey: "session-a")
+        }
+        await #expect(throws: CancellationError.self) {
+            try await transport.resetSession(sessionKey: "session-a")
+        }
+        await #expect(throws: CancellationError.self) {
+            try await transport.compactSession(sessionKey: "session-a")
+        }
+        #expect(await router.recordedMethods().isEmpty)
     }
 
     @Test func mapsSessionMessageEventToSessionMessage() {

@@ -7,6 +7,25 @@ import OpenClawProtocol
 import OSLog
 import Speech
 
+struct TalkDurableChatRequest: Equatable, Sendable {
+    let rawCommandID: String
+    let stableGatewayID: String
+    let sessionKey: String
+    let message: String
+    let thinkingLevel: String
+    let destructiveSessionAdmissionToken: UUID
+    let captureRouteSnapshot: OpenClawChatOutboxRouteSnapshot
+}
+
+struct TalkDurableChatPersistence: Sendable {
+    let request: TalkDurableChatRequest
+    let ownerGeneration: UInt64
+    let owner: OpenClawChatOutboxDeliveryOwner
+    let gatewayEvents: AsyncStream<EventFrame>
+    let incrementalEvents: AsyncStream<EventFrame>
+    let outboxUpdates: AsyncStream<OpenClawChatOutboxDeliveryUpdate>
+}
+
 // This file intentionally centralizes talk mode state + behavior.
 // It's large, and splitting would force `private` -> `fileprivate` across many members.
 // We'll refactor into smaller files when the surface stabilizes.
@@ -15,6 +34,7 @@ import Speech
 @Observable
 final class TalkModeManager: NSObject {
     private typealias SpeechRequest = SFSpeechAudioBufferRecognitionRequest
+    private typealias SpeechPresentationValidator = @MainActor @Sendable () async -> Bool
     private static let defaultModelIdFallback = "eleven_v3"
     private static let defaultRealtimeModelIdFallback = "gpt-realtime-2"
     private static let defaultTalkProvider = "elevenlabs"
@@ -62,7 +82,14 @@ final class TalkModeManager: NSObject {
 
     var hasActiveAudioCapture: Bool {
         self.isEnabled || self.isListening || self.isPushToTalkActive || self.realtimeRelaySession != nil
-            || self.realtimeRelayStartInFlight
+            || self.realtimeRelayStartInFlight || self.pttStartReservationID != nil
+    }
+
+    var canUseBackgroundTalkOptIn: Bool {
+        !self.isStarting && self.pttStartReservationID == nil && self.pendingDurableChat == nil &&
+            !self.isPushToTalkActive && self.activePTTCaptureId == nil && self.pttEndTask == nil &&
+            self.durableResponseTask == nil && !self.durableResponseOwnsSpeech &&
+            !self.isPersistingDurableMessage
     }
 
     private enum CaptureMode {
@@ -76,10 +103,19 @@ final class TalkModeManager: NSObject {
     private var captureMode: CaptureMode = .idle
     private var foregroundAudioCaptureAllowed = true
     private var resumeContinuousAfterPTT: Bool = false
+    private var pttStartReservationID: UUID?
     private var activePTTCaptureId: String?
     private var pttAutoStopEnabled: Bool = false
     private var pttCompletion: CheckedContinuation<OpenClawTalkPTTStopPayload, Never>?
     private var pttTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored private nonisolated(unsafe) var pttEndTask: Task<OpenClawTalkPTTStopPayload, Never>?
+    private var pttEndID: UUID?
+    private struct PTTEndAdmission {
+        let endID: UUID
+        let captureID: String
+        let deliveryGeneration: UInt64
+        let transcriptGeneration: UInt64
+    }
 
     private let allowSimulatorCapture: Bool
 
@@ -89,15 +125,21 @@ final class TalkModeManager: NSObject {
     private var speechRecognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var recognitionCallbackGeneration: UInt64 = 0
     private var silenceTask: Task<Void, Never>?
+    private var silenceMonitorGeneration: UInt64 = 0
+    private var pttTimeoutGeneration: UInt64 = 0
     private var realtimeSession: TalkRealtimeWebRTCSession?
     private var realtimeRelaySession: RealtimeTalkRelaySession?
+    private var realtimeRelayGeneration: UInt64 = 0
+    private var activeRealtimeRelayGeneration: UInt64?
     private var realtimeRelayStartInFlight = false
     private var prefetchedRealtimeSession: TalkRealtimeClientSession?
     private var realtimePrefetchTask: Task<Void, Never>?
 
     private var lastHeard: Date?
     private var lastTranscript: String = ""
+    private var transcriptGeneration: UInt64 = 0
     private var loggedPartialThisCycle: Bool = false
     private var lastSpokenText: String?
     private var lastInterruptedAtSeconds: Double?
@@ -140,10 +182,61 @@ final class TalkModeManager: NSObject {
     private var ttsGeneration: UInt64 = 0
     private var currentAudioActivation: TalkAudioRouteEvidence.Activation = .unknown
     private var audioRouteObserver: NSObjectProtocol?
+    private var durableChatGatewayOwnerID: (@MainActor () -> String?)?
+    private var durableChatCaptureAdmission:
+        (@MainActor () async throws -> OpenClawChatOutboxCaptureAdmission)?
+    private var durableChatCaptureAdmissionToken: (@MainActor () async throws -> UUID)?
+    private var durableChatCaptureAdmissionIsCurrent:
+        (@MainActor (_ stableGatewayID: String, _ token: UUID) async -> Bool)?
+    private var durableChatPersist: (@MainActor (TalkDurableChatRequest) async throws -> TalkDurableChatPersistence)?
+    private struct DurableCaptureContext {
+        let rawCommandID: String
+        let stableGatewayID: String
+        let sessionKey: String
+        let deliveryGeneration: UInt64
+        let responseAdmissionGeneration: UInt64
+        let destructiveSessionAdmissionToken: UUID
+        let captureRouteSnapshot: OpenClawChatOutboxRouteSnapshot
+    }
+    private struct ContinuousStartAdmission {
+        let attemptID: Int
+        let stableGatewayID: String
+        let sessionKey: String
+        let deliveryGeneration: UInt64
+        let destructiveSessionAdmissionToken: UUID?
+    }
+    private struct PendingDurableChat {
+        let request: TalkDurableChatRequest
+        let transcript: String
+        let captureGeneration: UInt64
+        let deliveryGeneration: UInt64
+        let responseAdmissionGeneration: UInt64
+        let restartAfter: Bool
+    }
+    private struct PersistedDurableChat {
+        let persistence: TalkDurableChatPersistence
+        let responseAdmissionGeneration: UInt64
+        let allowsPresentation: Bool
+        let wasPurgedByCredentialReset: Bool
+        let restartAfter: Bool
+    }
+    private var durableCaptureContext: DurableCaptureContext?
+    private var pendingDurableChat: PendingDurableChat?
+    var isPersistingDurableMessage = false
+    private var durableDeliveryGeneration: UInt64 = 0
+    private var durableResponseGeneration: UInt64 = 0
+    private var durableResponseOwnsSpeech = false
+    @ObservationIgnored private nonisolated(unsafe) var durableResponseTask: Task<Void, Never>?
     #if DEBUG
+    private var pttMicrophonePermissionOverride: (() async -> Bool)?
+    private var pttSpeechPermissionOverride: (() async -> Bool)?
     private var ttsPrepareAudioOverride: (() throws -> TalkAudioRouteEvidence)?
     private var ttsRestoreAudioOverride: (() -> Void)?
     private var incrementalSpeechBeforeSpeakOverride: ((UInt64) async -> Void)?
+    private var durableEventObservedOverride: (@Sendable (_ runID: String?, _ matched: Bool) -> Void)?
+    private var durableResponseExitedOverride: (@Sendable (_ generation: UInt64) -> Void)?
+    private var pttEndBeforeBodyOverride: (() async -> Void)?
+    private var durablePresentationBeforePlaybackOverride: (() async -> Void)?
     #endif
 
     private var gateway: GatewayNodeSession?
@@ -166,6 +259,7 @@ final class TalkModeManager: NSObject {
     private var incrementalSpeechBuffer = IncrementalSpeechBuffer()
     private var incrementalSpeechContext: IncrementalSpeechContext?
     private var incrementalSpeechDirective: TalkDirective?
+    private var incrementalSpeechPresentationValidator: SpeechPresentationValidator?
     private var incrementalSpeechPrefetch: IncrementalSpeechPrefetchState?
     private var incrementalSpeechPrefetchMonitorTask: Task<Void, Never>?
 
@@ -204,6 +298,68 @@ final class TalkModeManager: NSObject {
         self.gateway = gateway
     }
 
+    func attachDurableChatOutbox(
+        gatewayOwnerID: @escaping @MainActor () -> String?,
+        captureAdmission:
+            @escaping @MainActor () async throws -> OpenClawChatOutboxCaptureAdmission,
+        captureAdmissionToken: (@MainActor () async throws -> UUID)? = nil,
+        captureAdmissionIsCurrent:
+            (@MainActor (_ stableGatewayID: String, _ token: UUID) async -> Bool)? = nil,
+        persist: @escaping @MainActor (TalkDurableChatRequest) async throws -> TalkDurableChatPersistence)
+    {
+        self.durableChatGatewayOwnerID = gatewayOwnerID
+        self.durableChatCaptureAdmission = captureAdmission
+        self.durableChatCaptureAdmissionToken = captureAdmissionToken
+        self.durableChatCaptureAdmissionIsCurrent = captureAdmissionIsCurrent
+        self.durableChatPersist = persist
+    }
+
+    var hasPendingDurableMessage: Bool {
+        self.pendingDurableChat != nil
+    }
+
+    var pendingDurableCommandID: String? {
+        self.pendingDurableChat?.request.rawCommandID
+    }
+
+    func invalidateDurableChatDeliveryOwner() {
+        self.cancelDurableResponse()
+        if self.pendingDurableChat == nil, self.statusText.hasPrefix("Queued") {
+            self.statusText = "Queued — reply will remain in Chat"
+        }
+    }
+
+    func beginCredentialReset() {
+        self.durableDeliveryGeneration &+= 1
+        self.pttStartReservationID = nil
+        self.cancelDurableResponse()
+        self.statusText = "Off"
+        self.isPersistingDurableMessage = false
+        self.pendingDurableChat = nil
+        self.isPushToTalkActive = false
+        self.isListening = false
+        self.isUserSpeechDetected = false
+        self.captureMode = .idle
+        self.stopRecognition()
+        self.stopSilenceMonitor()
+        self.cancelPTTTimeout()
+        self.pttEndTask?.cancel()
+        self.pttEndTask = nil
+        self.pttEndID = nil
+        self.pttAutoStopEnabled = false
+        self.resumeContinuousAfterPTT = false
+        self.durableCaptureContext = nil
+        let captureID = self.activePTTCaptureId ?? UUID().uuidString
+        self.activePTTCaptureId = nil
+        self.finishPTTOnce(OpenClawTalkPTTStopPayload(
+            captureId: captureID,
+            transcript: nil,
+            status: "cancelled"))
+        self.lastTranscript = ""
+        self.lastHeard = nil
+        self.transcriptGeneration &+= 1
+    }
+
     func updateGatewayConnected(_ connected: Bool) {
         self.gatewayConnected = connected
         if connected {
@@ -213,6 +369,8 @@ final class TalkModeManager: NSObject {
                 Task { await self.start() }
             }
         } else {
+            self.cancelPendingStart()
+            self.cancelDurableResponse()
             self.stopRealtimeSession()
             if self.isEnabled, !self.isSpeaking {
                 self.statusText = "Offline"
@@ -227,6 +385,7 @@ final class TalkModeManager: NSObject {
         let trimmed = (sessionKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if trimmed == self.mainSessionKey { return }
+        self.cancelDurableResponse()
         self.mainSessionKey = trimmed
         if self.gatewayConnected, self.isEnabled {
             Task { await self.subscribeChatIfNeeded(sessionKey: trimmed) }
@@ -276,6 +435,15 @@ final class TalkModeManager: NSObject {
             "talk.timeline manager start enter enabled=\(self.isEnabled) "
                 + "listening=\(self.isListening) gatewayConnected=\(self.gatewayConnected)")
         guard self.isEnabled else { return }
+        guard self.pendingDurableChat == nil else {
+            self.statusText = "Retry the previous Talk message"
+            GatewayDiagnostics.log("talk start blocked: pending durable message requires review")
+            return
+        }
+        guard self.pttStartReservationID == nil else {
+            GatewayDiagnostics.log("talk start ignored: explicit PTT is starting")
+            return
+        }
         guard self.captureMode != .pushToTalk else { return }
         guard self.foregroundAudioCaptureAllowed else {
             self.statusText = "Paused"
@@ -303,8 +471,28 @@ final class TalkModeManager: NSObject {
         }
         self.logger.info("start")
         self.statusText = "Requesting permissions…"
+        let admittedDeliveryGeneration = self.durableDeliveryGeneration
+        let admittedSessionKey = self.mainSessionKey
+        let admittedStableGatewayID = self.durableChatGatewayOwnerID?()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let admittedDestructiveToken: UUID?
+        do {
+            admittedDestructiveToken = try await self.durableChatCaptureAdmissionToken?()
+        } catch {
+            guard self.isCurrentStartAttempt(attemptID) else { return }
+            self.statusText = "Start failed: durable delivery unavailable"
+            GatewayDiagnostics.log("talk start blocked: durable admission unavailable")
+            return
+        }
+        let startAdmission = ContinuousStartAdmission(
+            attemptID: attemptID,
+            stableGatewayID: admittedStableGatewayID,
+            sessionKey: admittedSessionKey,
+            deliveryGeneration: admittedDeliveryGeneration,
+            destructiveSessionAdmissionToken: admittedDestructiveToken)
+        guard await self.isCurrentContinuousStart(startAdmission) else { return }
         let permissionStartedAt = Self.nowSeconds()
-        let micOk = await Self.requestMicrophonePermission()
+        let micOk = await self.requestPTTMicrophonePermission()
         GatewayDiagnostics.log(
             "talk.timeline microphone permission ok=\(micOk) "
                 + "elapsedMs=\(Self.elapsedMs(since: permissionStartedAt))")
@@ -313,24 +501,29 @@ final class TalkModeManager: NSObject {
             self.statusText = "Microphone permission denied"
             return
         }
-        guard self.isCurrentStartAttempt(attemptID) else { return }
+        guard await self.isCurrentContinuousStart(startAdmission) else { return }
         await self.ensureTalkConfigLoadedForStart()
-        guard self.isCurrentStartAttempt(attemptID) else { return }
+        guard await self.isCurrentContinuousStart(startAdmission) else { return }
         if self.gatewayTalkPermissionState.requiresTalkPermissionAction {
             self.statusText = "Gateway permission required"
             GatewayDiagnostics.log("talk.timeline manager start blocked gateway permission")
             return
         }
         if self.realtimeWebRTCEnabled {
+            guard await self.isCurrentContinuousStart(startAdmission) else { return }
             let started = self.executionMode == .realtimeRelay
                 ? await self.startRealtimeRelayIfAvailable()
                 : await self.startRealtimeIfAvailable()
             if started {
+                guard await self.isCurrentContinuousStart(startAdmission) else {
+                    self.stopRealtimeSession()
+                    return
+                }
                 return
             }
         }
 
-        let speechOk = await Self.requestSpeechPermission()
+        let speechOk = await self.requestPTTSpeechPermission()
         guard speechOk else {
             self.logger.warning("start blocked: speech permission denied")
             self.statusText = Self.permissionMessage(
@@ -338,14 +531,23 @@ final class TalkModeManager: NSObject {
                 status: SFSpeechRecognizer.authorizationStatus())
             return
         }
-        guard self.isCurrentStartAttempt(attemptID) else { return }
+        guard await self.isCurrentContinuousStart(startAdmission) else { return }
 
         do {
             GatewayDiagnostics.log("talk.timeline fallback speech pipeline start")
+            let durableContext = try await self.makeDurableCaptureContext()
+            guard await self.isCurrentContinuousStart(startAdmission) else { return }
+            if let admittedDestructiveToken,
+               durableContext.destructiveSessionAdmissionToken != admittedDestructiveToken
+            {
+                throw CancellationError()
+            }
+            guard await self.isCurrentContinuousStart(startAdmission) else { return }
             try Self.configureAudioSession()
             self.currentAudioActivation = .active
             // Set this before starting recognition so any early speech errors are classified correctly.
             self.captureMode = .continuous
+            self.beginTranscriptCapture(context: durableContext)
             try self.startRecognition()
             self.isListening = true
             self.statusText = "Listening"
@@ -360,7 +562,31 @@ final class TalkModeManager: NSObject {
     }
 
     private func isCurrentStartAttempt(_ attemptID: Int) -> Bool {
-        self.startAttemptID == attemptID && self.isEnabled && self.captureMode != .pushToTalk
+        !Task.isCancelled && self.foregroundAudioCaptureAllowed && self.gatewayConnected &&
+            self.pttStartReservationID == nil && self.startAttemptID == attemptID && self.isEnabled &&
+            self.captureMode != .pushToTalk
+    }
+
+    private func isCurrentContinuousStart(_ admission: ContinuousStartAdmission) async -> Bool {
+        guard self.isCurrentStartAttempt(admission.attemptID),
+              self.durableDeliveryGeneration == admission.deliveryGeneration,
+              self.mainSessionKey == admission.sessionKey,
+              self.durableChatGatewayOwnerID?()?.trimmingCharacters(in: .whitespacesAndNewlines) ==
+              admission.stableGatewayID
+        else { return false }
+        if let token = admission.destructiveSessionAdmissionToken,
+           let durableChatCaptureAdmissionIsCurrent
+        {
+            let tokenIsCurrent = await durableChatCaptureAdmissionIsCurrent(
+                admission.stableGatewayID,
+                token)
+            guard tokenIsCurrent else { return false }
+        }
+        return self.isCurrentStartAttempt(admission.attemptID) &&
+            self.durableDeliveryGeneration == admission.deliveryGeneration &&
+            self.mainSessionKey == admission.sessionKey &&
+            self.durableChatGatewayOwnerID?()?.trimmingCharacters(in: .whitespacesAndNewlines) ==
+            admission.stableGatewayID
     }
 
     private func cancelPendingStart() {
@@ -396,27 +622,34 @@ final class TalkModeManager: NSObject {
     }
 
     func stop() {
+        let pttEnding = self.pttEndTask != nil
+        self.pttStartReservationID = nil
         self.isEnabled = false
         self.cancelPendingStart()
         self.isListening = false
         self.isUserSpeechDetected = false
-        self.isPushToTalkActive = false
-        self.captureMode = .idle
+        if !pttEnding {
+            self.isPushToTalkActive = false
+            self.captureMode = .idle
+        }
         self.statusText = "Off"
-        self.lastTranscript = ""
-        self.lastHeard = nil
-        self.silenceTask?.cancel()
-        self.silenceTask = nil
+        if self.pendingDurableChat == nil, !pttEnding {
+            self.lastTranscript = ""
+            self.lastHeard = nil
+            self.durableCaptureContext = nil
+            self.transcriptGeneration &+= 1
+        }
+        self.stopSilenceMonitor()
         self.stopRealtimeSession()
         self.stopRecognition()
         self.stopSpeaking()
+        self.cancelDurableResponse()
         self.lastInterruptedAtSeconds = nil
         let pendingPTT = self.pttCompletion != nil
         let pendingCaptureId = self.activePTTCaptureId ?? UUID().uuidString
-        self.pttTimeoutTask?.cancel()
-        self.pttTimeoutTask = nil
+        self.cancelPTTTimeout()
         self.pttAutoStopEnabled = false
-        if pendingPTT {
+        if pendingPTT, self.pttEndTask == nil {
             let payload = OpenClawTalkPTTStopPayload(
                 captureId: pendingCaptureId,
                 transcript: nil,
@@ -424,7 +657,9 @@ final class TalkModeManager: NSObject {
             self.finishPTTOnce(payload)
         }
         self.resumeContinuousAfterPTT = false
-        self.activePTTCaptureId = nil
+        if !pttEnding {
+            self.activePTTCaptureId = nil
+        }
         self.cancelTTSGeneration()
         self.systemSpeech.stop()
         do {
@@ -439,29 +674,49 @@ final class TalkModeManager: NSObject {
     /// Suspends microphone usage without disabling Talk Mode.
     /// Used when the app backgrounds (or when we need to temporarily release the mic).
     func suspendForBackground(keepActive: Bool = false) -> Bool {
-        guard self.isEnabled else { return false }
         if keepActive {
             self.statusText = self.isListening ? "Listening" : self.statusText
             return false
         }
-        let wasActive = self.isListening || self.isSpeaking || self.isPushToTalkActive
+        let wasActive = self.isEnabled || self.isListening || self.isSpeaking ||
+            self.pttStartReservationID != nil ||
+            self.isPushToTalkActive || self.activePTTCaptureId != nil || self.isPersistingDurableMessage
 
+        let pttEnding = self.pttEndTask != nil
+        self.pttStartReservationID = nil
         self.cancelPendingStart()
         self.isListening = false
-        self.isPushToTalkActive = false
-        self.captureMode = .idle
+        if !pttEnding {
+            self.isPushToTalkActive = false
+            self.captureMode = .idle
+        }
         self.statusText = "Paused"
-        self.lastTranscript = ""
-        self.lastHeard = nil
-        self.silenceTask?.cancel()
-        self.silenceTask = nil
+        if self.pendingDurableChat == nil, !pttEnding {
+            self.lastTranscript = ""
+            self.lastHeard = nil
+            self.durableCaptureContext = nil
+            self.transcriptGeneration &+= 1
+        }
+        self.stopSilenceMonitor()
+        self.cancelPTTTimeout()
 
         self.stopRealtimeSession()
         self.stopRecognition()
         self.stopSpeaking()
+        self.cancelDurableResponse()
         self.lastInterruptedAtSeconds = nil
         self.cancelTTSGeneration()
         self.systemSpeech.stop()
+        let captureID = self.activePTTCaptureId ?? UUID().uuidString
+        if !pttEnding {
+            self.activePTTCaptureId = nil
+        }
+        if self.pttEndTask == nil {
+            self.finishPTTOnce(OpenClawTalkPTTStopPayload(
+                captureId: captureID,
+                transcript: nil,
+                status: "cancelled"))
+        }
 
         do {
             try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
@@ -478,6 +733,7 @@ final class TalkModeManager: NSObject {
         self.foregroundAudioCaptureAllowed = allowed
         if !allowed {
             self.cancelPendingStart()
+            self.cancelDurableResponse()
         }
     }
 
@@ -497,44 +753,93 @@ final class TalkModeManager: NSObject {
     }
 
     func beginPushToTalk() async throws -> OpenClawTalkPTTStartPayload {
+        guard self.pendingDurableChat == nil else {
+            self.statusText = "Retry the previous Talk message"
+            throw NSError(domain: "TalkMode", code: 12, userInfo: [
+                NSLocalizedDescriptionKey: "Retry the previous Talk message before recording another",
+            ])
+        }
         guard self.gatewayConnected else {
             self.statusText = "Offline"
             throw NSError(domain: "TalkMode", code: 7, userInfo: [
                 NSLocalizedDescriptionKey: "Gateway not connected",
             ])
         }
+        guard self.foregroundAudioCaptureAllowed else {
+            self.statusText = "Paused"
+            throw CancellationError()
+        }
         if self.isPushToTalkActive, let captureId = activePTTCaptureId {
             return OpenClawTalkPTTStartPayload(captureId: captureId)
+        }
+        guard self.pttStartReservationID == nil else {
+            throw NSError(domain: "TalkMode", code: 13, userInfo: [
+                NSLocalizedDescriptionKey: "Push to Talk is already starting",
+            ])
+        }
+        let startReservationID = UUID()
+        self.pttStartReservationID = startReservationID
+        defer {
+            if self.pttStartReservationID == startReservationID {
+                self.pttStartReservationID = nil
+            }
+        }
+        if self.isStarting {
+            self.cancelPendingStart()
+        }
+
+        // A new explicit interaction owns the audio surface. Fence any older
+        // exact-run observer/TTS without cancelling its durable FIFO delivery.
+        self.cancelDurableResponse()
+        let durableContext = try await self.makeDurableCaptureContext()
+        guard self.pttStartReservationID == startReservationID,
+              self.gatewayConnected,
+              self.foregroundAudioCaptureAllowed,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
         }
 
         self.stopSpeaking(storeInterruption: false)
         self.cancelPendingStart()
-        self.pttTimeoutTask?.cancel()
-        self.pttTimeoutTask = nil
+        self.cancelPTTTimeout()
         self.pttAutoStopEnabled = false
 
         self.resumeContinuousAfterPTT = self.isEnabled && self.captureMode == .continuous
-        self.silenceTask?.cancel()
-        self.silenceTask = nil
+        self.stopSilenceMonitor()
+        self.stopRealtimeSession()
         self.stopRecognition()
         self.isListening = false
         self.isUserSpeechDetected = false
 
         let captureId = UUID().uuidString
         self.activePTTCaptureId = captureId
-        self.lastTranscript = ""
-        self.lastHeard = nil
+        self.beginTranscriptCapture(context: durableContext)
+        var captureStarted = false
+        defer {
+            if !captureStarted {
+                self.cancelPTTStartIfCurrent(captureID: captureId)
+            }
+        }
 
         self.statusText = "Requesting permissions…"
         if !self.allowSimulatorCapture {
-            let micOk = await Self.requestMicrophonePermission()
+            let micOk = await self.requestPTTMicrophonePermission()
+            try await self.requireCurrentPTTStart(
+                captureID: captureId,
+                context: durableContext,
+                startReservationID: startReservationID)
             guard micOk else {
                 self.statusText = "Microphone permission denied"
                 throw NSError(domain: "TalkMode", code: 4, userInfo: [
                     NSLocalizedDescriptionKey: "Microphone permission denied",
                 ])
             }
-            let speechOk = await Self.requestSpeechPermission()
+            let speechOk = await self.requestPTTSpeechPermission()
+            try await self.requireCurrentPTTStart(
+                captureID: captureId,
+                context: durableContext,
+                startReservationID: startReservationID)
             guard speechOk else {
                 self.statusText = Self.permissionMessage(
                     kind: "Speech recognition",
@@ -546,6 +851,10 @@ final class TalkModeManager: NSObject {
         }
 
         do {
+            try await self.requireCurrentPTTStart(
+                captureID: captureId,
+                context: durableContext,
+                startReservationID: startReservationID)
             try Self.configureAudioSession()
             self.currentAudioActivation = .active
             self.captureMode = .pushToTalk
@@ -562,11 +871,66 @@ final class TalkModeManager: NSObject {
             throw error
         }
 
+        captureStarted = true
         return OpenClawTalkPTTStartPayload(captureId: captureId)
     }
 
     func endPushToTalk() async -> OpenClawTalkPTTStopPayload {
-        let captureId = self.activePTTCaptureId ?? UUID().uuidString
+        self.pttStartReservationID = nil
+        if let pttEndTask {
+            return await pttEndTask.value
+        }
+        let endID = UUID()
+        let admission = PTTEndAdmission(
+            endID: endID,
+            captureID: self.activePTTCaptureId ?? UUID().uuidString,
+            deliveryGeneration: self.durableDeliveryGeneration,
+            transcriptGeneration: self.transcriptGeneration)
+        let task = Task { @MainActor [weak self] in
+            guard let self else {
+                return OpenClawTalkPTTStopPayload(
+                    captureId: admission.captureID,
+                    transcript: nil,
+                    status: "cancelled")
+            }
+            #if DEBUG
+            await self.pttEndBeforeBodyOverride?()
+            #endif
+            guard self.isCurrentPTTEnd(admission) else {
+                return OpenClawTalkPTTStopPayload(
+                    captureId: admission.captureID,
+                    transcript: nil,
+                    status: "cancelled")
+            }
+            return await self.performEndPushToTalk(admission)
+        }
+        self.pttEndID = endID
+        self.pttEndTask = task
+        let payload = await task.value
+        if self.pttEndID == endID {
+            self.pttEndTask = nil
+            self.pttEndID = nil
+        }
+        return payload
+    }
+
+    private func isCurrentPTTEnd(_ admission: PTTEndAdmission) -> Bool {
+        !Task.isCancelled && self.pttEndID == admission.endID &&
+            self.activePTTCaptureId == admission.captureID &&
+            self.durableDeliveryGeneration == admission.deliveryGeneration &&
+            self.transcriptGeneration == admission.transcriptGeneration
+    }
+
+    private func performEndPushToTalk(
+        _ admission: PTTEndAdmission) async -> OpenClawTalkPTTStopPayload
+    {
+        guard self.isCurrentPTTEnd(admission) else {
+            return OpenClawTalkPTTStopPayload(
+                captureId: admission.captureID,
+                transcript: nil,
+                status: "cancelled")
+        }
+        let captureId = admission.captureID
         guard self.isPushToTalkActive else {
             let payload = OpenClawTalkPTTStopPayload(
                 captureId: captureId,
@@ -581,15 +945,20 @@ final class TalkModeManager: NSObject {
         self.isUserSpeechDetected = false
         self.captureMode = .idle
         self.stopRecognition()
-        self.pttTimeoutTask?.cancel()
-        self.pttTimeoutTask = nil
+        self.stopSilenceMonitor()
+        self.cancelPTTTimeout()
         self.pttAutoStopEnabled = false
 
         let transcript = self.lastTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.lastTranscript = ""
-        self.lastHeard = nil
+        let captureGeneration = self.transcriptGeneration
+        let captureContext = self.durableCaptureContext
 
         guard !transcript.isEmpty else {
+            if self.transcriptGeneration == captureGeneration {
+                self.lastTranscript = ""
+                self.lastHeard = nil
+                self.durableCaptureContext = nil
+            }
             self.statusText = "Ready"
             if self.resumeContinuousAfterPTT {
                 await self.start()
@@ -604,33 +973,53 @@ final class TalkModeManager: NSObject {
             return payload
         }
 
-        guard self.gatewayConnected else {
-            self.statusText = "Gateway not connected"
-            if self.resumeContinuousAfterPTT {
-                await self.start()
+        let restartAfter = self.resumeContinuousAfterPTT
+        self.resumeContinuousAfterPTT = false
+        self.activePTTCaptureId = nil
+        self.statusText = "Queueing…"
+        do {
+            let persisted = try await self.persistTranscript(
+                transcript,
+                captureGeneration: captureGeneration,
+                captureContext: captureContext,
+                restartAfter: restartAfter)
+            if persisted.wasPurgedByCredentialReset {
+                let payload = OpenClawTalkPTTStopPayload(
+                    captureId: captureId,
+                    transcript: nil,
+                    status: "cancelled")
+                self.finishPTTOnce(payload)
+                return payload
             }
-            self.resumeContinuousAfterPTT = false
-            self.activePTTCaptureId = nil
             let payload = OpenClawTalkPTTStopPayload(
                 captureId: captureId,
                 transcript: transcript,
-                status: "offline")
+                status: "queued")
+            self.finishPTTOnce(payload)
+            self.startDurableResponse(for: persisted)
+            return payload
+        } catch {
+            if error is CancellationError {
+                let payload = OpenClawTalkPTTStopPayload(
+                    captureId: captureId,
+                    transcript: nil,
+                    status: "cancelled")
+                self.finishPTTOnce(payload)
+                return payload
+            }
+            self.statusText = "Talk message not queued — retry available"
+            let nsError = error as NSError
+            let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
+            GatewayDiagnostics.log(
+                "event=talk_outbox_persist_failed command_id=\(self.pendingDurableCommandID ?? "unavailable") "
+                    + "error_domain=\(errorDomain) error_code=\(nsError.code)")
+            let payload = OpenClawTalkPTTStopPayload(
+                captureId: captureId,
+                transcript: transcript,
+                status: "not_queued")
             self.finishPTTOnce(payload)
             return payload
         }
-
-        self.statusText = "Thinking…"
-        Task { @MainActor in
-            await self.processTranscript(transcript, restartAfter: self.resumeContinuousAfterPTT)
-        }
-        self.resumeContinuousAfterPTT = false
-        self.activePTTCaptureId = nil
-        let payload = OpenClawTalkPTTStopPayload(
-            captureId: captureId,
-            transcript: transcript,
-            status: "queued")
-        self.finishPTTOnce(payload)
-        return payload
     }
 
     func runPushToTalkOnce(maxDurationSeconds: TimeInterval = 12) async throws -> OpenClawTalkPTTStopPayload {
@@ -657,6 +1046,10 @@ final class TalkModeManager: NSObject {
     }
 
     func cancelPushToTalk() async -> OpenClawTalkPTTStopPayload {
+        self.pttStartReservationID = nil
+        if let pttEndTask {
+            return await pttEndTask.value
+        }
         let captureId = self.activePTTCaptureId ?? UUID().uuidString
         guard self.isPushToTalkActive else {
             let payload = OpenClawTalkPTTStopPayload(
@@ -665,10 +1058,11 @@ final class TalkModeManager: NSObject {
                 status: "idle")
             self.finishPTTOnce(payload)
             self.pttAutoStopEnabled = false
-            self.pttTimeoutTask?.cancel()
-            self.pttTimeoutTask = nil
+            self.stopSilenceMonitor()
+            self.cancelPTTTimeout()
             self.resumeContinuousAfterPTT = false
             self.activePTTCaptureId = nil
+            self.durableCaptureContext = nil
             return payload
         }
 
@@ -679,9 +1073,11 @@ final class TalkModeManager: NSObject {
         self.stopRecognition()
         self.lastTranscript = ""
         self.lastHeard = nil
+        self.durableCaptureContext = nil
+        self.transcriptGeneration &+= 1
         self.pttAutoStopEnabled = false
-        self.pttTimeoutTask?.cancel()
-        self.pttTimeoutTask = nil
+        self.stopSilenceMonitor()
+        self.cancelPTTTimeout()
         self.resumeContinuousAfterPTT = false
         self.activePTTCaptureId = nil
         self.statusText = "Ready"
@@ -699,6 +1095,10 @@ final class TalkModeManager: NSObject {
     }
 
     private func startRecognition() throws {
+        self.stopRecognition()
+        self.recognitionCallbackGeneration &+= 1
+        let callbackGeneration = self.recognitionCallbackGeneration
+
         #if targetEnvironment(simulator)
         if self.allowSimulatorCapture {
             self.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
@@ -712,7 +1112,6 @@ final class TalkModeManager: NSObject {
         }
         #endif
 
-        self.stopRecognition()
         let localSpeechLocale = UserDefaults.standard.string(forKey: TalkSpeechLocale.storageKey)
         let resolvedSpeech = TalkSpeechLocale.makeRecognizer(
             localSelection: localSpeechLocale,
@@ -743,6 +1142,7 @@ final class TalkModeManager: NSObject {
         let tapDiagnostics = AudioTapDiagnostics(label: "talk") { [weak self] level in
             guard let self else { return }
             Task { @MainActor in
+                guard self.recognitionCallbackGeneration == callbackGeneration else { return }
                 // Smooth + clamp for UI, and keep it cheap.
                 let raw = max(0, min(Double(level) * 10.0, 1.0))
                 let next = (self.micLevel * 0.80) + (raw * 0.20)
@@ -789,60 +1189,83 @@ final class TalkModeManager: NSObject {
             "talk speech: recognition started mode=\(String(describing: self.captureMode)) "
                 + "engineRunning=\(self.audioEngine.isRunning)")
         self.recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
-            if let error {
-                let msg = error.localizedDescription
-                let lowered = msg.lowercased()
-                let isCancellation = lowered.contains("cancelled") || lowered.contains("canceled")
-                if isCancellation {
-                    GatewayDiagnostics.log("talk speech: cancelled")
-                    if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
-                        self.statusText = "Listening"
-                    }
-                    self.logger.debug("speech recognition cancelled")
-                    return
-                }
-                GatewayDiagnostics.log("talk speech: error=\(msg)")
-                if !self.isSpeaking {
-                    if msg.localizedCaseInsensitiveContains("no speech detected") {
-                        // Treat as transient silence. Don't scare users with an error banner.
-                        self.statusText = self.isEnabled ? "Listening" : "Speech error: \(msg)"
-                    } else {
-                        self.statusText = "Speech error: \(msg)"
-                    }
-                }
-                self.logger.debug("speech recognition error: \(msg, privacy: .public)")
-                // Speech recognition can terminate on transient errors (e.g. no speech detected).
-                // If talk mode is enabled and we're in continuous capture, try to restart.
-                if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
-                    // Treat the task as terminal on error so we don't get stuck with a dead recognizer.
-                    self.stopRecognition()
-                    Task { @MainActor [weak self] in
-                        await self?.restartRecognitionAfterError()
-                    }
-                }
-            }
-            guard let result else { return }
-            let transcript = result.bestTranscription.formattedString
-            if !result.isFinal, !self.loggedPartialThisCycle {
-                let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty {
-                    self.loggedPartialThisCycle = true
-                    GatewayDiagnostics.log("talk speech: partial chars=\(trimmed.count)")
-                }
-            }
-            Task { @MainActor in
-                await self.handleTranscript(transcript: transcript, isFinal: result.isFinal)
+            let transcript = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let errorMessage = error?.localizedDescription
+            Task { @MainActor [weak self] in
+                await self?.handleRecognitionCallback(
+                    transcript: transcript,
+                    isFinal: isFinal,
+                    errorMessage: errorMessage,
+                    generation: callbackGeneration)
             }
         }
     }
 
-    private func restartRecognitionAfterError() async {
-        guard self.isEnabled, self.captureMode == .continuous else { return }
+    private func handleRecognitionCallback(
+        transcript: String?,
+        isFinal: Bool,
+        errorMessage: String?,
+        generation: UInt64) async
+    {
+        guard generation == self.recognitionCallbackGeneration else { return }
+        if let msg = errorMessage {
+            let lowered = msg.lowercased()
+            let isCancellation = lowered.contains("cancelled") || lowered.contains("canceled")
+            if isCancellation {
+                GatewayDiagnostics.log("talk speech: cancelled")
+                if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
+                    self.statusText = "Listening"
+                }
+                self.logger.debug("speech recognition cancelled")
+                return
+            }
+            GatewayDiagnostics.log("talk speech: error=\(msg)")
+            if !self.isSpeaking {
+                if msg.localizedCaseInsensitiveContains("no speech detected") {
+                    // Treat as transient silence. Don't scare users with an error banner.
+                    self.statusText = self.isEnabled ? "Listening" : "Speech error: \(msg)"
+                } else {
+                    self.statusText = "Speech error: \(msg)"
+                }
+            }
+            self.logger.debug("speech recognition error: \(msg, privacy: .public)")
+            // Speech recognition can terminate on transient errors (e.g. no speech detected).
+            // If talk mode is enabled and we're in continuous capture, try to restart.
+            if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
+                // Treat the task as terminal on error so we don't get stuck with a dead recognizer.
+                self.stopRecognition()
+                let restartGeneration = self.recognitionCallbackGeneration
+                Task { @MainActor [weak self] in
+                    await self?.restartRecognitionAfterError(expectedGeneration: restartGeneration)
+                }
+            }
+        }
+        guard generation == self.recognitionCallbackGeneration,
+              let transcript
+        else { return }
+        if !isFinal, !self.loggedPartialThisCycle {
+            let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                self.loggedPartialThisCycle = true
+                GatewayDiagnostics.log("talk speech: partial chars=\(trimmed.count)")
+            }
+        }
+        await self.handleTranscript(transcript: transcript, isFinal: isFinal)
+    }
+
+    private func restartRecognitionAfterError(expectedGeneration: UInt64) async {
+        guard expectedGeneration == self.recognitionCallbackGeneration,
+              self.isEnabled,
+              self.captureMode == .continuous
+        else { return }
         // Avoid thrashing the audio engine if it’s already running.
         if self.recognitionTask != nil, self.audioEngine.isRunning { return }
         try? await Task.sleep(nanoseconds: 250_000_000)
-        guard self.isEnabled, self.captureMode == .continuous else { return }
+        guard expectedGeneration == self.recognitionCallbackGeneration,
+              self.isEnabled,
+              self.captureMode == .continuous
+        else { return }
         do {
             try Self.configureAudioSession()
             self.currentAudioActivation = .active
@@ -859,6 +1282,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func stopRecognition() {
+        self.recognitionCallbackGeneration &+= 1
         self.recognitionTask?.cancel()
         self.recognitionTask = nil
         self.recognitionRequest?.endAudio()
@@ -918,14 +1342,47 @@ final class TalkModeManager: NSObject {
     }
 
     private func startSilenceMonitor() {
-        self.silenceTask?.cancel()
-        self.silenceTask = Task { [weak self] in
+        self.stopSilenceMonitor()
+        self.silenceMonitorGeneration &+= 1
+        let generation = self.silenceMonitorGeneration
+        let transcriptGeneration = self.transcriptGeneration
+        let captureID = self.activePTTCaptureId
+        self.silenceTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            while self.isEnabled || (self.isPushToTalkActive && self.pttAutoStopEnabled) {
-                try? await Task.sleep(nanoseconds: 200_000_000)
+            while self.isCurrentSilenceMonitor(
+                generation: generation,
+                transcriptGeneration: transcriptGeneration,
+                captureID: captureID),
+                self.isEnabled || (self.isPushToTalkActive && self.pttAutoStopEnabled)
+            {
+                do {
+                    try await Task.sleep(nanoseconds: 200_000_000)
+                } catch {
+                    return
+                }
+                guard self.isCurrentSilenceMonitor(
+                    generation: generation,
+                    transcriptGeneration: transcriptGeneration,
+                    captureID: captureID)
+                else { return }
                 await self.checkSilence()
             }
         }
+    }
+
+    private func stopSilenceMonitor() {
+        self.silenceMonitorGeneration &+= 1
+        self.silenceTask?.cancel()
+        self.silenceTask = nil
+    }
+
+    private func isCurrentSilenceMonitor(
+        generation: UInt64,
+        transcriptGeneration: UInt64,
+        captureID: String?) -> Bool
+    {
+        !Task.isCancelled && self.silenceMonitorGeneration == generation &&
+            self.transcriptGeneration == transcriptGeneration && self.activePTTCaptureId == captureID
     }
 
     private func checkSilence() async {
@@ -952,17 +1409,34 @@ final class TalkModeManager: NSObject {
 
     /// Guardrail for PTT once so we don't stay open indefinitely.
     private func schedulePTTTimeout(seconds: TimeInterval) {
-        guard seconds > 0 else { return }
+        guard seconds > 0, let captureID = self.activePTTCaptureId else { return }
         let nanos = UInt64(seconds * 1_000_000_000)
-        self.pttTimeoutTask?.cancel()
-        self.pttTimeoutTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: nanos)
-            await self?.handlePTTTimeout()
+        self.cancelPTTTimeout()
+        self.pttTimeoutGeneration &+= 1
+        let generation = self.pttTimeoutGeneration
+        self.pttTimeoutTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: nanos)
+            } catch {
+                return
+            }
+            await self?.handlePTTTimeout(generation: generation, captureID: captureID)
         }
     }
 
-    private func handlePTTTimeout() async {
-        guard self.pttAutoStopEnabled, self.isPushToTalkActive else { return }
+    private func cancelPTTTimeout() {
+        self.pttTimeoutGeneration &+= 1
+        self.pttTimeoutTask?.cancel()
+        self.pttTimeoutTask = nil
+    }
+
+    private func handlePTTTimeout(generation: UInt64, captureID: String) async {
+        guard !Task.isCancelled,
+              generation == self.pttTimeoutGeneration,
+              captureID == self.activePTTCaptureId,
+              self.pttAutoStopEnabled,
+              self.isPushToTalkActive
+        else { return }
         _ = await self.endPushToTalk()
     }
 
@@ -973,142 +1447,645 @@ final class TalkModeManager: NSObject {
     }
 
     private func processTranscript(_ transcript: String, restartAfter: Bool) async {
+        let captureContext = self.durableCaptureContext
         self.isListening = false
         self.isUserSpeechDetected = false
         self.captureMode = .idle
-        self.statusText = "Thinking…"
-        self.lastTranscript = ""
-        self.lastHeard = nil
+        self.statusText = "Queueing…"
         self.stopRecognition()
 
         GatewayDiagnostics.log("talk: process transcript chars=\(transcript.count) restartAfter=\(restartAfter)")
-        await reloadConfig()
-        let prompt = self.buildPrompt(transcript: transcript)
-        guard self.gatewayConnected, let gateway else {
-            self.statusText = "Gateway not connected"
-            self.logger.warning("finalize: gateway not connected")
-            GatewayDiagnostics.log("talk: abort gateway not connected")
-            if restartAfter {
-                await self.start()
+        do {
+            let persisted = try await self.persistTranscript(
+                transcript,
+                captureGeneration: self.transcriptGeneration,
+                captureContext: captureContext,
+                restartAfter: restartAfter)
+            guard !persisted.wasPurgedByCredentialReset else { return }
+            self.startDurableResponse(for: persisted)
+        } catch {
+            if error is CancellationError { return }
+            self.statusText = "Talk message not queued — retry available"
+            let nsError = error as NSError
+            let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
+            GatewayDiagnostics.log(
+                "event=talk_outbox_persist_failed command_id=\(self.pendingDurableCommandID ?? "unavailable") "
+                    + "error_domain=\(errorDomain) error_code=\(nsError.code)")
+        }
+    }
+
+    @discardableResult
+    func retryPendingDurableMessage() async -> Bool {
+        guard !self.isPersistingDurableMessage,
+              let pending = self.pendingDurableChat
+        else { return false }
+        do {
+            let refreshedPending = try await self.refreshPendingAdmissionForExplicitRetry(pending)
+            self.statusText = "Queueing…"
+            let persisted = try await self.persistPendingDurableChat(refreshedPending)
+            guard !persisted.wasPurgedByCredentialReset else { return false }
+            self.startDurableResponse(for: persisted)
+            return true
+        } catch {
+            if error is CancellationError { return false }
+            self.statusText = "Talk message not queued — retry available"
+            return false
+        }
+    }
+
+    @discardableResult
+    func discardPendingDurableMessage() -> Bool {
+        guard !self.isPersistingDurableMessage,
+              let pending = self.pendingDurableChat
+        else { return false }
+        self.pendingDurableChat = nil
+        if self.transcriptGeneration == pending.captureGeneration,
+           self.lastTranscript.trimmingCharacters(in: .whitespacesAndNewlines) == pending.transcript
+        {
+            self.lastTranscript = ""
+            self.lastHeard = nil
+            self.durableCaptureContext = nil
+            self.transcriptGeneration &+= 1
+        }
+        self.statusText = self.gatewayConnected ? "Ready" : "Offline"
+        GatewayDiagnostics.log(
+            "event=talk_outbox_pending_discarded command_id=\(pending.request.rawCommandID)")
+        return true
+    }
+
+    private func refreshPendingAdmissionForExplicitRetry(
+        _ pending: PendingDurableChat) async throws -> PendingDurableChat
+    {
+        let admittedDeliveryGeneration = self.durableDeliveryGeneration
+        let admittedRawCommandID = pending.request.rawCommandID
+        guard pending.deliveryGeneration == admittedDeliveryGeneration,
+              self.pendingDurableChat?.request.rawCommandID == admittedRawCommandID,
+              !Task.isCancelled
+        else {
+            throw CancellationError()
+        }
+        let currentGatewayID = self.durableChatGatewayOwnerID?()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard currentGatewayID == pending.request.stableGatewayID else {
+            throw OpenClawChatOutboxError.routeSnapshotChanged
+        }
+        guard let durableChatCaptureAdmission else {
+            throw OpenClawChatOutboxError.routeSnapshotUnavailable
+        }
+        let admission = try await durableChatCaptureAdmission()
+        guard !Task.isCancelled,
+              self.durableDeliveryGeneration == admittedDeliveryGeneration,
+              self.pendingDurableChat?.request.rawCommandID == admittedRawCommandID,
+              self.pendingDurableChat?.deliveryGeneration == admittedDeliveryGeneration,
+              self.durableChatGatewayOwnerID?()?
+                .trimmingCharacters(in: .whitespacesAndNewlines) == pending.request.stableGatewayID
+        else {
+            throw CancellationError()
+        }
+        let refreshedRequest = TalkDurableChatRequest(
+            rawCommandID: pending.request.rawCommandID,
+            stableGatewayID: pending.request.stableGatewayID,
+            sessionKey: pending.request.sessionKey,
+            message: pending.request.message,
+            thinkingLevel: pending.request.thinkingLevel,
+            destructiveSessionAdmissionToken: admission.destructiveSessionAdmissionToken,
+            captureRouteSnapshot: admission.routeSnapshot)
+        let refreshed = PendingDurableChat(
+            request: refreshedRequest,
+            transcript: pending.transcript,
+            captureGeneration: pending.captureGeneration,
+            deliveryGeneration: pending.deliveryGeneration,
+            // Explicit retry changes only the pre-effect destructive admission
+            // token. A session/lifecycle switch that fenced presentation must
+            // not be undone merely because delivery is retried.
+            responseAdmissionGeneration: pending.responseAdmissionGeneration,
+            restartAfter: pending.restartAfter)
+        if self.pendingDurableChat?.request.rawCommandID == pending.request.rawCommandID {
+            self.pendingDurableChat = refreshed
+        }
+        return refreshed
+    }
+
+    private func persistTranscript(
+        _ transcript: String,
+        captureGeneration: UInt64,
+        captureContext: DurableCaptureContext?,
+        restartAfter: Bool) async throws -> PersistedDurableChat
+    {
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw NSError(domain: "TalkMode", code: 9, userInfo: [
+                NSLocalizedDescriptionKey: "Talk transcript is empty",
+            ])
+        }
+        let pending: PendingDurableChat
+        if let existing = self.pendingDurableChat {
+            guard existing.transcript == trimmed else {
+                throw NSError(domain: "TalkMode", code: 10, userInfo: [
+                    NSLocalizedDescriptionKey: "Retry the previous Talk message before recording another",
+                ])
             }
+            pending = existing
+        } else {
+            guard let captureContext else {
+                throw OpenClawChatOutboxError.routeSnapshotUnavailable
+            }
+            let request = TalkDurableChatRequest(
+                rawCommandID: captureContext.rawCommandID,
+                stableGatewayID: captureContext.stableGatewayID,
+                sessionKey: captureContext.sessionKey,
+                message: self.buildPrompt(transcript: trimmed),
+                thinkingLevel: "low",
+                destructiveSessionAdmissionToken: captureContext.destructiveSessionAdmissionToken,
+                captureRouteSnapshot: captureContext.captureRouteSnapshot)
+            pending = PendingDurableChat(
+                request: request,
+                transcript: trimmed,
+                captureGeneration: captureGeneration,
+                deliveryGeneration: captureContext.deliveryGeneration,
+                responseAdmissionGeneration: captureContext.responseAdmissionGeneration,
+                restartAfter: restartAfter)
+            self.pendingDurableChat = pending
+        }
+        return try await self.persistPendingDurableChat(pending)
+    }
+
+    private func persistPendingDurableChat(
+        _ pending: PendingDurableChat) async throws -> PersistedDurableChat
+    {
+        guard !self.isPersistingDurableMessage else {
+            throw NSError(domain: "TalkMode", code: 13, userInfo: [
+                NSLocalizedDescriptionKey: "Talk message persistence is already in progress",
+            ])
+        }
+        guard let durableChatPersist = self.durableChatPersist else {
+            throw NSError(domain: "TalkMode", code: 11, userInfo: [
+                NSLocalizedDescriptionKey: "Durable Talk delivery is unavailable",
+            ])
+        }
+        let startLogMessage =
+            "event=talk_outbox_persist_start command_id=\(pending.request.rawCommandID) "
+                + "message_length=\(pending.request.message.count)"
+        GatewayDiagnostics.log(startLogMessage)
+        self.isPersistingDurableMessage = true
+        defer {
+            if pending.deliveryGeneration == self.durableDeliveryGeneration {
+                self.isPersistingDurableMessage = false
+            }
+        }
+        let persistence: TalkDurableChatPersistence
+        do {
+            persistence = try await durableChatPersist(pending.request)
+        } catch {
+            guard pending.deliveryGeneration == self.durableDeliveryGeneration else {
+                throw CancellationError()
+            }
+            throw error
+        }
+        let deliveryIsCurrent = pending.deliveryGeneration == self.durableDeliveryGeneration
+
+        // The enqueue return is proof that SQLite committed. A concurrent new
+        // capture owns a newer generation and must never be erased here.
+        if deliveryIsCurrent,
+           self.transcriptGeneration == pending.captureGeneration,
+           self.lastTranscript.trimmingCharacters(in: .whitespacesAndNewlines) == pending.transcript
+        {
+            self.lastTranscript = ""
+            self.lastHeard = nil
+            self.durableCaptureContext = nil
+        }
+        if deliveryIsCurrent,
+           self.pendingDurableChat?.request.rawCommandID == pending.request.rawCommandID
+        {
+            self.pendingDurableChat = nil
+        }
+        if deliveryIsCurrent {
+            self.statusText = "Queued"
+        }
+        GatewayDiagnostics.log(
+            "event=talk_outbox_persisted command_id=\(pending.request.rawCommandID)")
+        return PersistedDurableChat(
+            persistence: persistence,
+            responseAdmissionGeneration: pending.responseAdmissionGeneration,
+            allowsPresentation: deliveryIsCurrent,
+            wasPurgedByCredentialReset: !deliveryIsCurrent,
+            restartAfter: pending.restartAfter)
+    }
+
+    private func startDurableResponse(for persisted: PersistedDurableChat) {
+        guard persisted.allowsPresentation else { return }
+        guard persisted.responseAdmissionGeneration == self.durableResponseGeneration,
+              self.foregroundAudioCaptureAllowed
+        else {
+            self.statusText = "Queued — reply will remain in Chat"
+            return
+        }
+        self.cancelDurableResponse()
+        self.durableResponseGeneration &+= 1
+        let responseGeneration = self.durableResponseGeneration
+        #if DEBUG
+        let durableResponseExited = self.durableResponseExitedOverride
+        #endif
+        self.durableResponseTask = Task { @MainActor [weak self] in
+            #if DEBUG
+            defer { durableResponseExited?(responseGeneration) }
+            #endif
+            guard let self else { return }
+            await self.handleDurableResponse(
+                persisted.persistence,
+                restartAfter: persisted.restartAfter,
+                responseGeneration: responseGeneration)
+            guard self.durableResponseGeneration == responseGeneration else { return }
+            self.durableResponseTask = nil
+        }
+    }
+
+    private func handleDurableResponse(
+        _ persistence: TalkDurableChatPersistence,
+        restartAfter: Bool,
+        responseGeneration: UInt64) async
+    {
+        let rawCommandID = persistence.request.rawCommandID
+        let outcome: OpenClawChatOutboxOutcome?
+        do {
+            try await persistence.owner.wake()
+            let streamedOutcome = await self.waitForDurableOutcome(
+                persistence,
+                timeoutSeconds: 35)
+            if let streamedOutcome {
+                outcome = streamedOutcome
+            } else {
+                outcome = try await persistence.owner.currentOutcome(rawCommandID: rawCommandID)
+            }
+        } catch {
+            guard self.isCurrentDurableResponse(responseGeneration) else { return }
+            self.statusText = "Queued — delivery pending"
+            GatewayDiagnostics.log(
+                "event=talk_outbox_process_deferred command_id=\(rawCommandID)")
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        }
+        guard self.isCurrentDurableResponse(responseGeneration) else { return }
+        guard let outcome else {
+            self.statusText = "Queued — delivery pending"
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
             return
         }
 
-        let commandID = UUID().uuidString.lowercased()
-        var acceptedDiagnosticRunID: String?
-        do {
-            let startedAt = Date().timeIntervalSince1970
-            let sessionKey = self.mainSessionKey
-            await self.subscribeChatIfNeeded(sessionKey: sessionKey)
-            let startLogMessage =
-                "event=talk_chat_send_start command_id=\(commandID) message_length=\(prompt.count)"
-            self.logger.info("\(startLogMessage, privacy: .public)")
-            GatewayDiagnostics.log(startLogMessage)
-            let runId: String
-            do {
-                runId = try await self.sendChat(
-                    prompt,
-                    gateway: gateway,
-                    idempotencyKey: commandID)
-            } catch {
-                self.statusText = "Talk failed: \(error.localizedDescription)"
-                let nsError = error as NSError
-                let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
-                let failedLogMessage =
-                    "event=talk_chat_send_unconfirmed command_id=\(commandID) "
-                        + "outcome=acceptance_not_observed error_domain=\(errorDomain) "
-                        + "error_code=\(nsError.code)"
-                self.logger.error("\(failedLogMessage, privacy: .public)")
-                GatewayDiagnostics.log(failedLogMessage)
-                if restartAfter {
-                    await self.start()
-                }
-                return
-            }
-            let diagnosticRunID = IOSGatewayChatTransport.diagnosticToken(runId)
-            acceptedDiagnosticRunID = diagnosticRunID
-            let acceptedLogMessage =
-                "event=talk_chat_send_accepted command_id=\(commandID) run_id=\(diagnosticRunID)"
-            self.logger.info("\(acceptedLogMessage, privacy: .public)")
-            GatewayDiagnostics.log(acceptedLogMessage)
-            let shouldIncremental = self.shouldUseIncrementalTTS()
-            var streamingTask: Task<Void, Never>?
-            if shouldIncremental {
-                self.resetIncrementalSpeech()
-                streamingTask = Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    await self.streamAssistant(runId: runId, gateway: gateway)
-                }
-            }
-            let completion = await waitForChatCompletion(runId: runId, gateway: gateway, timeoutSeconds: 120)
-            if completion.state == .timeout {
-                self.logger.warning(
-                    "chat completion timeout run_id=\(diagnosticRunID, privacy: .public); attempting history fallback")
-                GatewayDiagnostics.log("talk: chat completion timeout run_id=\(diagnosticRunID)")
-            } else if completion.state == .aborted {
-                self.statusText = "Aborted"
-                self.logger.warning("chat completion aborted run_id=\(diagnosticRunID, privacy: .public)")
-                GatewayDiagnostics.log("talk: chat completion aborted run_id=\(diagnosticRunID)")
-                streamingTask?.cancel()
-                await self.finishIncrementalSpeech()
-                await self.start()
-                return
-            } else if completion.state == .error {
-                self.statusText = "Chat error"
-                self.logger.warning("chat completion error run_id=\(diagnosticRunID, privacy: .public)")
-                GatewayDiagnostics.log("talk: chat completion error run_id=\(diagnosticRunID)")
-                streamingTask?.cancel()
-                await self.finishIncrementalSpeech()
-                await self.start()
-                return
-            }
+        switch outcome {
+        case .accepted, .ambiguous, .canonicalHistoryConfirmed:
+            break
+        case .notDispatched:
+            self.statusText = "Queued — waiting for connection"
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        case .dispatchRejected, .blockedRouteChanged:
+            self.statusText = "Queued — review required"
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        case .expired, .cancelled:
+            self.statusText = "Talk delivery ended — text preserved"
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        }
 
-            var assistantText = completion.assistantText
-            if assistantText == nil, shouldIncremental {
-                let fallback = self.incrementalSpeechBuffer.latestText
-                if !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    assistantText = fallback
+        guard self.gatewayConnected else {
+            self.statusText = "Queued — reply will remain in Chat"
+            return
+        }
+        await self.reloadConfig()
+        guard self.isCurrentDurableResponse(responseGeneration) else { return }
+        let diagnosticRunID = IOSGatewayChatTransport.diagnosticToken(rawCommandID)
+        GatewayDiagnostics.log(
+            "event=talk_chat_send_admitted command_id=\(rawCommandID) run_id=\(diagnosticRunID)")
+        let admissionUpdates = await persistence.owner.destructiveSessionAdmissionUpdates()
+        guard self.isCurrentDurableResponse(responseGeneration) else { return }
+        let expectedAdmissionToken = persistence.request.destructiveSessionAdmissionToken
+        let admissionMonitor = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for await token in admissionUpdates {
+                if Task.isCancelled { return }
+                guard token == expectedAdmissionToken else {
+                    guard self.isCurrentDurableResponse(responseGeneration) else { return }
+                    self.cancelDurableResponse()
+                    return
                 }
             }
-            if assistantText == nil {
-                assistantText = try await self.waitForAssistantTextFromHistory(
-                    gateway: gateway,
-                    since: startedAt,
-                    timeoutSeconds: completion.state == .final ? 12 : 25)
+            guard self.isCurrentDurableResponse(responseGeneration) else { return }
+            self.cancelDurableResponse()
+        }
+        defer { admissionMonitor.cancel() }
+        let shouldIncremental = self.shouldUseIncrementalTTS()
+        self.durableResponseOwnsSpeech = true
+        defer { self.durableResponseOwnsSpeech = false }
+        let presentationValidator: SpeechPresentationValidator = { [weak self] in
+            guard let self else { return false }
+            return await self.isDurablePresentationAuthorized(
+                persistence,
+                responseGeneration: responseGeneration)
+        }
+        var streamingTask: Task<Void, Never>?
+        if shouldIncremental {
+            self.resetIncrementalSpeech()
+            self.incrementalSpeechPresentationValidator = presentationValidator
+            let incrementalEvents = persistence.incrementalEvents
+            streamingTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.streamAssistant(
+                    runId: rawCommandID,
+                    stream: incrementalEvents,
+                    presentationValidator: presentationValidator)
             }
-            guard let assistantText else {
-                self.statusText = "No reply"
-                self.logger.warning("assistant text timeout run_id=\(diagnosticRunID, privacy: .public)")
-                GatewayDiagnostics.log("talk: assistant text timeout run_id=\(diagnosticRunID)")
-                streamingTask?.cancel()
-                await self.finishIncrementalSpeech()
-                await self.start()
-                return
-            }
-            self.logger.info("assistant text ok chars=\(assistantText.count, privacy: .public)")
-            GatewayDiagnostics.log("talk: assistant text ok chars=\(assistantText.count)")
+        }
+        let completion = await self.waitForChatCompletion(
+            runId: rawCommandID,
+            stream: persistence.gatewayEvents,
+            timeoutSeconds: 120)
+        // Delivery confirmation belongs to the shared owner, not the Talk UI
+        // lifetime. An exact final is also a useful immediate history wake.
+        try? await persistence.owner.wake()
+        guard self.isCurrentDurableResponse(responseGeneration) else {
             streamingTask?.cancel()
-            if shouldIncremental {
-                await self.handleIncrementalAssistantFinal(text: assistantText)
-            } else {
-                await self.playAssistant(text: assistantText)
-            }
-        } catch {
-            self.statusText = "Talk failed: \(error.localizedDescription)"
-            let nsError = error as NSError
-            let errorDomain = IOSGatewayChatTransport.diagnosticToken(nsError.domain, maximumLength: 80)
-            let failedLogMessage =
-                "event=talk_chat_response_failed command_id=\(commandID) "
-                    + "run_id=\(acceptedDiagnosticRunID ?? "unavailable") "
-                    + "outcome=response_unavailable error_domain=\(errorDomain) "
-                    + "error_code=\(nsError.code)"
-            self.logger.error("\(failedLogMessage, privacy: .public)")
-            GatewayDiagnostics.log(failedLogMessage)
+            self.cancelIncrementalSpeech()
+            return
         }
 
-        if restartAfter {
-            await self.start()
+        if completion.state == .aborted || completion.state == .error {
+            self.statusText = completion.state == .aborted ? "Aborted" : "Chat error"
+            streamingTask?.cancel()
+            await self.finishIncrementalSpeech()
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
         }
+
+        var assistantText = completion.assistantText
+        if assistantText == nil, shouldIncremental {
+            let exactRunText = self.incrementalSpeechBuffer.latestText
+            if !exactRunText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                assistantText = exactRunText
+            }
+        }
+        guard let assistantText else {
+            self.statusText = "No audible reply — text preserved in Chat"
+            streamingTask?.cancel()
+            await self.finishIncrementalSpeech()
+            GatewayDiagnostics.log("talk: exact assistant text unavailable run_id=\(diagnosticRunID)")
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        }
+
+        streamingTask?.cancel()
+        guard self.isCurrentDurableResponse(responseGeneration) else { return }
+        guard await self.isDurablePresentationAuthorized(
+            persistence,
+            responseGeneration: responseGeneration)
+        else {
+            self.cancelIncrementalSpeech()
+            guard self.isCurrentDurableResponse(responseGeneration) else { return }
+            self.statusText = "No audible reply — session changed"
+            await self.restartAfterDurableResponseIfNeeded(
+                responseGeneration,
+                restartAfter: restartAfter)
+            return
+        }
+        if shouldIncremental {
+            await self.handleIncrementalAssistantFinal(
+                text: assistantText,
+                presentationValidator: presentationValidator)
+        } else {
+            await self.playAssistant(
+                text: assistantText,
+                presentationValidator: presentationValidator)
+        }
+        await self.restartAfterDurableResponseIfNeeded(
+            responseGeneration,
+            restartAfter: restartAfter)
+    }
+
+    private func waitForDurableOutcome(
+        _ persistence: TalkDurableChatPersistence,
+        timeoutSeconds: Int) async -> OpenClawChatOutboxOutcome?
+    {
+        let rawCommandID = persistence.request.rawCommandID
+        let updates = persistence.outboxUpdates
+        return await withTaskGroup(of: OpenClawChatOutboxOutcome?.self) { group in
+            group.addTask {
+                for await update in updates {
+                    if Task.isCancelled { return nil }
+                    if let receipt = update.terminalReceipts.first(where: {
+                        $0.rawCommandID == rawCommandID
+                    }) {
+                        return receipt.outcome
+                    }
+                    if let commandIndex = update.unresolvedCommands.firstIndex(where: {
+                        $0.rawCommandID == rawCommandID
+                    }) {
+                        let command = update.unresolvedCommands[commandIndex]
+                        if command.outcome != .notDispatched || commandIndex == 0 {
+                            return command.outcome
+                        }
+                    }
+                    if let transition = update.transitions.first(where: {
+                        $0.rawCommandID == rawCommandID
+                    }) {
+                        switch transition {
+                        case .dispatched:
+                            return .accepted
+                        case .canonicalHistoryConfirmed:
+                            return .canonicalHistoryConfirmed
+                        case .blocked:
+                            return .blockedRouteChanged
+                        }
+                    }
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds) * 1_000_000_000)
+                return nil
+            }
+            let outcome = await group.next() ?? nil
+            group.cancelAll()
+            return outcome
+        }
+    }
+
+    private func restartAfterDurableResponseIfNeeded(
+        _ responseGeneration: UInt64,
+        restartAfter: Bool) async
+    {
+        guard restartAfter,
+              self.isCurrentDurableResponse(responseGeneration),
+              self.isEnabled,
+              self.gatewayConnected
+        else { return }
+        await self.start()
+    }
+
+    private func isCurrentDurableResponse(_ generation: UInt64) -> Bool {
+        !Task.isCancelled && self.foregroundAudioCaptureAllowed && self.durableResponseGeneration == generation
+    }
+
+    private func isDurablePresentationAuthorized(
+        _ persistence: TalkDurableChatPersistence,
+        responseGeneration: UInt64) async -> Bool
+    {
+        guard self.isCurrentDurableResponse(responseGeneration) else { return false }
+        let tokenIsCurrent: Bool
+        if let durableChatCaptureAdmissionIsCurrent {
+            tokenIsCurrent = await durableChatCaptureAdmissionIsCurrent(
+                persistence.request.stableGatewayID,
+                persistence.request.destructiveSessionAdmissionToken)
+        } else {
+            tokenIsCurrent = (try? await persistence.owner.destructiveSessionAdmissionToken()) ==
+                persistence.request.destructiveSessionAdmissionToken
+        }
+        return tokenIsCurrent && self.isCurrentDurableResponse(responseGeneration)
+    }
+
+    private func cancelDurableResponse() {
+        self.durableResponseGeneration &+= 1
+        self.durableResponseTask?.cancel()
+        self.durableResponseTask = nil
+        if self.durableResponseOwnsSpeech {
+            self.durableResponseOwnsSpeech = false
+            self.stopSpeaking(storeInterruption: false)
+        }
+    }
+
+    private func beginTranscriptCapture(context: DurableCaptureContext) {
+        self.transcriptGeneration &+= 1
+        self.lastTranscript = ""
+        self.lastHeard = nil
+        self.durableCaptureContext = context
+    }
+
+    private func makeDurableCaptureContext() async throws -> DurableCaptureContext {
+        let admittedDeliveryGeneration = self.durableDeliveryGeneration
+        let admittedResponseGeneration = self.durableResponseGeneration
+        let admittedSessionKey = self.mainSessionKey
+        let stableGatewayID = self.durableChatGatewayOwnerID?()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !stableGatewayID.isEmpty,
+              self.gatewayConnected,
+              self.foregroundAudioCaptureAllowed,
+              !Task.isCancelled
+        else {
+            throw OpenClawChatOutboxError.routeSnapshotUnavailable
+        }
+        guard let durableChatCaptureAdmission else {
+            throw OpenClawChatOutboxError.routeSnapshotUnavailable
+        }
+        let admission = try await durableChatCaptureAdmission()
+        let currentGatewayID = self.durableChatGatewayOwnerID?()?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !Task.isCancelled,
+              self.gatewayConnected,
+              self.foregroundAudioCaptureAllowed,
+              self.durableDeliveryGeneration == admittedDeliveryGeneration,
+              self.durableResponseGeneration == admittedResponseGeneration,
+              self.mainSessionKey == admittedSessionKey,
+              currentGatewayID == stableGatewayID
+        else {
+            throw CancellationError()
+        }
+        return DurableCaptureContext(
+            rawCommandID: "talk-\(UUID().uuidString.lowercased())",
+            stableGatewayID: stableGatewayID,
+            sessionKey: admittedSessionKey,
+            deliveryGeneration: admittedDeliveryGeneration,
+            responseAdmissionGeneration: admittedResponseGeneration,
+            destructiveSessionAdmissionToken: admission.destructiveSessionAdmissionToken,
+            captureRouteSnapshot: admission.routeSnapshot)
+    }
+
+    private func requireCurrentPTTStart(
+        captureID: String,
+        context: DurableCaptureContext,
+        startReservationID: UUID) async throws
+    {
+        try self.requireLocallyCurrentPTTStart(
+            captureID: captureID,
+            context: context,
+            startReservationID: startReservationID)
+        if let durableChatCaptureAdmissionIsCurrent {
+            guard await durableChatCaptureAdmissionIsCurrent(
+                context.stableGatewayID,
+                context.destructiveSessionAdmissionToken)
+            else {
+                throw CancellationError()
+            }
+        }
+        try self.requireLocallyCurrentPTTStart(
+            captureID: captureID,
+            context: context,
+            startReservationID: startReservationID)
+    }
+
+    private func requireLocallyCurrentPTTStart(
+        captureID: String,
+        context: DurableCaptureContext,
+        startReservationID: UUID) throws
+    {
+        guard self.foregroundAudioCaptureAllowed,
+              !Task.isCancelled,
+              self.gatewayConnected,
+              self.pttStartReservationID == startReservationID,
+              self.activePTTCaptureId == captureID,
+              self.durableCaptureContext?.rawCommandID == context.rawCommandID,
+              self.durableDeliveryGeneration == context.deliveryGeneration,
+              self.durableChatGatewayOwnerID?() == context.stableGatewayID,
+              self.mainSessionKey == context.sessionKey
+        else {
+            throw CancellationError()
+        }
+    }
+
+    private func requestPTTMicrophonePermission() async -> Bool {
+        #if DEBUG
+        if let pttMicrophonePermissionOverride {
+            return await pttMicrophonePermissionOverride()
+        }
+        #endif
+        return await Self.requestMicrophonePermission()
+    }
+
+    private func requestPTTSpeechPermission() async -> Bool {
+        #if DEBUG
+        if let pttSpeechPermissionOverride {
+            return await pttSpeechPermissionOverride()
+        }
+        #endif
+        return await Self.requestSpeechPermission()
+    }
+
+    private func cancelPTTStartIfCurrent(captureID: String) {
+        guard self.activePTTCaptureId == captureID else { return }
+        self.stopSilenceMonitor()
+        self.cancelPTTTimeout()
+        self.activePTTCaptureId = nil
+        self.durableCaptureContext = nil
+        self.isPushToTalkActive = false
+        self.isListening = false
+        self.captureMode = .idle
+        self.stopRecognition()
+        self.lastTranscript = ""
+        self.lastHeard = nil
+        self.transcriptGeneration &+= 1
     }
 
     private func startRealtimeIfAvailable() async -> Bool {
@@ -1176,6 +2153,9 @@ final class TalkModeManager: NSObject {
         }
         self.realtimeRelayStartInFlight = true
         defer { self.realtimeRelayStartInFlight = false }
+        self.realtimeRelayGeneration &+= 1
+        let relayGeneration = self.realtimeRelayGeneration
+        self.activeRealtimeRelayGeneration = relayGeneration
         GatewayDiagnostics.log("talk.timeline realtime relay start attempt sessionKey=\(self.mainSessionKey)")
         let startedAt = Self.nowSeconds()
         let relaySession = RealtimeTalkRelaySession(
@@ -1187,21 +2167,10 @@ final class TalkModeManager: NSObject {
                 voice: self.realtimeVoiceId),
             pcmPlayer: self.pcmPlayer,
             onStatus: { [weak self] status in
-                guard let self else { return }
-                self.statusText = status
-                self.isListening = status.localizedCaseInsensitiveContains("listening")
-                if status.localizedCaseInsensitiveContains("thinking") {
-                    self.isListening = false
-                    self.isSpeaking = false
-                    self.isUserSpeechDetected = false
-                }
+                self?.handleRealtimeRelayStatus(status, generation: relayGeneration)
             },
             onSpeakingChanged: { [weak self] speaking in
-                guard let self else { return }
-                self.isSpeaking = speaking
-                if speaking {
-                    self.isListening = false
-                }
+                self?.handleRealtimeRelaySpeakingChanged(speaking, generation: relayGeneration)
             })
         self.realtimeRelaySession = relaySession
         do {
@@ -1222,7 +2191,7 @@ final class TalkModeManager: NSObject {
                 relaySession.stop()
                 return true
             }
-            self.realtimeRelaySession = nil
+            self.stopRealtimeSession()
             GatewayDiagnostics.log(
                 "talk.timeline realtime relay start failed elapsedMs=\(Self.elapsedMs(since: startedAt)) "
                     + "error=\(error.localizedDescription)")
@@ -1302,10 +2271,33 @@ final class TalkModeManager: NSObject {
     }
 
     private func stopRealtimeSession() {
-        self.realtimeSession?.stop()
+        let realtimeSession = self.realtimeSession
         self.realtimeSession = nil
-        self.realtimeRelaySession?.stop()
+        self.realtimeRelayGeneration &+= 1
+        self.activeRealtimeRelayGeneration = nil
+        let realtimeRelaySession = self.realtimeRelaySession
         self.realtimeRelaySession = nil
+        realtimeSession?.stop()
+        realtimeRelaySession?.stop()
+    }
+
+    private func handleRealtimeRelayStatus(_ status: String, generation: UInt64) {
+        guard self.activeRealtimeRelayGeneration == generation else { return }
+        self.statusText = status
+        self.isListening = status.localizedCaseInsensitiveContains("listening")
+        if status.localizedCaseInsensitiveContains("thinking") {
+            self.isListening = false
+            self.isSpeaking = false
+            self.isUserSpeechDetected = false
+        }
+    }
+
+    private func handleRealtimeRelaySpeakingChanged(_ speaking: Bool, generation: UInt64) {
+        guard self.activeRealtimeRelayGeneration == generation else { return }
+        self.isSpeaking = speaking
+        if speaking {
+            self.isListening = false
+        }
     }
 
     private func subscribeChatIfNeeded(sessionKey: String) async {
@@ -1351,49 +2343,14 @@ final class TalkModeManager: NSObject {
         var assistantText: String?
     }
 
-    private func sendChat(
-        _ message: String,
-        gateway: GatewayNodeSession,
-        idempotencyKey: String) async throws -> String
-    {
-        struct SendResponse: Decodable { let runId: String }
-        let json = try Self.makeChatSendPayload(
-            message: message,
-            sessionKey: self.mainSessionKey,
-            idempotencyKey: idempotencyKey)
-        let res = try await gateway.request(method: "chat.send", paramsJSON: json, timeoutSeconds: 30)
-        let decoded = try JSONDecoder().decode(SendResponse.self, from: res)
-        return decoded.runId
-    }
-
-    private static func makeChatSendPayload(
-        message: String,
-        sessionKey: String,
-        idempotencyKey: String) throws -> String
-    {
-        let payload: [String: Any] = [
-            "sessionKey": sessionKey,
-            "message": message,
-            "thinking": "low",
-            "timeoutMs": 30000,
-            "idempotencyKey": idempotencyKey,
-        ]
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        guard let json = String(bytes: data, encoding: .utf8) else {
-            throw NSError(
-                domain: "TalkModeManager",
-                code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to encode chat payload"])
-        }
-        return json
-    }
-
     private func waitForChatCompletion(
         runId: String,
-        gateway: GatewayNodeSession,
+        stream: AsyncStream<EventFrame>,
         timeoutSeconds: Int = 120) async -> ChatCompletionResult
     {
-        let stream = await gateway.subscribeServerEvents(bufferingNewest: 200)
+        #if DEBUG
+        let durableEventObserved = self.durableEventObservedOverride
+        #endif
         return await withTaskGroup(of: ChatCompletionResult.self) { group in
             group.addTask { [runId] in
                 var latestAssistantText: String?
@@ -1409,6 +2366,9 @@ final class TalkModeManager: NSObject {
                         else {
                             continue
                         }
+                        #if DEBUG
+                        durableEventObserved?(chatEvent.runId, chatEvent.runId == runId)
+                        #endif
                         guard chatEvent.runId == runId else { continue }
                         if let text = OpenClawChatEventText.assistantText(from: chatEvent) {
                             latestAssistantText = text
@@ -1430,6 +2390,9 @@ final class TalkModeManager: NSObject {
                         else {
                             continue
                         }
+                        #if DEBUG
+                        durableEventObserved?(agentEvent.runId, agentEvent.runId == runId)
+                        #endif
                         guard agentEvent.runId == runId else { continue }
                         if agentEvent.stream == "assistant",
                            let text = agentEvent.data["text"]?.value as? String
@@ -1462,53 +2425,15 @@ final class TalkModeManager: NSObject {
         }
     }
 
-    private func waitForAssistantTextFromHistory(
-        gateway: GatewayNodeSession,
-        since: Double,
-        timeoutSeconds: Int) async throws -> String?
+    private func playAssistant(
+        text: String,
+        presentationValidator: @escaping SpeechPresentationValidator) async
     {
-        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
-        while Date() < deadline {
-            if let text = try await fetchLatestAssistantText(gateway: gateway, since: since) {
-                return text
-            }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-        return nil
-    }
-
-    private func fetchLatestAssistantText(gateway: GatewayNodeSession, since: Double? = nil) async throws -> String? {
-        let res = try await gateway.request(
-            method: "chat.history",
-            paramsJSON: "{\"sessionKey\":\"\(self.mainSessionKey)\"}",
-            timeoutSeconds: 15)
-        guard let json = try JSONSerialization.jsonObject(with: res) as? [String: Any] else { return nil }
-        guard let messages = json["messages"] as? [[String: Any]] else { return nil }
-        for msg in messages.reversed() {
-            guard (msg["role"] as? String) == "assistant" else { continue }
-            if let since, let timestamp = msg["timestamp"] as? Double,
-               TalkHistoryTimestamp.isAfter(timestamp, sinceSeconds: since) == false
-            {
-                continue
-            }
-            guard let content = msg["content"] as? [[String: Any]] else { continue }
-            let text = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
-        }
-        return nil
-    }
-
-    private func playAssistant(text: String) async {
+        guard await self.isSpeechPresentationAuthorized(presentationValidator) else { return }
         let parsed = TalkDirectiveParser.parse(text)
         let directive = parsed.directive
         let cleaned = parsed.stripped.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        self.applyDirective(directive)
-
-        self.statusText = "Generating voice…"
-        self.isSpeaking = true
-        self.lastSpokenText = cleaned
 
         let language = ElevenLabsTTSClient.validatedLanguage(directive?.language)
         let requestedVoice = directive?.voiceId?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1523,6 +2448,14 @@ final class TalkModeManager: NSObject {
         } else {
             nil
         }
+        #if DEBUG
+        await self.durablePresentationBeforePlaybackOverride?()
+        #endif
+        guard await self.isSpeechPresentationAuthorized(presentationValidator) else { return }
+        self.applyDirective(directive)
+        self.statusText = "Generating voice…"
+        self.isSpeaking = true
+        self.lastSpokenText = cleaned
         let modelID = directive?.modelId ?? self.currentModelId ?? self.defaultModelId
         let desiredOutputFormat = (directive?.outputFormat ?? self.defaultOutputFormat)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2028,6 +2961,7 @@ final class TalkModeManager: NSObject {
         self.incrementalSpeechBuffer = IncrementalSpeechBuffer()
         self.incrementalSpeechContext = nil
         self.incrementalSpeechDirective = nil
+        self.incrementalSpeechPresentationValidator = nil
     }
 
     private func cancelIncrementalSpeech() {
@@ -2040,6 +2974,7 @@ final class TalkModeManager: NSObject {
         self.incrementalSpeechActive = false
         self.incrementalSpeechContext = nil
         self.incrementalSpeechDirective = nil
+        self.incrementalSpeechPresentationValidator = nil
     }
 
     private func enqueueIncrementalSpeech(_ text: String) {
@@ -2076,6 +3011,10 @@ final class TalkModeManager: NSObject {
             }
             while !Task.isCancelled, self.isCurrentIncrementalSpeechTask(taskGeneration) {
                 guard !self.incrementalSpeechQueue.isEmpty else { break }
+                guard await self.isIncrementalSpeechPresentationAuthorized() else {
+                    self.cancelIncrementalSpeech()
+                    return
+                }
                 let segment = self.incrementalSpeechQueue.removeFirst()
                 self.statusText = "Speaking…"
                 self.isSpeaking = true
@@ -2097,6 +3036,10 @@ final class TalkModeManager: NSObject {
                 }
                 #endif
                 guard !Task.isCancelled, self.isCurrentIncrementalSpeechTask(taskGeneration) else { break }
+                guard await self.isIncrementalSpeechPresentationAuthorized() else {
+                    self.cancelIncrementalSpeech()
+                    return
+                }
                 await self.speakIncrementalSegment(
                     segment,
                     context: context,
@@ -2110,6 +3053,20 @@ final class TalkModeManager: NSObject {
 
     private func isCurrentIncrementalSpeechTask(_ generation: UInt64) -> Bool {
         self.incrementalSpeechTaskGeneration == generation
+    }
+
+    private func isSpeechPresentationAuthorized(
+        _ presentationValidator: SpeechPresentationValidator) async -> Bool
+    {
+        guard !Task.isCancelled else { return false }
+        let isAuthorized = await presentationValidator()
+        return isAuthorized && !Task.isCancelled
+    }
+
+    private func isIncrementalSpeechPresentationAuthorized() async -> Bool {
+        guard !Task.isCancelled else { return false }
+        guard let incrementalSpeechPresentationValidator else { return true }
+        return await self.isSpeechPresentationAuthorized(incrementalSpeechPresentationValidator)
     }
 
     private func stopIncrementalSpeechPlaybackIfOwned() {
@@ -2285,25 +3242,51 @@ final class TalkModeManager: NSObject {
         self.incrementalSpeechActive = false
     }
 
-    private func handleIncrementalAssistantFinal(text: String) async {
+    private func handleIncrementalAssistantFinal(
+        text: String,
+        presentationValidator: @escaping SpeechPresentationValidator) async
+    {
+        guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
+            self.cancelIncrementalSpeech()
+            return
+        }
         let parsed = TalkDirectiveParser.parse(text)
-        self.applyDirective(parsed.directive)
         if let lang = parsed.directive?.language {
             self.incrementalSpeechLanguage = ElevenLabsTTSClient.validatedLanguage(lang)
         }
         await self.updateIncrementalContextIfNeeded()
+        #if DEBUG
+        await self.durablePresentationBeforePlaybackOverride?()
+        #endif
+        guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
+            self.cancelIncrementalSpeech()
+            return
+        }
+        self.applyDirective(parsed.directive)
         let segments = self.incrementalSpeechBuffer.ingest(text: text, isFinal: true)
         for segment in segments {
             self.enqueueIncrementalSpeech(segment)
         }
         await self.finishIncrementalSpeech()
+        guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
+            self.cancelIncrementalSpeech()
+            return
+        }
         if !self.incrementalSpeechUsed {
-            await self.playAssistant(text: text)
+            await self.playAssistant(
+                text: text,
+                presentationValidator: presentationValidator)
         }
     }
 
-    private func streamAssistant(runId: String, gateway: GatewayNodeSession) async {
-        let stream = await gateway.subscribeServerEvents(bufferingNewest: 200)
+    private func streamAssistant(
+        runId: String,
+        stream: AsyncStream<EventFrame>,
+        presentationValidator: @escaping SpeechPresentationValidator) async
+    {
+        #if DEBUG
+        let durableEventObserved = self.durableEventObservedOverride
+        #endif
         for await evt in stream {
             if Task.isCancelled { return }
             guard evt.event == "agent", let payload = evt.payload else { continue }
@@ -2313,13 +3296,24 @@ final class TalkModeManager: NSObject {
             else {
                 continue
             }
+            #if DEBUG
+            durableEventObserved?(agentEvent.runId, agentEvent.runId == runId)
+            #endif
             guard agentEvent.runId == runId, agentEvent.stream == "assistant" else { continue }
             guard let text = agentEvent.data["text"]?.value as? String else { continue }
+            guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
+                self.cancelIncrementalSpeech()
+                return
+            }
             let segments = self.incrementalSpeechBuffer.ingest(text: text, isFinal: false)
             if let lang = incrementalSpeechBuffer.directive?.language {
                 self.incrementalSpeechLanguage = ElevenLabsTTSClient.validatedLanguage(lang)
             }
             await self.updateIncrementalContextIfNeeded()
+            guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
+                self.cancelIncrementalSpeech()
+                return
+            }
             for segment in segments {
                 self.enqueueIncrementalSpeech(segment)
             }
@@ -2327,6 +3321,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func updateIncrementalContextIfNeeded(taskGeneration: UInt64? = nil) async {
+        guard !Task.isCancelled else { return }
         if let taskGeneration, !self.isCurrentIncrementalSpeechTask(taskGeneration) { return }
         let directive = self.incrementalSpeechBuffer.directive
         if let existing = incrementalSpeechContext, directive == incrementalSpeechDirective {
@@ -2344,8 +3339,8 @@ final class TalkModeManager: NSObject {
             return
         }
         let context = await buildIncrementalSpeechContext(directive: directive)
+        guard !Task.isCancelled else { return }
         if let taskGeneration, !self.isCurrentIncrementalSpeechTask(taskGeneration) { return }
-        if Task.isCancelled, taskGeneration != nil { return }
         self.incrementalSpeechContext = context
         self.incrementalSpeechDirective = directive
     }
@@ -2660,6 +3655,7 @@ extension TalkModeManager {
 
         do {
             let voices = try await ElevenLabsTTSClient(apiKey: apiKey).listVoices()
+            guard !Task.isCancelled else { return nil }
             guard let first = voices.first else {
                 self.logger.warning("elevenlabs voices list empty")
                 return nil
@@ -3357,17 +4353,6 @@ extension TalkModeManager: TalkRealtimeWebRTCSessionDelegate {
 
 #if DEBUG
 extension TalkModeManager {
-    static func _test_chatSendPayload(
-        message: String,
-        sessionKey: String,
-        idempotencyKey: String) throws -> String
-    {
-        try self.makeChatSendPayload(
-            message: message,
-            sessionKey: sessionKey,
-            idempotencyKey: idempotencyKey)
-    }
-
     static func _test_isPCMFormatRejectedByAPI(_ error: Error?) -> Bool {
         TalkTTSFailureClassification.isPCMFormatRejected(error)
     }
@@ -3395,6 +4380,163 @@ extension TalkModeManager {
     func _test_seedTranscript(_ transcript: String) {
         self.lastTranscript = transcript
         self.lastHeard = Date()
+    }
+
+    func _test_prepareActivePTT(transcript: String) async throws -> String {
+        self.cancelDurableResponse()
+        let context = try await self.makeDurableCaptureContext()
+        let captureID = UUID().uuidString
+        self.activePTTCaptureId = captureID
+        self.beginTranscriptCapture(context: context)
+        self.lastTranscript = transcript
+        self.lastHeard = Date()
+        self.captureMode = .pushToTalk
+        self.isListening = true
+        self.isPushToTalkActive = true
+        return captureID
+    }
+
+    func _test_lastTranscript() -> String {
+        self.lastTranscript
+    }
+
+    func _test_pendingDurableRequest() -> TalkDurableChatRequest? {
+        self.pendingDurableChat?.request
+    }
+
+    func _test_durableCaptureIdentity() -> (gatewayID: String, sessionKey: String, rawCommandID: String)? {
+        guard let durableCaptureContext else { return nil }
+        return (
+            durableCaptureContext.stableGatewayID,
+            durableCaptureContext.sessionKey,
+            durableCaptureContext.rawCommandID)
+    }
+
+    func _test_activePTTCaptureID() -> String? {
+        self.activePTTCaptureId
+    }
+
+    func _test_durableCaptureRouteSnapshot() -> OpenClawChatOutboxRouteSnapshot? {
+        self.durableCaptureContext?.captureRouteSnapshot
+    }
+
+    func _test_hasDurableResponseTask() -> Bool {
+        self.durableResponseTask != nil
+    }
+
+    func _test_incrementalSpeechState() -> (
+        active: Bool,
+        queued: Int,
+        workerActive: Bool,
+        ownsPlayback: Bool)
+    {
+        (
+            active: self.incrementalSpeechActive,
+            queued: self.incrementalSpeechQueue.count,
+            workerActive: self.incrementalSpeechTask != nil,
+            ownsPlayback: self.incrementalSpeechPlaybackGeneration != nil)
+    }
+
+    func _test_setPTTPermissionHooks(
+        microphone: @escaping () async -> Bool,
+        speech: @escaping () async -> Bool)
+    {
+        self.pttMicrophonePermissionOverride = microphone
+        self.pttSpeechPermissionOverride = speech
+    }
+
+    func _test_setDurableEventObservedHook(
+        _ hook: @escaping @Sendable (_ runID: String?, _ matched: Bool) -> Void)
+    {
+        self.durableEventObservedOverride = hook
+    }
+
+    func _test_setDurableResponseExitedHook(
+        _ hook: @escaping @Sendable (_ generation: UInt64) -> Void)
+    {
+        self.durableResponseExitedOverride = hook
+    }
+
+    func _test_setDurablePresentationBeforePlaybackHook(_ hook: @escaping () async -> Void) {
+        self.durablePresentationBeforePlaybackOverride = hook
+    }
+
+    func _test_seedActiveRealtimeRelayCallbacks() -> UInt64 {
+        self.realtimeRelayGeneration &+= 1
+        self.activeRealtimeRelayGeneration = self.realtimeRelayGeneration
+        self.captureMode = .continuous
+        self.isListening = true
+        return self.realtimeRelayGeneration
+    }
+
+    func _test_applyRealtimeRelayStatus(_ status: String, generation: UInt64) {
+        self.handleRealtimeRelayStatus(status, generation: generation)
+    }
+
+    func _test_applyRealtimeRelaySpeaking(_ speaking: Bool, generation: UInt64) {
+        self.handleRealtimeRelaySpeakingChanged(speaking, generation: generation)
+    }
+
+    func _test_hasActiveRealtimeRelayCallbacks() -> Bool {
+        self.activeRealtimeRelayGeneration != nil
+    }
+
+    func _test_setPTTEndBeforeBodyHook(_ hook: @escaping () async -> Void) {
+        self.pttEndBeforeBodyOverride = hook
+    }
+
+    func _test_recognitionCallbackGeneration() -> UInt64 {
+        self.recognitionCallbackGeneration
+    }
+
+    func _test_setPTTAutoStopEnabled(_ enabled: Bool) {
+        self.pttAutoStopEnabled = enabled
+    }
+
+    func _test_armPTTAutoStopMonitors(timeoutSeconds: TimeInterval = 3600) -> (
+        silenceGeneration: UInt64,
+        timeoutGeneration: UInt64,
+        transcriptGeneration: UInt64,
+        captureID: String)?
+    {
+        guard let captureID = self.activePTTCaptureId else { return nil }
+        self.pttAutoStopEnabled = true
+        self.startSilenceMonitor()
+        self.schedulePTTTimeout(seconds: timeoutSeconds)
+        return (
+            self.silenceMonitorGeneration,
+            self.pttTimeoutGeneration,
+            self.transcriptGeneration,
+            captureID)
+    }
+
+    func _test_deliverSilenceMonitorTick(
+        generation: UInt64,
+        transcriptGeneration: UInt64,
+        captureID: String) async
+    {
+        guard self.isCurrentSilenceMonitor(
+            generation: generation,
+            transcriptGeneration: transcriptGeneration,
+            captureID: captureID)
+        else { return }
+        await self.checkSilence()
+    }
+
+    func _test_deliverPTTTimeout(generation: UInt64, captureID: String) async {
+        await self.handlePTTTimeout(generation: generation, captureID: captureID)
+    }
+
+    func _test_deliverRecognitionCallback(
+        transcript: String,
+        isFinal: Bool,
+        generation: UInt64) async
+    {
+        await self.handleRecognitionCallback(
+            transcript: transcript,
+            isFinal: isFinal,
+            errorMessage: nil,
+            generation: generation)
     }
 
     func _test_handleTranscript(_ transcript: String, isFinal: Bool) async {
