@@ -1719,7 +1719,10 @@ struct OpenClawChatOutboxIntegrationTests {
             if outcome != .notDispatched {
                 let claimed = try await fixture.store.claimNext()
                 let claim = try #require(claimed)
-                _ = try await fixture.store.recordDispatchOutcome(outcome, for: claim)
+                _ = try await fixture.store.recordDispatchOutcome(
+                    outcome,
+                    for: claim,
+                    ackRunID: outcome == .accepted ? rawID : nil)
             }
             let transport = S3TestTransport()
             await transport.state.setUnavailable(.routeUnavailable)
