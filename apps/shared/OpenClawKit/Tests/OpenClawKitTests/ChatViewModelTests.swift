@@ -4085,7 +4085,13 @@ struct ChatViewModelTests {
         }
         #expect(await MainActor.run { vm.messages.isEmpty })
 
-        transport.emit(.seqGap)
+        let admittedSubscriptionGeneration = vm._test_eventSubscriptionGeneration()
+        vm._test_applyTransportEvent(
+            .seqGap,
+            admittedSubscriptionGeneration: admittedSubscriptionGeneration)
+        try await waitUntil("newer other refresh is admitted") {
+            await otherHistoryCount.current() == 2
+        }
         try await waitUntil("newer other refresh applies") {
             await MainActor.run {
                 vm.sessionKey == "other" &&
