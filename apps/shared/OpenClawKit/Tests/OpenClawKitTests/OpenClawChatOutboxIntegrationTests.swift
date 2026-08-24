@@ -1114,9 +1114,10 @@ struct OpenClawChatOutboxIntegrationTests {
         ])
 
         try await waitUntil("owner confirms exact user history without Chat UI") {
-            (try? await fixture.store.loadUnresolved().isEmpty) == true &&
-                (try? await fixture.store.loadRecentReceipts().first?.outcome) ==
-                .canonicalHistoryConfirmed
+            let unresolved = try? await fixture.store.loadUnresolved()
+            let receipts = try? await fixture.store.loadRecentReceipts()
+            return unresolved?.isEmpty == true &&
+                receipts?.first?.outcome == .canonicalHistoryConfirmed
         }
         #expect(await transport.state.dispatchedIDs() == [rawID])
         await owner.retire()
