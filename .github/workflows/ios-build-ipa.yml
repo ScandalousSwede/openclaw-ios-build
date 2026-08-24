@@ -34,7 +34,9 @@ jobs:
           AIES_CONFIRM_INTERNAL_ONLY: ${{ inputs.confirm_internal_only }}
           AIES_DISTRIBUTION: ${{ inputs.distribution }}
           AIES_EXPECTED_SHA: ${{ inputs.expected_git_sha }}
+          AIES_GITHUB_ACTOR: ${{ github.actor }}
           AIES_GITHUB_SHA: ${{ github.sha }}
+          AIES_GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           AIES_REF_NAME: ${{ github.ref_name }}
           AIES_REF_TYPE: ${{ github.ref_type }}
         run: |
@@ -50,6 +52,14 @@ jobs:
             echo "Signed dispatch requires explicit internal-only confirmation." >&2
             exit 1
           fi
+          if [[ "${AIES_GITHUB_ACTOR}" != "ScandalousSwede" ]]; then
+            echo "Signed AIES TestFlight dispatch is restricted to Ethan's GitHub account." >&2
+            exit 1
+          fi
+          if [[ "${AIES_GITHUB_TRIGGERING_ACTOR}" != "ScandalousSwede" ]]; then
+            echo "Signed AIES TestFlight reruns are restricted to Ethan's GitHub account." >&2
+            exit 1
+          fi
           if [[ ! "${AIES_EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Signed dispatch requires an exact lowercase 40-character Git SHA." >&2
             exit 1
@@ -62,8 +72,8 @@ jobs:
             echo "Signed AIES TestFlight dispatch must originate from a branch ref." >&2
             exit 1
           fi
-          if [[ "${AIES_REF_NAME}" != "aies/ios-tts-d1-testflight" ]]; then
-            echo "Signed AIES TestFlight dispatch is restricted to the isolated TTS branch." >&2
+          if [[ "${AIES_REF_NAME}" != "aies/ios-rc1-testflight" ]]; then
+            echo "Signed AIES TestFlight dispatch is restricted to the integrated RC1 branch." >&2
             exit 1
           fi
 
@@ -128,10 +138,12 @@ jobs:
       - name: Declare unsigned archive boundary
         run: echo "Building an unsigned multi-bundle archive; no signing credentials are consumed."
 
-      - name: Test build manifest tooling
+      - name: Test build manifest and internal release-policy tooling
         run: |
           cd apps/ios/Tools
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_write_build_manifest.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_write_build_manifest.py \
+            test_verify_aies_internal_signing.py
 
       - name: Generate Xcode project
         run: cd apps/ios && xcodegen generate
@@ -293,7 +305,11 @@ jobs:
 
   signed-internal-testflight:
     needs: dispatch-gate
-    if: inputs.distribution == 'signed-internal-testflight' && github.ref_type == 'branch'
+    if: >-
+      inputs.distribution == 'signed-internal-testflight' &&
+      github.ref_type == 'branch' &&
+      github.actor == 'ScandalousSwede' &&
+      github.triggering_actor == 'ScandalousSwede'
     runs-on: macos-15
     timeout-minutes: 120
     environment: aies-testflight-internal
@@ -318,6 +334,17 @@ jobs:
         with:
           ref: ${{ inputs.expected_git_sha }}
           fetch-depth: 1
+
+      - name: Verify exact release checkout
+        env:
+          AIES_EXPECTED_SHA: ${{ inputs.expected_git_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "${actual_sha}" != "${AIES_EXPECTED_SHA}" ]]; then
+            echo "Signed release checkout does not match expected_git_sha." >&2
+            exit 1
+          fi
 
       - name: Setup Node environment
         uses: ./.github/actions/setup-node-env
@@ -359,18 +386,20 @@ jobs:
               rule for rule in environment.get("protection_rules", [])
               if rule.get("type") == "required_reviewers"
           ]
-          if len(reviewer_rules) != 1 or not reviewer_rules[0].get("reviewers"):
-              raise SystemExit("AIES environment must require at least one reviewer")
-          if reviewer_rules[0].get("prevent_self_review") is not True:
-              raise SystemExit("AIES environment must prevent self-review")
+          if reviewer_rules:
+              raise SystemExit(
+                  "AIES single-owner environment must not require a deployment reviewer"
+              )
           deployment_policy = environment.get("deployment_branch_policy") or {}
           if deployment_policy.get("custom_branch_policies") is not True:
               raise SystemExit("AIES environment must use a custom branch policy")
+          if deployment_policy.get("protected_branches") is not False:
+              raise SystemExit("AIES environment must not admit all protected branches")
           policy_items = policies.get("branch_policies", [])
           policy_identity = {(item.get("name"), item.get("type")) for item in policy_items}
-          if policy_identity != {("aies/ios-tts-d1-testflight", "branch")}:
+          if policy_identity != {("aies/ios-rc1-testflight", "branch")}:
               raise SystemExit(
-                  "AIES environment must allow only the isolated TTS branch as a branch policy"
+                  "AIES environment must allow only the integrated RC1 branch as a branch policy"
               )
           PY
           rm -f -- "${environment_json}" "${branch_policies_json}"
@@ -475,6 +504,8 @@ jobs:
           swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
           swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
           swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxStorageTests
+          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxIntegrationTests
 
       - name: Run focused iOS reliability tests
         run: |
@@ -503,6 +534,8 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/GatewayOperatorScopeTests \
+            -only-testing:OpenClawTests/GatewayOnboardingResetTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \

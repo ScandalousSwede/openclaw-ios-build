@@ -576,8 +576,18 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(workflow.count('use-actions-cache: "false"'), 2)
         self.assertGreaterEqual(workflow.count('save-actions-cache: "false"'), 2)
         self.assertIn("github.ref_type", workflow)
-        self.assertIn("prevent_self_review", workflow)
-        self.assertIn('("aies/ios-tts-d1-testflight", "branch")', workflow)
+        self.assertNotIn("prevent_self_review", workflow)
+        self.assertIn("if reviewer_rules:", workflow)
+        self.assertIn('("aies/ios-rc1-testflight", "branch")', workflow)
+        self.assertIn("AIES_GITHUB_ACTOR: ${{ github.actor }}", workflow)
+        self.assertIn(
+            "AIES_GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}", workflow
+        )
+        self.assertGreaterEqual(workflow.count('!= "ScandalousSwede"'), 2)
+        self.assertIn("name: Verify exact release checkout", workflow)
+        self.assertGreaterEqual(
+            workflow.count("test_verify_aies_internal_signing.py"), 2
+        )
         self.assertGreaterEqual(workflow.count("TalkTTSDiagnosticsTests"), 2)
         key_step = workflow.index("name: Materialize ephemeral App Store Connect key")
         fastlane_parse = workflow.index(
@@ -600,6 +610,63 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             self.assertLess(workflow.index(artifact_step), cleanup)
         self.assertGreaterEqual(workflow.count("if: always() && !cancelled()"), 4)
         self.assertIn("${ASC_KEY_ID:-}", workflow)
+
+    def test_rc1_single_owner_internal_release_policy_is_consistent(self) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
+        ).read_text(encoding="utf-8")
+        fastfile = (REPO_ROOT / "apps" / "ios" / "fastlane" / "Fastfile").read_text(
+            encoding="utf-8"
+        )
+        runbook = (
+            REPO_ROOT / "apps" / "ios" / "AIES_INTERNAL_TESTFLIGHT.md"
+        ).read_text(encoding="utf-8")
+        trigger_block = workflow.split("\npermissions:", maxsplit=1)[0]
+        signed_job = workflow.split("\n  signed-internal-testflight:\n", maxsplit=1)[1]
+        signed_job_header = signed_job.split("\n    steps:\n", maxsplit=1)[0]
+        legacy_branch = "aies/" + "ios-tts-d1-testflight"
+
+        self.assertEqual(trigger_block.count("workflow_dispatch:"), 1)
+        for forbidden_trigger in (
+            "push:",
+            "pull_request:",
+            "schedule:",
+            "workflow_run:",
+        ):
+            self.assertNotIn(f"\n  {forbidden_trigger}", trigger_block)
+
+        for policy_surface in (workflow, fastfile, runbook):
+            self.assertIn("aies/ios-rc1-testflight", policy_surface)
+            self.assertNotIn(legacy_branch, policy_surface)
+
+        self.assertIn("if: >-", signed_job_header)
+        self.assertIn("github.actor == 'ScandalousSwede'", signed_job_header)
+        self.assertIn("github.triggering_actor == 'ScandalousSwede'", signed_job_header)
+        self.assertIn("environment: aies-testflight-internal", signed_job_header)
+        self.assertIn("environment: aies-testflight-internal", workflow)
+        self.assertIn("AIES_TESTFLIGHT_INTERNAL_ENABLED", workflow)
+        self.assertIn('required_env!("GITHUB_ACTOR") == "ScandalousSwede"', fastfile)
+        self.assertIn(
+            'required_env!("GITHUB_TRIGGERING_ACTOR") == "ScandalousSwede"',
+            fastfile,
+        )
+        for selector in (
+            "OpenClawChatOutboxStorageTests",
+            "OpenClawChatOutboxIntegrationTests",
+            "GatewayOperatorScopeTests",
+            "GatewayOnboardingResetTests",
+        ):
+            self.assertEqual(workflow.count(selector), 2)
+        self.assertIn("testFlightInternalTestingOnly", fastfile)
+        self.assertIn("distribute_external: false", fastfile)
+        self.assertIn("notify_external_testers: false", fastfile)
+        self.assertIn("submit_beta_review: false", fastfile)
+        self.assertNotIn("${{ secrets.OPENCLAW_APNS_PRIVATE_KEY", workflow)
+        self.assertIn(
+            "%w[OPENCLAW_APNS_PRIVATE_KEY_P8 OPENCLAW_APNS_PRIVATE_KEY_PATH]",
+            fastfile,
+        )
+        self.assertIn("must not be stored in GitHub", runbook)
 
     def test_fastlane_marks_export_internal_only(self) -> None:
         fastfile = (REPO_ROOT / "apps" / "ios" / "fastlane" / "Fastfile").read_text(

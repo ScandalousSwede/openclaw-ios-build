@@ -285,10 +285,16 @@ def prepare_aies_internal_context!
   UI.user_error!("AIES internal TestFlight lane is CI-only.") unless ENV["CI"] == "true" && ENV["GITHUB_ACTIONS"] == "true"
   UI.user_error!("AIES internal TestFlight environment is not enabled.") unless ENV["AIES_TESTFLIGHT_INTERNAL_ENABLED"] == "true"
   UI.user_error!("Internal-only dispatch confirmation is missing.") unless ENV["AIES_INTERNAL_ONLY_CONFIRMED"] == "true"
+  unless required_env!("GITHUB_ACTOR") == "ScandalousSwede"
+    UI.user_error!("AIES internal lane is restricted to Ethan's GitHub account.")
+  end
+  unless required_env!("GITHUB_TRIGGERING_ACTOR") == "ScandalousSwede"
+    UI.user_error!("AIES internal lane reruns are restricted to Ethan's GitHub account.")
+  end
 
   expected_sha = required_env!("AIES_EXPECTED_GIT_SHA").downcase
   expected_branch = required_env!("AIES_EXPECTED_GIT_BRANCH")
-  UI.user_error!("AIES internal lane is restricted to the isolated TTS branch.") unless expected_branch == "aies/ios-tts-d1-testflight"
+  UI.user_error!("AIES internal lane is restricted to the integrated RC1 branch.") unless expected_branch == "aies/ios-rc1-testflight"
   require_matching_checkout!(expected_sha, expected_branch)
 
   main_bundle_id = required_env!("ASC_APP_IDENTIFIER")

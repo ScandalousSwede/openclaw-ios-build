@@ -9,9 +9,11 @@ keeps external distribution and beta review disabled.
 
 ## One-time protected environment setup
 
-Create the GitHub environment `aies-testflight-internal` with required reviewers, prevent
-self-review where the account supports it, and restrict deployment branches to
-`aies/ios-tts-d1-testflight`. Add these environment variables:
+Create the GitHub environment `aies-testflight-internal` in single-owner release mode: do not add a
+required-reviewer rule or enable prevent-self-review. Restrict its deployment branch policy to the
+single exact branch `aies/ios-rc1-testflight`. The workflow independently permits only Ethan's
+`ScandalousSwede` GitHub account to initiate or rerun the signed lane. Add these environment
+variables:
 
 - `AIES_TESTFLIGHT_INTERNAL_ENABLED=true`
 - `AIES_INTERNAL_TESTER_GROUP` — the exact internal App Store Connect group Ethan belongs to
@@ -35,7 +37,8 @@ historical certificate archive.
 
 ## Dispatch
 
-Run `Build iOS IPA (Unsigned / Protected Internal TestFlight)` on the isolated branch with:
+Run `Build iOS IPA (Unsigned / Protected Internal TestFlight)` on
+`aies/ios-rc1-testflight` from Ethan's `ScandalousSwede` GitHub account with:
 
 - `distribution=signed-internal-testflight`
 - `expected_git_sha=<exact 40-character workflow SHA>`
