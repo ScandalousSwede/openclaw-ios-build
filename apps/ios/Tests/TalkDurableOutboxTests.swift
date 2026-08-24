@@ -1625,7 +1625,10 @@ struct TalkDurableOutboxTests {
         manager.isEnabled = true
 
         let start = Task { @MainActor in await manager.start() }
-        try await waitForDurableTalk("continuous capture waits for destructive admission") {
+        try await waitForDurableTalk(
+            "continuous capture waits for destructive admission",
+            iterations: 3_000
+        ) {
             await admissionGate.waiterCount() == 1
         }
         manager.beginCredentialReset()
