@@ -639,13 +639,19 @@ struct TalkDurableOutboxTests {
             let first = Task { @MainActor in
                 try await appModel.chatOutboxDelivery(stableGatewayID: "gateway-a")
             }
-            try await waitForDurableTalk("first owner open suspends") {
+            try await waitForDurableTalk(
+                "first owner open suspends",
+                iterations: 3_000
+            ) {
                 await provider.callCount(for: "gateway-a") == 1
             }
             let second = Task { @MainActor in
                 try await appModel.chatOutboxDelivery(stableGatewayID: "gateway-a")
             }
-            try await waitForDurableTalk("second same-owner open suspends") {
+            try await waitForDurableTalk(
+                "second same-owner open suspends",
+                iterations: 3_000
+            ) {
                 await provider.callCount(for: "gateway-a") == 2
             }
             await openGate.open()
@@ -675,7 +681,10 @@ struct TalkDurableOutboxTests {
             let staleA = Task { @MainActor in
                 try await appModel.chatOutboxDelivery(stableGatewayID: "gateway-a")
             }
-            try await waitForDurableTalk("A owner open suspends") {
+            try await waitForDurableTalk(
+                "A owner open suspends",
+                iterations: 3_000
+            ) {
                 await provider.callCount(for: "gateway-a") == 1
             }
 
