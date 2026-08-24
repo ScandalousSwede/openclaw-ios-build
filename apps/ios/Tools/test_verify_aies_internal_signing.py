@@ -592,10 +592,16 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             workflow.count("test_verify_aies_internal_signing.py"), 2
         )
         self.assertEqual(workflow.count("uses: ./.github/actions/setup-xcodegen"), 3)
-        self.assertEqual(workflow.count("xcodegen generate"), 3)
+        self.assertEqual(workflow.count("xcodegen generate"), 4)
         self.assertEqual(workflow.count("git -C ../.. diff --exit-code"), 1)
         self.assertEqual(
-            workflow.count("git -C ../.. ls-files --others --exclude-standard"), 1
+            workflow.count("git -C ../.. ls-files --others --exclude-standard"), 2
+        )
+        self.assertEqual(workflow.count('cmp -s "${first_diff}" "${second_diff}"'), 1)
+        self.assertIn(
+            "Second XcodeGen invocation produced no additional tracked or "
+            "untracked changes.",
+            workflow,
         )
         self.assertIn("XCODEGEN_VERSION: 2.46.0", xcodegen_action)
         self.assertIn(
@@ -611,7 +617,28 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         conformance_job = conformance_job.split("\n  build:\n", maxsplit=1)[0]
         self.assertNotIn("environment:", conformance_job)
         self.assertNotIn("secrets.", conformance_job)
-        self.assertIn("git -C ../.. diff --exit-code", conformance_job)
+        self.assertEqual(conformance_job.count("xcodegen generate"), 2)
+        first_generation = conformance_job.index("xcodegen generate")
+        second_generation = conformance_job.index(
+            "xcodegen generate", first_generation + 1
+        )
+        command_positions = [
+            first_generation,
+            conformance_job.index('git -C ../.. diff --binary > "${first_diff}"'),
+            conformance_job.index(
+                'first_untracked="$(git -C ../.. ls-files --others --exclude-standard)"'
+            ),
+            second_generation,
+            conformance_job.index('git -C ../.. diff --binary > "${second_diff}"'),
+            conformance_job.index(
+                'second_untracked="$(git -C ../.. ls-files --others '
+                '--exclude-standard)"'
+            ),
+            conformance_job.index('cmp -s "${first_diff}" "${second_diff}"'),
+            conformance_job.index("git -C ../.. diff --exit-code"),
+            conformance_job.index('if [[ -n "${second_untracked}" ]]'),
+        ]
+        self.assertEqual(command_positions, sorted(command_positions))
         build_job = workflow.split("\n  build:\n", maxsplit=1)[1]
         build_job = build_job.split("\n  signed-internal-testflight:\n", maxsplit=1)[0]
         self.assertIn("xcodegen-conformance", build_job)

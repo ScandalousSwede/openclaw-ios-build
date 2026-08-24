@@ -94,16 +94,29 @@ jobs:
       - name: Generate Xcode project and verify tracked outputs
         run: |
           set -euo pipefail
+          first_diff="${RUNNER_TEMP}/xcodegen-first.diff"
+          second_diff="${RUNNER_TEMP}/xcodegen-second.diff"
           cd apps/ios
           xcodegen generate
+          git -C ../.. diff --binary > "${first_diff}"
+          first_untracked="$(git -C ../.. ls-files --others --exclude-standard)"
+          xcodegen generate
+          git -C ../.. diff --binary > "${second_diff}"
+          second_untracked="$(git -C ../.. ls-files --others --exclude-standard)"
+          if ! cmp -s "${first_diff}" "${second_diff}" || \
+            [[ "${first_untracked}" != "${second_untracked}" ]]; then
+            echo "Repeated XcodeGen 2.46.0 generation was nondeterministic." >&2
+            diff -u "${first_diff}" "${second_diff}" || true
+            exit 1
+          fi
+          echo "Second XcodeGen invocation produced no additional tracked or untracked changes."
           if ! git -C ../.. diff --exit-code; then
             echo "XcodeGen changed tracked outputs; commit deterministic generated changes first." >&2
             exit 1
           fi
-          untracked_outputs="$(git -C ../.. ls-files --others --exclude-standard)"
-          if [[ -n "${untracked_outputs}" ]]; then
+          if [[ -n "${second_untracked}" ]]; then
             echo "XcodeGen left untracked outputs:" >&2
-            printf '%s\n' "${untracked_outputs}" >&2
+            printf '%s\n' "${second_untracked}" >&2
             exit 1
           fi
 
