@@ -1066,12 +1066,21 @@ struct OpenClawChatOutboxIntegrationTests {
         #expect(await transport.state.dispatchedIDs() == ["talk-one-owner"])
 
         var iterator = updates.makeAsyncIterator()
-        let update = await iterator.next()
-        #expect(update?.unresolvedCommands.first?.outcome == .accepted)
-        #expect(update?.transitions == [.dispatched(rawCommandID: "talk-one-owner")])
+        var observedUpdates: [OpenClawChatOutboxDeliveryUpdate] = []
+        while let update = await iterator.next() {
+            observedUpdates.append(update)
+            if update.transitions.contains(.dispatched(rawCommandID: "talk-one-owner")) {
+                break
+            }
+        }
         await owner.retire()
-        let finished = await iterator.next()
-        #expect(finished == nil)
+        while let update = await iterator.next() {
+            observedUpdates.append(update)
+        }
+        #expect(observedUpdates.contains { $0.unresolvedCommands.first?.outcome == .accepted })
+        #expect(observedUpdates.flatMap(\.transitions) == [
+            .dispatched(rawCommandID: "talk-one-owner"),
+        ])
         try await fixture.close()
     }
 
@@ -1713,6 +1722,7 @@ struct OpenClawChatOutboxIntegrationTests {
                 _ = try await fixture.store.recordDispatchOutcome(outcome, for: claim)
             }
             let transport = S3TestTransport()
+            await transport.state.setUnavailable(.routeUnavailable)
             let owner = OpenClawChatOutboxDeliveryOwner(
                 store: fixture.store,
                 stableGatewayID: "gateway-test",
@@ -1741,6 +1751,9 @@ struct OpenClawChatOutboxIntegrationTests {
                 }
             }
             #expect(await transport.state.compactCallCount() == 0)
+            let preserved = try await fixture.store.loadUnresolved()
+            #expect(preserved.map(\.rawCommandID) == [rawID])
+            #expect(preserved.first?.outcome == outcome)
             vm.shutdown()
             await owner.retire()
             try await fixture.close()
