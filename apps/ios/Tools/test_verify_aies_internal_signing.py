@@ -721,12 +721,13 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("skip_build_archive: true", export_options)
         self.assertIn('project: File.join(ios_root, "OpenClaw.xcodeproj")', export_options)
         self.assertRegex(export_options, re.compile(r"^\s+xcargs:", re.MULTILINE))
+        self.assertEqual(export_options.count('export_method: "app-store"'), 1)
         self.assertNotIn("export_xcargs:", export_options)
         self.assertEqual(fastfile.count("export_xcargs:"), 0)
         aies_export_options = fastfile.split(
             "\ndef aies_export_options", maxsplit=1
         )[1].split("\ndef aies_archive_build_options", maxsplit=1)[0]
-        self.assertEqual(aies_export_options.count('method: "app-store-connect"'), 1)
+        self.assertNotRegex(aies_export_options, re.compile(r"^\s+method:", re.MULTILINE))
         self.assertEqual(aies_export_options.count("manageAppVersionAndBuildNumber: false"), 1)
         self.assertEqual(aies_export_options.count("testFlightInternalTestingOnly: true"), 1)
         self.assertNotIn('"method" =>', aies_export_options)

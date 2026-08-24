@@ -269,7 +269,6 @@ end
 def aies_export_options(context)
   export_options = {
     signingStyle: "automatic",
-    method: "app-store-connect",
     manageAppVersionAndBuildNumber: false,
     testFlightInternalTestingOnly: true
   }
@@ -298,6 +297,7 @@ def aies_export_build_options(context, archive_path, output_directory)
     project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
     configuration: "Release",
+    export_method: "app-store",
     skip_profile_detection: true,
     skip_build_archive: true,
     archive_path: archive_path,
@@ -799,8 +799,8 @@ platform :ios do
       plist_path = argv.fetch(plist_index + 1)
       plist = File.read(plist_path)
       unless plist.scan("<key>method</key>").length == 1 &&
-             plist.match?(%r{<key>method</key>\s*<string>app-store-connect</string>})
-        UI.user_error!("Rendered ExportOptions.plist must contain one app-store-connect method.")
+             plist.match?(%r{<key>method</key>\s*<string>app-store</string>})
+        UI.user_error!("Rendered ExportOptions.plist must contain one Gym-compatible app-store method.")
       end
       unless plist.scan("<key>testFlightInternalTestingOnly</key>").length == 1 &&
              plist.match?(%r{<key>testFlightInternalTestingOnly</key>\s*<true/>})
