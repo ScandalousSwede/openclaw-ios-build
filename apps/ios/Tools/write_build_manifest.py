@@ -30,7 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sdk-version", required=True)
     parser.add_argument("--configuration", required=True)
     parser.add_argument("--archive-uuid", required=True)
-    parser.add_argument("--ipa", type=pathlib.Path, required=True)
+    payload = parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument("--ipa", type=pathlib.Path)
+    payload.add_argument("--archive-only", action="store_true")
     parser.add_argument("--archive-zip", type=pathlib.Path, required=True)
     parser.add_argument("--dsym-zip", type=pathlib.Path, required=True)
     parser.add_argument("--github-run-id")
@@ -193,8 +195,17 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "embedded APNs environment does not match the archived app signature"
         )
 
+    archive_only = getattr(args, "archive_only", False)
+    artifacts = [
+        artifact_record("xcarchive", args.archive_zip),
+        artifact_record("dsyms", args.dsym_zip),
+    ]
+    if not archive_only:
+        artifacts.insert(0, artifact_record("ipa", args.ipa))
+
     return {
         "schema": SCHEMA,
+        "evidence_stage": "archive" if archive_only else "export",
         "git_sha": args.git_sha,
         "git_branch": args.git_branch,
         "version": require_string(info, "CFBundleShortVersionString", info_path),
@@ -213,11 +224,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "configuration": args.configuration,
         "aps_environment_if_signed": aps_environment,
         "github_run_id": args.github_run_id,
-        "artifacts": [
-            artifact_record("ipa", args.ipa),
-            artifact_record("xcarchive", args.archive_zip),
-            artifact_record("dsyms", args.dsym_zip),
-        ],
+        "artifacts": artifacts,
     }
 
 

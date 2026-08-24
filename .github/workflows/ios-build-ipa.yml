@@ -88,6 +88,9 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Install credential-free release tooling
+        run: brew install fastlane
+
       - name: Setup pinned XcodeGen
         uses: ./.github/actions/setup-xcodegen
 
@@ -119,6 +122,10 @@ jobs:
             printf '%s\n' "${second_untracked}" >&2
             exit 1
           fi
+
+      - name: Verify rendered AIES export command
+        working-directory: apps/ios
+        run: fastlane ios verify_aies_export_command
 
   build:
     needs:
@@ -190,6 +197,7 @@ jobs:
         run: |
           cd apps/ios/Tools
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_sanitize_aies_release_log.py \
             test_write_build_manifest.py \
             test_verify_aies_internal_signing.py
 
@@ -543,6 +551,7 @@ jobs:
           set -euo pipefail
           cd apps/ios/Tools
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_sanitize_aies_release_log.py \
             test_write_build_manifest.py \
             test_verify_aies_internal_signing.py
 
@@ -552,6 +561,10 @@ jobs:
 
       - name: Generate test project
         run: cd apps/ios && xcodegen generate
+
+      - name: Verify rendered AIES export command without credentials
+        working-directory: apps/ios
+        run: fastlane ios verify_aies_export_command
 
       - name: Build OpenClawKit and run reliability tests
         run: |
@@ -625,7 +638,25 @@ jobs:
 
       - name: Build, verify, and upload internal TestFlight diagnostic
         working-directory: apps/ios
-        run: fastlane ios aies_internal_testflight
+        run: |
+          set -euo pipefail
+          fastlane ios aies_internal_testflight 2>&1 | \
+            tee "${RUNNER_TEMP}/aies-fastlane.raw.log"
+
+      - name: Sanitize retained release log
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          raw_log="${RUNNER_TEMP}/aies-fastlane.raw.log"
+          cleanup_raw_log() {
+            rm -f -- "${raw_log}"
+          }
+          trap cleanup_raw_log EXIT
+          if [[ -f "${raw_log}" ]]; then
+            python3 apps/ios/Tools/sanitize_aies_release_log.py \
+              --input "${raw_log}" \
+              --output "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
+          fi
 
       - name: Validate retained release evidence
         run: |
@@ -635,10 +666,55 @@ jobs:
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-dSYMs.zip"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json"
+          test -s "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
+          if grep -q "BEGIN PRIVATE KEY" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
+            echo "Retained export log contains a private-key marker." >&2
+            exit 1
+          fi
+          for sensitive in "${ASC_KEY_PATH}" "${ASC_KEY_ID}" "${ASC_ISSUER_ID}"; do
+            if [[ -n "${sensitive}" ]] && grep -Fq -- "${sensitive}" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
+              echo "Retained export log contains unsanitized ASC metadata." >&2
+              exit 1
+            fi
+          done
+          python3 - \
+            "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json" \
+            "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" \
+            "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" \
+            "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          archive_manifest, archive_signing, export_manifest, export_signing = (
+              json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+              for path in sys.argv[1:]
+          )
+          expected = (
+              (archive_manifest, "evidence_stage", "archive"),
+              (archive_signing, "status", "archive_verified"),
+              (export_manifest, "evidence_stage", "export"),
+              (export_signing, "status", "verified"),
+          )
+          mismatches = [
+              {"key": key, "expected": wanted, "actual": payload.get(key)}
+              for payload, key, wanted in expected
+              if payload.get(key) != wanted
+          ]
+          if mismatches:
+              raise SystemExit(
+                  "retained archive/export evidence failed stage validation: "
+                  + json.dumps(mismatches, sort_keys=True)
+              )
+          PY
           python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" "${GITHUB_SHA}" <<'PY'
           import json
           import pathlib
@@ -702,6 +778,9 @@ jobs:
           path: |
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-build-manifest.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-signing-entitlements.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-manifest.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-entitlements.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
           retention-days: 90
           if-no-files-found: warn

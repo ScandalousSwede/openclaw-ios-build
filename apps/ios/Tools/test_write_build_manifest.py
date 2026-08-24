@@ -76,6 +76,7 @@ class BuildManifestTests(unittest.TestCase):
                 manifest = write_build_manifest.build_manifest(args)
 
             self.assertEqual(manifest["schema"], write_build_manifest.SCHEMA)
+            self.assertEqual(manifest["evidence_stage"], "export")
             self.assertEqual(manifest["git_sha"], "a" * 40)
             self.assertEqual(manifest["version"], "2026.6.2")
             self.assertEqual(manifest["build_number"], "17")
@@ -86,6 +87,39 @@ class BuildManifestTests(unittest.TestCase):
             self.assertEqual(manifest["aps_environment_if_signed"], "development")
             self.assertEqual([item["kind"] for item in manifest["artifacts"]], ["ipa", "xcarchive", "dsyms"])
             self.assertNotIn(str(temp), str(manifest))
+
+    def test_archive_only_manifest_omits_ipa_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            temp = pathlib.Path(raw_temp)
+            archive = temp / "OpenClaw.xcarchive"
+            app = archive / "Products" / "Applications" / "OpenClaw.app"
+            self.write_plist(app / "Info.plist", self.complete_info(aps_environment="production"))
+            (app / "OpenClaw").write_bytes(b"binary")
+            (archive / "dSYMs" / "OpenClaw.app.dSYM").mkdir(parents=True)
+            args = self.make_args(temp=temp, archive=archive)
+            args.archive_only = True
+            args.ipa = None
+            slices = [
+                {
+                    "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    "architecture": "arm64",
+                }
+            ]
+            with (
+                mock.patch.object(write_build_manifest, "run_dwarfdump", return_value=slices),
+                mock.patch.object(
+                    write_build_manifest,
+                    "signed_aps_environment",
+                    return_value="production",
+                ),
+            ):
+                manifest = write_build_manifest.build_manifest(args)
+
+            self.assertEqual(manifest["evidence_stage"], "archive")
+            self.assertEqual(
+                [item["kind"] for item in manifest["artifacts"]],
+                ["xcarchive", "dsyms"],
+            )
 
     def test_manifest_rejects_main_binary_without_matching_dsym(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

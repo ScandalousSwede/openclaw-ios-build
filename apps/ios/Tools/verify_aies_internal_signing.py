@@ -22,7 +22,9 @@ SCHEMA = "argus.openclaw-ios.signing-report.v1"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=pathlib.Path, required=True)
-    parser.add_argument("--ipa", type=pathlib.Path, required=True)
+    payload = parser.add_mutually_exclusive_group(required=True)
+    payload.add_argument("--ipa", type=pathlib.Path)
+    payload.add_argument("--archive-only", action="store_true")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     parser.add_argument("--expected-main-bundle-id", required=True)
     parser.add_argument("--expected-team-id", required=True)
@@ -520,10 +522,9 @@ def executable_identity(
     }
 
 
-def verify_binary_binding(
+def verify_archive_dsym_binding(
     archive: pathlib.Path,
     archive_app: pathlib.Path,
-    ipa_app: pathlib.Path,
     codesign: str,
     dwarfdump: str,
     expected_main_bundle_id: str,
@@ -538,22 +539,7 @@ def verify_binary_binding(
             if relative_path == pathlib.PurePosixPath(".")
             else archive_app / relative_path
         )
-        ipa_bundle = (
-            ipa_app
-            if relative_path == pathlib.PurePosixPath(".")
-            else ipa_app / relative_path
-        )
         archive_identity = executable_identity(archive_bundle, codesign, dwarfdump)
-        ipa_identity = executable_identity(ipa_bundle, codesign, dwarfdump)
-        bound_fields = ("name", "signature_stripped_sha256", "uuids")
-        if any(
-            archive_identity[field] != ipa_identity[field] for field in bound_fields
-        ):
-            raise ValueError(
-                "archive and exported IPA executable identity differ for "
-                f"{expected_bundle_id}"
-            )
-
         dsym_binary = (
             archive
             / "dSYMs"
@@ -578,7 +564,6 @@ def verify_binary_binding(
                 "bundle_id": expected_bundle_id,
                 "bundle_relative_path": str(relative_path),
                 "archive_executable": archive_identity,
-                "ipa_executable": ipa_identity,
                 "dsym": {
                     "relative_path": str(dsym_binary.relative_to(archive)),
                     "sha256": sha256_bytes(dsym_binary.read_bytes()),
@@ -586,6 +571,43 @@ def verify_binary_binding(
                 },
             }
         )
+    return {"bundles": records}
+
+
+def verify_binary_binding(
+    archive: pathlib.Path,
+    archive_app: pathlib.Path,
+    ipa_app: pathlib.Path,
+    codesign: str,
+    dwarfdump: str,
+    expected_main_bundle_id: str,
+) -> dict[str, Any]:
+    archive_binding = verify_archive_dsym_binding(
+        archive,
+        archive_app,
+        codesign,
+        dwarfdump,
+        expected_main_bundle_id,
+    )
+    records: list[dict[str, Any]] = []
+    for record in archive_binding["bundles"]:
+        relative_path = pathlib.PurePosixPath(record["bundle_relative_path"])
+        ipa_bundle = (
+            ipa_app
+            if relative_path == pathlib.PurePosixPath(".")
+            else ipa_app / relative_path
+        )
+        ipa_identity = executable_identity(ipa_bundle, codesign, dwarfdump)
+        archive_identity = record["archive_executable"]
+        bound_fields = ("name", "signature_stripped_sha256", "uuids")
+        if any(
+            archive_identity[field] != ipa_identity[field] for field in bound_fields
+        ):
+            raise ValueError(
+                "archive and exported IPA executable identity differ for "
+                f"{record['bundle_id']}"
+            )
+        records.append({**record, "ipa_executable": ipa_identity})
     return {"bundles": records}
 
 
@@ -611,6 +633,35 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         args.codesign,
         args.security,
     )
+    archive_binding = verify_archive_dsym_binding(
+        args.archive,
+        archive_app,
+        args.codesign,
+        args.dwarfdump,
+        args.expected_main_bundle_id,
+    )
+    relay_base_url = archive_result["app"]["push_relay_base_url"]
+    common = {
+        "schema": SCHEMA,
+        "expected_git_sha": args.expected_git_sha,
+        "expected_team_id": args.expected_team_id,
+        "expected_main_bundle_id": args.expected_main_bundle_id,
+        "push_contract": {
+            "transport": "direct",
+            "distribution": "local",
+            "apns_environment": "production",
+            "relay_base_url": relay_base_url,
+            "relay_base_url_present": relay_base_url != "",
+        },
+        "archive": archive_result,
+    }
+    if getattr(args, "archive_only", False):
+        return {
+            **common,
+            "status": "archive_verified",
+            "binary_binding": archive_binding,
+        }
+
     with tempfile.TemporaryDirectory() as raw_temp:
         ipa_app = safely_extract_ipa(args.ipa, pathlib.Path(raw_temp))
         ipa_result = verify_app(
@@ -640,22 +691,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if archive_bundles != ipa_bundles:
         raise ValueError("archive and exported IPA bundle topology differs")
-    relay_base_url = archive_result["app"]["push_relay_base_url"]
     return {
-        "schema": SCHEMA,
+        **common,
         "status": "verified",
-        "expected_git_sha": args.expected_git_sha,
-        "expected_team_id": args.expected_team_id,
-        "expected_main_bundle_id": args.expected_main_bundle_id,
-        "push_contract": {
-            "transport": "direct",
-            "distribution": "local",
-            "apns_environment": "production",
-            "relay_base_url": relay_base_url,
-            "relay_base_url_present": relay_base_url != "",
-        },
         "binary_binding": binary_binding,
-        "archive": archive_result,
         "ipa": ipa_result,
     }
 

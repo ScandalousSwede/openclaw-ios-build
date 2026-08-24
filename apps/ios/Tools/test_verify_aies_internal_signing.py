@@ -83,6 +83,24 @@ class AIESInternalSigningTests(unittest.TestCase):
             )
             self.assertNotIn("cms_signature_verified", str(report))
 
+    def test_archive_only_report_verifies_five_bundles_and_dsyms(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            args.archive_only = True
+            args.ipa = None
+            with self.mock_signing():
+                report = verifier.build_report(args)
+            self.assertEqual(report["status"], "archive_verified")
+            self.assertEqual(len(report["archive"]["bundles"]), 5)
+            self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
+            self.assertNotIn("ipa", report)
+            for binding in report["binary_binding"]["bundles"]:
+                self.assertNotIn("ipa_executable", binding)
+                self.assertEqual(
+                    binding["archive_executable"]["uuids"],
+                    binding["dsym"]["uuids"],
+                )
+
     def test_rejects_relay_configuration_in_exported_ipa(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             args = self.make_fixture(pathlib.Path(raw_temp), ipa_push_transport="relay")
@@ -676,6 +694,85 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             self.assertLess(workflow.index(artifact_step), cleanup)
         self.assertGreaterEqual(workflow.count("if: always() && !cancelled()"), 4)
         self.assertIn("${ASC_KEY_ID:-}", workflow)
+
+    def test_aies_export_is_single_source_and_archive_evidence_is_failure_safe(
+        self,
+    ) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
+        ).read_text(encoding="utf-8")
+        fastfile = (REPO_ROOT / "apps" / "ios" / "fastlane" / "Fastfile").read_text(
+            encoding="utf-8"
+        )
+        archive_options = fastfile.split(
+            "\ndef aies_archive_build_options", maxsplit=1
+        )[1].split("\ndef aies_export_build_options", maxsplit=1)[0]
+        export_options = fastfile.split(
+            "\ndef aies_export_build_options", maxsplit=1
+        )[1].split("\ndef build_aies_beta_archive", maxsplit=1)[0]
+        release_lane = fastfile.split(
+            'lane :aies_internal_testflight do', maxsplit=1
+        )[1].split("\n  ensure", maxsplit=1)[0]
+
+        self.assertIn("skip_package_ipa: true", archive_options)
+        self.assertRegex(archive_options, re.compile(r"^\s+xcargs:", re.MULTILINE))
+        self.assertNotIn("export_xcargs:", archive_options)
+        self.assertIn("skip_build_archive: true", export_options)
+        self.assertRegex(export_options, re.compile(r"^\s+xcargs:", re.MULTILINE))
+        self.assertNotIn("export_xcargs:", export_options)
+        self.assertEqual(fastfile.count("export_xcargs:"), 0)
+        aies_export_options = fastfile.split(
+            "\ndef aies_export_options", maxsplit=1
+        )[1].split("\ndef aies_archive_build_options", maxsplit=1)[0]
+        self.assertEqual(aies_export_options.count('method: "app-store-connect"'), 1)
+        self.assertEqual(aies_export_options.count("manageAppVersionAndBuildNumber: false"), 1)
+        self.assertEqual(aies_export_options.count("testFlightInternalTestingOnly: true"), 1)
+        self.assertNotIn('"method" =>', aies_export_options)
+        self.assertLess(
+            release_lane.index("package_aies_archive_evidence!"),
+            release_lane.index("export_aies_beta_archive"),
+        )
+        self.assertLess(
+            release_lane.index("export_aies_beta_archive"),
+            release_lane.index("package_aies_internal_evidence!"),
+        )
+        self.assertIn('File.join(context.fetch(:output_directory), "unverified-export")', fastfile)
+        self.assertIn("FileUtils.mv(ipa_path, final_ipa)", fastfile)
+        self.assertIn('minimum_build_number: required_env!("GITHUB_RUN_NUMBER")', fastfile)
+        self.assertIn("[latest_build.to_i + 1, minimum].compact.max.to_s", fastfile)
+        self.assertIn('env_present?(ENV["IOS_BETA_BUILD_NUMBER"])', fastfile)
+
+        self.assertEqual(workflow.count("fastlane ios verify_aies_export_command"), 2)
+        self.assertEqual(workflow.count("test_sanitize_aies_release_log.py"), 2)
+        conformance_job = workflow.split("\n  xcodegen-conformance:\n", maxsplit=1)[1]
+        conformance_job = conformance_job.split("\n  build:\n", maxsplit=1)[0]
+        self.assertIn("fastlane ios verify_aies_export_command", conformance_job)
+        self.assertNotIn("environment:", conformance_job)
+        self.assertNotIn("secrets.", conformance_job)
+        signed_job = workflow.split(
+            "\n  signed-internal-testflight:\n", maxsplit=1
+        )[1]
+        self.assertLess(
+            signed_job.index("Verify rendered AIES export command without credentials"),
+            signed_job.index("Materialize ephemeral App Store Connect key"),
+        )
+        self.assertIn("group: aies-ios-internal-testflight", signed_job)
+        self.assertIn("cancel-in-progress: false", signed_job)
+        for retained in (
+            "OpenClaw-archive-manifest.json",
+            "OpenClaw-archive-signing-entitlements.json",
+            "OpenClaw-export.log",
+        ):
+            self.assertIn(retained, signed_job)
+        self.assertNotIn("unverified-export", workflow)
+        self.assertLess(
+            signed_job.index("name: Sanitize retained release log"),
+            signed_job.index("name: Upload signed release evidence"),
+        )
+        self.assertLess(
+            signed_job.index("name: Upload signed release evidence"),
+            signed_job.index("name: Remove ephemeral App Store Connect key"),
+        )
 
     def test_rc1_single_owner_internal_release_policy_is_consistent(self) -> None:
         workflow = (
