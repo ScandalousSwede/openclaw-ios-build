@@ -18,7 +18,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
     // An opaque token is intentionally used instead of an owner-local counter.
     // Recreating an owner for the same gateway must not make an admission token
     // captured by a retired owner valid again (A -> B -> new A ABA).
-    private var destructiveSessionAdmissionToken = UUID()
+    private var destructiveSessionAdmissionTokenValue = UUID()
     private var destructiveAdmissionSubscribers: [UUID: AsyncStream<UUID>.Continuation] = [:]
     private var destructiveSessionActionWaiters: [CheckedContinuation<Void, Never>] = []
     private var enqueueAdmissionsInFlight = 0
@@ -83,7 +83,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
             throw OpenClawChatOutboxDeliveryOwnerError.destructiveSessionActionInProgress
         }
         if let expectedDestructiveSessionAdmissionToken,
-           expectedDestructiveSessionAdmissionToken != self.destructiveSessionAdmissionToken
+           expectedDestructiveSessionAdmissionToken != self.destructiveSessionAdmissionTokenValue
         {
             throw OpenClawChatOutboxDeliveryOwnerError.destructiveSessionAdmissionChanged
         }
@@ -110,7 +110,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         guard !self.destructiveSessionActionActive else {
             throw OpenClawChatOutboxDeliveryOwnerError.destructiveSessionActionInProgress
         }
-        return self.destructiveSessionAdmissionToken
+        return self.destructiveSessionAdmissionTokenValue
     }
 
     public func destructiveSessionAdmissionUpdates() -> AsyncStream<UUID> {
@@ -124,7 +124,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         let subscriberID = UUID()
         let owner = self
         self.destructiveAdmissionSubscribers[subscriberID] = continuation
-        continuation.yield(self.destructiveSessionAdmissionToken)
+        continuation.yield(self.destructiveSessionAdmissionTokenValue)
         continuation.onTermination = { @Sendable _ in
             Task { await owner.removeDestructiveAdmissionSubscriber(subscriberID) }
         }
@@ -136,7 +136,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
     /// still enqueue if connectivity disappears before capture ends.
     public func admitCapture() async throws -> OpenClawChatOutboxCaptureAdmission {
         let admittedGeneration = try self.requireCurrentGeneration()
-        let admittedToken = self.destructiveSessionAdmissionToken
+        let admittedToken = self.destructiveSessionAdmissionTokenValue
         guard !self.destructiveSessionActionActive else {
             throw OpenClawChatOutboxDeliveryOwnerError.destructiveSessionActionInProgress
         }
@@ -145,7 +145,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         let routeSnapshot = try await self.coordinator.verifyLiveRouteSnapshot()
         try self.requireCurrent(admittedGeneration)
         guard !self.destructiveSessionActionActive,
-              self.destructiveSessionAdmissionToken == admittedToken
+              self.destructiveSessionAdmissionTokenValue == admittedToken
         else {
             throw OpenClawChatOutboxDeliveryOwnerError.destructiveSessionAdmissionChanged
         }
@@ -175,7 +175,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         try await admissionCheck()
         try Task.checkCancellation()
         _ = try self.requireCurrentGeneration()
-        self.destructiveSessionAdmissionToken = UUID()
+        self.destructiveSessionAdmissionTokenValue = UUID()
         self.publishDestructiveAdmissionToken()
         return try await action()
     }
@@ -340,7 +340,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
 
     private func publishDestructiveAdmissionToken() {
         for continuation in self.destructiveAdmissionSubscribers.values {
-            continuation.yield(self.destructiveSessionAdmissionToken)
+            continuation.yield(self.destructiveSessionAdmissionTokenValue)
         }
     }
 
