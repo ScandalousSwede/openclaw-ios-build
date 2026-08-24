@@ -280,7 +280,7 @@ end
 def aies_archive_build_options(context, archive_path)
   xcode_arguments = context.fetch(:xcode_arguments) + context.fetch(:provenance_arguments, [])
   {
-    project: "OpenClaw.xcodeproj",
+    project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
     configuration: "Release",
     clean: true,
@@ -295,7 +295,7 @@ end
 
 def aies_export_build_options(context, archive_path, output_directory)
   {
-    project: "OpenClaw.xcodeproj",
+    project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
     configuration: "Release",
     skip_profile_detection: true,

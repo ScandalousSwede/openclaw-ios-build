@@ -715,9 +715,11 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         )[1].split("\n  ensure", maxsplit=1)[0]
 
         self.assertIn("skip_package_ipa: true", archive_options)
+        self.assertIn('project: File.join(ios_root, "OpenClaw.xcodeproj")', archive_options)
         self.assertRegex(archive_options, re.compile(r"^\s+xcargs:", re.MULTILINE))
         self.assertNotIn("export_xcargs:", archive_options)
         self.assertIn("skip_build_archive: true", export_options)
+        self.assertIn('project: File.join(ios_root, "OpenClaw.xcodeproj")', export_options)
         self.assertRegex(export_options, re.compile(r"^\s+xcargs:", re.MULTILINE))
         self.assertNotIn("export_xcargs:", export_options)
         self.assertEqual(fastfile.count("export_xcargs:"), 0)
