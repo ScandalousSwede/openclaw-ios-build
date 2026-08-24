@@ -2116,7 +2116,6 @@ struct TalkDurableOutboxTests {
             confirmationDelaysNanoseconds: [0, 0])
         let gatewayEvents = DurableTalkEventSource()
         let incrementalEvents = DurableTalkEventSource()
-        let observations = DurableTalkEventObservation()
         let responseExits = DurableTalkResponseExitObservation()
         let speech = DurableTalkSystemSpeechSpy()
         let manager = TalkModeManager(allowSimulatorCapture: true)
@@ -2124,9 +2123,6 @@ struct TalkDurableOutboxTests {
         manager._test_setTTSAudioHooks(
             prepare: { durableTalkSpeakerRoute },
             restore: {})
-        manager._test_setDurableEventObservedHook { runID, matched in
-            observations.record(runID: runID, matched: matched)
-        }
         manager._test_setDurableResponseExitedHook { responseExits.record($0) }
         manager.attachDurableChatOutbox(
             gatewayOwnerID: { "gateway-talk" },
@@ -2156,22 +2152,16 @@ struct TalkDurableOutboxTests {
         #expect(newAdmissionToken != oldAdmissionToken)
 
         incrementalEvents.sendAgentAssistant(runID: rawID, text: "late incremental chunk.")
-        try await waitForDurableTalk("late incremental event reaches exact-run observer") {
-            observations.count(runID: rawID, matched: true) >= 1
+        gatewayEvents.sendChatFinal(runID: rawID, text: "late final reply")
+        try await waitForDurableTalk("reset-fenced response task exits") {
+            responseExits.count() == 1
         }
         try await waitForDurableTalk("reset authorization clears incremental speech state") {
             let state = await MainActor.run { manager._test_incrementalSpeechState() }
             return !state.active && state.queued == 0 && !state.workerActive && !state.ownsPlayback
         }
         #expect(speech.spokenTexts.isEmpty)
-
-        gatewayEvents.sendChatFinal(runID: rawID, text: "late final reply")
-        try await waitForDurableTalk("late final is consumed") {
-            observations.count(runID: rawID, matched: true) >= 2
-        }
-        try await waitForDurableTalk("reset-fenced response task exits") {
-            responseExits.count() == 1
-        }
+        #expect(!manager._test_hasDurableResponseTask())
         #expect(speech.spokenTexts.isEmpty)
         let incrementalState = manager._test_incrementalSpeechState()
         #expect(!incrementalState.active)

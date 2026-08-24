@@ -880,10 +880,18 @@ final class TalkModeManager: NSObject {
         if let pttEndTask {
             return await pttEndTask.value
         }
+        guard let captureID = self.activePTTCaptureId else {
+            let payload = OpenClawTalkPTTStopPayload(
+                captureId: UUID().uuidString,
+                transcript: nil,
+                status: "idle")
+            self.finishPTTOnce(payload)
+            return payload
+        }
         let endID = UUID()
         let admission = PTTEndAdmission(
             endID: endID,
-            captureID: self.activePTTCaptureId ?? UUID().uuidString,
+            captureID: captureID,
             deliveryGeneration: self.durableDeliveryGeneration,
             transcriptGeneration: self.transcriptGeneration)
         let task = Task { @MainActor [weak self] in
