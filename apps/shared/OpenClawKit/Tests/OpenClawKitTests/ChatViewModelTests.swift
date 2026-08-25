@@ -282,14 +282,17 @@ private final class CallbackBox {
 
 private actor AsyncGate {
     private var continuation: CheckedContinuation<Void, Never>?
+    private var isOpen = false
 
     func wait() async {
+        guard !self.isOpen else { return }
         await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
     }
 
     func open() {
+        self.isOpen = true
         self.continuation?.resume()
         self.continuation = nil
     }
@@ -2923,8 +2926,11 @@ struct ChatViewModelTests {
         #expect(await MainActor.run { vm.errorText } == nil)
 
         await gate.open()
-        try await waitUntil("history reloaded after compact") {
-            await MainActor.run { vm.messages.first?.content.first?.text == "after compact" }
+        try await waitUntil("post-compact bootstrap completes") {
+            await MainActor.run {
+                vm.messages.first?.content.first?.text == "after compact" &&
+                    !vm.isLoading
+            }
         }
 
         await MainActor.run {
@@ -2932,7 +2938,11 @@ struct ChatViewModelTests {
             vm.send()
         }
 
-        try await Task.sleep(for: .milliseconds(50))
+        try await waitUntil("immediate compact repeat reports cooldown") {
+            await MainActor.run {
+                vm.errorText == "Please wait before compacting this session again."
+            }
+        }
         #expect(await transport.compactSessionKeys() == ["main"])
         #expect(await MainActor.run { vm.errorText } == "Please wait before compacting this session again.")
     }
