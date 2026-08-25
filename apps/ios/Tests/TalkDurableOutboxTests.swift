@@ -563,6 +563,8 @@ private func waitForDurableTalk(
             ])
         }
         await Task.yield()
+        let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
+        try await clock.sleep(until: nextPoll, tolerance: .zero)
     }
 }
 
