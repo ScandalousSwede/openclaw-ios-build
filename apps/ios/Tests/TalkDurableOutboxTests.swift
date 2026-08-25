@@ -27,10 +27,21 @@ private func durableTalkSendResponse(
 private actor DurableTalkGate {
     private var isOpen = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private let waiterEnteredEvents: AsyncStream<Void>
+    private let waiterEnteredContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (self.waiterEnteredEvents, self.waiterEnteredContinuation) = AsyncStream.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1))
+    }
 
     func wait() async {
         if self.isOpen { return }
-        await withCheckedContinuation { self.waiters.append($0) }
+        await withCheckedContinuation {
+            self.waiters.append($0)
+            self.waiterEnteredContinuation.yield(())
+        }
     }
 
     func open() {
@@ -41,6 +52,12 @@ private actor DurableTalkGate {
     }
 
     func waiterCount() -> Int { self.waiters.count }
+
+    func waitUntilWaiterEnters() async -> Bool {
+        if !self.waiters.isEmpty { return true }
+        var iterator = self.waiterEnteredEvents.makeAsyncIterator()
+        return await iterator.next() != nil
+    }
 }
 
 private actor DurableTalkRequestRecorder {
@@ -565,6 +582,34 @@ private func waitForDurableTalk(
         await Task.yield()
         let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
         try await clock.sleep(until: nextPoll, tolerance: .zero)
+    }
+}
+
+private func waitForDurableTalkGateEntry(
+    _ description: String,
+    timeout: Duration = .seconds(3),
+    gate: DurableTalkGate) async throws
+{
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    let deadline = startedAt.advanced(by: timeout)
+
+    try await withThrowingTaskGroup(of: Void.self) { group in
+        group.addTask {
+            guard await gate.waitUntilWaiterEnters() else { throw CancellationError() }
+            try Task.checkCancellation()
+        }
+        group.addTask {
+            try await clock.sleep(until: deadline, tolerance: .zero)
+            let elapsed = startedAt.duration(to: clock.now)
+            throw NSError(domain: "TalkDurableOutboxTests", code: 1, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Timed out: \(description) after \(elapsed) (limit: \(timeout))",
+            ])
+        }
+
+        _ = try await group.next()
+        group.cancelAll()
     }
 }
 
@@ -1167,6 +1212,7 @@ struct TalkDurableOutboxTests {
                 let admissionGate = DurableTalkGate()
                 let provider = DurableTalkAdmissionProvider(gate: admissionGate, gatedCall: 1)
                 appModel.talkMode._test_setPTTPermissionHooks(microphone: { true }, speech: { true })
+                appModel.talkMode.gatewayTalkConfigLoaded = true
                 appModel.talkMode.attachDurableChatOutbox(
                     gatewayOwnerID: { "gateway-talk" },
                     captureAdmission: {
@@ -1176,13 +1222,23 @@ struct TalkDurableOutboxTests {
                 appModel.talkMode.updateGatewayConnected(true)
                 appModel.talkMode.isEnabled = true
                 let start = Task { @MainActor in await appModel.talkMode.start() }
-                try await waitForDurableTalk("continuous admission waits before background") {
-                    await admissionGate.waiterCount() == 1
+                do {
+                    try await waitForDurableTalkGateEntry(
+                        "continuous admission waits before background",
+                        gate: admissionGate)
+                } catch {
+                    start.cancel()
+                    await admissionGate.open()
+                    await start.value
+                    throw error
                 }
+                #expect(await admissionGate.waiterCount() == 1)
+                #expect(await provider.callCount() == 1)
                 #expect(!appModel.talkMode.canUseBackgroundTalkOptIn)
                 appModel.setScenePhase(.background)
                 await admissionGate.open()
                 await start.value
+                #expect(await provider.callCount() == 1)
                 #expect(!appModel.talkMode.isListening)
                 #expect(!appModel.talkMode.isPushToTalkActive)
                 #expect(appModel.talkMode._test_durableCaptureIdentity() == nil)
