@@ -2,7 +2,12 @@ import Foundation
 
 struct AsyncWaitTimeoutError: Error, CustomStringConvertible {
     let label: String
-    var description: String { "Timeout waiting for: \(self.label)" }
+    let elapsed: Duration
+    let timeout: Duration
+
+    var description: String {
+        "Timeout waiting for: \(self.label) after \(self.elapsed) (limit: \(self.timeout))"
+    }
 }
 
 func waitUntil(
@@ -11,12 +16,28 @@ func waitUntil(
     pollMs: UInt64 = 10,
     _ condition: @escaping @Sendable () async -> Bool) async throws
 {
-    let deadline = Date().addingTimeInterval(timeoutSeconds)
-    while Date() < deadline {
+    let clock = ContinuousClock()
+    let timeout = Duration.seconds(timeoutSeconds)
+    let startedAt = clock.now
+    let deadline = startedAt.advanced(by: timeout)
+    let pollInterval = Duration.milliseconds(Int64(pollMs))
+
+    while true {
+        try Task.checkCancellation()
         if await condition() {
             return
         }
-        try await Task.sleep(nanoseconds: pollMs * 1_000_000)
+
+        let now = clock.now
+        guard now < deadline else {
+            throw AsyncWaitTimeoutError(
+                label: label,
+                elapsed: startedAt.duration(to: now),
+                timeout: timeout)
+        }
+
+        await Task.yield()
+        let nextPoll = min(clock.now.advanced(by: pollInterval), deadline)
+        try await clock.sleep(until: nextPoll, tolerance: .zero)
     }
-    throw AsyncWaitTimeoutError(label: label)
 }
