@@ -543,17 +543,27 @@ private var durableTalkSpeakerRoute: TalkAudioRouteEvidence {
 
 private func waitForDurableTalk(
     _ description: String,
-    iterations: Int = 500,
+    timeout: Duration = .seconds(3),
     condition: @escaping @Sendable () async -> Bool) async throws
 {
-    for _ in 0..<iterations {
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    let deadline = startedAt.advanced(by: timeout)
+
+    while true {
+        try Task.checkCancellation()
         if await condition() { return }
+
+        let now = clock.now
+        guard now < deadline else {
+            let elapsed = startedAt.duration(to: now)
+            throw NSError(domain: "TalkDurableOutboxTests", code: 1, userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Timed out: \(description) after \(elapsed) (limit: \(timeout))",
+            ])
+        }
         await Task.yield()
-        try await Task.sleep(nanoseconds: 1_000_000)
     }
-    throw NSError(domain: "TalkDurableOutboxTests", code: 1, userInfo: [
-        NSLocalizedDescriptionKey: "Timed out: \(description)",
-    ])
 }
 
 @MainActor
@@ -641,7 +651,7 @@ struct TalkDurableOutboxTests {
             }
             try await waitForDurableTalk(
                 "first owner open suspends",
-                iterations: 3_000
+                timeout: .seconds(3)
             ) {
                 await provider.callCount(for: "gateway-a") == 1
             }
@@ -650,7 +660,7 @@ struct TalkDurableOutboxTests {
             }
             try await waitForDurableTalk(
                 "second same-owner open suspends",
-                iterations: 3_000
+                timeout: .seconds(3)
             ) {
                 await provider.callCount(for: "gateway-a") == 2
             }
@@ -683,7 +693,7 @@ struct TalkDurableOutboxTests {
             }
             try await waitForDurableTalk(
                 "A owner open suspends",
-                iterations: 3_000
+                timeout: .seconds(3)
             ) {
                 await provider.callCount(for: "gateway-a") == 1
             }
@@ -800,7 +810,7 @@ struct TalkDurableOutboxTests {
             }
             try await waitForDurableTalk(
                 "Node recovery confirms persisted Talk row",
-                iterations: 3_000
+                timeout: .seconds(3)
             ) {
                 (try? await fixture.store.loadUnresolved().isEmpty) == true
             }
@@ -1636,7 +1646,7 @@ struct TalkDurableOutboxTests {
         let start = Task { @MainActor in await manager.start() }
         try await waitForDurableTalk(
             "continuous capture waits for destructive admission",
-            iterations: 3_000
+            timeout: .seconds(3)
         ) {
             await admissionGate.waiterCount() == 1
         }
