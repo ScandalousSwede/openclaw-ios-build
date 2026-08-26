@@ -160,9 +160,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          runtime="${RUNNER_TEMP}/aies-package-talk-runtime"
+          mkdir -p "${runtime}/evidence"
           {
-            echo "AIES_EVIDENCE=${RUNNER_TEMP}/aies-package-talk-evidence"
-            echo "AIES_DERIVED_DATA=${RUNNER_TEMP}/aies-talk-derived-data"
+            echo "AIES_RUNTIME=${runtime}"
+            echo "AIES_EVIDENCE=${runtime}/evidence"
+            echo "AIES_DERIVED_DATA=${runtime}/derived-data"
           } >> "${GITHUB_ENV}"
 
       - name: Select Xcode 26.2
@@ -267,7 +270,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          runtime="${RUNNER_TEMP}/aies-final-package"
+          runtime="${AIES_RUNTIME}"
           mkdir -p "${runtime}"
           python3 apps/ios/Tools/prepare_aies_package_build_root.py prepare \
             --source-root "${GITHUB_WORKSPACE}" \
@@ -474,7 +477,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: AIES-RC1-package-talk-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/aies-package-talk-evidence
+          path: ${{ runner.temp }}/aies-package-talk-runtime/evidence
           retention-days: 90
           if-no-files-found: warn
 

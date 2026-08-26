@@ -72,6 +72,21 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertIn("aies-testflight-internal", release)
         self.assertIn("AIES_TESTFLIGHT_INTERNAL_ENABLED", release)
 
+    def test_package_talk_outputs_share_one_temporary_custody_root(self) -> None:
+        workflow = QUALIFICATION.read_text(encoding="utf-8")
+        self.assertIn(
+            'runtime="${RUNNER_TEMP}/aies-package-talk-runtime"', workflow
+        )
+        self.assertIn('echo "AIES_RUNTIME=${runtime}"', workflow)
+        self.assertIn('echo "AIES_EVIDENCE=${runtime}/evidence"', workflow)
+        self.assertIn('echo "AIES_DERIVED_DATA=${runtime}/derived-data"', workflow)
+        self.assertIn('runtime="${AIES_RUNTIME}"', workflow)
+        self.assertIn('--allowed-root "${runtime}"', workflow)
+        self.assertIn('--evidence-dir "${AIES_EVIDENCE}/package-final"', workflow)
+        self.assertIn(
+            "path: ${{ runner.temp }}/aies-package-talk-runtime/evidence", workflow
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
