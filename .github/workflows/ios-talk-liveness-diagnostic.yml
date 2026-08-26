@@ -1,9 +1,9 @@
-name: iOS Talk Liveness Diagnostic V3
+name: iOS Talk Liveness Diagnostic V4
 
 on:
   push:
     branches:
-      - codex/rc1-talk-liveness-diagnostic-v3
+      - codex/rc1-talk-liveness-diagnostic-v4
     paths:
       - .github/workflows/ios-talk-liveness-diagnostic.yml
 
@@ -11,12 +11,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-talk-liveness-diagnostic-v3-${{ github.ref }}
+  group: ios-talk-liveness-diagnostic-v4-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   talk-liveness-diagnostic:
-    name: Credential-free Talk liveness diagnostic V3
+    name: Credential-free Talk liveness diagnostic V4
     runs-on: macos-15
     timeout-minutes: 180
     env:
@@ -26,7 +26,8 @@ jobs:
       AIES_DIAGNOSTIC_BASE: 9a65f7b016161bc93970e461f892f0865a9942c5
       AIES_TEST_COMMIT: a0128ba47170ca87b25619520fc87853c59220d5
       AIES_V2_HEAD: 9781086968ca9955f348bb8a63f6b66ce3fdc8b4
-      AIES_DIAGNOSTIC_BRANCH: codex/rc1-talk-liveness-diagnostic-v3
+      AIES_V3_HEAD: c886c930a7e32a844959d1756c3c349d7bd0d9b2
+      AIES_DIAGNOSTIC_BRANCH: codex/rc1-talk-liveness-diagnostic-v4
       AIES_DIAGNOSTIC_WORKFLOW: .github/workflows/ios-talk-liveness-diagnostic.yml
       AIES_DIAGNOSTIC_TEST: apps/ios/Tests/TalkDurableOutboxTests.swift
       AIES_TARGET_FILTER: OpenClawTests/TalkDurableOutboxTests/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission
@@ -48,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          runtime_root="${RUNNER_TEMP}/aies-talk-liveness-v3-${GITHUB_RUN_ID}"
+          runtime_root="${RUNNER_TEMP}/aies-talk-liveness-v4-${GITHUB_RUN_ID}"
           evidence_dir="${runtime_root}/evidence"
           derived_data="${runtime_root}/derived-data"
           cloned_packages="${runtime_root}/source-packages"
@@ -83,7 +84,7 @@ jobs:
           }, indent=2, sort_keys=True) + "\n")
           PY
 
-      - name: Prove V3 workflow-only source and authority boundary
+      - name: Prove V4 workflow-only source and authority boundary
         id: source_gate
         shell: bash
         run: |
@@ -121,23 +122,23 @@ jobs:
 
           event = json.loads(pathlib.Path(sys.argv[1]).read_text())
           observed = [item.get("id") for item in event.get("commits", [])]
-          expected = [sys.argv[2], sys.argv[3]]
+          expected = [sys.argv[3]]
           if observed != expected:
-              raise SystemExit(f"new branch push must contain test commit then workflow commit: {observed!r}")
+              raise SystemExit(f"new branch push must contain exactly the workflow commit: {observed!r}")
           if event.get("head_commit", {}).get("id") != sys.argv[3]:
               raise SystemExit("push head commit is not the checked-out workflow commit")
           PY
           read -r -a workflow_commit_line <<<"$(git rev-list --parents -n 1 HEAD)"
           if [[ "${#workflow_commit_line[@]}" -ne 2 || \
-                "${workflow_commit_line[1]}" != "${AIES_TEST_COMMIT}" ]]; then
-            echo "V3 workflow commit must have exactly one parent, test commit ${AIES_TEST_COMMIT}." >&2
+                "${workflow_commit_line[1]}" != "${AIES_V3_HEAD}" ]]; then
+            echo "V4 workflow commit must have exactly one parent, V3 ${AIES_V3_HEAD}." >&2
             exit 1
           fi
 
-          workflow_change="$(git diff-tree --no-commit-id --name-status -r "${AIES_TEST_COMMIT}" HEAD)"
+          workflow_change="$(git diff-tree --no-commit-id --name-status -r "${AIES_V3_HEAD}" HEAD)"
           if [[ "${workflow_change}" != $'M\t'"${AIES_DIAGNOSTIC_WORKFLOW}" ]]; then
-            echo "V3 commit must modify only ${AIES_DIAGNOSTIC_WORKFLOW}." >&2
-            printf 'Observed V3 workflow change:\n%s\n' "${workflow_change}" >&2
+            echo "V4 commit must modify only ${AIES_DIAGNOSTIC_WORKFLOW}." >&2
+            printf 'Observed V4 workflow change:\n%s\n' "${workflow_change}" >&2
             exit 1
           fi
           [[ "$(git ls-tree HEAD "${AIES_DIAGNOSTIC_WORKFLOW}" | awk '{print $1}')" == "100644" ]]
@@ -161,7 +162,7 @@ jobs:
           expected_cumulative="$(printf 'A\t%s\nM\t%s\n' \
             "${AIES_DIAGNOSTIC_WORKFLOW}" "${AIES_DIAGNOSTIC_TEST}" | LC_ALL=C sort)"
           if [[ "${cumulative_changes}" != "${expected_cumulative}" ]]; then
-            echo "V3 branch must change exactly the diagnostic test file and workflow." >&2
+            echo "V4 branch must cumulatively change exactly the diagnostic test file and workflow." >&2
             printf 'Observed cumulative changes:\n%s\n' "${cumulative_changes}" >&2
             exit 1
           fi
@@ -226,6 +227,7 @@ jobs:
               "diagnosticBase": os.environ["AIES_DIAGNOSTIC_BASE"],
               "testCommit": os.environ["AIES_TEST_COMMIT"],
               "v2Head": os.environ["AIES_V2_HEAD"],
+              "v3Head": os.environ["AIES_V3_HEAD"],
               "diagnosticBranch": os.environ["AIES_DIAGNOSTIC_BRANCH"],
               "head": head,
               "tree": tree,
@@ -587,8 +589,16 @@ jobs:
               "arguments": arguments,
               "automaticUpdatesPermitted": False,
               "packageUpdateCommandInvoked": False,
-              "separateDependencyPreparationInvoked": False,
-              "firstProjectAwareXcodeOperation": "build-for-testing",
+              "separateDependencyPreparationInvoked": True,
+              "orderedProjectAwareOperations": [
+                  "probe 1 permissive resolve with an independent disposable root and cache",
+                  "probe 2 permissive resolve with an independent disposable root and cache",
+                  "permissive build-root resolve with isolated candidate-generation caches",
+                  "cold strict build-root resolve with canonical build caches",
+                  "build-for-testing reusing strict-resolve caches",
+              ],
+              "firstProjectAwareXcodeOperation": (
+                  "probe 1 permissive resolve with an independent disposable root and cache"),
               "helpEvidence": "xcodebuild-help.txt",
           }, indent=2, sort_keys=True) + "\n")
           PY
@@ -695,8 +705,32 @@ jobs:
               "observedXcodeAuthorityTopology": (
                   "generated iOS project treats the standalone Swabble lock path as the "
                   "aggregate graph authority"),
+              "selectedProject": "apps/ios/OpenClaw.xcodeproj",
+              "selectedScheme": "OpenClaw",
+              "trackedResolvedAuthorities": [
+                  "apps/macos/Package.resolved",
+                  "apps/macos-mlx-tts/Package.resolved",
+                  "apps/swabble/Package.resolved",
+              ],
+              "trackedIOSResolvedFilePresent": False,
+              "diagnosticsAlteredPackageManifestsOrProjectGraph": False,
+              "firstDiagnosticRun": {
+                  "runID": 32992824836,
+                  "observation": (
+                      "checkout Swabble lock was dirty after implicit Xcode/SwiftPM work"),
+                  "limitation": "the exact first mutation boundary was not captured",
+              },
+              "freshProbeLocalization": (
+                  "V3 fresh exact-HEAD probes localize the first Swabble-lock write to the "
+                  "project-aware resolve operation"),
+              "executorComparison": {
+                  "V1": "resolution permitted; aggregate graph was resolved and build succeeded",
+                  "V2": "strict resolution rejected the stale standalone graph before build",
+                  "V3": "fresh permissive probes resolved the same normalized aggregate graph",
+              },
               "toolchainComparison": (
-                  "V1 and V2 both used Xcode 26.2 build 17C52 and Swift 6.2.3"),
+                  "V1, V2, and V3 used Xcode 26.2 build 17C52 and Swift 6.2.3; "
+                  "current evidence does not support toolchain-specific graph drift"),
           }, indent=2, sort_keys=True) + "\n")
           PY
           inventory_tool="${AIES_EVIDENCE_DIR}/runtime-tools/package_state_inventory.py"
@@ -748,6 +782,76 @@ jobs:
           PY
           chmod 0700 "${inventory_tool}"
           python3 -m py_compile "${inventory_tool}"
+          lock_transition_tool="${AIES_EVIDENCE_DIR}/runtime-tools/validate_lock_transition.py"
+          python3 - "${lock_transition_tool}" <<'PY'
+          import pathlib
+          import sys
+          pathlib.Path(sys.argv[1]).write_text(r'''#!/usr/bin/env python3
+          import argparse
+          import json
+          import pathlib
+
+          parser = argparse.ArgumentParser()
+          parser.add_argument("--baseline", required=True)
+          parser.add_argument("--current", required=True)
+          parser.add_argument("--accepted", required=True)
+          parser.add_argument("--stage", required=True)
+          parser.add_argument("--output", required=True)
+          parser.add_argument("--secondary-marker", required=True)
+          args = parser.parse_args()
+
+          def locks(path):
+              payload = json.loads(pathlib.Path(path).read_text())
+              return {
+                  item["path"]: item for item in payload.get("packageResolved", [])
+                  if str(item.get("path", "")).startswith("apps/")
+              }
+          baseline = locks(args.baseline)
+          current = locks(args.current)
+          baseline_paths = set(baseline)
+          current_paths = set(current)
+          added = sorted(current_paths - baseline_paths)
+          removed = sorted(baseline_paths - current_paths)
+          changed = sorted(
+              path for path in baseline_paths & current_paths
+              if baseline[path].get("sha256") != current[path].get("sha256"))
+          valid = not added and not removed and changed == [args.accepted]
+          result = {
+              "stage": args.stage,
+              "acceptedResolvedPath": args.accepted,
+              "baselinePaths": sorted(baseline_paths),
+              "currentPaths": sorted(current_paths),
+              "addedPaths": added,
+              "removedPaths": removed,
+              "changedBytePaths": changed,
+              "pathSetUnchanged": not added and not removed,
+              "onlyAcceptedLockBytesChanged": changed == [args.accepted],
+              "valid": valid,
+          }
+          pathlib.Path(args.output).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+          if not valid:
+              classification = (
+                  "SECONDARY_RESOLVED_FILE_MATERIALIZED"
+                  if added and not removed
+                  else "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER"
+              )
+              pathlib.Path(args.secondary_marker).write_text(json.dumps({
+                  "classification": classification,
+                  "stage": args.stage,
+                  "addedPaths": added,
+                  "removedPaths": removed,
+                  "baselinePaths": sorted(baseline_paths),
+                  "currentPaths": sorted(current_paths),
+                  "changedBytePaths": changed,
+              }, indent=2, sort_keys=True) + "\n")
+          if not valid:
+              raise SystemExit(
+                  f"invalid Package.resolved transition at {args.stage}: "
+                  f"added={added}, removed={removed}, changed={changed}")
+          '''.lstrip())
+          PY
+          chmod 0700 "${lock_transition_tool}"
+          python3 -m py_compile "${lock_transition_tool}"
 
           # Resolution is deliberately performed only in disposable exact-HEAD clones. The
           # authoritative checkout remains guarded and the generated candidate is never
@@ -807,6 +911,7 @@ jobs:
           import hashlib
           import json
           import pathlib
+          import re
           import sys
           output = pathlib.Path(sys.argv[3])
           records = []
@@ -827,6 +932,14 @@ jobs:
           PY
             python3 "${inventory_tool}" "${probe_root}" \
               "${graph_evidence}/probe-${probe}.post-state.json"
+            python3 "${lock_transition_tool}" \
+              --baseline "${graph_evidence}/probe-${probe}.pre-state.json" \
+              --current "${graph_evidence}/probe-${probe}.post-state.json" \
+              --accepted "${AIES_PACKAGE_RESOLVED}" \
+              --stage "probe_${probe}_permissive_resolve" \
+              --output "${graph_evidence}/probe-${probe}.lock-transition.json" \
+              --secondary-marker \
+                "${AIES_EVIDENCE_DIR}/package-resolution/probe-secondary-resolved.json"
             git -C "${probe_root}" status --porcelain=v2 --untracked-files=all \
               > "${graph_evidence}/probe-${probe}.status-v2.txt"
             git -C "${probe_root}" diff --no-ext-diff --no-color --binary HEAD -- \
@@ -861,16 +974,28 @@ jobs:
               })
           output.write_text(json.dumps(locks, indent=2, sort_keys=True) + "\n")
           PY
-            cp "${probe_root}/${AIES_PACKAGE_RESOLVED}" \
-              "${graph_evidence}/probe-${probe}.Package.resolved"
             shasum -a 256 "${probe_root}/${AIES_PACKAGE_RESOLVED}" \
               > "${graph_evidence}/probe-${probe}.candidate-after.sha256"
+            cp "${probe_root}/${AIES_PACKAGE_RESOLVED}" \
+              "${graph_evidence}/probe-${probe}.path-bound-non-interchangeable.Package.resolved"
           done
+          python3 - "${graph_evidence}/probe-candidate-custody.json" <<'PY'
+          import json, pathlib, sys
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({
+              "retentionPurpose": "sealed raw evidence only",
+              "interchangeable": False,
+              "promotable": False,
+              "reason": "originHash is bound to each disposable probe root",
+              "candidates": [
+                  "probe-1.path-bound-non-interchangeable.Package.resolved",
+                  "probe-2.path-bound-non-interchangeable.Package.resolved",
+              ],
+          }, indent=2, sort_keys=True) + "\n")
+          PY
 
-          # The two independently fetched graphs must be byte-identical, and resolution may
-          # change only the historically selected Swabble lock authority in each temp clone.
-          cmp -s "${graph_evidence}/probe-1.Package.resolved" \
-            "${graph_evidence}/probe-2.Package.resolved"
+          # Resolution may change only the historically selected Swabble lock authority.
+          # The full nine-pin graph must be identical after normalizing Xcode's path-bound
+          # originHash; the raw files are intentionally not treated as interchangeable.
           if [[ -s "${graph_evidence}/probe-1.ios-secondary-locks.txt" || \
                 -s "${graph_evidence}/probe-2.ios-secondary-locks.txt" ]]; then
             python3 - "${AIES_EVIDENCE_DIR}/package-resolution/probe-secondary-resolved.json" <<'PY'
@@ -896,81 +1021,126 @@ jobs:
               exit 1
             fi
           done
+          diff -u \
+            "${graph_root}/probe-1/${AIES_PACKAGE_RESOLVED}" \
+            "${graph_root}/probe-2/${AIES_PACKAGE_RESOLVED}" \
+            > "${graph_evidence}/probe-lockfiles.raw.diff" || \
+            [[ "$?" -eq 1 ]]
 
           python3 - \
-            "${graph_evidence}/probe-1.Package.resolved" \
+            "${graph_root}/probe-1/${AIES_PACKAGE_RESOLVED}" \
+            "${graph_root}/probe-2/${AIES_PACKAGE_RESOLVED}" \
             "${graph_evidence}/aggregate-package-graph.json" \
             "${graph_evidence}/package-graph-classification.json" <<'PY'
           import hashlib
           import json
           import pathlib
+          import re
           import sys
 
-          source, inventory_path, classification_path = map(pathlib.Path, sys.argv[1:])
-          payload = json.loads(source.read_text())
+          source1, source2, inventory_path, classification_path = map(pathlib.Path, sys.argv[1:])
+          payload1 = json.loads(source1.read_text())
+          payload2 = json.loads(source2.read_text())
           expected = {
-              "commander": ("0.2.2", "ae2ce746b386ff94b26648cfe5625cfa8d02639b", "steipete/commander"),
-              "elevenlabskit": ("0.1.1", "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b", "steipete/elevenlabskit"),
-              "grdb.swift": ("7.11.1", "b83108d10f42680d78f23fe4d4d80fc88dab3212", "groue/grdb.swift"),
-              "swift-concurrency-extras": ("1.4.1", "5fa253428866f2360c3754e88537f700ed2656b5", "pointfreeco/swift-concurrency-extras"),
-              "swift-syntax": ("603.0.1", "9de99a78f099e59caf2b2beec65a4c45d54b2081", "swiftlang/swift-syntax"),
-              "swift-testing": ("6.3.2", "70eff261d7f462cad1fff51e05bcc74aa0b0f420", "apple/swift-testing"),
-              "swiftui-math": ("0.1.0", "0b5c2cfaaec8d6193db206f675048eeb5ce95f71", "gonzalezreal/swiftui-math"),
-              "textual": ("0.3.1", "5b06b811c0f5313b6b84bbef98c635a630638c38", "gonzalezreal/textual"),
-              "webrtc": ("147.0.0", "e8b5efb9d921a7d3044d3928ae235b8846436e41", "stasel/webrtc"),
+              "commander": ("0.2.2", "ae2ce746b386ff94b26648cfe5625cfa8d02639b", "steipete/commander", "remoteSourceControl"),
+              "elevenlabskit": ("0.1.1", "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b", "steipete/elevenlabskit", "remoteSourceControl"),
+              "grdb.swift": ("7.11.1", "b83108d10f42680d78f23fe4d4d80fc88dab3212", "groue/grdb.swift", "remoteSourceControl"),
+              "swift-concurrency-extras": ("1.4.1", "5fa253428866f2360c3754e88537f700ed2656b5", "pointfreeco/swift-concurrency-extras", "remoteSourceControl"),
+              "swift-syntax": ("603.0.1", "9de99a78f099e59caf2b2beec65a4c45d54b2081", "swiftlang/swift-syntax", "remoteSourceControl"),
+              "swift-testing": ("6.3.2", "70eff261d7f462cad1fff51e05bcc74aa0b0f420", "apple/swift-testing", "remoteSourceControl"),
+              "swiftui-math": ("0.1.0", "0b5c2cfaaec8d6193db206f675048eeb5ce95f71", "gonzalezreal/swiftui-math", "remoteSourceControl"),
+              "textual": ("0.3.1", "5b06b811c0f5313b6b84bbef98c635a630638c38", "gonzalezreal/textual", "remoteSourceControl"),
+              "webrtc": ("147.0.0", "e8b5efb9d921a7d3044d3928ae235b8846436e41", "stasel/webrtc", "remoteSourceControl"),
           }
-          observed = {}
-          normalized = []
-          for pin in payload.get("pins", []):
-              identity = str(pin.get("identity", "")).lower()
-              state = pin.get("state", {})
-              location = str(pin.get("location", "")).lower().removesuffix(".git")
-              normalized_location = location.split("github.com/", 1)[-1]
-              item = {
-                  "identity": identity,
-                  "kind": pin.get("kind"),
-                  "location": pin.get("location"),
-                  "normalizedLocation": normalized_location,
-                  "version": state.get("version"),
-                  "revision": state.get("revision"),
-              }
-              normalized.append(item)
-              observed[identity] = (item["version"], item["revision"], normalized_location)
-          if observed != expected:
-              missing = sorted(set(expected) - set(observed))
-              extra = sorted(set(observed) - set(expected))
+          def normalize(payload):
+              if payload.get("version") != 3:
+                  raise SystemExit("resolved file schema version must equal 3")
+              origin = payload.get("originHash")
+              if not isinstance(origin, str) or re.fullmatch(r"[0-9a-f]{64}", origin) is None:
+                  raise SystemExit("resolved file originHash must be present lowercase 64-hex")
+              observed = {}
+              normalized = []
+              for pin in payload.get("pins", []):
+                  identity = str(pin.get("identity", "")).lower()
+                  state = pin.get("state", {})
+                  location = str(pin.get("location", "")).lower().removesuffix(".git")
+                  normalized_location = location.split("github.com/", 1)[-1]
+                  item = {
+                      "identity": identity,
+                      "kind": pin.get("kind"),
+                      "location": pin.get("location"),
+                      "normalizedLocation": normalized_location,
+                      "version": state.get("version"),
+                      "revision": state.get("revision"),
+                  }
+                  normalized.append(item)
+                  observed[identity] = (
+                      item["version"], item["revision"], normalized_location, item["kind"])
+              return observed, sorted(normalized, key=lambda item: item["identity"])
+          observed1, normalized1 = normalize(payload1)
+          observed2, normalized2 = normalize(payload2)
+          if observed1 != expected or observed2 != expected:
+              observed = {"probe1": observed1, "probe2": observed2}
+              missing = {
+                  name: sorted(set(expected) - set(value)) for name, value in observed.items()}
+              extra = {
+                  name: sorted(set(value) - set(expected)) for name, value in observed.items()}
               mismatched = {
-                  key: {"expected": expected[key], "observed": observed.get(key)}
-                  for key in sorted(set(expected) & set(observed))
-                  if observed[key] != expected[key]
+                  name: {
+                      key: {"expected": expected[key], "observed": value.get(key)}
+                      for key in sorted(set(expected) & set(value))
+                      if value[key] != expected[key]
+                  } for name, value in observed.items()
               }
               raise SystemExit(
                   f"aggregate graph outside exact nine-pin allowlist: "
                   f"missing={missing}, extra={extra}, mismatched={mismatched}")
+          structural1 = dict(payload1)
+          structural2 = dict(payload2)
+          origin1 = structural1.pop("originHash", None)
+          origin2 = structural2.pop("originHash", None)
+          if structural1 != structural2 or normalized1 != normalized2:
+              raise SystemExit("probe lockfiles differ beyond path-bound originHash")
+          if source1.read_bytes() == source2.read_bytes() or origin1 == origin2:
+              raise SystemExit("expected independent paths to produce distinct originHash metadata")
           inventory = {
               "schemaVersion": 1,
-              "pinCount": len(normalized),
-              "pins": sorted(normalized, key=lambda item: item["identity"]),
-              "resolvedFileSHA256": hashlib.sha256(source.read_bytes()).hexdigest(),
-              "resolvedFileBytes": source.stat().st_size,
+              "pinCount": len(normalized1),
+              "pins": normalized1,
+              "normalizedPinGraphsIdentical": True,
+              "byteIdentical": False,
+              "pathBoundOriginHash": True,
+              "probe1": {
+                  "originHash": origin1,
+                  "sha256": hashlib.sha256(source1.read_bytes()).hexdigest(),
+                  "bytes": source1.stat().st_size,
+              },
+              "probe2": {
+                  "originHash": origin2,
+                  "sha256": hashlib.sha256(source2.read_bytes()).hexdigest(),
+                  "bytes": source2.stat().st_size,
+              },
           }
           inventory_path.write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n")
           classification_path.write_text(json.dumps({
-              "primaryBuildPackageClassification": "PACKAGE_GRAPH_REPRODUCIBLE_TEMPORARY_OVERLAY",
+              "primaryBuildPackageClassification": "PACKAGE_GRAPH_REPRODUCIBLE_BUILD_ROOT_RESOLUTION",
               "packageGraphClassification": "IOS_GENERATED_PROJECT_PACKAGE_AUTHORITY_TOPOLOGY_MISMATCH",
               "packageGraphSubtype": "STALE_COMMITTED_LOCKFILE_CONFIRMED",
+              "originHashClassification": "PATH_BOUND_LOCAL_PACKAGE_ORIGIN_HASH",
               "authorityFinding": (
                   "generated iOS project selects apps/swabble/Package.resolved as its aggregate "
                   "lock authority; accepted standalone Swabble graph omits six declared aggregate pins"),
               "probeCount": 2,
-              "byteIdenticalProbeGraphs": True,
+              "normalizedPinGraphsIdentical": True,
+              "byteIdenticalProbeGraphs": False,
+              "probeLockfilesPromotable": False,
               "authoritativeRC1Modified": False,
               "diagnosticOverlayOnly": True,
           }, indent=2, sort_keys=True) + "\n")
           PY
 
-          # Prepare an exact disposable build root. XcodeGen executes before the verified
-          # aggregate candidate is overlaid at the lock path Xcode selected in both probes.
+          # Prepare an exact disposable build root. Generate its path-bound lock with isolated
+          # warm caches, then prove cold strict consumption in separate caches reused by build.
           build_root="${AIES_RUNTIME_ROOT}/build-root"
           git clone --quiet --no-hardlinks --no-checkout "${GITHUB_WORKSPACE}" "${build_root}"
           git -C "${build_root}" checkout --quiet --detach "${GITHUB_SHA}"
@@ -979,20 +1149,208 @@ jobs:
             xcodegen generate
             xcodegen generate
           )
-          cp "${graph_evidence}/probe-1.Package.resolved" \
-            "${build_root}/${AIES_PACKAGE_RESOLVED}"
-          git -C "${build_root}" diff --no-ext-diff --no-color --binary HEAD -- \
-            "${AIES_PACKAGE_RESOLVED}" > "${graph_evidence}/build-root-overlay.diff"
-          git -C "${build_root}" status --porcelain=v2 --untracked-files=all \
-            > "${graph_evidence}/build-root-overlay.status-v2.txt"
+          build_lock_baseline="${graph_evidence}/build-root-lock-baseline.json"
+          python3 "${inventory_tool}" "${build_root}" "${build_lock_baseline}"
+          build_resolve_sources="${AIES_RUNTIME_ROOT}/build-resolve-sources"
+          build_resolve_cache="${AIES_RUNTIME_ROOT}/build-resolve-cache"
+          mkdir -p "${build_resolve_sources}" "${build_resolve_cache}"
+          [[ -z "$(find "${AIES_CLONED_SOURCE_PACKAGES}" -mindepth 1 -print -quit)" ]]
+          [[ -z "$(find "${AIES_PACKAGE_CACHE}" -mindepth 1 -print -quit)" ]]
+          build_permissive_command=(
+            xcodebuild
+            -resolvePackageDependencies
+            -project "${build_root}/apps/ios/OpenClaw.xcodeproj"
+            -scheme OpenClaw
+            -destination 'generic/platform=iOS Simulator'
+            -skipPackageUpdates
+            -disablePackageRepositoryCache
+            -clonedSourcePackagesDirPath "${build_resolve_sources}"
+            -packageCachePath "${build_resolve_cache}"
+          )
+          printf '%q ' "${build_permissive_command[@]}" \
+            > "${graph_evidence}/build-root-permissive-resolve.command.txt"
+          printf '\n' >> "${graph_evidence}/build-root-permissive-resolve.command.txt"
+          set +e
+          "${build_permissive_command[@]}" \
+            > "${graph_evidence}/build-root-permissive-resolve.log" 2>&1
+          permissive_status=$?
+          set -e
+          printf '%s\n' "${permissive_status}" \
+            > "${graph_evidence}/build-root-permissive-resolve.exit-status"
+          if [[ "${permissive_status}" -ne 0 ]]; then
+            cat "${graph_evidence}/build-root-permissive-resolve.log" >&2
+            exit "${permissive_status}"
+          fi
+          python3 - "${build_resolve_sources}" "${build_resolve_cache}" \
+            "${AIES_CLONED_SOURCE_PACKAGES}" "${AIES_PACKAGE_CACHE}" \
+            "${graph_evidence}/build-root-package-cache-custody.json" <<'PY'
+          import json, pathlib, sys
+          warm_sources, warm_cache, cold_sources, cold_cache, output = map(pathlib.Path, sys.argv[1:])
+          pathlib.Path(output).write_text(json.dumps({
+              "permissiveCandidateGeneration": {
+                  "clonedSourcePackagesDirPath": str(warm_sources),
+                  "packageCachePath": str(warm_cache),
+              },
+              "coldStrictResolveAndBuild": {
+                  "clonedSourcePackagesDirPath": str(cold_sources),
+                  "packageCachePath": str(cold_cache),
+                  "pristineBeforeStrictResolve": (
+                      not any(cold_sources.iterdir()) and not any(cold_cache.iterdir())),
+              },
+              "pathsDistinct": len({
+                  str(warm_sources.resolve()), str(warm_cache.resolve()),
+                  str(cold_sources.resolve()), str(cold_cache.resolve()),
+              }) == 4,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          python3 - "${graph_evidence}/build-root-package-cache-custody.json" <<'PY'
+          import json, pathlib, sys
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if not payload["pathsDistinct"] or not payload["coldStrictResolveAndBuild"]["pristineBeforeStrictResolve"]:
+              raise SystemExit("strict package source/cache roots are not distinct and pristine")
+          PY
+          if find "${build_root}/apps/ios" -name Package.resolved -type f -print -quit | grep -q .; then
+            python3 - "${build_root}" \
+              "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json" <<'PY'
+          import json, pathlib, sys
+          root, output = map(pathlib.Path, sys.argv[1:])
+          paths = sorted(str(path.relative_to(root)) for path in (root / "apps/ios").rglob("Package.resolved"))
+          output.write_text(json.dumps({
+              "classification": "SECONDARY_RESOLVED_FILE_MATERIALIZED",
+              "stage": "build_root_permissive_resolve",
+              "paths": paths,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+            echo "Build-root permissive resolve materialized a secondary lock." >&2
+            exit 1
+          fi
+          build_changed_paths="$(git -C "${build_root}" diff --name-only HEAD --)"
+          build_untracked_paths="$(git -C "${build_root}" ls-files --others --exclude-standard)"
+          [[ "${build_changed_paths}" == "${AIES_PACKAGE_RESOLVED}" ]]
+          [[ -z "${build_untracked_paths}" ]]
+
+          python3 - "${build_root}/${AIES_PACKAGE_RESOLVED}" \
+            "${graph_root}/probe-1/${AIES_PACKAGE_RESOLVED}" \
+            "${graph_evidence}/aggregate-package-graph.json" <<'PY'
+          import json, pathlib, re, sys
+          candidate, probe_path, expected_path = map(pathlib.Path, sys.argv[1:])
+          payload = json.loads(candidate.read_text())
+          probe = json.loads(probe_path.read_text())
+          expected = json.loads(expected_path.read_text())
+          if payload.get("version") != 3:
+              raise SystemExit("build-root resolved file schema version must equal 3")
+          origin = payload.get("originHash")
+          if not isinstance(origin, str) or re.fullmatch(r"[0-9a-f]{64}", origin) is None:
+              raise SystemExit("build-root originHash must be present lowercase 64-hex")
+          pins = []
+          for pin in payload.get("pins", []):
+              state = pin.get("state", {})
+              location = str(pin.get("location", "")).lower().removesuffix(".git")
+              pins.append({
+                  "identity": str(pin.get("identity", "")).lower(),
+                  "kind": pin.get("kind"),
+                  "location": pin.get("location"),
+                  "normalizedLocation": location.split("github.com/", 1)[-1],
+                  "version": state.get("version"),
+                  "revision": state.get("revision"),
+              })
+          pins.sort(key=lambda item: item["identity"])
+          if pins != expected["pins"]:
+              raise SystemExit("build-root candidate differs from verified normalized nine-pin graph")
+          candidate_structure = dict(payload)
+          probe_structure = dict(probe)
+          candidate_structure.pop("originHash")
+          probe_structure.pop("originHash")
+          if candidate_structure != probe_structure:
+              raise SystemExit(
+                  "build-root candidate differs from verified probe beyond path-bound originHash")
+          PY
           candidate_sha="$(shasum -a 256 "${build_root}/${AIES_PACKAGE_RESOLVED}" | awk '{print $1}')"
+          printf '%s\n' "${candidate_sha}" > "${graph_evidence}/build-root-candidate.sha256"
+          python3 "${inventory_tool}" "${build_root}" \
+            "${graph_evidence}/build-root-after-permissive-resolve.json"
+          python3 "${lock_transition_tool}" \
+            --baseline "${build_lock_baseline}" \
+            --current "${graph_evidence}/build-root-after-permissive-resolve.json" \
+            --accepted "${AIES_PACKAGE_RESOLVED}" \
+            --stage build_root_permissive_resolve \
+            --output "${graph_evidence}/build-root-permissive.lock-transition.json" \
+            --secondary-marker \
+              "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json"
+          git -C "${build_root}" diff --no-ext-diff --no-color --binary HEAD -- \
+            "${AIES_PACKAGE_RESOLVED}" > "${graph_evidence}/build-root-resolved.diff"
+          git -C "${build_root}" status --porcelain=v2 --untracked-files=all \
+            > "${graph_evidence}/build-root-resolved.status-v2.txt"
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          build_strict_command=(
+            xcodebuild
+            -resolvePackageDependencies
+            -project "${build_root}/apps/ios/OpenClaw.xcodeproj"
+            -scheme OpenClaw
+            -destination 'generic/platform=iOS Simulator'
+            "${strict_package_args[@]}"
+          )
+          printf '%q ' "${build_strict_command[@]}" \
+            > "${graph_evidence}/build-root-strict-resolve.command.txt"
+          printf '\n' >> "${graph_evidence}/build-root-strict-resolve.command.txt"
+          [[ -z "$(find "${AIES_CLONED_SOURCE_PACKAGES}" -mindepth 1 -print -quit)" ]]
+          [[ -z "$(find "${AIES_PACKAGE_CACHE}" -mindepth 1 -print -quit)" ]]
+          printf '%s\n' \
+            "coldStrictSourcePackagesPristine=true" \
+            "coldStrictPackageCachePristine=true" \
+            > "${graph_evidence}/build-root-cold-strict-preflight.txt"
+          set +e
+          "${build_strict_command[@]}" \
+            > "${graph_evidence}/build-root-strict-resolve.log" 2>&1
+          strict_status=$?
+          set -e
+          printf '%s\n' "${strict_status}" \
+            > "${graph_evidence}/build-root-strict-resolve.exit-status"
+          if [[ "${strict_status}" -ne 0 ]]; then
+            cat "${graph_evidence}/build-root-strict-resolve.log" >&2
+            exit "${strict_status}"
+          fi
+          strict_candidate_sha="$(shasum -a 256 "${build_root}/${AIES_PACKAGE_RESOLVED}" | awk '{print $1}')"
+          [[ "${strict_candidate_sha}" == "${candidate_sha}" ]]
+          if find "${build_root}/apps/ios" -name Package.resolved -type f -print -quit | grep -q .; then
+            python3 - "${build_root}" \
+              "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json" <<'PY'
+          import json, pathlib, sys
+          root, output = map(pathlib.Path, sys.argv[1:])
+          paths = sorted(str(path.relative_to(root)) for path in (root / "apps/ios").rglob("Package.resolved"))
+          output.write_text(json.dumps({
+              "classification": "SECONDARY_RESOLVED_FILE_MATERIALIZED",
+              "stage": "build_root_strict_resolve",
+              "paths": paths,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+            echo "Build-root strict resolve materialized a secondary lock." >&2
+            exit 1
+          fi
+          [[ "$(git -C "${build_root}" diff --name-only HEAD --)" == "${AIES_PACKAGE_RESOLVED}" ]]
+          [[ -z "$(git -C "${build_root}" ls-files --others --exclude-standard)" ]]
+          python3 "${inventory_tool}" "${build_root}" \
+            "${graph_evidence}/build-root-after-strict-resolve.json"
+          python3 "${lock_transition_tool}" \
+            --baseline "${build_lock_baseline}" \
+            --current "${graph_evidence}/build-root-after-strict-resolve.json" \
+            --accepted "${AIES_PACKAGE_RESOLVED}" \
+            --stage build_root_strict_resolve \
+            --output "${graph_evidence}/build-root-strict.lock-transition.json" \
+            --secondary-marker \
+              "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json"
           {
             echo "AIES_BUILD_ROOT=${build_root}"
             echo "AIES_DIAGNOSTIC_PACKAGE_SHA256=${candidate_sha}"
             echo "AIES_PACKAGE_INVENTORY_TOOL=${inventory_tool}"
+            echo "AIES_LOCK_TRANSITION_TOOL=${lock_transition_tool}"
+            echo "AIES_BUILD_LOCK_BASELINE=${build_lock_baseline}"
           } >> "${GITHUB_ENV}"
           python3 "${inventory_tool}" "${build_root}" \
-            "${graph_evidence}/build-root-overlay.pre-build-state.json"
+            "${graph_evidence}/build-root-resolved.pre-build-state.json"
           python3 "${AIES_PACKAGE_GUARD}" checkpoint \
             --stage package_graph_probe \
             --invocation 2
@@ -1860,8 +2218,14 @@ jobs:
                       "classification", "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER")
                   package_reason = "guard detected a source-custody package event"
               elif secondary_resolved.is_file() or probe_secondary_resolved.is_file():
-                  package_classification = "SECONDARY_RESOLVED_FILE_MATERIALIZED"
-                  package_reason = "strict build materialized a repository-local secondary lock"
+                  marker_path = (
+                      secondary_resolved if secondary_resolved.is_file()
+                      else probe_secondary_resolved)
+                  marker = json.loads(marker_path.read_text())
+                  package_classification = marker.get(
+                      "classification", "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER")
+                  package_reason = (
+                      "Package.resolved path-set custody changed during diagnostic execution")
               elif (strict_graph_blocker.is_file() or package_graph_blocker.is_file()
                     or build_input_custody_blocker.is_file()):
                   package_classification = "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER"
@@ -2231,7 +2595,7 @@ jobs:
           payload = {
               "classification": "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER",
               "stage": "build_for_testing",
-              "reason": "committed resolved graph was rejected under strict package operation",
+              "reason": "verified path-bound diagnostic graph was rejected under strict package operation",
               "command": command,
               "logSHA256": hashlib.sha256(log).hexdigest(),
               "relevantDiagnostics": relevant,
@@ -2249,7 +2613,17 @@ jobs:
           printf '%s\n' "${candidate_after}" \
             > "${AIES_EVIDENCE_DIR}/package-graph/build-root-candidate-after.sha256"
           python3 "${AIES_PACKAGE_INVENTORY_TOOL}" "${AIES_BUILD_ROOT}" \
-            "${AIES_EVIDENCE_DIR}/package-graph/build-root-overlay.post-build-state.json"
+            "${AIES_EVIDENCE_DIR}/package-graph/build-root-resolved.post-build-state.json"
+          python3 "${AIES_LOCK_TRANSITION_TOOL}" \
+            --baseline "${AIES_BUILD_LOCK_BASELINE}" \
+            --current \
+              "${AIES_EVIDENCE_DIR}/package-graph/build-root-resolved.post-build-state.json" \
+            --accepted "${AIES_PACKAGE_RESOLVED}" \
+            --stage build_for_testing \
+            --output \
+              "${AIES_EVIDENCE_DIR}/package-graph/build-root-build.lock-transition.json" \
+            --secondary-marker \
+              "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json"
           if find "${AIES_BUILD_ROOT}/apps/ios" -name Package.resolved -type f -print -quit | grep -q .; then
             python3 - "${AIES_BUILD_ROOT}" \
               "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json" <<'PY'
@@ -2273,7 +2647,7 @@ jobs:
           build_untracked_paths="$(git -C "${AIES_BUILD_ROOT}" ls-files --others --exclude-standard)"
           if [[ "${build_changed_paths}" != "${AIES_PACKAGE_RESOLVED}" || \
                 -n "${build_untracked_paths}" ]]; then
-            echo "Disposable build root changed outside its single verified lock overlay." >&2
+            echo "Disposable build root changed outside its single path-bound resolved lock." >&2
             exit 1
           fi
 
@@ -2617,7 +2991,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${AIES_EVIDENCE_DIR:-}" ]]; then
-            export AIES_RUNTIME_ROOT="${RUNNER_TEMP}/aies-talk-liveness-v3-${GITHUB_RUN_ID}"
+            export AIES_RUNTIME_ROOT="${RUNNER_TEMP}/aies-talk-liveness-v4-${GITHUB_RUN_ID}"
             export AIES_EVIDENCE_DIR="${AIES_RUNTIME_ROOT}/evidence"
             export AIES_DERIVED_DATA="${AIES_RUNTIME_ROOT}/derived-data"
             {
@@ -2677,7 +3051,36 @@ jobs:
                 -n "${AIES_PACKAGE_INVENTORY_TOOL:-}" && \
                 -f "${AIES_PACKAGE_INVENTORY_TOOL}" ]]; then
             python3 "${AIES_PACKAGE_INVENTORY_TOOL}" "${AIES_BUILD_ROOT}" \
-              "${AIES_EVIDENCE_DIR}/package-graph/build-root-overlay.final-state.json"
+              "${AIES_EVIDENCE_DIR}/package-graph/build-root-resolved.final-state.json"
+            if [[ -n "${AIES_LOCK_TRANSITION_TOOL:-}" && \
+                  -n "${AIES_BUILD_LOCK_BASELINE:-}" ]]; then
+              set +e
+              python3 "${AIES_LOCK_TRANSITION_TOOL}" \
+                --baseline "${AIES_BUILD_LOCK_BASELINE}" \
+                --current \
+                  "${AIES_EVIDENCE_DIR}/package-graph/build-root-resolved.final-state.json" \
+                --accepted "${AIES_PACKAGE_RESOLVED}" \
+                --stage final_evidence_seal \
+                --output \
+                  "${AIES_EVIDENCE_DIR}/package-graph/build-root-final.lock-transition.json" \
+                --secondary-marker \
+                  "${AIES_EVIDENCE_DIR}/package-resolution/build-secondary-resolved.json"
+              final_lock_transition_status=$?
+              set -e
+              if [[ "${final_lock_transition_status}" -ne 0 ]]; then
+                python3 - "${final_lock_transition_status}" \
+                  "${AIES_EVIDENCE_DIR}/package-resolution/build-input-custody-blocker.json" <<'PY'
+          import json, pathlib, sys
+          status, output = sys.argv[1:]
+          pathlib.Path(output).write_text(json.dumps({
+              "classification": "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER",
+              "stage": "final_lock_transition",
+              "exitStatus": int(status),
+              "reason": "final Package.resolved path/content inventory violated custody",
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+              fi
+            fi
             final_candidate_sha="$(shasum -a 256 \
               "${AIES_BUILD_ROOT}/${AIES_PACKAGE_RESOLVED}" | awk '{print $1}')"
             final_build_changes="$(git -C "${AIES_BUILD_ROOT}" diff --name-only HEAD --)"
@@ -2698,7 +3101,7 @@ jobs:
               "candidateSHA256": digest,
               "changedPaths": changes,
               "untrackedPaths": untracked,
-              "reason": "temporary build input changed outside its single verified lock overlay",
+              "reason": "temporary build input changed outside its single path-bound resolved lock",
           }, indent=2, sort_keys=True) + "\n")
           PY
             fi
@@ -2741,7 +3144,12 @@ jobs:
                   "classification", "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER"))
           elif ((root / "build-secondary-resolved.json").is_file()
                 or (root / "probe-secondary-resolved.json").is_file()):
-              print("SECONDARY_RESOLVED_FILE_MATERIALIZED")
+              marker = (
+                  root / "build-secondary-resolved.json"
+                  if (root / "build-secondary-resolved.json").is_file()
+                  else root / "probe-secondary-resolved.json")
+              print(json.loads(marker.read_text()).get(
+                  "classification", "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER"))
           else:
               print("PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER")
           PY
@@ -2848,6 +3256,10 @@ jobs:
           cat "${AIES_EVIDENCE_DIR}/package-graph/package-graph-classification.json" 2>/dev/null || true
           cat "${AIES_EVIDENCE_DIR}/package-graph/aggregate-package-graph.json" 2>/dev/null || true
           cat "${AIES_EVIDENCE_DIR}/package-graph/probe-1.full.diff" 2>/dev/null || true
+          find "${AIES_EVIDENCE_DIR}/package-graph" -name '*lock-transition.json' \
+            -type f -print -exec cat {} \; 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/package-graph/build-root-package-cache-custody.json" \
+            2>/dev/null || true
           echo "===== RAW AND CANONICAL TRACE ====="
           find "${AIES_EVIDENCE_DIR}" \( -name 'trace.raw.jsonl' -o -name 'trace.canonical.jsonl' \) \
             -type f -print -exec cat {} \; 2>/dev/null || true
@@ -2863,7 +3275,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: aies-talk-liveness-diagnostic-v3-${{ github.run_id }}
+          name: aies-talk-liveness-diagnostic-v4-${{ github.run_id }}
           path: ${{ env.AIES_EVIDENCE_DIR }}
           if-no-files-found: error
           retention-days: 90
