@@ -129,11 +129,24 @@ private final class DurableTalkLivenessTrace: @unchecked Sendable {
 private final class DurableTalkOneShotLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var signaled = false
+    private let signalEvents: AsyncStream<Void>
+    private let signalContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (self.signalEvents, self.signalContinuation) = AsyncStream.makeStream(
+            of: Void.self,
+            bufferingPolicy: .bufferingNewest(1))
+    }
 
     func signal() {
         self.lock.lock()
+        let shouldYield = !self.signaled
         self.signaled = true
         self.lock.unlock()
+        if shouldYield {
+            self.signalContinuation.yield()
+            self.signalContinuation.finish()
+        }
     }
 
     func isSignaled() -> Bool {
@@ -141,6 +154,12 @@ private final class DurableTalkOneShotLatch: @unchecked Sendable {
         let value = self.signaled
         self.lock.unlock()
         return value
+    }
+
+    func wait() async {
+        if self.isSignaled() { return }
+        var iterator = self.signalEvents.makeAsyncIterator()
+        _ = await iterator.next()
     }
 }
 
@@ -1440,6 +1459,13 @@ struct TalkDurableOutboxTests {
                     "control_mainactor_canary_enqueued",
                     readiness: durableTalkLivenessReadiness(appModel))
                 let start = Task { @MainActor in
+                    await canaryLatch.wait()
+                    guard !Task.isCancelled else {
+                        trace.record(
+                            "talk_start_task_cancelled_before_entry",
+                            readiness: durableTalkLivenessReadiness(appModel))
+                        return
+                    }
                     // `talk.timeline manager start enter` is the next synchronous product
                     // statement; this boundary therefore brackets its wall-clock log.
                     trace.record(
@@ -1463,9 +1489,10 @@ struct TalkDurableOutboxTests {
                     timeoutReadiness["mainactor_canary_signaled"] = String(canaryLatch.isSignaled())
                     trace.record("test_timeout", readiness: timeoutReadiness)
                     start.cancel()
+                    canary.cancel()
+                    canaryLatch.signal()
                     await admissionGate.open()
                     await start.value
-                    canary.cancel()
                     await canary.value
                     throw error
                 }
