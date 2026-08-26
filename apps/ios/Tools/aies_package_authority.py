@@ -423,6 +423,74 @@ def semantic_pins_from_manifest(manifest: dict[str, Any]) -> list[dict[str, Any]
     ]
 
 
+def semantic_pins_from_resolved(payload: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    pins = payload.get("pins")
+    if not isinstance(pins, list):
+        raise AuthorityError(f"{label} pins must be an array")
+    observed: list[dict[str, Any]] = []
+    identities: set[str] = set()
+    for index, pin in enumerate(pins):
+        if not isinstance(pin, dict):
+            raise AuthorityError(f"{label} pin {index} must be an object")
+        _require_exact_keys(
+            pin, {"identity", "kind", "location", "state"}, f"{label} pin {index}"
+        )
+        state = pin["state"]
+        if not isinstance(state, dict):
+            raise AuthorityError(f"{label} pin {index} state must be an object")
+        allowed_state_keys = {"version", "revision", "branch", "checksum"}
+        if not set(state).issubset(allowed_state_keys):
+            raise AuthorityError(
+                f"{label} pin {index} state contains unsupported fields: "
+                f"{sorted(set(state) - allowed_state_keys)}"
+            )
+        identity = pin["identity"]
+        if not isinstance(identity, str) or identity.lower() != identity or not identity:
+            raise AuthorityError(f"{label} pin {index} identity is invalid")
+        if identity in identities:
+            raise AuthorityError(f"duplicate {label} package identity: {identity}")
+        identities.add(identity)
+        observed.append(
+            {
+                "identity": identity,
+                "kind": pin["kind"],
+                "location": pin["location"],
+                "canonicalLocation": canonical_location(pin["location"]),
+                "version": state.get("version"),
+                "revision": state.get("revision"),
+                "branch": state.get("branch"),
+                "checksum": state.get("checksum"),
+            }
+        )
+    observed.sort(key=lambda pin: pin["identity"])
+    return observed
+
+
+def compare_semantic_pins(
+    observed: list[dict[str, Any]],
+    expected: list[dict[str, Any]],
+    label: str,
+) -> None:
+    if observed == expected:
+        return
+    observed_by_id = {pin["identity"]: pin for pin in observed}
+    expected_by_id = {pin["identity"]: pin for pin in expected}
+    missing = sorted(set(expected_by_id) - set(observed_by_id))
+    extra = sorted(set(observed_by_id) - set(expected_by_id))
+    mismatched = {
+        identity: {
+            "expected": expected_by_id[identity],
+            "observed": observed_by_id[identity],
+        }
+        for identity in sorted(set(expected_by_id) & set(observed_by_id))
+        if expected_by_id[identity] != observed_by_id[identity]
+    }
+    raise AuthorityError(
+        f"{label} graph differs from semantic authority: missing={missing}, "
+        f"extra={extra}, mismatched={json.dumps(mismatched, sort_keys=True)}"
+    )
+
+
 def concrete_payload(root: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "originHash": compute_origin_hash(root, manifest),
@@ -493,61 +561,9 @@ def validate_concrete(
             f"concrete originHash is bound to a different build root: "
             f"expected {expected_origin_hash}, observed {origin_hash}"
         )
-    pins = payload["pins"]
-    if not isinstance(pins, list):
-        raise AuthorityError("concrete pins must be an array")
-    observed: list[dict[str, Any]] = []
-    identities: set[str] = set()
-    for index, pin in enumerate(pins):
-        if not isinstance(pin, dict):
-            raise AuthorityError(f"concrete pin {index} must be an object")
-        _require_exact_keys(pin, {"identity", "kind", "location", "state"}, f"concrete pin {index}")
-        state = pin["state"]
-        if not isinstance(state, dict):
-            raise AuthorityError(f"concrete pin {index} state must be an object")
-        allowed_state_keys = {"version", "revision", "branch", "checksum"}
-        if not set(state).issubset(allowed_state_keys):
-            raise AuthorityError(
-                f"concrete pin {index} state contains unsupported fields: "
-                f"{sorted(set(state) - allowed_state_keys)}"
-            )
-        identity = pin["identity"]
-        if not isinstance(identity, str) or identity.lower() != identity or not identity:
-            raise AuthorityError(f"concrete pin {index} identity is invalid")
-        if identity in identities:
-            raise AuthorityError(f"duplicate concrete package identity: {identity}")
-        identities.add(identity)
-        observed.append(
-            {
-                "identity": identity,
-                "kind": pin["kind"],
-                "location": pin["location"],
-                "canonicalLocation": canonical_location(pin["location"]),
-                "version": state.get("version"),
-                "revision": state.get("revision"),
-                "branch": state.get("branch"),
-                "checksum": state.get("checksum"),
-            }
-        )
-    observed.sort(key=lambda pin: pin["identity"])
+    observed = semantic_pins_from_resolved(payload, "concrete")
     expected = semantic_pins_from_manifest(manifest)
-    if observed != expected:
-        observed_by_id = {pin["identity"]: pin for pin in observed}
-        expected_by_id = {pin["identity"]: pin for pin in expected}
-        missing = sorted(set(expected_by_id) - set(observed_by_id))
-        extra = sorted(set(observed_by_id) - set(expected_by_id))
-        mismatched = {
-            identity: {
-                "expected": expected_by_id[identity],
-                "observed": observed_by_id[identity],
-            }
-            for identity in sorted(set(expected_by_id) & set(observed_by_id))
-            if expected_by_id[identity] != observed_by_id[identity]
-        }
-        raise AuthorityError(
-            f"concrete graph differs from semantic authority: missing={missing}, "
-            f"extra={extra}, mismatched={json.dumps(mismatched, sort_keys=True)}"
-        )
+    compare_semantic_pins(observed, expected, "concrete")
     semantic = {
         "schema": SCHEMA,
         "resolvedFileSchemaVersion": payload["version"],
@@ -560,6 +576,47 @@ def validate_concrete(
         "resolvedPath": str(resolved_path),
         "rawSHA256": sha256_bytes(data),
         "bytes": len(data),
+        "originHash": origin_hash,
+        "semanticSHA256": sha256_bytes(canonical_json(semantic)),
+        "pinCount": len(observed),
+        "pins": observed,
+    }
+
+
+def validate_scoped_resolved(
+    manifest: dict[str, Any], resolved_path: pathlib.Path, scope: str
+) -> dict[str, Any]:
+    scopes = {
+        "openclawkit": {
+            "elevenlabskit",
+            "grdb.swift",
+            "swift-concurrency-extras",
+            "swiftui-math",
+            "textual",
+        }
+    }
+    if scope not in scopes:
+        raise AuthorityError(f"unsupported resolved graph scope: {scope!r}")
+    payload = load_json(resolved_path)
+    _require_exact_keys(payload, {"originHash", "pins", "version"}, f"{scope} resolved file")
+    if payload["version"] != manifest["resolvedFileSchemaVersion"]:
+        raise AuthorityError(f"unsupported resolved-file schema version: {payload['version']!r}")
+    origin_hash = payload["originHash"]
+    if not isinstance(origin_hash, str) or HEX64.fullmatch(origin_hash) is None:
+        raise AuthorityError(f"{scope} resolved file lacks a valid originHash")
+    observed = semantic_pins_from_resolved(payload, scope)
+    expected = [
+        pin
+        for pin in semantic_pins_from_manifest(manifest)
+        if pin["identity"] in scopes[scope]
+    ]
+    compare_semantic_pins(observed, expected, scope)
+    semantic = {"schema": SCHEMA, "scope": scope, "pins": observed}
+    return {
+        "status": "valid",
+        "scope": scope,
+        "resolvedPath": str(resolved_path),
+        "rawSHA256": sha256_bytes(resolved_path.read_bytes()),
         "originHash": origin_hash,
         "semanticSHA256": sha256_bytes(canonical_json(semantic)),
         "pinCount": len(observed),
@@ -642,6 +699,8 @@ def validate_workspace_state(
         ),
         "binaryArtifacts": [normalized_artifact],
     }
+
+
 def git_status(root: pathlib.Path) -> str:
     result = subprocess.run(
         ["git", "status", "--porcelain=v2", "--untracked-files=all"],
@@ -685,6 +744,10 @@ def parser() -> argparse.ArgumentParser:
     workspace.add_argument("--output")
     origin = subparsers.add_parser("origin-hash")
     origin.add_argument("--output")
+    scoped = subparsers.add_parser("validate-scoped-resolved")
+    scoped.add_argument("--scope", required=True, choices=["openclawkit"])
+    scoped.add_argument("--resolved", required=True)
+    scoped.add_argument("--output")
     return result
 
 
@@ -771,6 +834,11 @@ def main(argv: list[str] | None = None) -> int:
                 },
                 args.output,
             )
+        elif args.command == "validate-scoped-resolved":
+            report = validate_scoped_resolved(
+                manifest, pathlib.Path(args.resolved).resolve(), args.scope
+            )
+            write_report(report, args.output)
         else:  # pragma: no cover - argparse enforces the command set.
             raise AuthorityError(f"unsupported command: {args.command}")
     except (AuthorityError, OSError, subprocess.CalledProcessError) as error:

@@ -228,6 +228,16 @@ def write_environment(
         # to keep archive consumption on the same already-verified cold graph.
         "GYM_XCODE_BUILD_COMMAND": gym_build_command,
     }
+    invalid = [
+        key
+        for key, value in values.items()
+        if "\n" in value or "\r" in value or "\0" in value
+    ]
+    if invalid:
+        raise PreparationError(
+            "package environment contains an unsafe multiline or NUL value: "
+            + ", ".join(sorted(invalid))
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(f"{key}={value}\n" for key, value in values.items()),

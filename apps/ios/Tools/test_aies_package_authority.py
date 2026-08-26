@@ -407,6 +407,53 @@ class AIESPackageAuthorityTests(unittest.TestCase):
             self.assertRegex(report["originHash"], r"^[0-9a-f]{64}$")
             self.assertEqual(len(report["pins"]), 9)
 
+    def test_openclawkit_scoped_graph_is_exact_aggregate_subset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            payload = authority.concrete_payload(self.repo_root, self.manifest)
+            payload["pins"] = [
+                pin
+                for pin in payload["pins"]
+                if pin["identity"]
+                in {
+                    "elevenlabskit",
+                    "grdb.swift",
+                    "swift-concurrency-extras",
+                    "swiftui-math",
+                    "textual",
+                }
+            ]
+            resolved = root / "Package.resolved"
+            resolved.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            report = authority.validate_scoped_resolved(
+                self.manifest, resolved, "openclawkit"
+            )
+            self.assertEqual(report["pinCount"], 5)
+            self.assertEqual(
+                [pin["identity"] for pin in report["pins"]],
+                [
+                    "elevenlabskit",
+                    "grdb.swift",
+                    "swift-concurrency-extras",
+                    "swiftui-math",
+                    "textual",
+                ],
+            )
+
+    def test_openclawkit_scoped_graph_rejects_extra_aggregate_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            payload = authority.concrete_payload(self.repo_root, self.manifest)
+            payload["pins"] = [
+                pin for pin in payload["pins"] if pin["identity"] != "webrtc"
+            ]
+            resolved = root / "Package.resolved"
+            resolved.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(authority.AuthorityError, "extra=.*commander"):
+                authority.validate_scoped_resolved(
+                    self.manifest, resolved, "openclawkit"
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

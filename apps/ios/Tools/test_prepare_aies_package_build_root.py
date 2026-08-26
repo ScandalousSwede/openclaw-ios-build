@@ -93,6 +93,24 @@ class AIESPackageBuildRootPreparationTests(unittest.TestCase):
             self.assertNotIn("GYM_PACKAGE_CACHE_PATH", values)
             self.assertNotIn("GYM_SKIP_PACKAGE_REPOSITORY_FETCHES", values)
 
+    def test_environment_rejects_newline_path_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            with self.assertRaisesRegex(
+                preparation.PreparationError, "unsafe multiline or NUL value"
+            ):
+                preparation.write_environment(
+                    root / "environment.env",
+                    build_root=pathlib.Path("/tmp/build\nAIES_INJECTED=true"),
+                    project=root / "project",
+                    resolved=root / "Package.resolved",
+                    receipt=root / "receipt.json",
+                    strict_args_file=root / "strict.txt",
+                    source_packages=root / "sources",
+                    package_cache=root / "cache",
+                    semantic_sha="a" * 64,
+                )
+
     def test_assert_within_rejects_parent_and_escape(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             parent = pathlib.Path(temporary).resolve()
