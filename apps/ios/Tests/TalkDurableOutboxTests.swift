@@ -1,4 +1,5 @@
 import AVFAudio
+import Darwin
 import Foundation
 import OpenClawChatUI
 import OpenClawKit
@@ -71,13 +72,47 @@ private final class DurableTalkLivenessTrace: @unchecked Sendable {
         return now
     }
 
-    func emit() {
+    func sealAndFlush() {
+        self.record("diagnostic_trace_sealed")
         self.lock.lock()
         let snapshot = self.events
         self.lock.unlock()
+        self.emit(snapshot)
+        let traceFlushResult = Darwin.fflush(nil)
+        guard traceFlushResult == 0 else {
+            self.record(
+                "diagnostic_trace_flush_failed",
+                readiness: ["flush_result": String(traceFlushResult)])
+            self.emitLastEvent()
+            _ = Darwin.fflush(nil)
+            return
+        }
+
+        self.record("diagnostic_trace_flush_completed")
+        self.emitLastEvent()
+        let completionFlushResult = Darwin.fflush(nil)
+        if completionFlushResult != 0 {
+            self.record(
+                "diagnostic_trace_flush_failed",
+                readiness: ["flush_result": String(completionFlushResult)])
+            self.emitLastEvent()
+            _ = Darwin.fflush(nil)
+        }
+    }
+
+    private func emitLastEvent() {
+        self.lock.lock()
+        let lastEvent = self.events.last
+        self.lock.unlock()
+        if let lastEvent {
+            self.emit([lastEvent])
+        }
+    }
+
+    private func emit(_ events: [DurableTalkLivenessTraceEvent]) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        for event in snapshot {
+        for event in events {
             guard let data = try? encoder.encode(event),
                   let json = String(data: data, encoding: .utf8)
             else { continue }
@@ -1342,9 +1377,23 @@ struct TalkDurableOutboxTests {
 
     @Test func backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission() async throws {
         let trace = DurableTalkLivenessTrace()
+        var tracedAppModel: NodeAppModel?
         trace.record("test_started")
+        defer {
+            let cleanupReadiness: [String: String]
+            if let tracedAppModel {
+                cleanupReadiness = durableTalkLivenessReadiness(tracedAppModel)
+            } else {
+                cleanupReadiness = [:]
+            }
+            trace.record(
+                "diagnostic_cleanup_completed",
+                readiness: cleanupReadiness)
+            trace.sealAndFlush()
+        }
         try await withBackgroundTalkOptIn {
             try await withDurableTalkNodeModel(trace: trace) { appModel in
+                tracedAppModel = appModel
                 let admissionGate = DurableTalkGate(
                     waiterRegistered: {
                         trace.record("admission_gate_waiter_registered")
@@ -1418,10 +1467,6 @@ struct TalkDurableOutboxTests {
                     await start.value
                     canary.cancel()
                     await canary.value
-                    trace.record(
-                        "diagnostic_cleanup_completed",
-                        readiness: durableTalkLivenessReadiness(appModel))
-                    trace.emit()
                     throw error
                 }
                 #expect(await admissionGate.waiterCount() == 1)
@@ -1442,9 +1487,8 @@ struct TalkDurableOutboxTests {
                 #expect(!appModel.talkMode.isPushToTalkActive)
                 #expect(appModel.talkMode._test_durableCaptureIdentity() == nil)
                 trace.record(
-                    "test_completed",
+                    "test_assertions_completed",
                     readiness: durableTalkLivenessReadiness(appModel))
-                trace.emit()
                 appModel.talkMode.isEnabled = false
                 appModel.setScenePhase(.active)
             }
