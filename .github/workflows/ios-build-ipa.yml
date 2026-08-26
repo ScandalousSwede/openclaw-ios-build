@@ -87,9 +87,19 @@ jobs:
           xcode-version: '26.2'
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-      - name: Install credential-free release tooling
-        run: brew install fastlane
+      - name: Install pinned credential-free release tooling
+        run: |
+          set -euo pipefail
+          fastlane_gems="${RUNNER_TEMP}/aies-fastlane-2.228.0"
+          gem install --no-document --install-dir "${fastlane_gems}" fastlane --version 2.228.0
+          {
+            echo "GEM_HOME=${fastlane_gems}"
+            echo "GEM_PATH=${fastlane_gems}"
+          } >> "${GITHUB_ENV}"
+          echo "${fastlane_gems}/bin" >> "${GITHUB_PATH}"
 
       - name: Setup pinned XcodeGen
         uses: ./.github/actions/setup-xcodegen
@@ -123,6 +133,20 @@ jobs:
             exit 1
           fi
 
+      - name: Test package authority and preparation tooling
+        working-directory: apps/ios/Tools
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_aies_package_authority.py \
+            test_prepare_aies_package_build_root.py
+
+      - name: Verify pinned Fastlane version
+        run: |
+          set -euo pipefail
+          fastlane --version | tee "${RUNNER_TEMP}/fastlane-version.txt"
+          grep -Eq 'fastlane 2\.228\.0([^0-9]|$)' "${RUNNER_TEMP}/fastlane-version.txt"
+
       - name: Verify rendered AIES export command
         working-directory: apps/ios
         run: fastlane ios verify_aies_export_command
@@ -150,6 +174,8 @@ jobs:
           swift --version
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node environment
         uses: ./.github/actions/setup-node-env
@@ -167,6 +193,19 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Prepare strict aggregate package build root
+        run: |
+          set -euo pipefail
+          package_runtime="${RUNNER_TEMP}/aies-unsigned-package"
+          mkdir -p "${package_runtime}"
+          python3 apps/ios/Tools/prepare_aies_package_build_root.py prepare \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --build-root "${package_runtime}/build-root" \
+            --allowed-root "${package_runtime}" \
+            --expected-sha "${GITHUB_SHA}" \
+            --evidence-dir "${package_runtime}/evidence" \
+            --github-env "${GITHUB_ENV}"
 
       - name: Capture build provenance
         run: |
@@ -195,24 +234,36 @@ jobs:
 
       - name: Test build manifest and internal release-policy tooling
         run: |
-          cd apps/ios/Tools
+          cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_aies_package_authority.py \
+            test_prepare_aies_package_build_root.py \
             test_sanitize_aies_release_log.py \
+            test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_verify_aies_internal_signing.py
-
-      - name: Generate Xcode project
-        run: cd apps/ios && xcodegen generate
 
       - name: Build OpenClawKit and run S0-S3 reliability tests
         run: |
           set -euo pipefail
-          swift build --package-path apps/shared/OpenClawKit
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
-          swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
-          swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxStorageTests
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxIntegrationTests
+          shared_root="${RUNNER_TEMP}/aies-unsigned-shared-tests"
+          git clone --quiet --no-hardlinks --no-checkout "${GITHUB_WORKSPACE}" "${shared_root}"
+          git -C "${shared_root}" checkout --quiet --detach "${GITHUB_SHA}"
+          shared_package="${shared_root}/apps/shared/OpenClawKit"
+          swift package --package-path "${shared_package}" resolve
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${AIES_BUILD_ROOT}" \
+            validate-scoped-resolved \
+            --scope openclawkit \
+            --resolved "${shared_package}/Package.resolved" \
+            --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/openclawkit-resolved.json"
+          swift build --package-path "${shared_package}" --force-resolved-versions
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Run iOS tests
         run: |
@@ -234,7 +285,11 @@ jobs:
               raise SystemExit("No available iOS simulator")
           print(devices[0]["udid"])
           ' )"
-          cd apps/ios
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
           xcodebuild \
             -project OpenClaw.xcodeproj \
             -scheme OpenClaw \
@@ -250,13 +305,22 @@ jobs:
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
+            "${strict_package_args[@]}" \
             test \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
 
       - name: Archive iOS app
         run: |
           set -euo pipefail
-          cd apps/ios
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
 
           provenance_settings=(
             "OPENCLAW_BUILD_GIT_SHA=${GITHUB_SHA}"
@@ -276,9 +340,12 @@ jobs:
             -configuration Debug \
             -destination generic/platform=iOS \
             -archivePath /tmp/OpenClaw.xcarchive \
+            "${strict_package_args[@]}" \
             archive \
             CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             "${provenance_settings[@]}"
 
@@ -313,7 +380,7 @@ jobs:
       - name: Write build manifest
         run: |
           set -euo pipefail
-          python3 apps/ios/Tools/write_build_manifest.py \
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/write_build_manifest.py" \
             --archive /tmp/OpenClaw.xcarchive \
             --output /tmp/OpenClaw-build-manifest.json \
             --git-sha "${GITHUB_SHA}" \
@@ -329,6 +396,70 @@ jobs:
             --dsym-zip /tmp/OpenClaw-dSYMs.zip \
             --github-run-id "${GITHUB_RUN_ID}"
           python3 -m json.tool /tmp/OpenClaw-build-manifest.json >/dev/null
+
+      - name: Verify unsigned five-bundle archive and seal provenance
+        run: |
+          set -euo pipefail
+          evidence_root="${RUNNER_TEMP}/openclaw-aies-unsigned-evidence"
+          mkdir -p "${evidence_root}"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_unsigned_archive.py" \
+            --archive /tmp/OpenClaw.xcarchive \
+            --ipa /tmp/OpenClaw.ipa \
+            --archive-zip /tmp/OpenClaw.xcarchive.zip \
+            --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+            --output "${evidence_root}/OpenClaw-unsigned-archive.json"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-archive-verification.json"
+          cp /tmp/OpenClaw-build-manifest.json "${evidence_root}/"
+          ditto "${RUNNER_TEMP}/aies-unsigned-package/evidence" \
+            "${evidence_root}/package-authority"
+          python3 - "${evidence_root}" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          source_status = subprocess.run(
+              ["git", "status", "--porcelain=v2", "--untracked-files=all"],
+              capture_output=True,
+              check=True,
+              text=True,
+          ).stdout
+          if source_status:
+              raise SystemExit("authoritative workflow checkout became dirty")
+          records = []
+          for path in sorted(item for item in root.rglob("*") if item.is_file()):
+              if path.name == "SHA256SUMS":
+                  continue
+              records.append(
+                  f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+                  f"{path.relative_to(root).as_posix()}"
+              )
+          (root / "SHA256SUMS").write_text("\n".join(records) + "\n")
+          custody = {
+              "schema": "aies.ios.unsigned-source-custody.v1",
+              "gitSHA": subprocess.run(
+                  ["git", "rev-parse", "HEAD"], capture_output=True, check=True, text=True
+              ).stdout.strip(),
+              "gitTree": subprocess.run(
+                  ["git", "rev-parse", "HEAD^{tree}"], capture_output=True, check=True, text=True
+              ).stdout.strip(),
+              "statusPorcelainV2": source_status,
+          }
+          (root / "source-custody.json").write_text(
+              json.dumps(custody, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+          (
+            cd "${evidence_root}"
+            shasum -a 256 source-custody.json >> SHA256SUMS
+          )
+          cat "${evidence_root}/OpenClaw-unsigned-archive.json"
+          cat "${evidence_root}/package-authority/package-preparation.json"
+          cat "${evidence_root}/SHA256SUMS"
 
       - name: Upload IPA
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -359,6 +490,14 @@ jobs:
         with:
           name: OpenClaw-iOS-build-manifest-${{ github.run_id }}-${{ github.run_attempt }}
           path: /tmp/OpenClaw-build-manifest.json
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload package authority and unsigned provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-iOS-package-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/openclaw-aies-unsigned-evidence
           retention-days: 90
           if-no-files-found: error
 
@@ -395,6 +534,7 @@ jobs:
         with:
           ref: ${{ inputs.expected_git_sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Verify exact release checkout
         env:
@@ -416,13 +556,35 @@ jobs:
           save-actions-cache: "false"
 
       - name: Install iOS build tools
-        run: brew install fastlane swiftlint swiftformat
+        run: |
+          set -euo pipefail
+          brew install swiftlint swiftformat
+          fastlane_gems="${RUNNER_TEMP}/aies-fastlane-2.228.0"
+          gem install --no-document --install-dir "${fastlane_gems}" fastlane --version 2.228.0
+          {
+            echo "GEM_HOME=${fastlane_gems}"
+            echo "GEM_PATH=${fastlane_gems}"
+          } >> "${GITHUB_ENV}"
+          echo "${fastlane_gems}/bin" >> "${GITHUB_PATH}"
 
       - name: Setup pinned XcodeGen
         uses: ./.github/actions/setup-xcodegen
 
       - name: Install dependencies
         run: pnpm install
+
+      - name: Prepare strict aggregate package build root
+        run: |
+          set -euo pipefail
+          package_runtime="${RUNNER_TEMP}/aies-signed-package"
+          mkdir -p "${package_runtime}"
+          python3 apps/ios/Tools/prepare_aies_package_build_root.py prepare \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --build-root "${package_runtime}/build-root" \
+            --allowed-root "${package_runtime}" \
+            --expected-sha "${GITHUB_SHA}" \
+            --evidence-dir "${package_runtime}/evidence" \
+            --github-env "${GITHUB_ENV}"
 
       - name: Verify protected environment policy
         env:
@@ -549,32 +711,59 @@ jobs:
       - name: Test signing evidence tooling
         run: |
           set -euo pipefail
-          cd apps/ios/Tools
+          cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_aies_package_authority.py \
+            test_prepare_aies_package_build_root.py \
             test_sanitize_aies_release_log.py \
+            test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_verify_aies_internal_signing.py
 
       - name: Parse Fastlane release configuration without credentials
-        working-directory: apps/ios
-        run: fastlane lanes >/dev/null
+        run: |
+          set -euo pipefail
+          fastlane --version | tee "${RUNNER_TEMP}/fastlane-version.txt"
+          grep -Eq 'fastlane 2\.228\.0([^0-9]|$)' "${RUNNER_TEMP}/fastlane-version.txt"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+          fastlane lanes >/dev/null
 
-      - name: Generate test project
-        run: cd apps/ios && xcodegen generate
+      - name: Verify rendered strict Fastlane package contract
+        run: |
+          set -euo pipefail
+          ruby "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_fastlane_package_contract.rb" \
+            --project "${AIES_IOS_PROJECT}" \
+            --source-packages "${AIES_CLONED_SOURCE_PACKAGES}" \
+            --package-cache "${AIES_PACKAGE_CACHE}" \
+            --output "${RUNNER_TEMP}/aies-signed-package/evidence/fastlane-package-contract.json"
 
       - name: Verify rendered AIES export command without credentials
-        working-directory: apps/ios
-        run: fastlane ios verify_aies_export_command
+        run: |
+          set -euo pipefail
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+          fastlane ios verify_aies_export_command
 
       - name: Build OpenClawKit and run reliability tests
         run: |
           set -euo pipefail
-          swift build --package-path apps/shared/OpenClawKit
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawDiagnosticEventTests
-          swift test --package-path apps/shared/OpenClawKit --filter GatewayNodeSessionTests
-          swift test --package-path apps/shared/OpenClawKit --filter ChatViewModelTests
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxStorageTests
-          swift test --package-path apps/shared/OpenClawKit --filter OpenClawChatOutboxIntegrationTests
+          shared_root="${RUNNER_TEMP}/aies-signed-shared-tests"
+          git clone --quiet --no-hardlinks --no-checkout "${GITHUB_WORKSPACE}" "${shared_root}"
+          git -C "${shared_root}" checkout --quiet --detach "${GITHUB_SHA}"
+          shared_package="${shared_root}/apps/shared/OpenClawKit"
+          swift package --package-path "${shared_package}" resolve
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${AIES_BUILD_ROOT}" \
+            validate-scoped-resolved \
+            --scope openclawkit \
+            --resolved "${shared_package}/Package.resolved" \
+            --output "${RUNNER_TEMP}/aies-signed-package/evidence/openclawkit-resolved.json"
+          swift build --package-path "${shared_package}" --force-resolved-versions
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Run focused iOS reliability tests
         run: |
@@ -596,7 +785,11 @@ jobs:
               raise SystemExit("No available iOS simulator")
           print(devices[0]["udid"])
           ' )"
-          cd apps/ios
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
           xcodebuild \
             -project OpenClaw.xcodeproj \
             -scheme OpenClaw \
@@ -612,8 +805,13 @@ jobs:
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
+            "${strict_package_args[@]}" \
             test \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER=""
 
       - name: Materialize ephemeral App Store Connect key
         env:
@@ -637,9 +835,9 @@ jobs:
           unset ASC_PRIVATE_KEY_P8
 
       - name: Build, verify, and upload internal TestFlight diagnostic
-        working-directory: apps/ios
         run: |
           set -euo pipefail
+          cd "${AIES_BUILD_ROOT}/apps/ios"
           fastlane ios aies_internal_testflight 2>&1 | \
             tee "${RUNNER_TEMP}/aies-fastlane.raw.log"
 
@@ -653,10 +851,19 @@ jobs:
           }
           trap cleanup_raw_log EXIT
           if [[ -f "${raw_log}" ]]; then
-            python3 apps/ios/Tools/sanitize_aies_release_log.py \
+            python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/sanitize_aies_release_log.py" \
               --input "${raw_log}" \
               --output "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           fi
+
+      - name: Verify strict package custody after signed lane
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${RUNNER_TEMP}/aies-signed-package/evidence/post-fastlane-verification.json"
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Validate retained release evidence
         run: |
@@ -782,6 +989,15 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-entitlements.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload signed package-authority evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-package-authority-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-signed-package/evidence
           retention-days: 90
           if-no-files-found: warn
 

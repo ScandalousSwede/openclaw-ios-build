@@ -590,6 +590,13 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         project_spec = (REPO_ROOT / "apps" / "ios" / "project.yml").read_text(
             encoding="utf-8"
         )
+        package_preparation = (
+            REPO_ROOT
+            / "apps"
+            / "ios"
+            / "Tools"
+            / "prepare_aies_package_build_root.py"
+        ).read_text(encoding="utf-8")
         third_party_uses = re.findall(
             r"^\s*uses:\s*([^./\s][^@\s]+)@([^\s#]+)", workflow, re.MULTILINE
         )
@@ -613,7 +620,15 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             workflow.count("test_verify_aies_internal_signing.py"), 2
         )
         self.assertEqual(workflow.count("uses: ./.github/actions/setup-xcodegen"), 3)
-        self.assertEqual(workflow.count("xcodegen generate"), 4)
+        # The conformance job renders the tracked project twice in place. The
+        # unsigned and signed lanes each delegate their two-pass generation to
+        # the same exact-SHA disposable-build-root preparation contract.
+        self.assertEqual(workflow.count("xcodegen generate"), 2)
+        self.assertEqual(
+            workflow.count("prepare_aies_package_build_root.py prepare"), 2
+        )
+        self.assertIn("for pass_number in (1, 2):", package_preparation)
+        self.assertIn('[args.xcodegen, "generate"]', package_preparation)
         self.assertEqual(workflow.count("git -C ../.. diff --exit-code"), 1)
         self.assertEqual(
             workflow.count("git -C ../.. ls-files --others --exclude-standard"), 2
