@@ -10,6 +10,105 @@ private enum DurableTalkTestError: Error {
     case rejected
 }
 
+private struct DurableTalkLivenessTraceEvent: Codable {
+    let schemaVersion: Int
+    let sequence: Int
+    let event: String
+    let monotonicNanoseconds: Int64
+    let deltaFromTalkStartRequestNanoseconds: Int64?
+    let matrix: String
+    let processIteration: String
+    let processID: Int32
+    let isMainThread: Bool
+    let isCancelled: Bool
+    let readiness: [String: String]
+}
+
+private final class DurableTalkLivenessTrace: @unchecked Sendable {
+    private let clock: ContinuousClock
+    private let origin: ContinuousClock.Instant
+    private let lock = NSLock()
+    private var nextSequence = 1
+    private var talkStartRequestedAt: ContinuousClock.Instant?
+    private var events: [DurableTalkLivenessTraceEvent] = []
+    private let matrix: String
+    private let processIteration: String
+
+    init() {
+        let clock = ContinuousClock()
+        self.clock = clock
+        self.origin = clock.now
+        let environment = ProcessInfo.processInfo.environment
+        self.matrix = environment["AIES_TALK_DIAGNOSTIC_MATRIX"] ?? "unspecified"
+        self.processIteration = environment["AIES_TALK_DIAGNOSTIC_ITERATION"] ?? "unspecified"
+    }
+
+    @discardableResult
+    func record(
+        _ event: String,
+        readiness: [String: String] = [:]) -> ContinuousClock.Instant
+    {
+        self.lock.lock()
+        let now = self.clock.now
+        if event == "talk_start_requested_by_test" {
+            self.talkStartRequestedAt = now
+        }
+        let requestDelta = self.talkStartRequestedAt.map { Self.nanoseconds($0.duration(to: now)) }
+        self.events.append(DurableTalkLivenessTraceEvent(
+            schemaVersion: 1,
+            sequence: self.nextSequence,
+            event: event,
+            monotonicNanoseconds: Self.nanoseconds(self.origin.duration(to: now)),
+            deltaFromTalkStartRequestNanoseconds: requestDelta,
+            matrix: self.matrix,
+            processIteration: self.processIteration,
+            processID: ProcessInfo.processInfo.processIdentifier,
+            isMainThread: Thread.isMainThread,
+            isCancelled: Task.isCancelled,
+            readiness: readiness))
+        self.nextSequence += 1
+        self.lock.unlock()
+        return now
+    }
+
+    func emit() {
+        self.lock.lock()
+        let snapshot = self.events
+        self.lock.unlock()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        for event in snapshot {
+            guard let data = try? encoder.encode(event),
+                  let json = String(data: data, encoding: .utf8)
+            else { continue }
+            print("AIES_TALK_LIVENESS_TRACE \(json)")
+        }
+    }
+
+    private static func nanoseconds(_ duration: Duration) -> Int64 {
+        let components = duration.components
+        return components.seconds * 1_000_000_000 + components.attoseconds / 1_000_000_000
+    }
+}
+
+private final class DurableTalkOneShotLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signaled = false
+
+    func signal() {
+        self.lock.lock()
+        self.signaled = true
+        self.lock.unlock()
+    }
+
+    func isSignaled() -> Bool {
+        self.lock.lock()
+        let value = self.signaled
+        self.lock.unlock()
+        return value
+    }
+}
+
 private struct DurableTalkSendResponsePayload: Encodable {
     let runId: String
     let status: String
@@ -29,23 +128,32 @@ private actor DurableTalkGate {
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private let waiterEnteredEvents: AsyncStream<Void>
     private let waiterEnteredContinuation: AsyncStream<Void>.Continuation
+    private let waiterRegistered: (@Sendable () -> Void)?
+    private let gateOpened: (@Sendable () -> Void)?
 
-    init() {
+    init(
+        waiterRegistered: (@Sendable () -> Void)? = nil,
+        gateOpened: (@Sendable () -> Void)? = nil)
+    {
         (self.waiterEnteredEvents, self.waiterEnteredContinuation) = AsyncStream.makeStream(
             of: Void.self,
             bufferingPolicy: .bufferingNewest(1))
+        self.waiterRegistered = waiterRegistered
+        self.gateOpened = gateOpened
     }
 
     func wait() async {
         if self.isOpen { return }
         await withCheckedContinuation {
             self.waiters.append($0)
+            self.waiterRegistered?()
             self.waiterEnteredContinuation.yield(())
         }
     }
 
     func open() {
         self.isOpen = true
+        self.gateOpened?()
         let waiters = self.waiters
         self.waiters.removeAll()
         waiters.forEach { $0.resume() }
@@ -74,12 +182,19 @@ private actor DurableTalkAdmissionProvider {
     private let token: UUID
     private let gate: DurableTalkGate?
     private let gatedCall: Int
+    private let admissionResolved: (@Sendable () -> Void)?
     private var calls = 0
 
-    init(token: UUID = UUID(), gate: DurableTalkGate? = nil, gatedCall: Int = .max) {
+    init(
+        token: UUID = UUID(),
+        gate: DurableTalkGate? = nil,
+        gatedCall: Int = .max,
+        admissionResolved: (@Sendable () -> Void)? = nil)
+    {
         self.token = token
         self.gate = gate
         self.gatedCall = gatedCall
+        self.admissionResolved = admissionResolved
     }
 
     func admissionToken() async -> UUID {
@@ -87,6 +202,7 @@ private actor DurableTalkAdmissionProvider {
         if self.calls == self.gatedCall {
             await self.gate?.wait()
         }
+        self.admissionResolved?()
         return self.token
     }
 
@@ -588,10 +704,11 @@ private func waitForDurableTalk(
 private func waitForDurableTalkGateEntry(
     _ description: String,
     timeout: Duration = .seconds(3),
+    startedAt requestedAt: ContinuousClock.Instant? = nil,
     gate: DurableTalkGate) async throws
 {
     let clock = ContinuousClock()
-    let startedAt = clock.now
+    let startedAt = requestedAt ?? clock.now
     let deadline = startedAt.advanced(by: timeout)
 
     try await withThrowingTaskGroup(of: Void.self) { group in
@@ -614,7 +731,22 @@ private func waitForDurableTalkGateEntry(
 }
 
 @MainActor
+private func durableTalkLivenessReadiness(_ model: NodeAppModel) -> [String: String] {
+    [
+        "backgrounded": String(model.isBackgrounded),
+        "background_opt_in_eligible": String(model.talkMode.canUseBackgroundTalkOptIn),
+        "config_loaded": String(model.talkMode.gatewayTalkConfigLoaded),
+        "gateway_connected": String(model.talkMode.isGatewayConnected),
+        "listening": String(model.talkMode.isListening),
+        "permission_state": model.talkMode.gatewayTalkPermissionState.statusLabel,
+        "push_to_talk_active": String(model.talkMode.isPushToTalkActive),
+        "talk_enabled": String(model.talkMode.isEnabled),
+    ]
+}
+
+@MainActor
 private func withDurableTalkNodeModel<T>(
+    trace: DurableTalkLivenessTrace? = nil,
     _ body: @MainActor (NodeAppModel) async throws -> T) async rethrows -> T
 {
     let talkKey = "talk.enabled"
@@ -635,7 +767,9 @@ private func withDurableTalkNodeModel<T>(
             UserDefaults.standard.removeObject(forKey: voiceWakeKey)
         }
     }
+    trace?.record("model_initialization_started")
     let model = NodeAppModel(talkMode: TalkModeManager(allowSimulatorCapture: true))
+    trace?.record("model_initialization_completed", readiness: durableTalkLivenessReadiness(model))
     defer {
         model.talkMode.isEnabled = false
         model.voiceWake.setEnabled(false)
@@ -1207,10 +1341,23 @@ struct TalkDurableOutboxTests {
     }
 
     @Test func backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission() async throws {
+        let trace = DurableTalkLivenessTrace()
+        trace.record("test_started")
         try await withBackgroundTalkOptIn {
-            try await withDurableTalkNodeModel { appModel in
-                let admissionGate = DurableTalkGate()
-                let provider = DurableTalkAdmissionProvider(gate: admissionGate, gatedCall: 1)
+            try await withDurableTalkNodeModel(trace: trace) { appModel in
+                let admissionGate = DurableTalkGate(
+                    waiterRegistered: {
+                        trace.record("admission_gate_waiter_registered")
+                    },
+                    gateOpened: {
+                        trace.record("admission_gate_opened")
+                    })
+                let provider = DurableTalkAdmissionProvider(
+                    gate: admissionGate,
+                    gatedCall: 1,
+                    admissionResolved: {
+                        trace.record("admission_resolved")
+                    })
                 appModel.talkMode._test_setPTTPermissionHooks(microphone: { true }, speech: { true })
                 appModel.talkMode.gatewayTalkConfigLoaded = true
                 appModel.talkMode.attachDurableChatOutbox(
@@ -1221,27 +1368,83 @@ struct TalkDurableOutboxTests {
                     persist: { _ in throw DurableTalkTestError.rejected })
                 appModel.talkMode.updateGatewayConnected(true)
                 appModel.talkMode.isEnabled = true
-                let start = Task { @MainActor in await appModel.talkMode.start() }
+                trace.record(
+                    "production_readiness_state_observed",
+                    readiness: durableTalkLivenessReadiness(appModel))
+                let requestedAt = trace.record(
+                    "talk_start_requested_by_test",
+                    readiness: durableTalkLivenessReadiness(appModel))
+                let canaryLatch = DurableTalkOneShotLatch()
+                let canary = Task { @MainActor in
+                    guard !Task.isCancelled else {
+                        trace.record(
+                            "control_mainactor_canary_cancelled_before_entry",
+                            readiness: durableTalkLivenessReadiness(appModel))
+                        return
+                    }
+                    trace.record(
+                        "control_mainactor_canary_entered",
+                        readiness: durableTalkLivenessReadiness(appModel))
+                    canaryLatch.signal()
+                }
+                trace.record(
+                    "control_mainactor_canary_enqueued",
+                    readiness: durableTalkLivenessReadiness(appModel))
+                let start = Task { @MainActor in
+                    // `talk.timeline manager start enter` is the next synchronous product
+                    // statement; this boundary therefore brackets its wall-clock log.
+                    trace.record(
+                        "talk_start_existing_log_entry_boundary",
+                        readiness: durableTalkLivenessReadiness(appModel))
+                    await appModel.talkMode.start()
+                    trace.record(
+                        "talk_start_function_returned",
+                        readiness: durableTalkLivenessReadiness(appModel))
+                }
+                trace.record(
+                    "talk_start_task_created",
+                    readiness: durableTalkLivenessReadiness(appModel))
                 do {
                     try await waitForDurableTalkGateEntry(
                         "continuous admission waits before background",
+                        startedAt: requestedAt,
                         gate: admissionGate)
                 } catch {
+                    var timeoutReadiness = durableTalkLivenessReadiness(appModel)
+                    timeoutReadiness["mainactor_canary_signaled"] = String(canaryLatch.isSignaled())
+                    trace.record("test_timeout", readiness: timeoutReadiness)
                     start.cancel()
                     await admissionGate.open()
                     await start.value
+                    canary.cancel()
+                    await canary.value
+                    trace.record(
+                        "diagnostic_cleanup_completed",
+                        readiness: durableTalkLivenessReadiness(appModel))
+                    trace.emit()
                     throw error
                 }
                 #expect(await admissionGate.waiterCount() == 1)
                 #expect(await provider.callCount() == 1)
                 #expect(!appModel.talkMode.canUseBackgroundTalkOptIn)
+                trace.record(
+                    "background_transition_requested",
+                    readiness: durableTalkLivenessReadiness(appModel))
                 appModel.setScenePhase(.background)
+                trace.record(
+                    "background_transition_observed",
+                    readiness: durableTalkLivenessReadiness(appModel))
                 await admissionGate.open()
                 await start.value
+                await canary.value
                 #expect(await provider.callCount() == 1)
                 #expect(!appModel.talkMode.isListening)
                 #expect(!appModel.talkMode.isPushToTalkActive)
                 #expect(appModel.talkMode._test_durableCaptureIdentity() == nil)
+                trace.record(
+                    "test_completed",
+                    readiness: durableTalkLivenessReadiness(appModel))
+                trace.emit()
                 appModel.talkMode.isEnabled = false
                 appModel.setScenePhase(.active)
             }
