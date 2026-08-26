@@ -1,0 +1,226 @@
+{
+  "schema": "aies.ios.aggregate-package-authority.v1",
+  "resolvedFileSchemaVersion": 3,
+  "project": {
+    "path": "apps/ios/OpenClaw.xcodeproj",
+    "scheme": "OpenClaw",
+    "concreteResolvedPath": "apps/ios/OpenClaw.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+  },
+  "sourceDeclarations": [
+    {
+      "path": "apps/ios/project.yml",
+      "sha256": "e84163a1e392d4d8e66033e86da69aecae1a6b4ca0b53b17d933e17092dd30a5"
+    },
+    {
+      "path": "apps/shared/OpenClawKit/Package.swift",
+      "sha256": "5bc4ab0e19f3c9653eefa50347702511162ff310c57c117453cf4f42002eebc6"
+    },
+    {
+      "path": "apps/swabble/Package.swift",
+      "sha256": "6d7e1f2113615b71b6ff35723ea5402358a496aeb79b28ddfde0c343c67b640a"
+    }
+  ],
+  "standaloneLocks": [
+    {
+      "scope": "standalone-swabble",
+      "path": "apps/swabble/Package.resolved",
+      "sha256": "8db1bfc0cd61b0a2c479806004dc67ec0385d8f50c53b16edbd2df251149d7e1",
+      "pinIdentities": [
+        "commander",
+        "swift-syntax",
+        "swift-testing"
+      ]
+    }
+  ],
+  "localPackages": [
+    {
+      "identity": "openclawkit",
+      "projectRelativePath": "../shared/OpenClawKit",
+      "repositoryPath": "apps/shared/OpenClawKit",
+      "declaration": "apps/ios/project.yml:14"
+    },
+    {
+      "identity": "swabble",
+      "projectRelativePath": "../swabble",
+      "repositoryPath": "apps/swabble",
+      "declaration": "apps/ios/project.yml:16"
+    }
+  ],
+  "originHash": {
+    "contract": "swiftpm-6.2.3-workspace-root",
+    "upstreamCommit": "9e5bde0a18e8be5b978cdcd4e4a3ac4565237191",
+    "manifestPathsInOrder": [
+      "apps/shared/OpenClawKit/Package.swift",
+      "apps/swabble/Package.swift"
+    ],
+    "dependencyLocationsInOrder": [
+      {
+        "kind": "absoluteRepositoryPath",
+        "path": "apps/shared/OpenClawKit"
+      },
+      {
+        "kind": "absoluteRepositoryPath",
+        "path": "apps/swabble"
+      },
+      {
+        "kind": "literal",
+        "value": "https://github.com/stasel/WebRTC.git"
+      }
+    ]
+  },
+  "binaryArtifacts": [
+    {
+      "packageIdentity": "webrtc",
+      "targetName": "WebRTC",
+      "url": "https://github.com/stasel/WebRTC/releases/download/147.0.0/WebRTC-M147.xcframework.zip",
+      "checksumAlgorithm": "sha256",
+      "checksum": "49f9b1713432c19f408e3218fc8526c7692fafca5869f7ec5f5991614276ed40"
+    }
+  ],
+  "pins": [
+    {
+      "identity": "commander",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/steipete/Commander.git",
+      "version": "0.2.2",
+      "revision": "ae2ce746b386ff94b26648cfe5625cfa8d02639b",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/swabble/Package.swift:16",
+      "requirement": {
+        "kind": "exact",
+        "version": "0.2.2"
+      }
+    },
+    {
+      "identity": "elevenlabskit",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/steipete/ElevenLabsKit.git",
+      "version": "0.1.1",
+      "revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:21",
+      "requirement": {
+        "kind": "from",
+        "minimumVersion": "0.1.1"
+      }
+    },
+    {
+      "identity": "grdb.swift",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/groue/GRDB.swift.git",
+      "version": "7.11.1",
+      "revision": "b83108d10f42680d78f23fe4d4d80fc88dab3212",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:22",
+      "requirement": {
+        "kind": "exact",
+        "version": "7.11.1"
+      }
+    },
+    {
+      "identity": "swift-concurrency-extras",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/pointfreeco/swift-concurrency-extras",
+      "version": "1.4.1",
+      "revision": "5fa253428866f2360c3754e88537f700ed2656b5",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "transitive",
+      "sourceDeclaration": "textual@5b06b811c0f5313b6b84bbef98c635a630638c38:Package.swift:18",
+      "requirement": {
+        "kind": "from",
+        "minimumVersion": "1.3.1"
+      }
+    },
+    {
+      "identity": "swift-syntax",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/swiftlang/swift-syntax.git",
+      "version": "603.0.1",
+      "revision": "9de99a78f099e59caf2b2beec65a4c45d54b2081",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "transitive",
+      "sourceDeclaration": "swift-testing@70eff261d7f462cad1fff51e05bcc74aa0b0f420:Package.swift",
+      "requirement": {
+        "kind": "from",
+        "minimumVersion": "603.0.0-latest"
+      }
+    },
+    {
+      "identity": "swift-testing",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/apple/swift-testing",
+      "version": "6.3.2",
+      "revision": "70eff261d7f462cad1fff51e05bcc74aa0b0f420",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/swabble/Package.swift:17",
+      "requirement": {
+        "kind": "from",
+        "minimumVersion": "6.3.1"
+      }
+    },
+    {
+      "identity": "swiftui-math",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/gonzalezreal/swiftui-math",
+      "version": "0.1.0",
+      "revision": "0b5c2cfaaec8d6193db206f675048eeb5ce95f71",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "transitive",
+      "sourceDeclaration": "textual@5b06b811c0f5313b6b84bbef98c635a630638c38:Package.swift:20",
+      "requirement": {
+        "kind": "from",
+        "minimumVersion": "0.1.0"
+      }
+    },
+    {
+      "identity": "textual",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/gonzalezreal/textual",
+      "version": "0.3.1",
+      "revision": "5b06b811c0f5313b6b84bbef98c635a630638c38",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "transitive",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:23",
+      "requirement": {
+        "kind": "exact",
+        "version": "0.3.1"
+      }
+    },
+    {
+      "identity": "webrtc",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/stasel/WebRTC.git",
+      "version": "147.0.0",
+      "revision": "e8b5efb9d921a7d3044d3928ae235b8846436e41",
+      "branch": null,
+      "checksum": null,
+      "aggregateRole": "direct",
+      "declarationRole": "direct",
+      "sourceDeclaration": "apps/ios/project.yml:18",
+      "requirement": {
+        "kind": "exact",
+        "version": "147.0.0"
+      }
+    }
+  ]
+}
