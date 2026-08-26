@@ -1501,8 +1501,7 @@ struct ChatViewModelTests {
             sessionKey: "agent:aiden:main",
             historyResponses: [historyPayload(sessionKey: "agent:aiden:main")])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         transport.emit(
             .sessionMessage(
@@ -1537,8 +1536,7 @@ struct ChatViewModelTests {
             sessionKey: "agent:work:global",
             historyResponses: [historyPayload(sessionKey: "agent:work:global")])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         transport.emit(
             .sessionMessage(
@@ -1574,8 +1572,7 @@ struct ChatViewModelTests {
             sessionKey: "agent:work:global",
             historyResponses: [historyPayload(sessionKey: "agent:work:global")])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         transport.emit(
             .sessionMessage(
@@ -1604,8 +1601,7 @@ struct ChatViewModelTests {
         let now = Date().timeIntervalSince1970 * 1000
         let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         transport.emit(
             .sessionMessage(
@@ -1633,8 +1629,7 @@ struct ChatViewModelTests {
         let now = Date().timeIntervalSince1970 * 1000
         let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         await sendUserMessage(vm, text: "ping")
         try await waitUntil("local run pending") { await MainActor.run { vm.pendingRunCount == 1 } }
@@ -1915,8 +1910,7 @@ struct ChatViewModelTests {
     @Test func `dedupes gateway echo of local user message`() async throws {
         let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         await sendUserMessage(vm, text: "echo me")
         try await waitUntil("optimistic user message visible") {
@@ -2000,8 +1994,7 @@ struct ChatViewModelTests {
         let now = Date().timeIntervalSince1970 * 1000
         let (transport, vm) = await makeViewModel(historyResponses: [historyPayload()])
 
-        await MainActor.run { vm.load() }
-        try await waitUntil("bootstrap history loaded") { await MainActor.run { vm.messages.isEmpty } }
+        try await loadAndWaitBootstrap(vm: vm)
 
         transport.emit(
             .sessionMessage(
