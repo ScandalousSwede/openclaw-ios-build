@@ -2883,9 +2883,13 @@ struct ChatViewModelTests {
             vm.send()
         }
 
-        try await waitUntil("compact attempted") {
-            await transport.compactSessionKeys() == ["main"]
+        try await waitUntil("compact failure state committed") {
+            let calls = await transport.compactSessionKeys()
+            let errorText = await MainActor.run { vm.errorText }
+            return calls == ["main"] &&
+                errorText == "Unable to compact the session. Please try again."
         }
+        #expect(await transport.compactSessionKeys() == ["main"])
         #expect(await MainActor.run { vm.errorText } == "Unable to compact the session. Please try again.")
     }
 
@@ -2961,9 +2965,13 @@ struct ChatViewModelTests {
             vm.send()
         }
 
-        try await waitUntil("first compact attempted") {
-            await transport.compactSessionKeys() == ["main"]
+        try await waitUntil("first compact failure state committed") {
+            let calls = await transport.compactSessionKeys()
+            let errorText = await MainActor.run { vm.errorText }
+            return calls == ["main"] &&
+                errorText == "Unable to compact the session. Please try again."
         }
+        #expect(await transport.compactSessionKeys() == ["main"])
         #expect(await MainActor.run { vm.errorText } == "Unable to compact the session. Please try again.")
 
         await MainActor.run {
@@ -2971,9 +2979,12 @@ struct ChatViewModelTests {
             vm.send()
         }
 
-        try await waitUntil("second compact attempted") {
-            await transport.compactSessionKeys() == ["main", "main"]
+        try await waitUntil("second compact completes") {
+            let calls = await transport.compactSessionKeys()
+            let completed = await MainActor.run { !vm.isLoading && vm.errorText == nil }
+            return calls == ["main", "main"] && completed
         }
+        #expect(await transport.compactSessionKeys() == ["main", "main"])
         #expect(await MainActor.run { vm.errorText } == nil)
     }
 
