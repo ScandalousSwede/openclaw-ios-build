@@ -1,0 +1,2329 @@
+name: iOS Talk Liveness Diagnostic V2
+
+on:
+  push:
+    branches:
+      - codex/rc1-talk-liveness-diagnostic-v2
+    paths:
+      - .github/workflows/ios-talk-liveness-diagnostic.yml
+      - apps/ios/Tests/TalkDurableOutboxTests.swift
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-talk-liveness-diagnostic-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  talk-liveness-diagnostic:
+    name: Credential-free Talk liveness diagnostic V2
+    runs-on: macos-15
+    timeout-minutes: 180
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      OPENCLAW_SKIP_SOURCE_LINT: "YES"
+      AIES_AUTH_RC1: 84152459fe11fc294e89677c2851594e9aa7de15
+      AIES_DIAGNOSTIC_BASE: 9a65f7b016161bc93970e461f892f0865a9942c5
+      AIES_TEST_COMMIT: 54aba4f6050b08dbbf39e9e0087e6652a57e71ef
+      AIES_DIAGNOSTIC_BRANCH: codex/rc1-talk-liveness-diagnostic-v2
+      AIES_DIAGNOSTIC_WORKFLOW: .github/workflows/ios-talk-liveness-diagnostic.yml
+      AIES_DIAGNOSTIC_TEST: apps/ios/Tests/TalkDurableOutboxTests.swift
+      AIES_TARGET_FILTER: OpenClawTests/TalkDurableOutboxTests/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission
+      AIES_SUITE_FILTER: OpenClawTests/TalkDurableOutboxTests
+      AIES_PACKAGE_RESOLVED: apps/swabble/Package.resolved
+      AIES_PACKAGE_BLOB: a64270d1544a694e44669ffe8279c1e1d7acb8fb
+      AIES_PACKAGE_SHA256: 8db1bfc0cd61b0a2c479806004dc67ec0385d8f50c53b16edbd2df251149d7e1
+      AIES_PACKAGE_BYTES: "930"
+
+    steps:
+      - name: Checkout exact diagnostic commit without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Initialize runner-temporary diagnostic paths
+        id: temp_paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_root="${RUNNER_TEMP}/aies-talk-liveness-v2-${GITHUB_RUN_ID}"
+          evidence_dir="${runtime_root}/evidence"
+          derived_data="${runtime_root}/derived-data"
+          cloned_packages="${runtime_root}/source-packages"
+          package_cache="${runtime_root}/package-cache"
+          results_dir="${runtime_root}/results"
+          mkdir -p \
+            "${evidence_dir}/environment" \
+            "${derived_data}" \
+            "${cloned_packages}" \
+            "${package_cache}" \
+            "${results_dir}"
+          {
+            echo "AIES_RUNTIME_ROOT=${runtime_root}"
+            echo "AIES_EVIDENCE_DIR=${evidence_dir}"
+            echo "AIES_DERIVED_DATA=${derived_data}"
+            echo "AIES_CLONED_SOURCE_PACKAGES=${cloned_packages}"
+            echo "AIES_PACKAGE_CACHE=${package_cache}"
+            echo "AIES_RESULTS_DIR=${results_dir}"
+          } >> "${GITHUB_ENV}"
+          python3 - "${runtime_root}" "${evidence_dir}/environment/runtime-paths.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          root, output = sys.argv[1:]
+          pathlib.Path(output).write_text(json.dumps({
+              "runnerTemp": os.environ["RUNNER_TEMP"],
+              "runtimeRoot": root,
+              "insideRunnerTemp": pathlib.Path(root).is_relative_to(
+                  pathlib.Path(os.environ["RUNNER_TEMP"])),
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Prove diagnostic source and authority boundary
+        id: source_gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            "${AIES_EVIDENCE_DIR}/source" \
+            "${AIES_EVIDENCE_DIR}/package-resolution" \
+            "${AIES_EVIDENCE_DIR}/runtime-tools" \
+            "${AIES_DERIVED_DATA}" \
+            "${AIES_CLONED_SOURCE_PACKAGES}" \
+            "${AIES_PACKAGE_CACHE}" \
+            "${AIES_RESULTS_DIR}"
+          exec > >(tee "${AIES_EVIDENCE_DIR}/source/source-gate.log") 2>&1
+
+          [[ "${GITHUB_EVENT_NAME}" == "push" ]]
+          [[ "${GITHUB_REPOSITORY}" == "ScandalousSwede/openclaw-ios-build" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/${AIES_DIAGNOSTIC_BRANCH}" ]]
+          [[ "${GITHUB_REF_NAME}" == "${AIES_DIAGNOSTIC_BRANCH}" ]]
+          [[ "${GITHUB_RUN_ATTEMPT}" == "1" ]]
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+
+          event_created="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["created"]).lower())' "${GITHUB_EVENT_PATH}")"
+          event_forced="$(python3 -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["forced"]).lower())' "${GITHUB_EVENT_PATH}")"
+          event_before="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["before"])' "${GITHUB_EVENT_PATH}")"
+          event_after="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["after"])' "${GITHUB_EVENT_PATH}")"
+          [[ "${event_created}" == "true" ]]
+          [[ "${event_forced}" == "false" ]]
+          [[ "${event_before}" =~ ^0{40}$ ]]
+          [[ "${event_after}" == "${GITHUB_SHA}" ]]
+          git merge-base --is-ancestor "${AIES_AUTH_RC1}" "${AIES_DIAGNOSTIC_BASE}"
+          python3 - "${GITHUB_EVENT_PATH}" "${AIES_TEST_COMMIT}" "${GITHUB_SHA}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          event = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          expected = [sys.argv[2], sys.argv[3]]
+          observed = [item.get("id") for item in event.get("commits", [])]
+          if observed != expected:
+              raise SystemExit(f"push must contain exactly Commit A then Commit B: {observed!r}")
+          if event.get("head_commit", {}).get("id") != sys.argv[3]:
+              raise SystemExit("push head_commit is not the checked-out workflow commit")
+          PY
+
+          read -r -a workflow_commit_line <<<"$(git rev-list --parents -n 1 HEAD)"
+          if [[ "${#workflow_commit_line[@]}" -ne 2 || \
+                "${workflow_commit_line[1]}" != "${AIES_TEST_COMMIT}" ]]; then
+            echo "Workflow Commit B must have exactly one parent, Commit A ${AIES_TEST_COMMIT}." >&2
+            exit 1
+          fi
+
+          workflow_change="$(git diff-tree --no-commit-id --name-status -r "${AIES_TEST_COMMIT}" HEAD)"
+          if [[ "${workflow_change}" != $'A\t'"${AIES_DIAGNOSTIC_WORKFLOW}" ]]; then
+            echo "Commit B must add only ${AIES_DIAGNOSTIC_WORKFLOW}." >&2
+            printf 'Observed Commit B change:\n%s\n' "${workflow_change}" >&2
+            exit 1
+          fi
+          if git cat-file -e "${AIES_TEST_COMMIT}:${AIES_DIAGNOSTIC_WORKFLOW}" 2>/dev/null; then
+            echo "Diagnostic workflow unexpectedly existed in Commit A." >&2
+            exit 1
+          fi
+          [[ "$(git ls-tree HEAD "${AIES_DIAGNOSTIC_WORKFLOW}" | awk '{print $1}')" == "100644" ]]
+
+          read -r -a test_commit_line <<<"$(git rev-list --parents -n 1 "${AIES_TEST_COMMIT}")"
+          if [[ "${#test_commit_line[@]}" -ne 2 || \
+                "${test_commit_line[1]}" != "${AIES_DIAGNOSTIC_BASE}" ]]; then
+            echo "Commit A must have exactly one parent, ${AIES_DIAGNOSTIC_BASE}." >&2
+            exit 1
+          fi
+          test_change="$(git diff-tree --no-commit-id --name-status -r "${AIES_DIAGNOSTIC_BASE}" "${AIES_TEST_COMMIT}")"
+          if [[ "${test_change}" != $'M\t'"${AIES_DIAGNOSTIC_TEST}" ]]; then
+            echo "Commit A must modify only ${AIES_DIAGNOSTIC_TEST}." >&2
+            printf 'Observed Commit A change:\n%s\n' "${test_change}" >&2
+            exit 1
+          fi
+          [[ "$(git ls-tree "${AIES_DIAGNOSTIC_BASE}" "${AIES_DIAGNOSTIC_TEST}" | awk '{print $1}')" == "100644" ]]
+          [[ "$(git ls-tree "${AIES_TEST_COMMIT}" "${AIES_DIAGNOSTIC_TEST}" | awk '{print $1}')" == "100644" ]]
+
+          cumulative_changes="$(git diff --name-status "${AIES_DIAGNOSTIC_BASE}" HEAD | LC_ALL=C sort)"
+          expected_cumulative="$(printf 'A\t%s\nM\t%s\n' \
+            "${AIES_DIAGNOSTIC_WORKFLOW}" "${AIES_DIAGNOSTIC_TEST}" | LC_ALL=C sort)"
+          if [[ "${cumulative_changes}" != "${expected_cumulative}" ]]; then
+            echo "V2 branch must change exactly the test file and diagnostic workflow." >&2
+            printf 'Observed cumulative changes:\n%s\n' "${cumulative_changes}" >&2
+            exit 1
+          fi
+
+          expected_objects=(
+            "apps/ios/Sources=d034193e7f21102d444bbc7a694dd7f766bd1271"
+            "apps/shared/OpenClawKit/Sources=d76bc15087d19197f254db8c66a1cc39e80de100"
+            ".github/workflows/ios-build-ipa.yml=4b6a6bfaecea118d2d6f3330d89e814768f0be4f"
+            ".github/actions/setup-xcodegen=8c1bb175a4b110babcd05b9b20b50f55e657086d"
+            ".github/actions/setup-xcodegen/action.yml=3e2846f5529a82c952cdb598451b0176f65afd88"
+            "apps/ios/fastlane=97bd74492afad3fb1a3746886c50bc670d26973c"
+            "apps/ios/fastlane/Fastfile=e3e654e301862e8cd1b2416a960c6482059a4223"
+            "apps/ios/project.yml=be05d0f289a8ac03e8f99cf8a370a6daee6dfe7e"
+            "apps/ios/Tools=556a590367a56566b432b0ec852290d50b52f601"
+            "apps/ios/Signing.xcconfig=d6acc35dee879122941d4601c7aaf51998f03105"
+            "apps/ios/Config/Signing.xcconfig=19d2975626b758919c1ad7e133e28e0b4e35c3cb"
+            "apps/ios/Sources/OpenClaw.entitlements=ff60a879b1a25f566ee380339905df1fb525f690"
+            "apps/ios/Config=ba40de4de4befc4dc93c7adf311defe40f44cfaf"
+            "apps/ios/Config/Version.xcconfig=15a9de706d886f23f59ec53687483c28a7eb5c8f"
+            "apps/swabble/Package.resolved=a64270d1544a694e44669ffe8279c1e1d7acb8fb"
+          )
+          : > "${AIES_EVIDENCE_DIR}/source/object-hashes.tsv"
+          git cat-file -e "${AIES_AUTH_RC1}^{commit}"
+          for entry in "${expected_objects[@]}"; do
+            path="${entry%%=*}"
+            expected="${entry#*=}"
+            actual="$(git rev-parse "HEAD:${path}")"
+            authoritative="$(git rev-parse "${AIES_AUTH_RC1}:${path}")"
+            printf '%s\t%s\t%s\t%s\n' \
+              "${path}" "${actual}" "${authoritative}" "${expected}" |
+              tee -a "${AIES_EVIDENCE_DIR}/source/object-hashes.tsv"
+            if [[ "${actual}" != "${expected}" || "${authoritative}" != "${expected}" ]]; then
+              echo "Immutable object mismatch: ${path}" >&2
+              exit 1
+            fi
+          done
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "Checkout is not clean before diagnostic setup." >&2
+            git status --short >&2
+            exit 1
+          fi
+
+          cp "${AIES_DIAGNOSTIC_WORKFLOW}" \
+            "${AIES_EVIDENCE_DIR}/source/ios-talk-liveness-diagnostic.yml"
+          head_sha="$(git rev-parse HEAD)"
+          head_tree="$(git rev-parse 'HEAD^{tree}')"
+          test_tree="$(git rev-parse "${AIES_TEST_COMMIT}^{tree}")"
+          python3 - "${head_sha}" "${head_tree}" "${test_tree}" \
+            "${workflow_change}" "${test_change}" "${cumulative_changes}" \
+            "${AIES_EVIDENCE_DIR}/source/source-state.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          head, tree, test_tree, workflow_change, test_change, cumulative, output = sys.argv[1:]
+          payload = {
+              "authoritativeRC1": os.environ["AIES_AUTH_RC1"],
+              "diagnosticBase": os.environ["AIES_DIAGNOSTIC_BASE"],
+              "testCommit": os.environ["AIES_TEST_COMMIT"],
+              "diagnosticBranch": os.environ["AIES_DIAGNOSTIC_BRANCH"],
+              "head": head,
+              "tree": tree,
+              "testTree": test_tree,
+              "workflowCommitChange": workflow_change,
+              "testCommitChange": test_change,
+              "cumulativeChanges": cumulative,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "ref": os.environ["GITHUB_REF"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          pathlib.Path(output).write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          PY
+          cat "${AIES_EVIDENCE_DIR}/source/source-state.json"
+
+      - name: Materialize Package.resolved first-mutation guard and checkpoint checkout
+        id: package_guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          guard="${AIES_EVIDENCE_DIR}/runtime-tools/package_guard.py"
+          python3 - "${guard}" <<'PY'
+          import pathlib
+          import sys
+
+          output = pathlib.Path(sys.argv[1])
+          output.write_text(r'''#!/usr/bin/env python3
+          from __future__ import annotations
+
+          import argparse
+          import datetime as dt
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import shutil
+          import subprocess
+          import sys
+          from typing import Any
+
+          EXIT_PACKAGE_MUTATION = 42
+          EXIT_OTHER_SOURCE_DIRTY = 43
+
+          def utc_now() -> str:
+              return dt.datetime.now(dt.timezone.utc).isoformat()
+
+          def git(repo: pathlib.Path, *args: str, binary: bool = False):
+              result = subprocess.run(
+                  ["git", *args], cwd=repo, capture_output=True, check=False,
+                  text=not binary)
+              if result.returncode != 0:
+                  stderr = result.stderr if not binary else result.stderr.decode(errors="replace")
+                  raise RuntimeError(f"git {' '.join(args)} failed: {stderr}")
+              return result.stdout
+
+          def sha256_bytes(value: bytes) -> str:
+              return hashlib.sha256(value).hexdigest()
+
+          def write_json(path: pathlib.Path, payload: Any) -> None:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+          def create_once(path: pathlib.Path, payload: Any) -> None:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              try:
+                  descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              except FileExistsError:
+                  return
+              with os.fdopen(descriptor, "w") as handle:
+                  json.dump(payload, handle, indent=2, sort_keys=True)
+                  handle.write("\n")
+
+          def root_lock_inventory(repo: pathlib.Path) -> list[dict[str, Any]]:
+              records = []
+              ios_root = repo / "apps" / "ios"
+              for path in sorted(ios_root.rglob("Package.resolved")):
+                  if not path.is_file():
+                      continue
+                  data = path.read_bytes()
+                  relative = path.relative_to(repo).as_posix()
+                  ignored = subprocess.run(
+                      ["git", "check-ignore", "-q", "--", relative], cwd=repo).returncode == 0
+                  records.append({
+                      "path": relative,
+                      "sha256": sha256_bytes(data),
+                      "bytes": len(data),
+                      "ignored": ignored,
+                      "content": data.decode("utf-8", errors="replace"),
+                  })
+              return records
+
+          def checkpoint(args: argparse.Namespace) -> int:
+              if not re.fullmatch(r"[a-z0-9_-]+", args.stage):
+                  raise SystemExit("invalid checkpoint stage")
+              repo = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+              evidence = pathlib.Path(os.environ["AIES_EVIDENCE_DIR"]).resolve()
+              package_dir = evidence / "package-resolution"
+              package_dir.mkdir(parents=True, exist_ok=True)
+              package_relative = os.environ["AIES_PACKAGE_RESOLVED"]
+              package_path = repo / package_relative
+              data = package_path.read_bytes()
+              stat = package_path.stat()
+              status = git(
+                  repo, "status", "--porcelain=v2", "--untracked-files=all", "--",
+                  package_relative)
+              full_status = git(repo, "status", "--porcelain=v2", "--untracked-files=all")
+              diff = git(
+                  repo, "diff", "--no-ext-diff", "--no-color", "--binary", "HEAD", "--",
+                  package_relative)
+              command_manifest = None
+              if args.command_manifest:
+                  command_path = pathlib.Path(args.command_manifest)
+                  command_bytes = command_path.read_bytes()
+                  command_manifest = {
+                      "path": str(command_path),
+                      "sha256": sha256_bytes(command_bytes),
+                      "content": command_bytes.decode("utf-8", errors="replace"),
+                  }
+              record = {
+                  "stage": args.stage,
+                  "invocation": args.invocation,
+                  "timestampUTC": utc_now(),
+                  "head": git(repo, "rev-parse", "HEAD").strip(),
+                  "committedBlob": git(repo, "rev-parse", f"HEAD:{package_relative}").strip(),
+                  "authoritativeBlob": git(
+                      repo, "rev-parse", f"{os.environ['AIES_AUTH_RC1']}:{package_relative}").strip(),
+                  "workspaceGitBlob": git(repo, "hash-object", package_relative).strip(),
+                  "workspaceSHA256": sha256_bytes(data),
+                  "bytes": len(data),
+                  "mtimeNanoseconds": stat.st_mtime_ns,
+                  "ctimeNanoseconds": stat.st_ctime_ns,
+                  "inode": stat.st_ino,
+                  "mtimeUTC": dt.datetime.fromtimestamp(
+                      stat.st_mtime, dt.timezone.utc).isoformat(),
+                  "statusPorcelainV2": status,
+                  "diffExists": bool(diff),
+                  "diffSHA256": sha256_bytes(diff.encode()),
+                  "globalStatusPorcelainV2": full_status,
+                  "repositoryLocalIOSResolvedFiles": root_lock_inventory(repo),
+                  "commandManifest": command_manifest,
+              }
+              ledger = package_dir / "checkpoint-ledger.jsonl"
+              index = 1
+              if ledger.exists():
+                  index += sum(1 for line in ledger.read_text().splitlines() if line.strip())
+              record["index"] = index
+              checkpoint_name = f"{index:03d}-{args.stage}-{args.invocation}"
+              write_json(package_dir / "checkpoints" / f"{checkpoint_name}.json", record)
+              (package_dir / "checkpoints" / f"{checkpoint_name}.status-v2.txt").write_text(status)
+              (package_dir / "checkpoints" / f"{checkpoint_name}.global-status-v2.txt").write_text(
+                  full_status)
+              (package_dir / "checkpoints" / f"{checkpoint_name}.diff").write_text(diff)
+              with ledger.open("a") as handle:
+                  handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+              baseline_path = package_dir / "checkpoint-baseline.json"
+              previous_path = package_dir / "last-checkpoint.json"
+              baseline = json.loads(baseline_path.read_text()) if baseline_path.exists() else None
+              previous = json.loads(previous_path.read_text()) if previous_path.exists() else None
+              write_json(previous_path, record)
+              expected_blob = os.environ["AIES_PACKAGE_BLOB"]
+              expected_sha = os.environ["AIES_PACKAGE_SHA256"]
+              expected_bytes = int(os.environ["AIES_PACKAGE_BYTES"])
+              package_reasons = []
+              source_reasons = []
+              if baseline is None:
+                  if args.stage != "checkout_preflight" or args.invocation != 0:
+                      source_reasons.append("first checkpoint was not checkout_preflight invocation zero")
+                  for key in ("committedBlob", "authoritativeBlob", "workspaceGitBlob"):
+                      if record[key] != expected_blob:
+                          package_reasons.append(f"{key} differs from accepted blob")
+                  if record["workspaceSHA256"] != expected_sha:
+                      package_reasons.append("workspace SHA-256 differs from accepted hash")
+                  if record["bytes"] != expected_bytes:
+                      package_reasons.append("workspace byte count differs from accepted count")
+                  if status or diff:
+                      package_reasons.append("tracked Package.resolved is dirty at baseline")
+                  if record["repositoryLocalIOSResolvedFiles"]:
+                      package_reasons.append("repository-local iOS Package.resolved exists at baseline")
+                  if full_status:
+                      source_reasons.append("checkout is dirty at baseline")
+                  write_json(baseline_path, record)
+                  baseline = record
+              else:
+                  stable_fields = (
+                      "committedBlob", "authoritativeBlob", "workspaceGitBlob", "workspaceSHA256",
+                      "bytes", "mtimeNanoseconds", "ctimeNanoseconds", "inode")
+                  for key in stable_fields:
+                      if record[key] != baseline[key]:
+                          package_reasons.append(f"{key} changed after checkout baseline")
+                  if status or diff:
+                      package_reasons.append("tracked Package.resolved has status or diff")
+                  if record["repositoryLocalIOSResolvedFiles"]:
+                      package_reasons.append(
+                          "Xcode materialized a repository-local iOS Package.resolved")
+                  if full_status:
+                      package_status_lines = [
+                          line for line in full_status.splitlines()
+                          if package_relative in line
+                      ]
+                      if package_status_lines:
+                          package_reasons.append("global status reports Package.resolved")
+                      else:
+                          source_reasons.append("another repository path became dirty")
+
+              if package_reasons:
+                  mutation_dir = package_dir / "first-mutation-files"
+                  mutation_dir.mkdir(parents=True, exist_ok=True)
+                  (mutation_dir / "Package.resolved.diff").write_text(diff)
+                  (mutation_dir / "global-status-v2.txt").write_text(full_status)
+                  for lock in record["repositoryLocalIOSResolvedFiles"]:
+                      source = repo / lock["path"]
+                      destination = mutation_dir / "repository-local-locks" / lock["path"]
+                      destination.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(source, destination)
+                  marker = {
+                      "classification": "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER",
+                      "firstMutationStage": args.stage,
+                      "firstMutationInvocation": args.invocation,
+                      "reasons": package_reasons,
+                      "previous": previous,
+                      "current": record,
+                      "fullDiffPath": str(mutation_dir / "Package.resolved.diff"),
+                      "fullDiffSHA256": sha256_bytes(diff.encode()),
+                  }
+                  create_once(package_dir / "first-mutation.json", marker)
+                  print(json.dumps(marker, indent=2, sort_keys=True))
+                  print("===== FIRST PACKAGE.RESOLVED MUTATION DIFF =====")
+                  print(diff if diff else "<tracked diff empty; metadata/root-lock mutation>")
+                  return EXIT_PACKAGE_MUTATION
+
+              if source_reasons:
+                  marker = {
+                      "classification": "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE",
+                      "firstDirtyStage": args.stage,
+                      "firstDirtyInvocation": args.invocation,
+                      "reasons": source_reasons,
+                      "previous": previous,
+                      "current": record,
+                  }
+                  create_once(package_dir / "first-other-source-dirty.json", marker)
+                  print(json.dumps(marker, indent=2, sort_keys=True))
+                  return EXIT_OTHER_SOURCE_DIRTY
+
+              print(json.dumps(record, indent=2, sort_keys=True))
+              return 0
+
+          def main() -> int:
+              parser = argparse.ArgumentParser()
+              subparsers = parser.add_subparsers(dest="command", required=True)
+              checkpoint_parser = subparsers.add_parser("checkpoint")
+              checkpoint_parser.add_argument("--stage", required=True)
+              checkpoint_parser.add_argument("--invocation", type=int, default=0)
+              checkpoint_parser.add_argument("--command-manifest")
+              checkpoint_parser.set_defaults(handler=checkpoint)
+              args = parser.parse_args()
+              return args.handler(args)
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          '''.lstrip())
+          PY
+          chmod 0700 "${guard}"
+          python3 -m py_compile "${guard}"
+          cp "${guard}" "${AIES_EVIDENCE_DIR}/runtime-tools/package_guard.retained.py"
+          echo "AIES_PACKAGE_GUARD=${guard}" >> "${GITHUB_ENV}"
+          python3 "${guard}" checkpoint \
+            --stage checkout_preflight \
+            --invocation 0
+
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: "26.2"
+
+      - name: Capture toolchain identity and prove strict resolved-package flags
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE_DIR}/environment"
+          {
+            echo "runner_name=${RUNNER_NAME}"
+            echo "runner_os=${RUNNER_OS}"
+            echo "runner_arch=${RUNNER_ARCH}"
+            echo "image_os=${ImageOS:-unknown}"
+            echo "image_version=${ImageVersion:-unknown}"
+            echo "uname=$(uname -a)"
+            sw_vers
+            xcodebuild -version
+            swift --version
+            echo "simulator_sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          } | tee "${AIES_EVIDENCE_DIR}/environment/toolchain.txt"
+
+          help_log="${AIES_EVIDENCE_DIR}/environment/xcodebuild-help.txt"
+          set +e
+          xcodebuild -help > "${help_log}" 2>&1
+          help_status=$?
+          set -e
+          printf '%s\n' "${help_status}" > "${AIES_EVIDENCE_DIR}/environment/xcodebuild-help.exit-status"
+          [[ "${help_status}" -eq 0 ]]
+          shasum -a 256 "${help_log}" | tee "${AIES_EVIDENCE_DIR}/environment/xcodebuild-help.sha256"
+          flags=(
+            -disableAutomaticPackageResolution
+            -onlyUsePackageVersionsFromResolvedFile
+            -skipPackageUpdates
+            -disablePackageRepositoryCache
+            -clonedSourcePackagesDirPath
+            -packageCachePath
+          )
+          : > "${AIES_EVIDENCE_DIR}/environment/strict-package-help-evidence.txt"
+          for flag in "${flags[@]}"; do
+            if ! grep -F -- "${flag}" "${help_log}" \
+              >> "${AIES_EVIDENCE_DIR}/environment/strict-package-help-evidence.txt"; then
+              echo "Selected Xcode does not advertise required strict flag: ${flag}" >&2
+              exit 1
+            fi
+          done
+          cat "${AIES_EVIDENCE_DIR}/environment/strict-package-help-evidence.txt"
+
+          conventions="${AIES_EVIDENCE_DIR}/environment/repository-package-conventions.txt"
+          git grep -n -E \
+            'disableAutomaticPackageResolution|onlyUsePackageVersionsFromResolvedFile|skipPackageUpdates|clonedSourcePackagesDirPath|packageCachePath|resolvePackageDependencies' \
+            "${AIES_DIAGNOSTIC_BASE}" -- .github apps/ios > "${conventions}" || true
+          cat "${conventions}"
+
+          strict_args="${AIES_EVIDENCE_DIR}/environment/strict-package-args.txt"
+          printf '%s\n' \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -skipPackageUpdates \
+            -disablePackageRepositoryCache \
+            -clonedSourcePackagesDirPath \
+            "${AIES_CLONED_SOURCE_PACKAGES}" \
+            -packageCachePath \
+            "${AIES_PACKAGE_CACHE}" \
+            > "${strict_args}"
+          python3 - "${strict_args}" \
+            "${AIES_EVIDENCE_DIR}/environment/strict-package-args.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          source, output = map(pathlib.Path, sys.argv[1:])
+          arguments = source.read_text().splitlines()
+          output.write_text(json.dumps({
+              "arguments": arguments,
+              "automaticUpdatesPermitted": False,
+              "packageUpdateCommandInvoked": False,
+              "separateDependencyPreparationInvoked": False,
+              "firstProjectAwareXcodeOperation": "build-for-testing",
+              "helpEvidence": "xcodebuild-help.txt",
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          echo "AIES_STRICT_PACKAGE_ARGS_FILE=${strict_args}" >> "${GITHUB_ENV}"
+
+      - name: Setup pinned XcodeGen
+        uses: ./.github/actions/setup-xcodegen
+
+      - name: Generate deterministically and prove checkout cleanliness
+        id: xcodegen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE_DIR}/generation"
+          exec > >(tee "${AIES_EVIDENCE_DIR}/generation/xcodegen.log") 2>&1
+          xcodegen --version
+          cd apps/ios
+          first_diff="${AIES_EVIDENCE_DIR}/generation/xcodegen-first.diff"
+          second_diff="${AIES_EVIDENCE_DIR}/generation/xcodegen-second.diff"
+          first_command="${AIES_EVIDENCE_DIR}/generation/xcodegen-first.command.txt"
+          second_command="${AIES_EVIDENCE_DIR}/generation/xcodegen-second.command.txt"
+          printf '%s\n' 'xcodegen generate' > "${first_command}"
+          xcodegen generate
+          git -C ../.. diff --binary HEAD -- > "${first_diff}"
+          first_untracked="$(git -C ../.. ls-files --others --exclude-standard)"
+          python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+            --stage xcodegen_1 \
+            --invocation 1 \
+            --command-manifest "${first_command}"
+          if [[ -s "${first_diff}" || -n "${first_untracked}" ]]; then
+            echo "First XcodeGen pass changed tracked or nonignored source state." >&2
+            cat "${first_diff}" >&2
+            printf '%s\n' "${first_untracked}" >&2
+            exit 1
+          fi
+
+          printf '%s\n' 'xcodegen generate' > "${second_command}"
+          xcodegen generate
+          git -C ../.. diff --binary HEAD -- > "${second_diff}"
+          second_untracked="$(git -C ../.. ls-files --others --exclude-standard)"
+          python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+            --stage xcodegen_2 \
+            --invocation 2 \
+            --command-manifest "${second_command}"
+          if ! cmp -s "${first_diff}" "${second_diff}" || \
+            [[ "${first_untracked}" != "${second_untracked}" ]]; then
+            echo "Repeated XcodeGen 2.46.0 generation was nondeterministic." >&2
+            diff -u "${first_diff}" "${second_diff}" || true
+            exit 1
+          fi
+          if [[ -s "${second_diff}" || -n "${second_untracked}" ]]; then
+            echo "Second XcodeGen pass changed tracked or nonignored source state." >&2
+            cat "${second_diff}" >&2
+            printf '%s\n' "${second_untracked}" >&2
+            exit 1
+          fi
+          git -C ../.. diff --exit-code
+          echo "Both XcodeGen passes were deterministic, tracked-diff empty, and package-guard clean."
+
+      - name: Select and boot one simulator destination
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          devices_json="${AIES_EVIDENCE_DIR}/environment/simctl-devices.json"
+          xcrun simctl list devices available --json > "${devices_json}"
+          simulator_udid="$(python3 - "${devices_json}" \
+            "${AIES_EVIDENCE_DIR}/environment/simulator.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          source, output = map(pathlib.Path, sys.argv[1:])
+          payload = json.loads(source.read_text())
+          candidates = []
+          for runtime, entries in payload.get("devices", {}).items():
+              if ".iOS-" not in runtime:
+                  continue
+              for entry in entries:
+                  if (entry.get("isAvailable") and entry.get("udid") and
+                          str(entry.get("name", "")).startswith("iPhone")):
+                      candidates.append({"runtime": runtime, **entry})
+          if not candidates:
+              raise SystemExit("No available iOS simulator")
+          selected = candidates[0]
+          output.write_text(json.dumps(selected, indent=2, sort_keys=True) + "\n")
+          print(selected["udid"])
+          PY
+          )"
+          destination="platform=iOS Simulator,id=${simulator_udid},arch=arm64"
+          {
+            echo "AIES_SIMULATOR_UDID=${simulator_udid}"
+            echo "AIES_DESTINATION=${destination}"
+          } >> "${GITHUB_ENV}"
+          xcrun simctl boot "${simulator_udid}" 2>/dev/null || true
+          xcrun simctl bootstatus "${simulator_udid}" -b
+          cat "${AIES_EVIDENCE_DIR}/environment/simulator.json"
+          printf '%s\n' \
+            "Project-aware -showdestinations intentionally omitted; simulator selected with simctl." \
+            > "${AIES_EVIDENCE_DIR}/environment/xcode-destinations-policy.txt"
+
+      - name: Materialize credential-free trace parser
+        id: parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE_DIR}/runtime-tools" "${AIES_EVIDENCE_DIR}/aggregate"
+          parser="${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py"
+          touch "${parser}"
+          chmod 0600 "${parser}"
+          python3 - "${parser}" <<'PY'
+          import pathlib
+          import sys
+
+          output = pathlib.Path(sys.argv[1])
+          output.write_text(r'''#!/usr/bin/env python3
+          from __future__ import annotations
+
+          import argparse
+          from collections import Counter
+          import csv
+          import hashlib
+          import json
+          import math
+          import os
+          import pathlib
+          import re
+          import shutil
+          import statistics
+          import sys
+          from typing import Any
+
+          MARKER = "AIES_TALK_LIVENESS_TRACE "
+          TARGET_NAME = "backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission"
+          TIMEOUT_TEXT = "Timed out: continuous admission waits before background"
+          DIAGNOSTIC_DEADLINE_NANOSECONDS = 3_000_000_000
+          TRACE_KEYS = {
+              "schemaVersion",
+              "sequence",
+              "event",
+              "monotonicNanoseconds",
+              "deltaFromTalkStartRequestNanoseconds",
+              "matrix",
+              "processIteration",
+              "processID",
+              "isMainThread",
+              "isCancelled",
+              "readiness",
+          }
+          ALIASES = {
+              "model_initialization_started": "helper_model_initialization_started",
+              "model_initialization_completed": "helper_model_initialization_completed",
+              "control_mainactor_canary_enqueued": "mainactor_canary_enqueued",
+              "control_mainactor_canary_entered": "mainactor_canary_entered",
+              "control_mainactor_canary_cancelled_before_entry": "mainactor_canary_cancelled_before_entry",
+              "talk_start_existing_log_entry_boundary": "boundary_before_talk_start_call",
+              "diagnostic_cleanup_completed": "cleanup_completed",
+              "diagnostic_trace_sealed": "trace_sealed",
+              "diagnostic_trace_flush_completed": "trace_flush_completed",
+              "diagnostic_trace_flush_failed": "trace_flush_failed",
+              "test_timeout": "timeout",
+          }
+          ALLOWED_EVENTS = {
+              "test_started",
+              "model_initialization_started",
+              "model_initialization_completed",
+              "production_readiness_state_observed",
+              "talk_start_requested_by_test",
+              "control_mainactor_canary_enqueued",
+              "control_mainactor_canary_entered",
+              "control_mainactor_canary_cancelled_before_entry",
+              "talk_start_task_created",
+              "talk_start_existing_log_entry_boundary",
+              "admission_gate_waiter_registered",
+              "background_transition_requested",
+              "background_transition_observed",
+              "admission_gate_opened",
+              "admission_resolved",
+              "talk_start_function_returned",
+              "test_timeout",
+              "diagnostic_cleanup_completed",
+              "diagnostic_trace_sealed",
+              "diagnostic_trace_flush_completed",
+              "diagnostic_trace_flush_failed",
+              "test_assertions_completed",
+          }
+          ALLOWED_READINESS = {
+              "backgrounded",
+              "background_opt_in_eligible",
+              "config_loaded",
+              "gateway_connected",
+              "listening",
+              "flush_result",
+              "mainactor_canary_signaled",
+              "permission_state",
+              "push_to_talk_active",
+              "talk_enabled",
+          }
+
+          def write_json(path: pathlib.Path, payload: Any) -> None:
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+          def extract_events(log_path: pathlib.Path) -> list[dict[str, Any]]:
+              decoder = json.JSONDecoder()
+              events: list[dict[str, Any]] = []
+              for line in log_path.read_text(errors="replace").splitlines():
+                  if MARKER not in line:
+                      continue
+                  fragment = line.split(MARKER, 1)[1].strip()
+                  event, _ = decoder.raw_decode(fragment)
+                  events.append(event)
+              return events
+
+          def canonicalize(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+              canonical = []
+              for event in events:
+                  item = dict(event)
+                  raw = str(event.get("event", ""))
+                  item["rawEvent"] = raw
+                  item["canonicalEvent"] = ALIASES.get(raw, raw)
+                  canonical.append(item)
+              return canonical
+
+          def first(events: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+              return next((event for event in events if event.get("canonicalEvent") == name), None)
+
+          def before_terminal(
+              events: list[dict[str, Any]], terminal: dict[str, Any]
+          ) -> list[dict[str, Any]]:
+              sequence = int(terminal["sequence"])
+              return [event for event in events if int(event["sequence"]) <= sequence]
+
+          def delta(event: dict[str, Any] | None) -> int | None:
+              if event is None:
+                  return None
+              value = event.get("deltaFromTalkStartRequestNanoseconds")
+              return int(value) if value is not None else None
+
+          def metric(
+              name: str,
+              start: dict[str, Any] | None,
+              end: dict[str, Any] | None,
+              terminal: dict[str, Any],
+          ) -> dict[str, Any]:
+              start_delta = delta(start)
+              end_delta = delta(end)
+              terminal_delta = delta(terminal)
+              if start_delta is not None and end_delta is not None:
+                  return {
+                      "metric": name,
+                      "status": "observed",
+                      "valueNanoseconds": end_delta - start_delta,
+                      "lowerBoundNanoseconds": None,
+                      "endpointDeltaFromRequestNanoseconds": end_delta,
+                      "endpointMissedDiagnosticDeadline": (
+                          end_delta > DIAGNOSTIC_DEADLINE_NANOSECONDS),
+                  }
+              if start_delta is not None and terminal_delta is not None:
+                  return {
+                      "metric": name,
+                      "status": "right_censored",
+                      "valueNanoseconds": None,
+                      "lowerBoundNanoseconds": terminal_delta - start_delta,
+                      "endpointDeltaFromRequestNanoseconds": None,
+                      "endpointMissedDiagnosticDeadline": None,
+                  }
+              return {
+                  "metric": name,
+                  "status": "missing",
+                  "valueNanoseconds": None,
+                  "lowerBoundNanoseconds": None,
+                  "endpointDeltaFromRequestNanoseconds": None,
+                  "endpointMissedDiagnosticDeadline": None,
+              }
+
+          def classify_timeout(events: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:
+              timeout = first(events, "timeout")
+              if timeout is None:
+                  return "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE", {"reason": "missing timeout"}
+              pre_cleanup = before_terminal(events, timeout)
+              canary = first(pre_cleanup, "mainactor_canary_entered")
+              boundary = first(pre_cleanup, "boundary_before_talk_start_call")
+              gate = first(pre_cleanup, "admission_gate_waiter_registered")
+              timeout_ns = delta(timeout)
+              canary_ns = delta(canary)
+              boundary_ns = delta(boundary)
+              gate_ns = delta(gate)
+              decision = {
+                  "diagnosticDeadlineNanoseconds": DIAGNOSTIC_DEADLINE_NANOSECONDS,
+                  "timeoutNanoseconds": timeout_ns,
+                  "canaryEntryDeltaNanoseconds": canary_ns,
+                  "talkBoundaryDeltaNanoseconds": boundary_ns,
+                  "gateRegistrationDeltaNanoseconds": gate_ns,
+                  "method": (
+                      "fixed request+3s deadline plus sequence partition at test_timeout; "
+                      "events before timeout but after 3s are late organic progress, while "
+                      "events after timeout are cleanup-only"),
+              }
+              if timeout_ns is None or timeout_ns < DIAGNOSTIC_DEADLINE_NANOSECONDS:
+                  decision["reason"] = "timeout event occurred before the fixed diagnostic deadline"
+                  return "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE", decision
+              if gate_ns is not None and gate_ns <= DIAGNOSTIC_DEADLINE_NANOSECONDS:
+                  decision["reason"] = (
+                      "admission gate registered within the fixed deadline despite timeout observation")
+                  return "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE", decision
+
+              comparative_cutoff = DIAGNOSTIC_DEADLINE_NANOSECONDS // 10
+              decision["comparativePromptRatio"] = "endpoint <= 10% of the other boundary/lower bound"
+              decision["comparativePromptCutoffNanoseconds"] = comparative_cutoff
+              if (
+                  canary_ns is not None
+                  and canary_ns <= comparative_cutoff
+                  and (boundary_ns is None or boundary_ns > DIAGNOSTIC_DEADLINE_NANOSECONDS)
+              ):
+                  decision["reason"] = (
+                      "canary entered within one tenth of the fixed bound while Talk boundary "
+                      "missed the fixed bound")
+                  return "CALLER_SCHEDULING_DELAY", decision
+              if (
+                  canary_ns is not None
+                  and boundary_ns is not None
+                  and canary_ns > DIAGNOSTIC_DEADLINE_NANOSECONDS
+                  and boundary_ns > DIAGNOSTIC_DEADLINE_NANOSECONDS
+              ):
+                  difference = abs(boundary_ns - canary_ns)
+                  comparable_limit = max(canary_ns, boundary_ns) // 4
+                  decision["canaryTalkDifferenceNanoseconds"] = difference
+                  decision["comparableLimitNanoseconds"] = comparable_limit
+                  if difference <= comparable_limit:
+                      decision["reason"] = (
+                          "canary and Talk boundary both missed the fixed deadline and entered "
+                          "within 25% of the slower observed latency")
+                      return "GLOBAL_MAINACTOR_OR_SIMULATOR_STARVATION", decision
+              if (
+                  canary_ns is not None
+                  and boundary_ns is not None
+                  and canary_ns <= comparative_cutoff
+                  and boundary_ns <= comparative_cutoff
+                  and (gate_ns is None or gate_ns > DIAGNOSTIC_DEADLINE_NANOSECONDS)
+              ):
+                  decision["reason"] = (
+                      "canary and Talk boundary entered within one tenth of the fixed bound, "
+                      "while admission missed the fixed bound")
+                  return "INTERNAL_TALK_START_DELAY", decision
+              if (
+                  canary_ns is not None
+                  and boundary_ns is not None
+                  and canary_ns <= comparative_cutoff
+                  and boundary_ns <= DIAGNOSTIC_DEADLINE_NANOSECONDS
+                  and (gate_ns is None or gate_ns > DIAGNOSTIC_DEADLINE_NANOSECONDS)
+              ):
+                  decision["reason"] = (
+                      "production-eligible request reached MainActor and Talk before the bound, "
+                      "admission missed it, and global executor delay is not sufficient")
+                  return "PRODUCT_LIVENESS_DEFECT_POSSIBLE", decision
+              decision["reason"] = (
+                  "observed/censored boundaries do not unambiguously separate global, caller, "
+                  "and internal contributions")
+              return "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE", decision
+
+          def validate(args: argparse.Namespace) -> int:
+              log_path = pathlib.Path(args.log)
+              output = pathlib.Path(args.output)
+              output.mkdir(parents=True, exist_ok=True)
+              errors: list[str] = []
+              try:
+                  raw_events = extract_events(log_path)
+              except Exception as exc:
+                  raw_events = []
+                  errors.append(f"trace extraction failed: {exc}")
+              canonical = canonicalize(raw_events)
+              with (output / "trace.raw.jsonl").open("w") as handle:
+                  for event in raw_events:
+                      handle.write(json.dumps(event, sort_keys=True) + "\n")
+              with (output / "trace.canonical.jsonl").open("w") as handle:
+                  for event in canonical:
+                      handle.write(json.dumps(event, sort_keys=True) + "\n")
+
+              if not raw_events:
+                  errors.append("no AIES trace events found")
+              for event in raw_events:
+                  event_keys = set(event)
+                  if not (
+                      event_keys == TRACE_KEYS
+                      or event_keys == TRACE_KEYS - {"deltaFromTalkStartRequestNanoseconds"}
+                  ):
+                      errors.append("trace event keys do not match the allowlisted schema")
+                      break
+              sequences = [event.get("sequence") for event in raw_events]
+              if sequences != list(range(1, len(raw_events) + 1)):
+                  errors.append("trace sequence is not contiguous from one")
+              timestamps = [event.get("monotonicNanoseconds") for event in raw_events]
+              if any(not isinstance(value, int) for value in timestamps):
+                  errors.append("invalid monotonic timestamp")
+              elif timestamps != sorted(timestamps):
+                  errors.append("monotonic timestamps decreased")
+              if any(event.get("schemaVersion") != 1 for event in raw_events):
+                  errors.append("unexpected trace schema")
+              if any(event.get("event") not in ALLOWED_EVENTS for event in raw_events):
+                  errors.append("unknown trace event")
+              event_counts = Counter(str(event.get("event")) for event in raw_events)
+              if any(count != 1 for count in event_counts.values()):
+                  errors.append("trace lifecycle event was emitted more than once")
+              for event in raw_events:
+                  readiness = event.get("readiness", {})
+                  if not isinstance(readiness, dict) or not set(readiness).issubset(ALLOWED_READINESS):
+                      errors.append("unexpected readiness payload")
+                      break
+                  if any(
+                      not isinstance(value, str) or len(value) > 64 or "\n" in value
+                      for value in readiness.values()
+                  ):
+                      errors.append("readiness value is not a bounded state string")
+                      break
+              matrices = {event.get("matrix") for event in raw_events}
+              iterations = {str(event.get("processIteration")) for event in raw_events}
+              process_ids = {event.get("processID") for event in raw_events}
+              if matrices != {args.matrix}:
+                  errors.append(f"unexpected matrix labels: {sorted(str(value) for value in matrices)}")
+              if iterations != {str(args.iteration)}:
+                  errors.append(f"unexpected iteration labels: {sorted(iterations)}")
+              if len(process_ids) != 1 or None in process_ids:
+                  errors.append("trace does not identify exactly one test process")
+              request = first(canonical, "talk_start_requested_by_test")
+              if request is None or delta(request) != 0:
+                  errors.append("Talk request event is missing or not the zero point")
+              if request is not None:
+                  request_timestamp = int(request["monotonicNanoseconds"])
+                  request_sequence = int(request["sequence"])
+                  for event in canonical:
+                      event_delta = event.get("deltaFromTalkStartRequestNanoseconds")
+                      if int(event["sequence"]) < request_sequence:
+                          if event_delta is not None:
+                              errors.append("pre-request event has a request-relative delta")
+                              break
+                      else:
+                          expected_delta = int(event["monotonicNanoseconds"]) - request_timestamp
+                          if event_delta is None or abs(int(event_delta) - expected_delta) > 1:
+                              errors.append("request-relative delta does not match monotonic timestamps")
+                              break
+              if len([event for event in canonical if event.get("canonicalEvent") == "test_started"]) != 1:
+                  errors.append("expected exactly one target-test trace")
+              log_text = log_path.read_text(errors="replace")
+              existing_start_log = "talk.timeline manager start enter" in log_text
+              readiness_event = first(canonical, "production_readiness_state_observed")
+              expected_readiness = {
+                  "talk_enabled": "true",
+                  "gateway_connected": "true",
+                  "config_loaded": "true",
+                  "backgrounded": "false",
+              }
+              observed_readiness = readiness_event.get("readiness", {}) if readiness_event else {}
+              if any(observed_readiness.get(key) != value for key, value in expected_readiness.items()):
+                  errors.append("production-eligible readiness precondition was not observed")
+              xcresult_tests = pathlib.Path(args.xcresult_tests)
+              xcresult_tests_text = (
+                  xcresult_tests.read_text(errors="replace") if xcresult_tests.is_file() else "")
+              if TARGET_NAME not in xcresult_tests_text:
+                  errors.append("XCResult does not prove the selected target test executed")
+              try:
+                  xcresult_tests_payload = json.loads(xcresult_tests_text)
+              except Exception as exc:
+                  xcresult_tests_payload = {}
+                  errors.append(f"XCResult tests payload is invalid: {exc}")
+              try:
+                  enumeration_summary = json.loads(pathlib.Path(args.enumeration_summary).read_text())
+              except Exception as exc:
+                  enumeration_summary = {}
+                  errors.append(f"test enumeration summary is invalid: {exc}")
+
+              def collect_strings(value: Any, output: set[str]) -> None:
+                  if isinstance(value, dict):
+                      for child in value.values():
+                          collect_strings(child, output)
+                  elif isinstance(value, list):
+                      for child in value:
+                          collect_strings(child, output)
+                  elif isinstance(value, str):
+                      output.add(value.replace("()", ""))
+
+              xcresult_strings: set[str] = set()
+              collect_strings(xcresult_tests_payload, xcresult_strings)
+              expected_suite_identifiers = {
+                  str(value).replace("()", "")
+                  for value in enumeration_summary.get("testIdentifiers", [])
+              }
+              expected_suite_names = {
+                  value.rsplit("/", 1)[-1] for value in expected_suite_identifiers
+              }
+              observed_suite_names = {
+                  name for name in expected_suite_names
+                  if any(value == name or value.endswith("/" + name) for value in xcresult_strings)
+              }
+              if args.phase == "talk-suite" and observed_suite_names != expected_suite_names:
+                  errors.append("XCResult Talk-suite test names differ from the saved enumeration")
+              xcresult_summary = pathlib.Path(args.xcresult_summary)
+              summary: dict[str, Any] = {}
+              try:
+                  summary = json.loads(xcresult_summary.read_text())
+              except Exception as exc:
+                  errors.append(f"XCResult summary is missing or invalid: {exc}")
+
+              def summary_integer(key: str) -> int | None:
+                  value = summary.get(key)
+                  return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+              summary_total = summary_integer("totalTestCount")
+              summary_passed = summary_integer("passedTests")
+              summary_failed = summary_integer("failedTests")
+              summary_skipped = summary_integer("skippedTests")
+              summary_result = str(summary.get("result", "")).lower()
+
+              required_base = {
+                  "test_started",
+                  "helper_model_initialization_started",
+                  "helper_model_initialization_completed",
+                  "production_readiness_state_observed",
+                  "talk_start_requested_by_test",
+                  "mainactor_canary_enqueued",
+                  "talk_start_task_created",
+              }
+              present = {event.get("canonicalEvent") for event in canonical}
+              errors.extend(
+                  f"missing required event: {name}" for name in sorted(required_base - present))
+              terminal = "invalid"
+              timeout = first(canonical, "timeout")
+              assertions_completed = first(canonical, "test_assertions_completed")
+              cleanup = first(canonical, "cleanup_completed")
+              sealed = first(canonical, "trace_sealed")
+              flushed = first(canonical, "trace_flush_completed")
+              flush_failed = first(canonical, "trace_flush_failed")
+              if flush_failed is not None:
+                  errors.append("trace output flush failed")
+              if canonical and canonical[-1].get("canonicalEvent") != "trace_flush_completed":
+                  errors.append("trace_flush_completed is not the unique final trace event")
+              if args.xcode_status == 0 and assertions_completed is not None and timeout is None:
+                  terminal = "pass"
+                  required_pass = {
+                      "mainactor_canary_entered",
+                      "boundary_before_talk_start_call",
+                      "admission_gate_waiter_registered",
+                      "background_transition_requested",
+                      "background_transition_observed",
+                      "admission_gate_opened",
+                      "admission_resolved",
+                      "talk_start_function_returned",
+                      "test_assertions_completed",
+                      "cleanup_completed",
+                      "trace_sealed",
+                      "trace_flush_completed",
+                  }
+                  errors.extend(
+                      f"missing passing event: {name}" for name in sorted(required_pass - present))
+                  if "mainactor_canary_cancelled_before_entry" in present:
+                      errors.append("passing trace unexpectedly cancelled the MainActor canary")
+                  if not existing_start_log:
+                      errors.append("existing TalkModeManager.start entry log is absent")
+                  if not (
+                      summary_total == args.expected_test_count
+                      and summary_passed == args.expected_test_count
+                      and summary_failed == 0
+                      and summary_skipped == 0
+                      and summary_result == "passed"
+                  ):
+                      errors.append("XCResult does not prove the exact expected passing test count")
+              elif (
+                  args.xcode_status != 0
+                  and timeout is not None
+                  and TIMEOUT_TEXT in log_text
+                  and cleanup is not None
+              ):
+                  terminal = "valid_timeout"
+                  if first(canonical, "boundary_before_talk_start_call") is not None and not existing_start_log:
+                      errors.append("Talk boundary exists but product start-entry log is absent")
+                  required_timeout = {
+                      "boundary_before_talk_start_call",
+                      "admission_gate_opened",
+                      "talk_start_function_returned",
+                      "cleanup_completed",
+                      "trace_sealed",
+                      "trace_flush_completed",
+                  }
+                  errors.extend(
+                      f"missing timeout lifecycle event: {name}"
+                      for name in sorted(required_timeout - present))
+                  canary_terminals = int("mainactor_canary_entered" in present) + int(
+                      "mainactor_canary_cancelled_before_entry" in present)
+                  if canary_terminals != 1:
+                      errors.append("timeout trace needs exactly one canary entry/cancellation terminal")
+                  if not (
+                      summary_total == args.expected_test_count
+                      and summary_passed == args.expected_test_count - 1
+                      and summary_failed == 1
+                      and summary_skipped == 0
+                      and summary_result == "failed"
+                  ):
+                      errors.append("XCResult does not prove exactly one expected timeout failure")
+              else:
+                  errors.append(
+                      "xcodebuild outcome is neither a structurally valid pass nor the expected timeout")
+
+              positions = {
+                  str(event.get("canonicalEvent")): int(event["sequence"])
+                  for event in canonical
+              }
+              required_order = [
+                  ("test_started", "helper_model_initialization_started"),
+                  ("helper_model_initialization_started", "helper_model_initialization_completed"),
+                  ("helper_model_initialization_completed", "production_readiness_state_observed"),
+                  ("production_readiness_state_observed", "talk_start_requested_by_test"),
+                  ("talk_start_requested_by_test", "mainactor_canary_enqueued"),
+                  ("talk_start_requested_by_test", "talk_start_task_created"),
+                  ("talk_start_task_created", "boundary_before_talk_start_call"),
+                  ("boundary_before_talk_start_call", "admission_gate_waiter_registered"),
+                  ("background_transition_requested", "background_transition_observed"),
+                  ("admission_gate_opened", "admission_resolved"),
+                  ("boundary_before_talk_start_call", "talk_start_function_returned"),
+                  ("cleanup_completed", "trace_sealed"),
+                  ("trace_sealed", "trace_flush_completed"),
+              ]
+              for left, right in required_order:
+                  if left in positions and right in positions and positions[left] >= positions[right]:
+                      errors.append(f"invalid event order: {left} must precede {right}")
+              for canary_terminal in (
+                  "mainactor_canary_entered", "mainactor_canary_cancelled_before_entry"):
+                  if canary_terminal in positions and "mainactor_canary_enqueued" in positions:
+                      if positions["mainactor_canary_enqueued"] >= positions[canary_terminal]:
+                          errors.append("canary terminal preceded canary enqueue")
+              if terminal == "pass":
+                  passing_order = [
+                      ("admission_gate_waiter_registered", "background_transition_requested"),
+                      ("background_transition_observed", "admission_gate_opened"),
+                      ("talk_start_function_returned", "test_assertions_completed"),
+                      ("test_assertions_completed", "cleanup_completed"),
+                  ]
+                  for left, right in passing_order:
+                      if left in positions and right in positions and positions[left] >= positions[right]:
+                          errors.append(f"invalid passing event order: {left} must precede {right}")
+              if terminal == "valid_timeout":
+                  for name in (
+                      "admission_gate_opened", "cleanup_completed", "trace_sealed",
+                      "trace_flush_completed"):
+                      if "timeout" in positions and name in positions and positions["timeout"] >= positions[name]:
+                          errors.append(f"timeout cleanup event {name} did not follow timeout")
+
+              terminal_event = timeout or flushed or assertions_completed or (
+                  canonical[-1] if canonical else {})
+              preterminal = (
+                  before_terminal(canonical, timeout) if timeout is not None else canonical
+              )
+              samples = [
+                  metric(
+                      "mainactor_canary_enqueue_to_entry",
+                      first(preterminal, "mainactor_canary_enqueued"),
+                      first(preterminal, "mainactor_canary_entered"),
+                      terminal_event,
+                  ),
+                  metric(
+                      "talk_request_to_boundary_before_start",
+                      first(preterminal, "talk_start_requested_by_test"),
+                      first(preterminal, "boundary_before_talk_start_call"),
+                      terminal_event,
+                  ),
+                  metric(
+                      "talk_entry_proxy_to_admission_gate",
+                      first(preterminal, "boundary_before_talk_start_call"),
+                      first(preterminal, "admission_gate_waiter_registered"),
+                      terminal_event,
+                  ),
+                  metric(
+                      "assertion_completion_to_cleanup_completion",
+                      assertions_completed,
+                      cleanup,
+                      terminal_event,
+                  ),
+                  metric(
+                      "cleanup_completion_to_trace_flush",
+                      cleanup,
+                      flushed,
+                      terminal_event,
+                  ),
+              ] if canonical else []
+
+              classification = None
+              decision: dict[str, Any] = {}
+              if terminal == "valid_timeout" and not errors:
+                  classification, decision = classify_timeout(canonical)
+              kind = terminal if not errors else "invalid"
+              result = {
+                  "phase": args.phase,
+                  "iteration": args.iteration,
+                  "xcodebuildExitStatus": args.xcode_status,
+                  "xcodebuildProcessID": args.xcode_pid,
+                  "testProcessIDs": sorted(process_ids) if None not in process_ids else [],
+                  "kind": kind,
+                  "errors": errors,
+                  "traceStructurallyComplete": not errors,
+                  "cleanupCompleted": cleanup is not None,
+                  "traceFlushCompleted": flushed is not None,
+                  "existingTalkStartLogPresent": existing_start_log,
+                  "successCleanupObservability": (
+                      {
+                          "monotonicCleanupObserved": cleanup is not None,
+                          "traceSealObserved": sealed is not None,
+                          "traceFlushObserved": flushed is not None,
+                          "externalSuccessfulTestCompletionObserved": True,
+                          "note": (
+                              "test_assertions_completed precedes test-owned/helper cleanup; "
+                              "cleanup, seal, and successful flush are observed independently"),
+                      }
+                      if kind == "pass" else None),
+                  "traceOrderingContract": {
+                      "model": "causal partial order",
+                      "schedulerNativeInterleaving": (
+                          "mainactor_canary_enqueued and talk_start_task_created are synchronous; "
+                          "canary entry and Talk boundary occur after executor scheduling"),
+                      "existingStartEntryProxy": "talk.timeline manager start enter",
+                  },
+                  "xcresultSummary": {
+                      "result": summary.get("result"),
+                      "totalTestCount": summary_total,
+                      "passedTests": summary_passed,
+                      "failedTests": summary_failed,
+                      "skippedTests": summary_skipped,
+                      "expectedTestCount": args.expected_test_count,
+                  },
+                  "samples": samples,
+                  "classificationCandidate": classification,
+                  "classificationDecision": decision,
+              }
+              write_json(output / "trace-validation.json", result)
+              print(json.dumps(result, sort_keys=True))
+              return 0
+
+          def nearest_rank(values: list[int], percentile: float) -> int | None:
+              if not values:
+                  return None
+              ordered = sorted(values)
+              index = max(0, math.ceil(percentile * len(ordered)) - 1)
+              return ordered[index]
+
+          def finalize(args: argparse.Namespace) -> int:
+              evidence = pathlib.Path(args.evidence)
+              validations = []
+              for path in sorted(evidence.glob("matrix*/**/trace-validation.json")):
+                  validations.append(json.loads(path.read_text()))
+              isolated = [item for item in validations if item.get("phase") == "isolated"]
+              talk_suite = [item for item in validations if item.get("phase") == "talk-suite"]
+              invalid = [item for item in validations if item.get("kind") == "invalid"]
+              timeouts = [item for item in validations if item.get("kind") == "valid_timeout"]
+              passes = [item for item in isolated if item.get("kind") == "pass"]
+              suite_passes = [item for item in talk_suite if item.get("kind") == "pass"]
+              incomplete_success_cleanup = [
+                  item for item in validations
+                  if item.get("xcodebuildExitStatus") == 0
+                  and not item.get("traceStructurallyComplete", False)
+              ]
+
+              package_dir = evidence / "package-resolution"
+              first_package_mutation = package_dir / "first-mutation.json"
+              strict_graph_blocker = package_dir / "strict-graph-blocker.json"
+              first_other_source_dirty = package_dir / "first-other-source-dirty.json"
+              package_ledger_path = package_dir / "checkpoint-ledger.jsonl"
+              package_ledger = []
+              if package_ledger_path.is_file():
+                  try:
+                      package_ledger = [
+                          json.loads(line) for line in package_ledger_path.read_text().splitlines()
+                          if line.strip()
+                      ]
+                  except Exception:
+                      package_ledger = []
+              expected_package_stages = [
+                  ("checkout_preflight", 0),
+                  ("xcodegen_1", 1),
+                  ("xcodegen_2", 2),
+                  ("build_for_testing", 1),
+                  ("test_enumeration", 1),
+              ]
+              expected_package_stages.extend(
+                  ("matrix1", iteration) for iteration in range(1, len(isolated) + 1))
+              expected_package_stages.extend(
+                  ("matrix2", iteration) for iteration in range(1, len(talk_suite) + 1))
+              expected_package_stages.append(("final_before_evidence_seal", 0))
+              observed_package_stages = [
+                  (str(item.get("stage")), int(item.get("invocation", -1)))
+                  for item in package_ledger
+              ]
+              baseline_package = package_ledger[0] if package_ledger else {}
+              package_records_clean = bool(package_ledger) and all(
+                  item.get("committedBlob") == os.environ["AIES_PACKAGE_BLOB"]
+                  and item.get("authoritativeBlob") == os.environ["AIES_PACKAGE_BLOB"]
+                  and item.get("head") == os.environ["GITHUB_SHA"]
+                  and item.get("workspaceGitBlob") == os.environ["AIES_PACKAGE_BLOB"]
+                  and item.get("workspaceSHA256") == os.environ["AIES_PACKAGE_SHA256"]
+                  and item.get("bytes") == int(os.environ["AIES_PACKAGE_BYTES"])
+                  and item.get("mtimeNanoseconds") == baseline_package.get("mtimeNanoseconds")
+                  and item.get("ctimeNanoseconds") == baseline_package.get("ctimeNanoseconds")
+                  and item.get("inode") == baseline_package.get("inode")
+                  and item.get("statusPorcelainV2") == ""
+                  and item.get("diffExists") is False
+                  and item.get("globalStatusPorcelainV2") == ""
+                  and item.get("repositoryLocalIOSResolvedFiles") == []
+                  for item in package_ledger
+              )
+              package_ledger_valid = (
+                  observed_package_stages == expected_package_stages and package_records_clean)
+
+              step_outcomes_path = evidence / "aggregate" / "step-outcomes.json"
+              try:
+                  step_outcomes = json.loads(step_outcomes_path.read_text())
+              except Exception:
+                  step_outcomes = {}
+              required_success_steps = {
+                  "AIES_TEMP_PATHS_OUTCOME",
+                  "AIES_SOURCE_GATE_OUTCOME",
+                  "AIES_PACKAGE_GUARD_OUTCOME",
+                  "AIES_TOOLCHAIN_OUTCOME",
+                  "AIES_XCODEGEN_OUTCOME",
+                  "AIES_SIMULATOR_OUTCOME",
+                  "AIES_PARSER_OUTCOME",
+                  "AIES_BUILD_OUTCOME",
+                  "AIES_ENUMERATE_OUTCOME",
+                  "AIES_MATRIX1_OUTCOME",
+              }
+              failed_required_steps = sorted(
+                  key for key in required_success_steps if step_outcomes.get(key) != "success")
+
+              isolated_iterations = [int(item.get("iteration", -1)) for item in isolated]
+              suite_iterations = [int(item.get("iteration", -1)) for item in talk_suite]
+              isolated_iteration_sequence_valid = (
+                  isolated_iterations == list(range(1, len(isolated_iterations) + 1)))
+              suite_iteration_sequence_valid = (
+                  suite_iterations == list(range(1, len(suite_iterations) + 1)))
+              isolated_xcode_pids = {
+                  item.get("xcodebuildProcessID") for item in isolated
+                  if item.get("xcodebuildProcessID") is not None
+              }
+              suite_xcode_pids = {
+                  item.get("xcodebuildProcessID") for item in talk_suite
+                  if item.get("xcodebuildProcessID") is not None
+              }
+              isolated_test_pids = {
+                  pid for item in isolated for pid in item.get("testProcessIDs", [])
+              }
+              suite_test_pids = {
+                  pid for item in talk_suite for pid in item.get("testProcessIDs", [])
+              }
+
+              if first_package_mutation.is_file() or strict_graph_blocker.is_file():
+                  classification = "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER"
+                  reason = (
+                      "Package.resolved mutated/materialized or the committed resolved graph "
+                      "could not be consumed under locally supported strict Xcode operation")
+              elif first_other_source_dirty.is_file():
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "a nonauthorized repository path became dirty"
+              elif failed_required_steps:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = f"required workflow steps were not successful: {failed_required_steps}"
+              elif step_outcomes.get("AIES_FINAL_WORKTREE_CLEAN") != "true":
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "diagnostic worktree was not clean after test execution"
+              elif step_outcomes.get("AIES_FINAL_HEAD_MATCH") != "true":
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "final repository HEAD did not equal the exact pushed diagnostic SHA"
+              elif not package_ledger_valid:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "Package.resolved checkpoint ledger is incomplete or not byte/metadata clean"
+              elif not isolated_iteration_sequence_valid or not suite_iteration_sequence_valid:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "matrix iteration labels are incomplete, duplicated, or nonconsecutive"
+              elif invalid:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "at least one test invocation had an invalid or incomplete trace/result"
+              elif timeouts:
+                  if len(timeouts) != 1 or validations[-1].get("kind") != "valid_timeout":
+                      classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                      reason = "timeout was not the single final early-stop observation"
+                  elif (
+                      timeouts[0].get("phase") == "isolated"
+                      and step_outcomes.get("AIES_MATRIX2_OUTCOME") != "skipped"
+                  ) or (
+                      timeouts[0].get("phase") == "talk-suite"
+                      and step_outcomes.get("AIES_MATRIX2_OUTCOME") != "success"
+                  ):
+                      classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                      reason = "matrix step outcome does not match the timeout early-stop path"
+                  else:
+                      classification = timeouts[0].get("classificationCandidate") or (
+                          "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE")
+                      reason = "first structurally valid three-second timeout"
+              elif incomplete_success_cleanup:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = (
+                      "passing traces lack the required monotonic cleanup_completed event; "
+                      "NOT_REPRODUCED is ineligible")
+              elif (
+                  len(passes) == 50
+                  and len(isolated) == 50
+                  and len(suite_passes) == 10
+                  and len(talk_suite) == 10
+                  and len(isolated_xcode_pids) >= 5
+                  and len(isolated_test_pids) >= 5
+                  and len(suite_xcode_pids) == 10
+                  and len(suite_test_pids) == 10
+                  and step_outcomes.get("AIES_MATRIX2_OUTCOME") == "success"
+                  and package_ledger_valid
+              ):
+                  classification = "NOT_REPRODUCED_ON_DIAGNOSTIC_EXECUTOR"
+                  reason = "isolated target passed 50/50 and Talk suite passed 10/10"
+              else:
+                  classification = "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE"
+                  reason = "required bounded matrices did not reach a classifiable terminal state"
+
+              rows = []
+              for item in validations:
+                  for sample in item.get("samples", []):
+                      rows.append({
+                          "phase": item.get("phase"),
+                          "iteration": item.get("iteration"),
+                          "kind": item.get("kind"),
+                          **sample,
+                      })
+              aggregate = evidence / "aggregate"
+              aggregate.mkdir(parents=True, exist_ok=True)
+              with (aggregate / "timing-samples.csv").open("w", newline="") as handle:
+                  fields = [
+                      "phase", "iteration", "kind", "metric", "status",
+                      "valueNanoseconds", "lowerBoundNanoseconds",
+                      "endpointDeltaFromRequestNanoseconds", "endpointMissedDiagnosticDeadline",
+                  ]
+                  writer = csv.DictWriter(handle, fieldnames=fields)
+                  writer.writeheader()
+                  writer.writerows(rows)
+
+              metric_names = sorted({row["metric"] for row in rows})
+              metrics: dict[str, Any] = {}
+              for name in metric_names:
+                  selected = [row for row in rows if row["metric"] == name]
+                  values = [
+                      int(row["valueNanoseconds"])
+                      for row in selected
+                      if row["status"] == "observed" and row["valueNanoseconds"] is not None
+                  ]
+                  lower_bounds = [
+                      int(row["lowerBoundNanoseconds"])
+                      for row in selected
+                      if row["status"] == "right_censored"
+                      and row["lowerBoundNanoseconds"] is not None
+                  ]
+                  metrics[name] = {
+                      "sampleCount": len(selected),
+                      "observedCount": len(values),
+                      "censoredCount": len(lower_bounds),
+                      "missingCount": len(selected) - len(values) - len(lower_bounds),
+                      "rawObservedNanoseconds": values,
+                      "rawCensoredLowerBoundsNanoseconds": lower_bounds,
+                      "p50Nanoseconds": nearest_rank(values, 0.50),
+                      "p95Nanoseconds": nearest_rank(values, 0.95) if len(values) >= 20 else None,
+                      "p95Note": None if len(values) >= 20 else "insufficient_sample_size",
+                      "p99Nanoseconds": nearest_rank(values, 0.99) if len(values) >= 100 else None,
+                      "p99Note": None if len(values) >= 100 else "insufficient_sample_size",
+                      "maximumNanoseconds": max(values) if values else None,
+                      "maximumCensoredLowerBoundNanoseconds": (
+                          max(lower_bounds) if lower_bounds else None),
+                  }
+              write_json(aggregate / "metrics.json", metrics)
+
+              counts = {
+                  "enumerationOnlyTestWithoutBuildingInvocations": 1,
+                  "isolatedAttempted": len(isolated),
+                  "isolatedPassed": len(passes),
+                  "talkSuiteAttempted": len(talk_suite),
+                  "talkSuitePassed": len(suite_passes),
+                  "passingTraceCleanupIncomplete": len(incomplete_success_cleanup),
+                  "executingTestWithoutBuildingInvocations": len(validations),
+                  "totalTestWithoutBuildingInvocations": len(validations) + 1,
+                  "isolatedFreshXcodebuildProcessCount": len(isolated_xcode_pids),
+                  "isolatedDistinctTestProcessCount": len(isolated_test_pids),
+                  "talkSuiteFreshXcodebuildProcessCount": len(suite_xcode_pids),
+                  "talkSuiteDistinctTestProcessCount": len(suite_test_pids),
+                  "freshXcodebuildProcessCount": len(isolated_xcode_pids | suite_xcode_pids),
+                  "distinctReportedTestProcessCount": len(isolated_test_pids | suite_test_pids),
+                  "traceValidityCount": len(validations) - len(invalid),
+                  "cleanupCompletionCount": sum(
+                      1 for item in validations
+                      if item.get("cleanupCompleted", False)
+                  ),
+                  "traceFlushCompletionCount": sum(
+                      1 for item in validations
+                      if item.get("traceFlushCompleted", False)
+                  ),
+                  "packageCheckpointCount": len(package_ledger),
+                  "packageCheckpointLedgerValid": package_ledger_valid,
+                  "observedPackageCheckpointStages": observed_package_stages,
+                  "expectedPackageCheckpointStages": expected_package_stages,
+                  "isolatedIterationSequenceValid": isolated_iteration_sequence_valid,
+                  "talkSuiteIterationSequenceValid": suite_iteration_sequence_valid,
+                  "stepOutcomes": step_outcomes,
+                  "simulatorPolicy": "one selected simulator reused for all invocations",
+                  "passingXCResultRetention": (
+                      "iterations 1 and every 10th; all failing/invalid XCResults retained"
+                  ),
+              }
+              write_json(aggregate / "run-counts.json", counts)
+              decision = {
+                  "status": (
+                      "LIVENESS_CLASSIFIED"
+                      if classification not in {
+                          "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE",
+                          "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER",
+                      }
+                      else "STILL_INCONCLUSIVE"
+                  ),
+                  "primaryClassification": classification,
+                  "reason": reason,
+                  "firstTimeoutDecision": (
+                      timeouts[0].get("classificationDecision") if timeouts else None),
+                  "diagnosticBound": (
+                      "three seconds; diagnostic only and not a user-facing product SLA"),
+                  "packageCheckpointLedgerValid": package_ledger_valid,
+                  "packageResolvedFinalSHA256": (
+                      package_ledger[-1].get("workspaceSHA256") if package_ledger else None),
+              }
+              write_json(aggregate / "classification.json", decision)
+              report = [
+                  f"STATUS: {decision['status']}",
+                  f"PRIMARY CLASSIFICATION: {classification}",
+                  f"REASON: {reason}",
+                  f"ISOLATED: {len(passes)}/{len(isolated)}",
+                  f"TALK SUITE: {len(suite_passes)}/{len(talk_suite)}",
+                  f"STRUCTURALLY VALID TRACES: {len(validations) - len(invalid)}/{len(validations)}",
+                  f"POST-CLEANUP COMPLETION TRACES: {counts['cleanupCompletionCount']}/{len(validations)}",
+                  f"TRACE FLUSH COMPLETION TRACES: {counts['traceFlushCompletionCount']}/{len(validations)}",
+                  f"PACKAGE CHECKPOINT LEDGER VALID: {package_ledger_valid}",
+                  f"ISOLATED FRESH XCODEBUILD PROCESSES: {len(isolated_xcode_pids)}",
+                  f"ISOLATED DISTINCT TEST PROCESSES: {len(isolated_test_pids)}",
+                  f"TALK SUITE FRESH XCODEBUILD PROCESSES: {len(suite_xcode_pids)}",
+                  f"TALK SUITE DISTINCT TEST PROCESSES: {len(suite_test_pids)}",
+                  "SIGNED RUN: not authorized",
+              ]
+              (aggregate / "classification-report.txt").write_text("\n".join(report) + "\n")
+              print("\n".join(report))
+              return 0
+
+          def hash_products(args: argparse.Namespace) -> int:
+              derived = pathlib.Path(args.derived).resolve()
+              xctestrun = pathlib.Path(args.xctestrun).resolve()
+              candidates = {xctestrun}
+              for bundle in derived.glob("Build/Products/**/*.xctest"):
+                  if bundle.name == "OpenClawTests.xctest":
+                      candidates.update(path for path in bundle.rglob("*") if path.is_file())
+              for app_binary in derived.glob("Build/Products/**/OpenClaw.app/OpenClaw"):
+                  if app_binary.is_file():
+                      candidates.add(app_binary)
+              records = []
+              for path in sorted(candidates):
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  records.append({
+                      "path": str(path),
+                      "size": path.stat().st_size,
+                      "sha256": digest,
+                  })
+              if len(records) < 3:
+                  raise SystemExit("Too few compiled test products were identified")
+              write_json(pathlib.Path(args.output), records)
+              return 0
+
+          def seal(args: argparse.Namespace) -> int:
+              evidence = pathlib.Path(args.evidence)
+              output = evidence / "SHA256SUMS"
+              records = []
+              for path in sorted(evidence.rglob("*")):
+                  if not path.is_file() or path == output:
+                      continue
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  records.append(f"{digest}  {path.relative_to(evidence)}")
+              output.write_text("\n".join(records) + "\n")
+              print(f"sealedFileCount={len(records)}")
+              print(f"SHA256SUMS.sha256={hashlib.sha256(output.read_bytes()).hexdigest()}")
+              return 0
+
+          def main() -> int:
+              parser = argparse.ArgumentParser()
+              subparsers = parser.add_subparsers(dest="command", required=True)
+              validate_parser = subparsers.add_parser("validate")
+              validate_parser.add_argument("--log", required=True)
+              validate_parser.add_argument("--output", required=True)
+              validate_parser.add_argument("--phase", required=True)
+              validate_parser.add_argument("--matrix", required=True)
+              validate_parser.add_argument("--iteration", type=int, required=True)
+              validate_parser.add_argument("--xcode-status", type=int, required=True)
+              validate_parser.add_argument("--xcode-pid", type=int, required=True)
+              validate_parser.add_argument("--xcresult-summary", required=True)
+              validate_parser.add_argument("--expected-test-count", type=int, required=True)
+              validate_parser.add_argument("--enumeration-summary", required=True)
+              validate_parser.add_argument("--xcresult-tests", required=True)
+              validate_parser.set_defaults(handler=validate)
+              finalize_parser = subparsers.add_parser("finalize")
+              finalize_parser.add_argument("--evidence", required=True)
+              finalize_parser.set_defaults(handler=finalize)
+              hash_parser = subparsers.add_parser("hash-products")
+              hash_parser.add_argument("--derived", required=True)
+              hash_parser.add_argument("--xctestrun", required=True)
+              hash_parser.add_argument("--output", required=True)
+              hash_parser.set_defaults(handler=hash_products)
+              seal_parser = subparsers.add_parser("seal")
+              seal_parser.add_argument("--evidence", required=True)
+              seal_parser.set_defaults(handler=seal)
+              args = parser.parse_args()
+              return args.handler(args)
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          '''.lstrip())
+          PY
+          python3 -m py_compile "${parser}"
+          cp "${parser}" "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.retained.py"
+
+      - name: Build Talk test products once without signing
+        id: build_tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE_DIR}/build" "${AIES_DERIVED_DATA}"
+          build_log="${AIES_EVIDENCE_DIR}/build/build-for-testing.log"
+          build_result="${AIES_EVIDENCE_DIR}/build/build-for-testing.xcresult"
+          build_command_manifest="${AIES_EVIDENCE_DIR}/build/build-for-testing.command.txt"
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          cd apps/ios
+          build_command=(
+            xcodebuild
+            -project OpenClaw.xcodeproj
+            -scheme OpenClaw
+            -configuration Debug
+            -destination "${AIES_DESTINATION}"
+            -derivedDataPath "${AIES_DERIVED_DATA}"
+            -resultBundlePath "${build_result}"
+            -parallel-testing-enabled NO
+            "-only-testing:${AIES_SUITE_FILTER}"
+            "${strict_package_args[@]}"
+            build-for-testing
+            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_REQUIRED=NO
+            "CODE_SIGN_IDENTITY="
+            "DEVELOPMENT_TEAM="
+            "PROVISIONING_PROFILE_SPECIFIER="
+          )
+          printf '%q ' "${build_command[@]}" > "${build_command_manifest}"
+          printf '\n' >> "${build_command_manifest}"
+          set +e
+          "${build_command[@]}" > "${build_log}" 2>&1
+          build_status=$?
+          set -e
+          set +e
+          python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+            --stage build_for_testing \
+            --invocation 1 \
+            --command-manifest "${build_command_manifest}"
+          package_status=$?
+          set -e
+          cat "${build_log}"
+          printf '%s\n' "${build_status}" > "${AIES_EVIDENCE_DIR}/build/build-for-testing.exit-status"
+          if [[ "${package_status}" -ne 0 ]]; then
+            exit "${package_status}"
+          fi
+          if [[ "${build_status}" -ne 0 ]]; then
+            if grep -Eiq \
+              'automatic package resolution is disabled|resolved file.*(required|out.of.date|corrupt|malformed|unusable|missing|cannot be used)|Package\.resolved.*(required|out.of.date|corrupt|malformed|unusable|missing|cannot be used)' \
+              "${build_log}"; then
+              python3 - "${build_log}" "${build_command_manifest}" \
+                "${AIES_EVIDENCE_DIR}/package-resolution/strict-graph-blocker.json" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          log_path, command_path, output_path = map(pathlib.Path, sys.argv[1:])
+          log = log_path.read_bytes()
+          command = command_path.read_text()
+          relevant = [
+              line for line in log.decode(errors="replace").splitlines()
+              if any(token in line.lower() for token in (
+                  "package.resolved", "automatic package resolution", "resolved file",
+                  "onlyusepackageversionsfromresolvedfile"))
+          ]
+          payload = {
+              "classification": "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER",
+              "stage": "build_for_testing",
+              "reason": "committed resolved graph was rejected under strict package operation",
+              "command": command,
+              "logSHA256": hashlib.sha256(log).hexdigest(),
+              "relevantDiagnostics": relevant,
+          }
+          output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+            fi
+            echo "Credential-free build-for-testing failed." >&2
+            exit "${build_status}"
+          fi
+
+          xctestrun_list="${AIES_EVIDENCE_DIR}/build/xctestrun-paths.txt"
+          find "${AIES_DERIVED_DATA}/Build/Products" -type f -name '*.xctestrun' -print |
+            sort > "${xctestrun_list}"
+          xctestrun_count="$(wc -l < "${xctestrun_list}" | tr -d '[:space:]')"
+          if [[ "${xctestrun_count}" -ne 1 ]]; then
+            printf 'Expected exactly one xctestrun; found %s\n' "${xctestrun_count}" >&2
+            cat "${xctestrun_list}" >&2
+            exit 1
+          fi
+          xctestrun="$(sed -n '1p' "${xctestrun_list}")"
+          cp "${xctestrun}" "${AIES_EVIDENCE_DIR}/build/test-products.xctestrun"
+          {
+            echo "AIES_XCTESTRUN=${xctestrun}"
+            echo "AIES_TRACE_TOOL=${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py"
+          } >> "${GITHUB_ENV}"
+          python3 "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" hash-products \
+            --derived "${AIES_DERIVED_DATA}" \
+            --xctestrun "${xctestrun}" \
+            --output "${AIES_EVIDENCE_DIR}/build/test-products-before.json"
+          ditto -c -k --sequesterRsrc --keepParent "${build_result}" \
+            "${AIES_EVIDENCE_DIR}/build/build-for-testing.xcresult.zip"
+          rm -rf "${build_result}"
+
+      - name: Enumerate and prove the exact isolated target
+        id: enumerate
+        shell: bash
+        run: |
+          set -euo pipefail
+          enumeration_log="${AIES_EVIDENCE_DIR}/build/test-enumeration.log"
+          enumeration_json="${AIES_EVIDENCE_DIR}/build/test-enumeration.json"
+          enumeration_command_manifest="${AIES_EVIDENCE_DIR}/build/test-enumeration.command.txt"
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          enumeration_command=(
+            xcodebuild
+            -xctestrun "${AIES_XCTESTRUN}"
+            -destination "${AIES_DESTINATION}"
+            "-only-testing:${AIES_SUITE_FILTER}"
+            -parallel-testing-enabled NO
+            "${strict_package_args[@]}"
+            -enumerate-tests
+            -test-enumeration-style flat
+            -test-enumeration-format json
+            -test-enumeration-output-path "${enumeration_json}"
+            test-without-building
+          )
+          printf '%q ' "${enumeration_command[@]}" > "${enumeration_command_manifest}"
+          printf '\n' >> "${enumeration_command_manifest}"
+          set +e
+          "${enumeration_command[@]}" > "${enumeration_log}" 2>&1
+          enumeration_status=$?
+          set -e
+          set +e
+          python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+            --stage test_enumeration \
+            --invocation 1 \
+            --command-manifest "${enumeration_command_manifest}"
+          package_status=$?
+          set -e
+          cat "${enumeration_log}"
+          if [[ "${package_status}" -ne 0 ]]; then
+            exit "${package_status}"
+          fi
+          [[ "${enumeration_status}" -eq 0 ]]
+          python3 - "${enumeration_json}" "${GITHUB_ENV}" \
+            "${AIES_EVIDENCE_DIR}/build/test-enumeration-summary.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          github_env = pathlib.Path(sys.argv[2])
+          summary_path = pathlib.Path(sys.argv[3])
+          payload = json.loads(path.read_text())
+          needle = "backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission"
+          identifiers = []
+          def walk(value):
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      if (
+                          key.lower() in {"identifier", "testidentifier"}
+                          and isinstance(child, str)
+                          and "TalkDurableOutboxTests" in child
+                      ):
+                          identifiers.append(child)
+                      walk(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      walk(child)
+              elif (
+                  isinstance(value, str)
+                  and "OpenClawTests" in value
+                  and "TalkDurableOutboxTests" in value
+                  and value.count("/") >= 2
+              ):
+                  identifiers.append(value)
+          walk(payload)
+          unique = sorted(set(identifiers))
+          target_matches = [value for value in unique if needle in value]
+          if len(target_matches) != 1:
+              raise SystemExit("Exact diagnostic target was not enumerated")
+          if len(unique) != 43:
+              raise SystemExit(f"Expected 43 Talk suite tests, enumerated {len(unique)}")
+          summary = {
+              "talkSuiteTestCount": len(unique),
+              "targetIdentifier": target_matches[0],
+              "testIdentifiers": unique,
+          }
+          summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+          with github_env.open("a") as handle:
+              handle.write(f"AIES_TALK_SUITE_TEST_COUNT={len(unique)}\n")
+              handle.write(f"AIES_TARGET_FILTER={target_matches[0]}\n")
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Matrix 1 - isolated target, maximum fifty fresh xcodebuild processes
+        id: matrix1
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix_root="${AIES_EVIDENCE_DIR}/matrix1"
+          mkdir -p "${matrix_root}"
+          run_talk_suite=true
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          for iteration in $(seq 1 50); do
+            label="$(printf '%03d' "${iteration}")"
+            output="${matrix_root}/iteration-${label}"
+            result="${output}/result.xcresult"
+            log="${output}/xcodebuild.log"
+            command_manifest="${output}/xcodebuild.command.txt"
+            mkdir -p "${output}"
+            echo "MATRIX1 iteration=${iteration} starting"
+            test_command=(
+              xcodebuild
+              -xctestrun "${AIES_XCTESTRUN}"
+              -destination "${AIES_DESTINATION}"
+              "-only-testing:${AIES_TARGET_FILTER}"
+              -parallel-testing-enabled NO
+              "${strict_package_args[@]}"
+              -resultBundlePath "${result}"
+              test-without-building
+            )
+            {
+              printf 'TEST_RUNNER_AIES_TALK_DIAGNOSTIC_MATRIX=%q ' isolated-target
+              printf 'TEST_RUNNER_AIES_TALK_DIAGNOSTIC_ITERATION=%q ' "${iteration}"
+              printf '%q ' "${test_command[@]}"
+              printf '\n'
+            } > "${command_manifest}"
+            set +e
+            TEST_RUNNER_AIES_TALK_DIAGNOSTIC_MATRIX=isolated-target \
+            TEST_RUNNER_AIES_TALK_DIAGNOSTIC_ITERATION="${iteration}" \
+              "${test_command[@]}" > "${log}" 2>&1 &
+            xcode_pid=$!
+            printf '%s\n' "${xcode_pid}" > "${output}/xcodebuild.pid"
+            wait "${xcode_pid}"
+            xcode_status=$?
+            set -e
+            printf '%s\n' "${xcode_status}" > "${output}/xcodebuild.exit-status"
+            set +e
+            python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+              --stage matrix1 \
+              --invocation "${iteration}" \
+              --command-manifest "${command_manifest}"
+            package_status=$?
+            set -e
+            grep -E 'AIES_TALK_LIVENESS_TRACE|talk.timeline manager start enter|Timed out:|Test run with|Test Case|Testing failed' \
+              "${log}" || true
+            if [[ "${package_status}" -ne 0 ]]; then
+              exit "${package_status}"
+            fi
+
+            if [[ -d "${result}" ]]; then
+              xcrun xcresulttool get test-results summary --path "${result}" \
+                > "${output}/xcresult-summary.json" 2> "${output}/xcresult-summary.stderr" || true
+              xcrun xcresulttool get test-results tests --path "${result}" \
+                > "${output}/xcresult-tests.json" 2> "${output}/xcresult-tests.stderr" || true
+            fi
+            python3 "${AIES_TRACE_TOOL}" validate \
+              --log "${log}" \
+              --output "${output}" \
+              --phase isolated \
+              --matrix isolated-target \
+              --iteration "${iteration}" \
+              --xcode-status "${xcode_status}" \
+              --xcode-pid "${xcode_pid}" \
+              --xcresult-summary "${output}/xcresult-summary.json" \
+              --expected-test-count 1 \
+              --enumeration-summary "${AIES_EVIDENCE_DIR}/build/test-enumeration-summary.json" \
+              --xcresult-tests "${output}/xcresult-tests.json"
+            kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' \
+              "${output}/trace-validation.json")"
+            if [[ "${kind}" == "valid_timeout" || "${kind}" == "invalid" || \
+                  "${iteration}" == "1" || $((iteration % 10)) -eq 0 ]]; then
+              if [[ -d "${result}" ]]; then
+                ditto -c -k --sequesterRsrc --keepParent "${result}" "${output}/result.xcresult.zip"
+              fi
+            fi
+            rm -rf "${result}"
+            if [[ "${kind}" == "valid_timeout" ]]; then
+              echo "Valid timeout captured at isolated iteration ${iteration}; stopping Matrix 1."
+              run_talk_suite=false
+              break
+            fi
+            if [[ "${kind}" != "pass" ]]; then
+              echo "Invalid/inconclusive target result at isolated iteration ${iteration}; stopping."
+              run_talk_suite=false
+              break
+            fi
+          done
+          echo "AIES_RUN_TALK_SUITE=${run_talk_suite}" >> "${GITHUB_ENV}"
+
+      - name: Matrix 2 - ten complete Talk suite processes
+        id: matrix2
+        if: env.AIES_RUN_TALK_SUITE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          matrix_root="${AIES_EVIDENCE_DIR}/matrix2"
+          mkdir -p "${matrix_root}"
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          for iteration in $(seq 1 10); do
+            label="$(printf '%03d' "${iteration}")"
+            output="${matrix_root}/pass-${label}"
+            result="${output}/result.xcresult"
+            log="${output}/xcodebuild.log"
+            command_manifest="${output}/xcodebuild.command.txt"
+            mkdir -p "${output}"
+            echo "MATRIX2 pass=${iteration} starting"
+            test_command=(
+              xcodebuild
+              -xctestrun "${AIES_XCTESTRUN}"
+              -destination "${AIES_DESTINATION}"
+              "-only-testing:${AIES_SUITE_FILTER}"
+              -parallel-testing-enabled NO
+              "${strict_package_args[@]}"
+              -resultBundlePath "${result}"
+              test-without-building
+            )
+            {
+              printf 'TEST_RUNNER_AIES_TALK_DIAGNOSTIC_MATRIX=%q ' talk-suite
+              printf 'TEST_RUNNER_AIES_TALK_DIAGNOSTIC_ITERATION=%q ' "${iteration}"
+              printf '%q ' "${test_command[@]}"
+              printf '\n'
+            } > "${command_manifest}"
+            set +e
+            TEST_RUNNER_AIES_TALK_DIAGNOSTIC_MATRIX=talk-suite \
+            TEST_RUNNER_AIES_TALK_DIAGNOSTIC_ITERATION="${iteration}" \
+              "${test_command[@]}" > "${log}" 2>&1 &
+            xcode_pid=$!
+            printf '%s\n' "${xcode_pid}" > "${output}/xcodebuild.pid"
+            wait "${xcode_pid}"
+            xcode_status=$?
+            set -e
+            printf '%s\n' "${xcode_status}" > "${output}/xcodebuild.exit-status"
+            set +e
+            python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+              --stage matrix2 \
+              --invocation "${iteration}" \
+              --command-manifest "${command_manifest}"
+            package_status=$?
+            set -e
+            grep -E 'AIES_TALK_LIVENESS_TRACE|talk.timeline manager start enter|Timed out:|Test run with|Testing failed' \
+              "${log}" || true
+            if [[ "${package_status}" -ne 0 ]]; then
+              exit "${package_status}"
+            fi
+
+            if [[ -d "${result}" ]]; then
+              xcrun xcresulttool get test-results summary --path "${result}" \
+                > "${output}/xcresult-summary.json" 2> "${output}/xcresult-summary.stderr" || true
+              xcrun xcresulttool get test-results tests --path "${result}" \
+                > "${output}/xcresult-tests.json" 2> "${output}/xcresult-tests.stderr" || true
+            fi
+            python3 "${AIES_TRACE_TOOL}" validate \
+              --log "${log}" \
+              --output "${output}" \
+              --phase talk-suite \
+              --matrix talk-suite \
+              --iteration "${iteration}" \
+              --xcode-status "${xcode_status}" \
+              --xcode-pid "${xcode_pid}" \
+              --xcresult-summary "${output}/xcresult-summary.json" \
+              --expected-test-count "${AIES_TALK_SUITE_TEST_COUNT}" \
+              --enumeration-summary "${AIES_EVIDENCE_DIR}/build/test-enumeration-summary.json" \
+              --xcresult-tests "${output}/xcresult-tests.json"
+            kind="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["kind"])' \
+              "${output}/trace-validation.json")"
+            if [[ "${kind}" != "pass" || "${iteration}" == "1" || \
+                  "${iteration}" == "5" || "${iteration}" == "10" ]]; then
+              if [[ -d "${result}" ]]; then
+                ditto -c -k --sequesterRsrc --keepParent "${result}" "${output}/result.xcresult.zip"
+              fi
+            fi
+            rm -rf "${result}"
+            if [[ "${kind}" != "pass" ]]; then
+              echo "Talk suite stopped at first failure, pass ${iteration}."
+              break
+            fi
+          done
+
+      - name: Finalize diagnostic classification and seal evidence
+        id: finalize
+        if: always()
+        shell: bash
+        env:
+          AIES_TEMP_PATHS_OUTCOME: ${{ steps.temp_paths.outcome }}
+          AIES_SOURCE_GATE_OUTCOME: ${{ steps.source_gate.outcome }}
+          AIES_PACKAGE_GUARD_OUTCOME: ${{ steps.package_guard.outcome }}
+          AIES_TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          AIES_XCODEGEN_OUTCOME: ${{ steps.xcodegen.outcome }}
+          AIES_SIMULATOR_OUTCOME: ${{ steps.simulator.outcome }}
+          AIES_PARSER_OUTCOME: ${{ steps.parser.outcome }}
+          AIES_BUILD_OUTCOME: ${{ steps.build_tests.outcome }}
+          AIES_ENUMERATE_OUTCOME: ${{ steps.enumerate.outcome }}
+          AIES_MATRIX1_OUTCOME: ${{ steps.matrix1.outcome }}
+          AIES_MATRIX2_OUTCOME: ${{ steps.matrix2.outcome }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AIES_EVIDENCE_DIR:-}" ]]; then
+            export AIES_RUNTIME_ROOT="${RUNNER_TEMP}/aies-talk-liveness-v2-${GITHUB_RUN_ID}"
+            export AIES_EVIDENCE_DIR="${AIES_RUNTIME_ROOT}/evidence"
+            export AIES_DERIVED_DATA="${AIES_RUNTIME_ROOT}/derived-data"
+            {
+              echo "AIES_RUNTIME_ROOT=${AIES_RUNTIME_ROOT}"
+              echo "AIES_EVIDENCE_DIR=${AIES_EVIDENCE_DIR}"
+              echo "AIES_DERIVED_DATA=${AIES_DERIVED_DATA}"
+            } >> "${GITHUB_ENV}"
+          fi
+          mkdir -p \
+            "${AIES_EVIDENCE_DIR}/aggregate" \
+            "${AIES_EVIDENCE_DIR}/source" \
+            "${AIES_EVIDENCE_DIR}/package-resolution"
+          final_checkpoint_status=99
+          if [[ -n "${AIES_PACKAGE_GUARD:-}" && -f "${AIES_PACKAGE_GUARD}" ]]; then
+            set +e
+            python3 "${AIES_PACKAGE_GUARD}" checkpoint \
+              --stage final_before_evidence_seal \
+              --invocation 0
+            final_checkpoint_status=$?
+            set -e
+          fi
+          export AIES_FINAL_PACKAGE_CHECKPOINT_STATUS="${final_checkpoint_status}"
+          printf '%s\n' "${final_checkpoint_status}" \
+            > "${AIES_EVIDENCE_DIR}/package-resolution/final-checkpoint.exit-status"
+
+          final_head="$(git rev-parse HEAD 2>/dev/null || true)"
+          final_tree="$(git rev-parse 'HEAD^{tree}' 2>/dev/null || true)"
+          if [[ "${final_head}" == "${GITHUB_SHA}" ]]; then
+            export AIES_FINAL_HEAD_MATCH=true
+          else
+            export AIES_FINAL_HEAD_MATCH=false
+          fi
+          python3 - "${final_head}" "${final_tree}" "${AIES_FINAL_HEAD_MATCH}" \
+            "${AIES_EVIDENCE_DIR}/source/final-head-tree.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          head, tree, matches, output = sys.argv[1:]
+          pathlib.Path(output).write_text(json.dumps({
+              "head": head,
+              "tree": tree,
+              "matchesGITHUB_SHA": matches == "true",
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+
+          if ! git status --porcelain=v2 --untracked-files=all \
+            > "${AIES_EVIDENCE_DIR}/source/final-worktree-status.txt" \
+            2> "${AIES_EVIDENCE_DIR}/source/final-worktree-status.stderr"; then
+            export AIES_FINAL_WORKTREE_CLEAN=false
+          elif [[ -s "${AIES_EVIDENCE_DIR}/source/final-worktree-status.txt" ]]; then
+            export AIES_FINAL_WORKTREE_CLEAN=false
+          else
+            export AIES_FINAL_WORKTREE_CLEAN=true
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          output = pathlib.Path(os.environ["AIES_EVIDENCE_DIR"]) / "aggregate" / "step-outcomes.json"
+          keys = [
+              "AIES_TEMP_PATHS_OUTCOME", "AIES_SOURCE_GATE_OUTCOME", "AIES_PACKAGE_GUARD_OUTCOME",
+              "AIES_TOOLCHAIN_OUTCOME", "AIES_XCODEGEN_OUTCOME",
+              "AIES_SIMULATOR_OUTCOME", "AIES_PARSER_OUTCOME", "AIES_BUILD_OUTCOME", "AIES_ENUMERATE_OUTCOME",
+              "AIES_MATRIX1_OUTCOME", "AIES_MATRIX2_OUTCOME", "AIES_FINAL_WORKTREE_CLEAN",
+              "AIES_FINAL_PACKAGE_CHECKPOINT_STATUS", "AIES_FINAL_HEAD_MATCH",
+          ]
+          output.write_text(json.dumps({key: os.environ.get(key) for key in keys}, indent=2) + "\n")
+          PY
+          if [[ -f "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" ]]; then
+            python3 "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" finalize \
+              --evidence "${AIES_EVIDENCE_DIR}"
+          else
+            fallback_classification=INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE
+            fallback_reason="diagnostic parser or executor setup failed before trace collection"
+            if [[ -f "${AIES_EVIDENCE_DIR}/package-resolution/first-mutation.json" || \
+                  -f "${AIES_EVIDENCE_DIR}/package-resolution/strict-graph-blocker.json" ]]; then
+              fallback_classification=PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER
+              fallback_reason="package mutation or strict resolved-graph incompatibility occurred before parser setup"
+            fi
+            python3 - "${fallback_classification}" "${fallback_reason}" \
+              "${AIES_EVIDENCE_DIR}/aggregate/classification.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          classification, reason, output = sys.argv[1:]
+          pathlib.Path(output).write_text(json.dumps({
+              "status": "STILL_INCONCLUSIVE",
+              "primaryClassification": classification,
+              "reason": reason,
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+            printf '%s\n' \
+              'STATUS: STILL_INCONCLUSIVE' \
+              "PRIMARY CLASSIFICATION: ${fallback_classification}" \
+              "REASON: ${fallback_reason}" \
+              'SIGNED RUN: not authorized' \
+              > "${AIES_EVIDENCE_DIR}/aggregate/classification-report.txt"
+          fi
+
+          if [[ -n "${AIES_XCTESTRUN:-}" && -f "${AIES_XCTESTRUN}" && \
+                -f "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" ]]; then
+            python3 "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" hash-products \
+              --derived "${AIES_DERIVED_DATA}" \
+              --xctestrun "${AIES_XCTESTRUN}" \
+              --output "${AIES_EVIDENCE_DIR}/build/test-products-after.json"
+            if ! cmp -s "${AIES_EVIDENCE_DIR}/build/test-products-before.json" \
+              "${AIES_EVIDENCE_DIR}/build/test-products-after.json"; then
+              echo "Test products changed after build-for-testing." >&2
+              python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          path = pathlib.Path(os.environ["AIES_EVIDENCE_DIR"]) / "aggregate" / "classification.json"
+          payload = json.loads(path.read_text())
+          payload.update({
+              "status": "STILL_INCONCLUSIVE",
+              "primaryClassification": "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE",
+              "reason": "compiled test-product hashes changed after the one authorized build",
+          })
+          path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+          PY
+              printf '%s\n' \
+                'STATUS: STILL_INCONCLUSIVE' \
+                'PRIMARY CLASSIFICATION: INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE' \
+                'REASON: compiled test-product hashes changed after the one authorized build' \
+                'SIGNED RUN: not authorized' \
+                > "${AIES_EVIDENCE_DIR}/aggregate/classification-report.txt"
+            fi
+          fi
+
+          if [[ -f "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" ]]; then
+            python3 "${AIES_EVIDENCE_DIR}/runtime-tools/trace_tool.py" seal \
+              --evidence "${AIES_EVIDENCE_DIR}"
+          else
+            (
+              cd "${AIES_EVIDENCE_DIR}"
+              find . -type f ! -name SHA256SUMS -print0 |
+                xargs -0 shasum -a 256 > SHA256SUMS
+            )
+          fi
+
+      - name: Print critical trace and sealed classification before upload
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "===== CLASSIFICATION ====="
+          cat "${AIES_EVIDENCE_DIR}/aggregate/classification-report.txt" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/aggregate/classification.json" 2>/dev/null || true
+          echo "===== RUN COUNTS ====="
+          cat "${AIES_EVIDENCE_DIR}/aggregate/run-counts.json" 2>/dev/null || true
+          echo "===== TIMING METRICS ====="
+          cat "${AIES_EVIDENCE_DIR}/aggregate/metrics.json" 2>/dev/null || true
+          echo "===== SOURCE AND IMMUTABILITY ====="
+          cat "${AIES_EVIDENCE_DIR}/source/source-state.json" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/source/final-head-tree.json" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/source/object-hashes.tsv" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/source/final-worktree-status.txt" 2>/dev/null || true
+          echo "===== STRICT PACKAGE HELP AND FLAGS ====="
+          cat "${AIES_EVIDENCE_DIR}/environment/strict-package-help-evidence.txt" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/environment/strict-package-args.json" 2>/dev/null || true
+          echo "===== PACKAGE.RESOLVED CHECKPOINT LEDGER ====="
+          cat "${AIES_EVIDENCE_DIR}/package-resolution/checkpoint-ledger.jsonl" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/package-resolution/first-mutation.json" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/package-resolution/strict-graph-blocker.json" 2>/dev/null || true
+          cat "${AIES_EVIDENCE_DIR}/package-resolution/first-mutation-files/Package.resolved.diff" 2>/dev/null || true
+          echo "===== RAW AND CANONICAL TRACE ====="
+          find "${AIES_EVIDENCE_DIR}" \( -name 'trace.raw.jsonl' -o -name 'trace.canonical.jsonl' \) \
+            -type f -print -exec cat {} \; 2>/dev/null || true
+          echo "===== SHA256SUMS ====="
+          cat "${AIES_EVIDENCE_DIR}/SHA256SUMS" 2>/dev/null || true
+          if [[ -f "${AIES_EVIDENCE_DIR}/SHA256SUMS" ]]; then
+            shasum -a 256 "${AIES_EVIDENCE_DIR}/SHA256SUMS"
+          fi
+
+      - name: Upload sealed diagnostic evidence
+        id: evidence_upload
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: aies-talk-liveness-diagnostic-v2-${{ github.run_id }}
+          path: ${{ env.AIES_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6
+
+      - name: Enforce diagnostic and artifact transport result
+        if: always()
+        shell: bash
+        env:
+          AIES_UPLOAD_OUTCOME: ${{ steps.evidence_upload.outcome }}
+        run: |
+          set -euo pipefail
+          classification="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["primaryClassification"])' \
+            "${AIES_EVIDENCE_DIR}/aggregate/classification.json" 2>/dev/null || \
+            echo INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE)"
+          if [[ "${AIES_UPLOAD_OUTCOME}" != "success" ]]; then
+            echo "artifactTransportStatus=CI_ARTIFACT_TRANSPORT_FAILURE"
+            echo "Primary diagnostic classification remains ${classification}."
+            exit 1
+          fi
+          echo "artifactTransportStatus=RETAINED"
+          echo "primaryClassification=${classification}"
+          echo "SIGNED RUN: not authorized"
+          if [[ "${classification}" == "INCONCLUSIVE_TRACE_OR_EXECUTOR_FAILURE" || \
+                "${classification}" == "PACKAGE_RESOLUTION_REPRODUCIBILITY_BLOCKER" ]]; then
+            exit 1
+          fi
