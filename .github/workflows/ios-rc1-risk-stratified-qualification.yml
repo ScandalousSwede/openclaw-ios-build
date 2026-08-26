@@ -1,0 +1,623 @@
+name: AIES iOS RC1 Risk-Stratified Unsigned Qualification
+
+on:
+  push:
+    branches:
+      - aies/ios-rc1-aggregate-package-authority
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aies-ios-rc1-aggregate-package-authority-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AIES_AUTHORITATIVE_RC1: 84152459fe11fc294e89677c2851594e9aa7de15
+  AIES_QUALIFICATION_BRANCH: aies/ios-rc1-aggregate-package-authority
+  AIES_TALK_SUITE: OpenClawTests/TalkDurableOutboxTests
+
+jobs:
+  source-and-tooling:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove exact source custody and protected-object immutability
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/aies-source-evidence"
+          mkdir -p "${evidence}"
+          [[ "${GITHUB_EVENT_NAME}" == "push" ]]
+          [[ "${GITHUB_REF_TYPE}" == "branch" ]]
+          [[ "${GITHUB_REF_NAME}" == "${AIES_QUALIFICATION_BRANCH}" ]]
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]]
+          git merge-base --is-ancestor "${AIES_AUTHORITATIVE_RC1}" HEAD
+          remote_rc1="$(git ls-remote origin refs/heads/aies/ios-rc1-testflight | awk '{print $1}')"
+          [[ "${remote_rc1}" == "${AIES_AUTHORITATIVE_RC1}" ]]
+
+          check_object() {
+            local path="$1"
+            local expected="$2"
+            local actual
+            actual="$(git rev-parse "HEAD:${path}")"
+            printf '%s\t%s\t%s\n' "${path}" "${expected}" "${actual}" \
+              | tee -a "${evidence}/protected-objects.tsv"
+            [[ "${actual}" == "${expected}" ]]
+          }
+          check_object apps/ios/Sources d034193e7f21102d444bbc7a694dd7f766bd1271
+          check_object apps/shared/OpenClawKit/Sources d76bc15087d19197f254db8c66a1cc39e80de100
+          check_object apps/ios/fastlane/Fastfile e3e654e301862e8cd1b2416a960c6482059a4223
+          check_object apps/ios/project.yml be05d0f289a8ac03e8f99cf8a370a6daee6dfe7e
+          check_object apps/ios/Signing.xcconfig d6acc35dee879122941d4601c7aaf51998f03105
+          check_object apps/ios/Config/Signing.xcconfig 19d2975626b758919c1ad7e133e28e0b4e35c3cb
+          check_object apps/ios/Sources/OpenClaw.entitlements ff60a879b1a25f566ee380339905df1fb525f690
+          check_object apps/swabble/Package.resolved a64270d1544a694e44669ffe8279c1e1d7acb8fb
+
+          git diff --name-only "${AIES_AUTHORITATIVE_RC1}" HEAD \
+            | tee "${evidence}/changed-paths.txt"
+          python3 - "${evidence}/changed-paths.txt" <<'PY'
+          import pathlib
+          import sys
+
+          allowed = {
+              ".github/workflows/ios-build-ipa.yml",
+              ".github/workflows/ios-rc1-risk-stratified-qualification.yml",
+              "apps/ios/PackageAuthority/README.md",
+              "apps/ios/PackageAuthority/aggregate-package-graph.json",
+              "apps/ios/Tests/TalkDurableOutboxTests.swift",
+              "apps/ios/Tools/aies_package_authority.py",
+              "apps/ios/Tools/prepare_aies_package_build_root.py",
+              "apps/ios/Tools/run_aies_qualification.py",
+              "apps/ios/Tools/run_aies_swift_qualification.py",
+              "apps/ios/Tools/test_aies_package_authority.py",
+              "apps/ios/Tools/test_aies_qualification_workflow_contract.py",
+              "apps/ios/Tools/test_prepare_aies_package_build_root.py",
+              "apps/ios/Tools/test_run_aies_qualification.py",
+              "apps/ios/Tools/test_run_aies_swift_qualification.py",
+              "apps/ios/Tools/test_verify_aies_internal_signing.py",
+              "apps/ios/Tools/test_verify_aies_unsigned_archive.py",
+              "apps/ios/Tools/verify_aies_fastlane_package_contract.rb",
+              "apps/ios/Tools/verify_aies_unsigned_archive.py",
+              "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatViewModelTests.swift",
+              "apps/shared/OpenClawKit/Tests/OpenClawKitTests/TestAsyncHelpers.swift",
+          }
+          observed = set(pathlib.Path(sys.argv[1]).read_text().splitlines())
+          if not observed or observed - allowed:
+              raise SystemExit(f"unauthorized candidate paths: {sorted(observed - allowed)}")
+          PY
+          git log --format='%H %T %P %s' "${AIES_AUTHORITATIVE_RC1}"..HEAD \
+            > "${evidence}/commit-lineage.txt"
+          git diff --binary "${AIES_AUTHORITATIVE_RC1}" HEAD -- \
+            .github/workflows/ios-build-ipa.yml \
+            > "${evidence}/protected-workflow-authorized.diff"
+          git status --porcelain=v2 --untracked-files=all \
+            | tee "${evidence}/final-status-v2.txt"
+          [[ ! -s "${evidence}/final-status-v2.txt" ]]
+          {
+            echo "HEAD=${GITHUB_SHA}"
+            echo "TREE=$(git rev-parse HEAD^{tree})"
+            echo "AUTHORITATIVE_RC1=${AIES_AUTHORITATIVE_RC1}"
+            echo "REMOTE_AUTHORITATIVE_RC1=${remote_rc1}"
+          } > "${evidence}/source-state.env"
+          cat "${evidence}/source-state.env"
+          cat "${evidence}/protected-objects.tsv"
+          cat "${evidence}/changed-paths.txt"
+
+      - name: Run credential-free policy and package tooling tests
+        working-directory: apps/ios/Tools
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_aies_package_authority.py \
+            test_aies_qualification_workflow_contract.py \
+            test_prepare_aies_package_build_root.py \
+            test_run_aies_qualification.py \
+            test_run_aies_swift_qualification.py \
+            test_sanitize_aies_release_log.py \
+            test_verify_aies_unsigned_archive.py \
+            test_write_build_manifest.py \
+            test_verify_aies_internal_signing.py 2>&1 \
+            | tee "${RUNNER_TEMP}/aies-source-evidence/policy-tooling-tests.log"
+
+      - name: Seal source and tooling evidence
+        if: always() && !cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/aies-source-evidence"
+          test -d "${evidence}"
+          test ! -e "${evidence}/SHA256SUMS"
+          (cd "${evidence}" && find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 shasum -a 256 > SHA256SUMS)
+          cat "${evidence}/SHA256SUMS"
+
+      - name: Upload source and tooling evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AIES-RC1-source-tooling-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-source-evidence
+          retention-days: 90
+          if-no-files-found: warn
+
+  package-and-talk-qualification:
+    needs: source-and-tooling
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Initialize package and Talk evidence paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "AIES_EVIDENCE=${RUNNER_TEMP}/aies-package-talk-evidence"
+            echo "AIES_DERIVED_DATA=${RUNNER_TEMP}/aies-talk-derived-data"
+          } >> "${GITHUB_ENV}"
+
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          install-bun: "false"
+          install-deps: "false"
+          use-actions-cache: "false"
+          save-actions-cache: "false"
+
+      - name: Setup pinned XcodeGen
+        uses: ./.github/actions/setup-xcodegen
+
+      - name: Record toolchain and install source dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE}/toolchain"
+          sw_vers | tee "${AIES_EVIDENCE}/toolchain/macos.txt"
+          uname -a | tee "${AIES_EVIDENCE}/toolchain/uname.txt"
+          xcodebuild -version | tee "${AIES_EVIDENCE}/toolchain/xcode.txt"
+          swift --version 2>&1 | tee "${AIES_EVIDENCE}/toolchain/swift.txt"
+          xcodegen --version | tee "${AIES_EVIDENCE}/toolchain/xcodegen.txt"
+          [[ "$(xcodegen --version)" == "Version: 2.46.0" ]]
+
+      - name: Prove aggregate graph materialization across three roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE}/package-probes"
+          authority="${GITHUB_WORKSPACE}/apps/ios/Tools/aies_package_authority.py"
+          for index in 1 2 3; do
+            root="${RUNNER_TEMP}/aies-package-probe-${index}"
+            git clone --quiet --no-hardlinks --no-checkout "${GITHUB_WORKSPACE}" "${root}"
+            git -C "${root}" checkout --quiet --detach "${GITHUB_SHA}"
+            for pass in 1 2; do
+              (cd "${root}/apps/ios" && xcodegen generate) \
+                > "${AIES_EVIDENCE}/package-probes/root-${index}-xcodegen-${pass}.log" 2>&1
+              git -C "${root}" status --porcelain=v2 --untracked-files=all \
+                > "${AIES_EVIDENCE}/package-probes/root-${index}-xcodegen-${pass}.status-v2"
+              [[ ! -s "${AIES_EVIDENCE}/package-probes/root-${index}-xcodegen-${pass}.status-v2" ]]
+            done
+            lock="${root}/apps/ios/OpenClaw.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+            python3 "${root}/apps/ios/Tools/aies_package_authority.py" \
+              --repo-root "${root}" materialize --output "${lock}" \
+              > "${AIES_EVIDENCE}/package-probes/root-${index}-materialize.json"
+            python3 "${root}/apps/ios/Tools/aies_package_authority.py" \
+              --repo-root "${root}" validate-concrete --resolved "${lock}" \
+              --output "${AIES_EVIDENCE}/package-probes/root-${index}-concrete.json"
+            git -C "${root}" status --porcelain=v2 --untracked-files=all \
+              > "${AIES_EVIDENCE}/package-probes/root-${index}-final.status-v2"
+            [[ ! -s "${AIES_EVIDENCE}/package-probes/root-${index}-final.status-v2" ]]
+          done
+          lock_path='apps/ios/OpenClaw.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved'
+          for right in 2 3; do
+            python3 "${authority}" --repo-root "${GITHUB_WORKSPACE}" compare \
+              --left-root "${RUNNER_TEMP}/aies-package-probe-1" \
+              --left-resolved "${RUNNER_TEMP}/aies-package-probe-1/${lock_path}" \
+              --right-root "${RUNNER_TEMP}/aies-package-probe-${right}" \
+              --right-resolved "${RUNNER_TEMP}/aies-package-probe-${right}/${lock_path}" \
+              --output "${AIES_EVIDENCE}/package-probes/root-1-vs-${right}.json"
+          done
+          set +e
+          python3 "${RUNNER_TEMP}/aies-package-probe-2/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${RUNNER_TEMP}/aies-package-probe-2" validate-concrete \
+            --resolved "${RUNNER_TEMP}/aies-package-probe-1/${lock_path}" \
+            > "${AIES_EVIDENCE}/package-probes/cross-root-reuse-rejection.log" 2>&1
+          reuse_status=$?
+          set -e
+          [[ "${reuse_status}" -eq 2 ]]
+          python3 - "${AIES_EVIDENCE}/package-probes" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          reports = [json.loads((root / f"root-{i}-concrete.json").read_text()) for i in (1, 2, 3)]
+          if len({value["semanticSHA256"] for value in reports}) != 1:
+              raise SystemExit("three roots produced different semantic graphs")
+          if len({value["originHash"] for value in reports}) != 3:
+              raise SystemExit("originHash was not independently bound to all roots")
+          if len({value["rawSHA256"] for value in reports}) != 3:
+              raise SystemExit("concrete resolved files were not root-specific")
+          for right in (2, 3):
+              comparison = json.loads((root / f"root-1-vs-{right}.json").read_text())
+              required = {
+                  "status": "semantically-identical",
+                  "originHashesDiffer": True,
+                  "rawHashesDiffer": True,
+              }
+              if any(comparison.get(key) != value for key, value in required.items()):
+                  raise SystemExit(f"invalid root comparison {right}: {comparison}")
+          PY
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
+
+      - name: Prepare final strict cold package build root
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime="${RUNNER_TEMP}/aies-final-package"
+          mkdir -p "${runtime}"
+          python3 apps/ios/Tools/prepare_aies_package_build_root.py prepare \
+            --source-root "${GITHUB_WORKSPACE}" \
+            --build-root "${runtime}/build-root" \
+            --allowed-root "${runtime}" \
+            --expected-sha "${GITHUB_SHA}" \
+            --evidence-dir "${AIES_EVIDENCE}/package-final" \
+            --github-env "${GITHUB_ENV}"
+
+      - name: Install dependencies in the prepared exact-SHA build root
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${AIES_BUILD_ROOT}"
+          pnpm install --frozen-lockfile
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
+
+      - name: Render the protected Fastlane strict-package contract without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          gems="${RUNNER_TEMP}/aies-qualification-fastlane-2.228.0"
+          gem install --no-document --install-dir "${gems}" fastlane --version 2.228.0
+          GEM_HOME="${gems}" GEM_PATH="${gems}" \
+            ruby "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_fastlane_package_contract.rb" \
+              --project "${AIES_IOS_PROJECT}" \
+              --source-packages "${AIES_CLONED_SOURCE_PACKAGES}" \
+              --package-cache "${AIES_PACKAGE_CACHE}" \
+              --output "${AIES_EVIDENCE}/package-final/fastlane-package-contract.json"
+
+      - name: Select and boot one simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list -j devices available \
+            > "${AIES_EVIDENCE}/toolchain/simulators.json"
+          udid="$(python3 - "${AIES_EVIDENCE}/toolchain/simulators.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          devices = json.loads(pathlib.Path(sys.argv[1]).read_text())["devices"]
+          candidates = []
+          for runtime, values in sorted(devices.items()):
+              for device in values:
+                  if device.get("isAvailable") and device.get("name") == "iPhone 16 Pro":
+                      candidates.append((runtime, device["udid"]))
+          if not candidates:
+              raise SystemExit("No available iPhone 16 Pro simulator")
+          preferred = [value for value in candidates if "iOS-18-5" in value[0]]
+          print((preferred or candidates)[0][1])
+          PY
+          )"
+          xcrun simctl boot "${udid}" 2>/dev/null || true
+          xcrun simctl bootstatus "${udid}" -b
+          echo "AIES_SIMULATOR_UDID=${udid}" >> "${GITHUB_ENV}"
+          xcrun simctl list devices | grep -F "${udid}" \
+            > "${AIES_EVIDENCE}/toolchain/selected-simulator.txt"
+
+      - name: Build Talk test products exactly once without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE}/build" "${AIES_DERIVED_DATA}"
+          strict=()
+          while IFS= read -r argument; do strict+=("${argument}"); done \
+            < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+          command=(
+            xcodebuild -project OpenClaw.xcodeproj -scheme OpenClaw
+            -configuration Debug -destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}"
+            -derivedDataPath "${AIES_DERIVED_DATA}"
+            -resultBundlePath "${AIES_EVIDENCE}/build/build-for-testing.xcresult"
+            -parallel-testing-enabled NO
+            "-only-testing:${AIES_TALK_SUITE}"
+            "${strict[@]}" build-for-testing
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+            "CODE_SIGN_IDENTITY=" "DEVELOPMENT_TEAM=" "PROVISIONING_PROFILE_SPECIFIER="
+          )
+          printf '%q ' "${command[@]}" \
+            > "${AIES_EVIDENCE}/build/build-for-testing.command.txt"
+          printf '\n' >> "${AIES_EVIDENCE}/build/build-for-testing.command.txt"
+          "${command[@]}" 2>&1 | tee "${AIES_EVIDENCE}/build/build-for-testing.log"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${AIES_EVIDENCE}/package-final/post-build-verification.json"
+
+      - name: Seal test-product identity and enumerate exact tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner="${AIES_BUILD_ROOT}/apps/ios/Tools/run_aies_qualification.py"
+          products="${AIES_DERIVED_DATA}/Build/Products"
+          xctestrun="$(python3 "${runner}" locate-xctestrun \
+            --products-root "${products}" \
+            --output "${AIES_EVIDENCE}/build/xctestrun.json")"
+          python3 "${runner}" hash-products \
+            --products-root "${products}" --xctestrun "${xctestrun}" \
+            --output "${AIES_EVIDENCE}/build/test-products.json"
+          {
+            echo "AIES_XCTESTRUN=${xctestrun}"
+            echo "AIES_TEST_PRODUCTS=${products}"
+          } >> "${GITHUB_ENV}"
+
+          enumerate() {
+            local label="$1" filter="$2" count="$3"
+            python3 "${runner}" enumerate \
+              --xctestrun "${xctestrun}" \
+              --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
+              --only-testing "${filter}" --expected-test-count "${count}" \
+              --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
+              --timeout-seconds 600 \
+              --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
+              --output "${AIES_EVIDENCE}/enumeration-${label}"
+          }
+          enumerate talk-suite "${AIES_TALK_SUITE}" 43
+          enumerate owner-convergence \
+            "${AIES_TALK_SUITE}/concurrentNodeOwnerRequestsForSameGatewayConvergeToOneIdentity" 1
+          enumerate stale-owner \
+            "${AIES_TALK_SUITE}/staleNodeOwnerSelectionCannotReplaceNewGatewayOwner" 1
+          enumerate raw-foreign \
+            "${AIES_TALK_SUITE}/exactRawRunSpeaksAndForeignFinalIsIgnored" 1
+          enumerate background-admission \
+            "${AIES_TALK_SUITE}/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission" 1
+
+      - name: Run forty focused passes for each high-risk Talk target
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner="${AIES_BUILD_ROOT}/apps/ios/Tools/run_aies_qualification.py"
+          run_target() {
+            local label="$1" filter="$2"
+            python3 "${runner}" run \
+              --xctestrun "${AIES_XCTESTRUN}" \
+              --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
+              --only-testing "${filter}" --count 40 --expected-test-count 1 \
+              --enumeration "${AIES_EVIDENCE}/enumeration-${label}/enumeration.json" \
+              --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
+              --timeout-seconds 600 \
+              --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
+              --output "${AIES_EVIDENCE}/matrix-${label}-focused-40"
+          }
+          run_target owner-convergence \
+            "${AIES_TALK_SUITE}/concurrentNodeOwnerRequestsForSameGatewayConvergeToOneIdentity"
+          run_target stale-owner \
+            "${AIES_TALK_SUITE}/staleNodeOwnerSelectionCannotReplaceNewGatewayOwner"
+          run_target raw-foreign \
+            "${AIES_TALK_SUITE}/exactRawRunSpeaksAndForeignFinalIsIgnored"
+          run_target background-admission \
+            "${AIES_TALK_SUITE}/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission"
+
+      - name: Run ten complete Talk suite passes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/run_aies_qualification.py" run \
+            --xctestrun "${AIES_XCTESTRUN}" \
+            --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
+            --only-testing "${AIES_TALK_SUITE}" --count 10 --expected-test-count 43 \
+            --enumeration "${AIES_EVIDENCE}/enumeration-talk-suite/enumeration.json" \
+            --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
+            --timeout-seconds 1200 \
+            --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
+            --output "${AIES_EVIDENCE}/matrix-talk-suite-10"
+
+      - name: Prove 50-of-50 target totals and seal evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${AIES_EVIDENCE}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          suite = json.loads((root / "matrix-talk-suite-10/matrix-summary.json").read_text())
+          if suite.get("status") != "passed" or suite.get("passed") != 10:
+              raise SystemExit("Talk suite did not pass 10/10")
+          totals = {}
+          for label in ("owner-convergence", "stale-owner", "raw-foreign", "background-admission"):
+              focused = json.loads((root / f"matrix-{label}-focused-40/matrix-summary.json").read_text())
+              if focused.get("status") != "passed" or focused.get("passed") != 40:
+                  raise SystemExit(f"focused matrix failed: {label}")
+              target = json.loads((root / f"enumeration-{label}/enumeration.json").read_text())
+              suite_ids = set(json.loads((root / "enumeration-talk-suite/enumeration.json").read_text())["testIdentifiers"])
+              if target["testIdentifiers"][0] not in suite_ids:
+                  raise SystemExit(f"target absent from Talk suite: {label}")
+              totals[label] = {"focusedPasses": 40, "suitePasses": 10, "totalPasses": 50}
+          (root / "talk-qualification-summary.json").write_text(
+              json.dumps({"status": "passed", "talkSuite": "10/10", "targets": totals}, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${AIES_EVIDENCE}/package-final/post-matrix-verification.json"
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/run_aies_qualification.py" seal \
+            --evidence "${AIES_EVIDENCE}"
+          cat "${AIES_EVIDENCE}/talk-qualification-summary.json"
+          cat "${AIES_EVIDENCE}/SHA256SUMS"
+
+      - name: Upload package and Talk qualification evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AIES-RC1-package-talk-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-package-talk-evidence
+          retention-days: 90
+          if-no-files-found: warn
+
+  compact-bootstrap-qualification:
+    needs: source-and-tooling
+    runs-on: macos-15
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Initialize compact/bootstrap evidence path
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AIES_EVIDENCE=${RUNNER_TEMP}/aies-compact-evidence" >> "${GITHUB_ENV}"
+
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Resolve and validate the exact shared package graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${AIES_EVIDENCE}/toolchain" "${AIES_EVIDENCE}/package"
+          xcodebuild -version | tee "${AIES_EVIDENCE}/toolchain/xcode.txt"
+          swift --version 2>&1 | tee "${AIES_EVIDENCE}/toolchain/swift.txt"
+          root="${RUNNER_TEMP}/aies-shared-qualification-root"
+          git clone --quiet --no-hardlinks --no-checkout "${GITHUB_WORKSPACE}" "${root}"
+          git -C "${root}" checkout --quiet --detach "${GITHUB_SHA}"
+          package="${root}/apps/shared/OpenClawKit"
+          swift package --package-path "${package}" resolve 2>&1 \
+            | tee "${AIES_EVIDENCE}/package/resolve.log"
+          python3 "${root}/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${root}" validate-scoped-resolved --scope openclawkit \
+            --resolved "${package}/Package.resolved" \
+            --output "${AIES_EVIDENCE}/package/openclawkit-resolved.json"
+          {
+            echo "AIES_SHARED_ROOT=${root}"
+            echo "AIES_SHARED_PACKAGE=${package}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build once and retain exact shared-test enumeration
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test list --package-path "${AIES_SHARED_PACKAGE}" \
+            --force-resolved-versions 2>&1 \
+            | tee "${AIES_EVIDENCE}/shared-test-enumeration.txt"
+          products="$(swift build --package-path "${AIES_SHARED_PACKAGE}" \
+            --force-resolved-versions --show-bin-path)"
+          python3 "${AIES_SHARED_ROOT}/apps/ios/Tools/run_aies_swift_qualification.py" \
+            hash-products --products-root "${products}" \
+            --output "${AIES_EVIDENCE}/shared-test-products.json"
+          {
+            echo "AIES_SHARED_PRODUCTS=${products}"
+            echo "AIES_SHARED_RESOLVED=${AIES_SHARED_PACKAGE}/Package.resolved"
+          } >> "${GITHUB_ENV}"
+          grep -F 'ChatViewModelTests' "${AIES_EVIDENCE}/shared-test-enumeration.txt" \
+            > "${AIES_EVIDENCE}/chat-view-model-enumeration.txt"
+          grep -F 'compact trigger ignores concurrent and immediate repeat requests' \
+            "${AIES_EVIDENCE}/chat-view-model-enumeration.txt" \
+            > "${AIES_EVIDENCE}/compact-target-enumeration.txt"
+          [[ "$(wc -l < "${AIES_EVIDENCE}/compact-target-enumeration.txt" | tr -d '[:space:]')" -eq 1 ]]
+
+      - name: Run ten complete compact/bootstrap-family suite passes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${AIES_SHARED_ROOT}/apps/ios/Tools/run_aies_swift_qualification.py" run \
+            --package-path "${AIES_SHARED_PACKAGE}" \
+            --products-root "${AIES_SHARED_PRODUCTS}" \
+            --products-manifest "${AIES_EVIDENCE}/shared-test-products.json" \
+            --resolved "${AIES_SHARED_RESOLVED}" \
+            --filter ChatViewModelTests --count 10 \
+            --expected-test-count 99 --expected-suite-count 1 \
+            --timeout-seconds 1200 \
+            --output "${AIES_EVIDENCE}/matrix-chat-view-model-10"
+
+      - name: Run forty focused compact concurrency passes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${AIES_SHARED_ROOT}/apps/ios/Tools/run_aies_swift_qualification.py" run \
+            --package-path "${AIES_SHARED_PACKAGE}" \
+            --products-root "${AIES_SHARED_PRODUCTS}" \
+            --products-manifest "${AIES_EVIDENCE}/shared-test-products.json" \
+            --resolved "${AIES_SHARED_RESOLVED}" \
+            --filter 'compact trigger ignores concurrent and immediate repeat requests' \
+            --count 40 --expected-test-count 1 --expected-suite-count 1 \
+            --timeout-seconds 600 \
+            --output "${AIES_EVIDENCE}/matrix-compact-focused-40"
+
+      - name: Prove compact target 50-of-50 and seal evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "${AIES_EVIDENCE}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          suite = json.loads((root / "matrix-chat-view-model-10/matrix-summary.json").read_text())
+          focused = json.loads((root / "matrix-compact-focused-40/matrix-summary.json").read_text())
+          if suite.get("status") != "passed" or suite.get("passed") != 10:
+              raise SystemExit("ChatViewModel suite did not pass 10/10")
+          if focused.get("status") != "passed" or focused.get("passed") != 40:
+              raise SystemExit("compact focused target did not pass 40/40")
+          report = {
+              "status": "passed",
+              "chatViewModelSuite": "10/10",
+              "compactFocused": "40/40",
+              "compactTargetTotal": "50/50",
+          }
+          (root / "compact-qualification-summary.json").write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n"
+          )
+          PY
+          current="$(shasum -a 256 "${AIES_SHARED_RESOLVED}" | awk '{print $1}')"
+          expected="$(python3 - "${AIES_EVIDENCE}/package/openclawkit-resolved.json" <<'PY'
+          import json, pathlib, sys
+          print(json.loads(pathlib.Path(sys.argv[1]).read_text())["rawSHA256"])
+          PY
+          )"
+          [[ "${current}" == "${expected}" ]]
+          status="$(git -C "${AIES_SHARED_ROOT}" status --porcelain=v2 --untracked-files=all)"
+          printf '%s\n' "${status}" > "${AIES_EVIDENCE}/final-build-root-status-v2.txt"
+          [[ -z "${status}" ]]
+          python3 "${AIES_SHARED_ROOT}/apps/ios/Tools/run_aies_qualification.py" seal \
+            --evidence "${AIES_EVIDENCE}"
+          cat "${AIES_EVIDENCE}/compact-qualification-summary.json"
+          cat "${AIES_EVIDENCE}/SHA256SUMS"
+
+      - name: Upload compact/bootstrap qualification evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AIES-RC1-compact-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-compact-evidence
+          retention-days: 90
+          if-no-files-found: warn

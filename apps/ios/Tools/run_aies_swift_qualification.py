@@ -181,6 +181,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         str(package),
         "--skip-build",
         "--force-resolved-versions",
+        "--no-parallel",
         "--filter",
         args.filter,
     ]

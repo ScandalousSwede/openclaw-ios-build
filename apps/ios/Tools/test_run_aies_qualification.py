@@ -183,6 +183,15 @@ class QualificationHarnessTests(unittest.TestCase):
             ):
                 qualification.test_product_inventory(products, external)
 
+    def test_evidence_output_must_not_overlap_test_products(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            products = pathlib.Path(temporary) / "Build/Products"
+            products.mkdir(parents=True)
+            with self.assertRaisesRegex(qualification.QualificationError, "must not overlap"):
+                qualification.require_separate_output(
+                    products / "evidence.json", products
+                )
+
     def test_extra_xcode_arguments_allow_only_strict_package_custody(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -206,6 +215,8 @@ class QualificationHarnessTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(qualification.QualificationError, "requires one value"):
             qualification.validate_extra_xcode_arguments(["-packageCachePath"])
+        with self.assertRaisesRegex(qualification.QualificationError, "incomplete"):
+            qualification.validate_extra_xcode_arguments([])
 
     def test_collect_enumeration_is_exact_for_suite_and_target(self) -> None:
         payload = enumeration_payload(

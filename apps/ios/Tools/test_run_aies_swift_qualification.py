@@ -100,6 +100,14 @@ class SwiftQualificationTests(unittest.TestCase):
                 report = qualification.run_matrix(args)
             self.assertEqual(report["passed"], 3)
             self.assertEqual(report["freshSwiftProcessCount"], 3)
+            first_command = json.loads(
+                (root / "evidence/iteration-001/command.json").read_text(
+                    encoding="utf-8"
+                )
+            )["arguments"]
+            self.assertIn("--skip-build", first_command)
+            self.assertIn("--force-resolved-versions", first_command)
+            self.assertIn("--no-parallel", first_command)
 
     def test_matrix_stops_on_first_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

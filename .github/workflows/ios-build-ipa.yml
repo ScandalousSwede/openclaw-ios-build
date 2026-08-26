@@ -139,7 +139,11 @@ jobs:
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
-            test_prepare_aies_package_build_root.py
+            test_aies_qualification_workflow_contract.py \
+            test_prepare_aies_package_build_root.py \
+            test_run_aies_qualification.py \
+            test_run_aies_swift_qualification.py \
+            test_verify_aies_unsigned_archive.py
 
       - name: Verify pinned Fastlane version
         run: |
@@ -191,9 +195,6 @@ jobs:
       - name: Setup pinned XcodeGen
         uses: ./.github/actions/setup-xcodegen
 
-      - name: Install dependencies
-        run: pnpm install
-
       - name: Prepare strict aggregate package build root
         run: |
           set -euo pipefail
@@ -206,6 +207,13 @@ jobs:
             --expected-sha "${GITHUB_SHA}" \
             --evidence-dir "${package_runtime}/evidence" \
             --github-env "${GITHUB_ENV}"
+
+      - name: Install dependencies in prepared build root
+        run: |
+          set -euo pipefail
+          cd "${AIES_BUILD_ROOT}"
+          pnpm install --frozen-lockfile
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Capture build provenance
         run: |
@@ -237,7 +245,10 @@ jobs:
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_qualification_workflow_contract.py \
             test_prepare_aies_package_build_root.py \
+            test_run_aies_qualification.py \
+            test_run_aies_swift_qualification.py \
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
@@ -570,9 +581,6 @@ jobs:
       - name: Setup pinned XcodeGen
         uses: ./.github/actions/setup-xcodegen
 
-      - name: Install dependencies
-        run: pnpm install
-
       - name: Prepare strict aggregate package build root
         run: |
           set -euo pipefail
@@ -585,6 +593,13 @@ jobs:
             --expected-sha "${GITHUB_SHA}" \
             --evidence-dir "${package_runtime}/evidence" \
             --github-env "${GITHUB_ENV}"
+
+      - name: Install dependencies in prepared build root
+        run: |
+          set -euo pipefail
+          cd "${AIES_BUILD_ROOT}"
+          pnpm install --frozen-lockfile
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Verify protected environment policy
         env:
@@ -714,7 +729,10 @@ jobs:
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_qualification_workflow_contract.py \
             test_prepare_aies_package_build_root.py \
+            test_run_aies_qualification.py \
+            test_run_aies_swift_qualification.py \
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
@@ -991,6 +1009,36 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
           retention-days: 90
           if-no-files-found: warn
+
+      - name: Seal signed package-authority evidence
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/aies-signed-package/evidence"
+          test -d "${evidence}"
+          python3 - "${evidence}" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1]).resolve()
+          sums = root / "SHA256SUMS"
+          if sums.exists() or sums.is_symlink():
+              raise SystemExit("signed package evidence is already sealed")
+          records = []
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink():
+                  raise SystemExit(f"signed package evidence contains a symlink: {path}")
+              if path.is_file():
+                  records.append(
+                      f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+                      f"{path.relative_to(root).as_posix()}"
+                  )
+          if not records:
+              raise SystemExit("signed package evidence is empty")
+          sums.write_text("\n".join(records) + "\n", encoding="utf-8")
+          PY
+          cat "${evidence}/SHA256SUMS"
 
       - name: Upload signed package-authority evidence
         if: always() && !cancelled()
