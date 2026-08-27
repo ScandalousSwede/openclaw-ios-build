@@ -377,26 +377,35 @@ jobs:
             echo "AIES_TEST_PRODUCTS=${products}"
           } >> "${GITHUB_ENV}"
 
-          enumerate() {
-            local label="$1" filter="$2" count="$3"
-            python3 "${runner}" enumerate \
+          python3 "${runner}" enumerate \
+            --xctestrun "${xctestrun}" \
+            --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
+            --only-testing "${AIES_TALK_SUITE}" --expected-test-count 43 \
+            --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
+            --timeout-seconds 600 \
+            --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
+            --output "${AIES_EVIDENCE}/enumeration-talk-suite"
+
+          narrow() {
+            local label="$1" filter="$2"
+            mkdir -p "${AIES_EVIDENCE}/enumeration-${label}"
+            python3 "${runner}" narrow-enumeration \
+              --source "${AIES_EVIDENCE}/enumeration-talk-suite/enumeration.json" \
               --xctestrun "${xctestrun}" \
               --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
-              --only-testing "${filter}" --expected-test-count "${count}" \
-              --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
-              --timeout-seconds 600 \
-              --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
-              --output "${AIES_EVIDENCE}/enumeration-${label}"
+              --source-only-testing "${AIES_TALK_SUITE}" \
+              --source-expected-test-count 43 \
+              --only-testing "${filter}" \
+              --output "${AIES_EVIDENCE}/enumeration-${label}/enumeration.json"
           }
-          enumerate talk-suite "${AIES_TALK_SUITE}" 43
-          enumerate owner-convergence \
-            "${AIES_TALK_SUITE}/concurrentNodeOwnerRequestsForSameGatewayConvergeToOneIdentity" 1
-          enumerate stale-owner \
-            "${AIES_TALK_SUITE}/staleNodeOwnerSelectionCannotReplaceNewGatewayOwner" 1
-          enumerate raw-foreign \
-            "${AIES_TALK_SUITE}/exactRawRunSpeaksAndForeignFinalIsIgnored" 1
-          enumerate background-admission \
-            "${AIES_TALK_SUITE}/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission" 1
+          narrow owner-convergence \
+            "${AIES_TALK_SUITE}/concurrentNodeOwnerRequestsForSameGatewayConvergeToOneIdentity"
+          narrow stale-owner \
+            "${AIES_TALK_SUITE}/staleNodeOwnerSelectionCannotReplaceNewGatewayOwner"
+          narrow raw-foreign \
+            "${AIES_TALK_SUITE}/exactRawRunSpeaksAndForeignFinalIsIgnored"
+          narrow background-admission \
+            "${AIES_TALK_SUITE}/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission"
 
       - name: Run forty focused passes for each high-risk Talk target
         shell: bash
@@ -404,25 +413,35 @@ jobs:
           set -euo pipefail
           runner="${AIES_BUILD_ROOT}/apps/ios/Tools/run_aies_qualification.py"
           run_target() {
-            local label="$1" filter="$2"
+            local label="$1"
+            local enumeration="${AIES_EVIDENCE}/enumeration-${label}/enumeration.json"
+            local filter
+            filter="$(python3 - "${enumeration}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          value = payload.get("onlyTesting")
+          if not isinstance(value, str) or not value.endswith("()"):
+              raise SystemExit("narrowed enumeration lacks Xcode's exact raw selector")
+          print(value)
+          PY
+            )"
             python3 "${runner}" run \
               --xctestrun "${AIES_XCTESTRUN}" \
               --destination "platform=iOS Simulator,id=${AIES_SIMULATOR_UDID}" \
               --only-testing "${filter}" --count 40 --expected-test-count 1 \
-              --enumeration "${AIES_EVIDENCE}/enumeration-${label}/enumeration.json" \
+              --enumeration "${enumeration}" \
               --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
               --timeout-seconds 600 \
               --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
               --output "${AIES_EVIDENCE}/matrix-${label}-focused-40"
           }
-          run_target owner-convergence \
-            "${AIES_TALK_SUITE}/concurrentNodeOwnerRequestsForSameGatewayConvergeToOneIdentity"
-          run_target stale-owner \
-            "${AIES_TALK_SUITE}/staleNodeOwnerSelectionCannotReplaceNewGatewayOwner"
-          run_target raw-foreign \
-            "${AIES_TALK_SUITE}/exactRawRunSpeaksAndForeignFinalIsIgnored"
-          run_target background-admission \
-            "${AIES_TALK_SUITE}/backgroundTalkOptInCannotAuthorizeInFlightContinuousAdmission"
+          run_target owner-convergence
+          run_target stale-owner
+          run_target raw-foreign
+          run_target background-admission
 
       - name: Run ten complete Talk suite passes
         shell: bash

@@ -347,14 +347,16 @@ def identifier_matches_filter(identifier: str, only_testing: str) -> bool:
     return False
 
 
-def collect_enumerated_identifiers(payload: Any, only_testing: str) -> list[str]:
+def collect_enumerated_test_records(
+    payload: Any, only_testing: str
+) -> list[dict[str, str]]:
     if not isinstance(payload, dict):
         raise QualificationError("Xcode enumeration payload must be an object")
     errors = payload.get("errors")
     values = payload.get("values")
     if errors != [] or not isinstance(values, list) or not values:
         raise QualificationError("Xcode enumeration contains errors or no configurations")
-    candidates: list[str] = []
+    candidates: list[dict[str, str]] = []
     for configuration in values:
         if not isinstance(configuration, dict):
             raise QualificationError("Xcode enumeration configuration must be an object")
@@ -370,10 +372,127 @@ def collect_enumerated_identifiers(payload: Any, only_testing: str) -> list[str]
             canonical = canonical_identifier(identifier)
             if not canonical:
                 raise QualificationError(f"enabled test identifier is invalid: {identifier}")
-            candidates.append(canonical)
-    if len(candidates) != len(set(candidates)):
+            candidates.append(
+                {"identifier": canonical, "rawIdentifier": identifier}
+            )
+    canonical = [candidate["identifier"] for candidate in candidates]
+    raw = [candidate["rawIdentifier"] for candidate in candidates]
+    if len(canonical) != len(set(canonical)) or len(raw) != len(set(raw)):
         raise QualificationError("Xcode enumeration contains duplicate enabled tests")
-    return sorted(candidates)
+    return sorted(candidates, key=lambda candidate: candidate["identifier"])
+
+
+def collect_enumerated_identifiers(payload: Any, only_testing: str) -> list[str]:
+    return [
+        record["identifier"]
+        for record in collect_enumerated_test_records(payload, only_testing)
+    ]
+
+
+def narrow_enumeration(
+    *,
+    source_path: pathlib.Path,
+    xctestrun: pathlib.Path,
+    destination: str,
+    source_only_testing: str,
+    source_expected_test_count: int,
+    only_testing: str,
+    output: pathlib.Path,
+) -> dict[str, Any]:
+    """Derive one exact leaf from an already sealed suite enumeration.
+
+    Xcode 26.2 can report a selected Swift Testing leaf in ``disabledTests``
+    when ``-enumerate-tests`` is combined with a normalized leaf
+    ``-only-testing`` filter. Suite enumeration is stable and retains Xcode's
+    exact raw ``testName()`` selector, so qualification narrows that sealed
+    inventory, executes the raw selector, and validates every actual XCResult
+    against the resulting single canonical identifier.
+    """
+    xctestrun = require_xctestrun(xctestrun)
+    source_only_testing = validate_only_testing(source_only_testing)
+    only_testing = validate_only_testing(only_testing)
+    source_parts = source_only_testing.split("/")
+    target_parts = only_testing.split("/")
+    if len(source_parts) != 2:
+        raise QualificationError("source enumeration must identify Module/Suite")
+    if len(target_parts) != 3:
+        raise QualificationError("narrowed enumeration must identify one exact test")
+    if target_parts[:2] != source_parts:
+        raise QualificationError(
+            "narrowed test must belong to the enumerated module and suite"
+        )
+    if source_expected_test_count < 1:
+        raise QualificationError("source expected test count must be positive")
+    source = load_enumeration(
+        source_path,
+        xctestrun,
+        destination,
+        source_only_testing,
+        source_expected_test_count,
+    )
+    target_identifier = "/".join(target_parts[-2:])
+    raw_identifiers = source.get("rawTestIdentifiers")
+    if (
+        not isinstance(raw_identifiers, list)
+        or any(not isinstance(value, str) for value in raw_identifiers)
+        or len(raw_identifiers) != source_expected_test_count
+        or len(set(raw_identifiers)) != len(raw_identifiers)
+    ):
+        raise QualificationError("source enumeration lacks exact raw test identifiers")
+    source_identifiers = source["testIdentifiers"]
+    raw_canonical: list[str] = []
+    for raw_identifier in raw_identifiers:
+        canonical = canonical_identifier(raw_identifier)
+        if (
+            not raw_identifier.endswith("()")
+            or not canonical
+            or not identifier_matches_filter(raw_identifier, source_only_testing)
+        ):
+            raise QualificationError(
+                "source raw test identifier does not belong to the enumerated suite"
+            )
+        raw_canonical.append(canonical)
+    if sorted(raw_canonical) != sorted(source_identifiers):
+        raise QualificationError(
+            "source raw and canonical test inventories differ"
+        )
+    for key in ("productsManifestSHA256", "productsTreeSHA256"):
+        value = source.get(key)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise QualificationError(f"source enumeration has invalid {key}")
+    raw_matches = [
+        identifier
+        for identifier in raw_identifiers
+        if canonical_identifier(identifier) == target_identifier
+        and identifier_matches_filter(identifier, only_testing)
+    ]
+    if len(raw_matches) != 1:
+        raise QualificationError(
+            "exact narrowed test is absent or ambiguous in the suite enumeration"
+        )
+    raw_target = raw_matches[0]
+    manifest = {
+        "schema": ENUMERATION_SCHEMA,
+        "destination": destination,
+        "expectedTestCount": 1,
+        "onlyTesting": raw_target,
+        "productsManifestSHA256": source["productsManifestSHA256"],
+        "productsTreeSHA256": source["productsTreeSHA256"],
+        "rawTestIdentifiers": [raw_target],
+        "requestedOnlyTesting": only_testing,
+        "sourceEnumerationSHA256": sha256_file(source_path),
+        "sourceExpectedTestCount": source_expected_test_count,
+        "sourceOnlyTesting": source_only_testing,
+        "testIdentifiers": [target_identifier],
+        "xctestrun": str(xctestrun),
+        "xctestrunSHA256": source.get("xctestrunSHA256"),
+    }
+    write_new_json(output, manifest)
+    return manifest
 
 
 def collect_xcresult_cases(payload: Any) -> list[dict[str, str]]:
@@ -735,7 +854,8 @@ def enumerate_tests(
                 f"test enumeration failed with xcodebuild status {outcome.status}"
             )
         payload = read_json(raw_path, "Xcode test enumeration")
-        identifiers = collect_enumerated_identifiers(payload, only_testing)
+        records = collect_enumerated_test_records(payload, only_testing)
+        identifiers = [record["identifier"] for record in records]
         if len(identifiers) != expected_test_count:
             raise QualificationError(
                 f"expected {expected_test_count} enumerated tests; found {len(identifiers)}"
@@ -750,6 +870,7 @@ def enumerate_tests(
             "productsManifestSHA256": sha256_file(products_manifest_path),
             "productsTreeSHA256": products_after["treeSHA256"],
             "rawEnumerationSHA256": sha256_file(raw_path),
+            "rawTestIdentifiers": [record["rawIdentifier"] for record in records],
             "testIdentifiers": identifiers,
             "xctestrun": str(xctestrun),
             "xctestrunSHA256": products["xctestrunSHA256"],
@@ -1068,6 +1189,15 @@ def build_parser() -> argparse.ArgumentParser:
     enumeration.add_argument("--output", type=pathlib.Path, required=True)
     add_xcode_arguments(enumeration)
 
+    narrow = subparsers.add_parser("narrow-enumeration")
+    narrow.add_argument("--source", type=pathlib.Path, required=True)
+    narrow.add_argument("--xctestrun", type=pathlib.Path, required=True)
+    narrow.add_argument("--destination", required=True)
+    narrow.add_argument("--source-only-testing", required=True)
+    narrow.add_argument("--source-expected-test-count", type=int, required=True)
+    narrow.add_argument("--only-testing", required=True)
+    narrow.add_argument("--output", type=pathlib.Path, required=True)
+
     run = subparsers.add_parser("run")
     run.add_argument("--xcodebuild", default="xcodebuild")
     run.add_argument("--xcrun", default="xcrun")
@@ -1122,6 +1252,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=args.output,
                 extra_arguments=extra,
                 timeout_seconds=args.timeout_seconds,
+            )
+            print(json.dumps(manifest, sort_keys=True))
+        elif args.command == "narrow-enumeration":
+            manifest = narrow_enumeration(
+                source_path=args.source,
+                xctestrun=args.xctestrun,
+                destination=args.destination,
+                source_only_testing=args.source_only_testing,
+                source_expected_test_count=args.source_expected_test_count,
+                only_testing=args.only_testing,
+                output=args.output,
             )
             print(json.dumps(manifest, sort_keys=True))
         elif args.command == "run":

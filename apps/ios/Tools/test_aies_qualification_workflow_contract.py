@@ -66,6 +66,10 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertIn("--count 10 --expected-test-count 43", qualification)
         self.assertIn("--filter ChatViewModelTests --count 10", qualification)
         self.assertIn("compactTargetTotal", qualification)
+        self.assertEqual(qualification.count('python3 "${runner}" enumerate'), 1)
+        self.assertEqual(qualification.count('python3 "${runner}" narrow-enumeration'), 1)
+        self.assertEqual(qualification.count("          narrow "), 4)
+        self.assertIn('value.endswith("()")', qualification)
         self.assertEqual(
             release.count("prepare_aies_package_build_root.py prepare"), 2
         )

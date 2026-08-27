@@ -106,9 +106,15 @@ class QualificationHarnessTests(unittest.TestCase):
                 "destination": DESTINATION,
                 "expectedTestCount": len(identifiers),
                 "onlyTesting": only_testing,
+                "productsManifestSHA256": qualification.sha256_bytes(
+                    b"products-manifest"
+                ),
                 "productsTreeSHA256": qualification.stable_test_product_inventory(
                     xctestrun.parent, xctestrun
                 )["treeSHA256"],
+                "rawTestIdentifiers": [
+                    f"OpenClawTests/{identifier}()" for identifier in identifiers
+                ],
                 "testIdentifiers": identifiers,
                 "xctestrunSHA256": qualification.sha256_file(xctestrun),
             },
@@ -233,6 +239,110 @@ class QualificationHarnessTests(unittest.TestCase):
         )
         self.assertEqual(target, ["TalkDurableOutboxTests/example"])
 
+    def test_narrow_enumeration_retains_exact_raw_xcode_selector(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            xctestrun = self.make_xctestrun(root)
+            source = root / "suite-enumeration.json"
+            self.write_enumeration(
+                source,
+                xctestrun,
+                [
+                    "TalkDurableOutboxTests/example",
+                    "TalkDurableOutboxTests/other",
+                ],
+                only_testing="OpenClawTests/TalkDurableOutboxTests",
+            )
+            output = root / "target-enumeration.json"
+            result = qualification.narrow_enumeration(
+                source_path=source,
+                xctestrun=xctestrun,
+                destination=DESTINATION,
+                source_only_testing="OpenClawTests/TalkDurableOutboxTests",
+                source_expected_test_count=2,
+                only_testing=FILTER,
+                output=output,
+            )
+            raw = "OpenClawTests/TalkDurableOutboxTests/example()"
+            self.assertEqual(result["onlyTesting"], raw)
+            self.assertEqual(result["rawTestIdentifiers"], [raw])
+            self.assertEqual(
+                result["testIdentifiers"], ["TalkDurableOutboxTests/example"]
+            )
+            self.assertEqual(result["requestedOnlyTesting"], FILTER)
+            self.assertEqual(
+                result["sourceEnumerationSHA256"], qualification.sha256_file(source)
+            )
+            loaded = qualification.load_enumeration(
+                output, xctestrun, DESTINATION, raw, 1
+            )
+            self.assertEqual(loaded, result)
+
+    def test_narrow_enumeration_rejects_absent_or_wrong_suite_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            xctestrun = self.make_xctestrun(root)
+            source = root / "suite-enumeration.json"
+            self.write_enumeration(
+                source,
+                xctestrun,
+                ["TalkDurableOutboxTests/example"],
+                only_testing="OpenClawTests/TalkDurableOutboxTests",
+            )
+            with self.assertRaisesRegex(
+                qualification.QualificationError, "absent or ambiguous"
+            ):
+                qualification.narrow_enumeration(
+                    source_path=source,
+                    xctestrun=xctestrun,
+                    destination=DESTINATION,
+                    source_only_testing="OpenClawTests/TalkDurableOutboxTests",
+                    source_expected_test_count=1,
+                    only_testing="OpenClawTests/TalkDurableOutboxTests/missing",
+                    output=root / "missing.json",
+                )
+            with self.assertRaisesRegex(
+                qualification.QualificationError, "must belong"
+            ):
+                qualification.narrow_enumeration(
+                    source_path=source,
+                    xctestrun=xctestrun,
+                    destination=DESTINATION,
+                    source_only_testing="OpenClawTests/TalkDurableOutboxTests",
+                    source_expected_test_count=1,
+                    only_testing="OpenClawTests/OtherTests/example",
+                    output=root / "wrong-suite.json",
+                )
+
+    def test_narrow_enumeration_rejects_mismatched_raw_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            xctestrun = self.make_xctestrun(root)
+            source = root / "suite-enumeration.json"
+            self.write_enumeration(
+                source,
+                xctestrun,
+                ["TalkDurableOutboxTests/example"],
+                only_testing="OpenClawTests/TalkDurableOutboxTests",
+            )
+            payload = qualification.read_json(source, "suite enumeration")
+            payload["rawTestIdentifiers"] = [
+                "OpenClawTests/OtherTests/example()"
+            ]
+            qualification.write_json(source, payload)
+            with self.assertRaisesRegex(
+                qualification.QualificationError, "does not belong"
+            ):
+                qualification.narrow_enumeration(
+                    source_path=source,
+                    xctestrun=xctestrun,
+                    destination=DESTINATION,
+                    source_only_testing="OpenClawTests/TalkDurableOutboxTests",
+                    source_expected_test_count=1,
+                    only_testing=FILTER,
+                    output=root / "target.json",
+                )
+
     def test_collect_enumeration_ignores_disabled_tests(self) -> None:
         payload = enumeration_payload(
             "OpenClawTests/TalkDurableOutboxTests/example"
@@ -346,6 +456,10 @@ class QualificationHarnessTests(unittest.TestCase):
                     timeout_seconds=300,
                 )
             self.assertEqual(manifest["testIdentifiers"], ["TalkDurableOutboxTests/example"])
+            self.assertEqual(
+                manifest["rawTestIdentifiers"],
+                ["OpenClawTests/TalkDurableOutboxTests/example()"],
+            )
             self.assertEqual(observed.count("test-without-building"), 1)
             self.assertIn("-enumerate-tests", observed)
             self.assertNotIn("archive", observed)
@@ -359,7 +473,10 @@ class QualificationHarnessTests(unittest.TestCase):
             self.write_products_manifest(products_manifest, xctestrun)
             enumeration = root / "enumeration.json"
             expected = ["TalkDurableOutboxTests/example"]
-            self.write_enumeration(enumeration, xctestrun, expected)
+            raw_filter = f"{FILTER}()"
+            self.write_enumeration(
+                enumeration, xctestrun, expected, only_testing=raw_filter
+            )
             launches: list[list[str]] = []
 
             def fake_execute(
@@ -404,7 +521,7 @@ class QualificationHarnessTests(unittest.TestCase):
                     xcrun="xcrun",
                     xctestrun=xctestrun,
                     destination=DESTINATION,
-                    only_testing=FILTER,
+                    only_testing=raw_filter,
                     count=3,
                     expected_test_count=1,
                     enumeration_path=enumeration,
@@ -422,6 +539,12 @@ class QualificationHarnessTests(unittest.TestCase):
             )
             self.assertTrue(
                 all(command.count("-resultBundlePath") == 1 for command in launches)
+            )
+            self.assertTrue(
+                all(
+                    command.count(f"-only-testing:{raw_filter}") == 1
+                    for command in launches
+                )
             )
 
     def test_run_repetitions_stops_after_first_invalid_result(self) -> None:
