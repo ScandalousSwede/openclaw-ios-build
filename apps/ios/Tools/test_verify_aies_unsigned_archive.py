@@ -43,10 +43,18 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
             self.build_settings_payload(), MAIN_ID
         )
 
+        self.assertEqual(
+            report["schema"],
+            "argus.openclaw-ios.unsigned-build-settings-report.v2",
+        )
         self.assertEqual(report["status"], "verified")
         self.assertEqual(report["target_count"], 5)
+        self.assertEqual(report["required_entry_count"], 5)
         self.assertEqual(
             {item["bundle_id"] for item in report["targets"]}, set(BUNDLE_PATHS)
+        )
+        self.assertTrue(
+            all(item["occurrence_count"] == 1 for item in report["targets"])
         )
 
     def test_rejects_missing_required_target(self) -> None:
@@ -55,10 +63,97 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing required.*OpenClawWatchApp"):
             verifier.build_settings_topology_report(payload, MAIN_ID)
 
-    def test_rejects_duplicate_required_target(self) -> None:
+    def test_accepts_and_records_every_valid_required_target_occurrence(self) -> None:
         payload = self.build_settings_payload()
-        payload.append(payload[0])
-        with self.assertRaisesRegex(ValueError, "duplicate build-settings entry"):
+        payload[0]["buildSettings"].update(
+            {
+                "SDKROOT": "iphonesimulator",
+                "PLATFORM_NAME": "iphonesimulator",
+                "EFFECTIVE_PLATFORM_NAME": "-iphonesimulator",
+                "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator",
+            }
+        )
+        payload.append(
+            {
+                **payload[0],
+                "buildSettings": {
+                    **payload[0]["buildSettings"],
+                    "SDKROOT": "iphoneos",
+                    "PLATFORM_NAME": "iphoneos",
+                    "EFFECTIVE_PLATFORM_NAME": "-iphoneos",
+                },
+            }
+        )
+
+        report = verifier.build_settings_topology_report(payload, MAIN_ID)
+
+        self.assertEqual(report["target_count"], 5)
+        self.assertEqual(report["required_entry_count"], 6)
+        main = next(item for item in report["targets"] if item["target"] == "OpenClaw")
+        self.assertEqual(main["occurrence_count"], 2)
+        self.assertEqual(
+            [item["source_index"] for item in main["occurrences"]], [0, 6]
+        )
+        self.assertEqual(
+            [item["context"]["SDKROOT"] for item in main["occurrences"]],
+            ["iphonesimulator", "iphoneos"],
+        )
+        self.assertEqual(
+            len(
+                {
+                    item["full_build_settings_sha256"]
+                    for item in main["occurrences"]
+                }
+            ),
+            2,
+        )
+
+    def test_rejects_invalid_bundle_identifier_in_later_occurrence(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append(
+            {
+                **payload[0],
+                "buildSettings": {
+                    **payload[0]["buildSettings"],
+                    "PRODUCT_BUNDLE_IDENTIFIER": "ai.openclaw.client",
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "bundle identifier mismatch.*index 6"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_invalid_topology_variable_in_later_occurrence(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append(
+            {
+                **payload[0],
+                "buildSettings": {
+                    **payload[0]["buildSettings"],
+                    "OPENCLAW_SHARE_BUNDLE_ID": "ai.openclaw.client.share",
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "topology variable mismatch.*index 6"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_enabled_signing_in_later_occurrence(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append(
+            {
+                **payload[0],
+                "buildSettings": {
+                    **payload[0]["buildSettings"],
+                    "CODE_SIGNING_ALLOWED": "YES",
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "CODE_SIGNING_ALLOWED.*index 6"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_missing_settings_in_later_occurrence(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append({"target": "OpenClaw"})
+        with self.assertRaisesRegex(ValueError, "missing buildSettings.*index 6"):
             verifier.build_settings_topology_report(payload, MAIN_ID)
 
     def test_rejects_short_bundle_identifier(self) -> None:
