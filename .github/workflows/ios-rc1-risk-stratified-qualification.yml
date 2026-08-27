@@ -83,6 +83,7 @@ jobs:
               "apps/ios/Tools/test_verify_aies_internal_signing.py",
               "apps/ios/Tools/test_verify_aies_unsigned_archive.py",
               "apps/ios/Tools/verify_aies_fastlane_package_contract.rb",
+              "apps/ios/Tools/verify_aies_internal_signing.py",
               "apps/ios/Tools/verify_aies_unsigned_archive.py",
               "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatViewModelTests.swift",
               "apps/shared/OpenClawKit/Tests/OpenClawKitTests/TestAsyncHelpers.swift",

@@ -50,6 +50,9 @@ class AIESInternalSigningTests(unittest.TestCase):
             with self.mock_signing():
                 report = verifier.build_report(args)
             self.assertEqual(report["status"], "verified")
+            self.assertEqual(
+                report["schema"], "argus.openclaw-ios.signing-report.v2"
+            )
             self.assertEqual(report["push_contract"]["transport"], "direct")
             self.assertEqual(report["push_contract"]["relay_base_url"], "")
             self.assertFalse(report["push_contract"]["relay_base_url_present"])
@@ -64,10 +67,29 @@ class AIESInternalSigningTests(unittest.TestCase):
                     binding["archive_executable"]["signature_stripped_sha256"],
                     binding["ipa_executable"]["signature_stripped_sha256"],
                 )
-                self.assertEqual(
-                    binding["archive_executable"]["uuids"],
-                    binding["dsym"]["uuids"],
-                )
+                if binding["bundle_id"] == f"{MAIN_ID}.watchkitapp":
+                    self.assertEqual(binding["executable_role"], "sdk_watchkit_stub")
+                    self.assertIsNone(binding["dsym"])
+                    self.assertNotEqual(
+                        binding["archive_executable"]["raw_sha256"],
+                        binding["watchkit_stub"]["archive"]["embedded_stub"][
+                            "raw_sha256"
+                        ],
+                    )
+                    self.assertEqual(
+                        binding["watchkit_stub"]["archive"]["embedded_stub"][
+                            "signature_stripped_sha256"
+                        ],
+                        binding["watchkit_stub"]["ipa"]["embedded_stub"][
+                            "signature_stripped_sha256"
+                        ],
+                    )
+                else:
+                    self.assertEqual(binding["executable_role"], "compiled_product")
+                    self.assertEqual(
+                        binding["archive_executable"]["uuids"],
+                        binding["dsym"]["uuids"],
+                    )
             self.assertTrue(
                 all(
                     item["signing_identity"]["trust_verified"]
@@ -93,13 +115,21 @@ class AIESInternalSigningTests(unittest.TestCase):
             self.assertEqual(report["status"], "archive_verified")
             self.assertEqual(len(report["archive"]["bundles"]), 5)
             self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
+            self.assertEqual(report["binary_binding"]["required_dsym_count"], 4)
+            self.assertEqual(report["binary_binding"]["verified_dsym_count"], 4)
             self.assertNotIn("ipa", report)
             for binding in report["binary_binding"]["bundles"]:
                 self.assertNotIn("ipa_executable", binding)
-                self.assertEqual(
-                    binding["archive_executable"]["uuids"],
-                    binding["dsym"]["uuids"],
-                )
+                if binding["bundle_id"] == f"{MAIN_ID}.watchkitapp":
+                    self.assertEqual(binding["executable_role"], "sdk_watchkit_stub")
+                    self.assertIsNone(binding["dsym"])
+                    self.assertIn("archive", binding["watchkit_stub"])
+                    self.assertNotIn("ipa", binding["watchkit_stub"])
+                else:
+                    self.assertEqual(
+                        binding["archive_executable"]["uuids"],
+                        binding["dsym"]["uuids"],
+                    )
 
     def test_rejects_relay_configuration_in_exported_ipa(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -255,6 +285,92 @@ class AIESInternalSigningTests(unittest.TestCase):
                 ):
                     verifier.build_report(args)
 
+    def test_rejects_missing_dsym_for_every_compiled_product(self) -> None:
+        compiled = [
+            bundle_id
+            for bundle_id in BUNDLE_PATHS
+            if bundle_id != f"{MAIN_ID}.watchkitapp"
+        ]
+        for bundle_id in compiled:
+            with self.subTest(bundle_id=bundle_id):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    self.dsym_binary(args.archive, bundle_id).unlink()
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(ValueError, "missing matching dSYM"),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_missing_or_mismatched_watchkit_stub(self) -> None:
+        for mutation in ("missing", "mismatched"):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    watch_bundle = self.bundle_path(
+                        args.archive / "Products" / "Applications" / "OpenClaw.app",
+                        f"{MAIN_ID}.watchkitapp",
+                    )
+                    stub = watch_bundle / "_WatchKitStub" / "WK"
+                    if mutation == "missing":
+                        stub.unlink()
+                    else:
+                        stub.write_bytes(b"different-sdk-stub")
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(
+                            ValueError, "WatchKit SDK stub|does not match"
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_missing_or_mismatched_ipa_watchkit_stub(self) -> None:
+        cases = (
+            {"missing_ipa_watch_stub": True},
+            {"mismatched_ipa_watch_stub": True},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp), **options)
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(
+                            ValueError, "WatchKit SDK stub|does not match"
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_wrong_watchkit_plist_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            watch_bundle = self.bundle_path(
+                args.archive / "Products" / "Applications" / "OpenClaw.app",
+                f"{MAIN_ID}.watchkitapp",
+            )
+            info_path = watch_bundle / "Info.plist"
+            info = verifier.read_plist(info_path)
+            info["WKCompanionAppBundleIdentifier"] = "ai.openclaw.invalid"
+            with info_path.open("wb") as handle:
+                plistlib.dump(info, handle)
+            with (
+                self.mock_signing(),
+                self.assertRaisesRegex(ValueError, "companion identifier mismatch"),
+            ):
+                verifier.build_report(args)
+
+    def test_rejects_unexpected_watchkit_stub_dsym(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            dsym = self.dsym_binary(args.archive, f"{MAIN_ID}.watchkitapp")
+            dsym.parent.mkdir(parents=True, exist_ok=True)
+            dsym.write_bytes(b"unexpected-watch-stub-dsym")
+            with (
+                self.mock_signing(),
+                self.assertRaisesRegex(ValueError, "unexpected dSYM"),
+            ):
+                verifier.build_report(args)
+
     def test_signing_identity_verifies_entire_extracted_chain(self) -> None:
         commands: list[list[str]] = []
 
@@ -353,6 +469,8 @@ class AIESInternalSigningTests(unittest.TestCase):
         add_archive_sibling_app: bool = False,
         mismatched_ipa_bundle: str | None = None,
         mismatched_dsym_bundle: str | None = None,
+        missing_ipa_watch_stub: bool = False,
+        mismatched_ipa_watch_stub: bool = False,
     ) -> argparse.Namespace:
         archive = temp / "OpenClaw.xcarchive"
         archive_app = archive / "Products" / "Applications" / "OpenClaw.app"
@@ -374,6 +492,8 @@ class AIESInternalSigningTests(unittest.TestCase):
             )
         for bundle_id, relative_path in BUNDLE_PATHS.items():
             if bundle_id == omit_bundle:
+                continue
+            if bundle_id == f"{MAIN_ID}.watchkitapp":
                 continue
             bundle_path = (
                 archive_app
@@ -413,6 +533,15 @@ class AIESInternalSigningTests(unittest.TestCase):
             executables=ipa_executables,
             add_duplicate_bundle=add_duplicate_bundle,
         )
+        ipa_watch_stub = (
+            self.bundle_path(ipa_root, f"{MAIN_ID}.watchkitapp")
+            / "_WatchKitStub"
+            / "WK"
+        )
+        if missing_ipa_watch_stub:
+            ipa_watch_stub.unlink()
+        elif mismatched_ipa_watch_stub:
+            ipa_watch_stub.write_bytes(b"sdk-stub-signature:different-payload")
         ipa = temp / "OpenClaw.ipa"
         with zipfile.ZipFile(ipa, "w") as output:
             for path in sorted((temp / "ipa-root").rglob("*")):
@@ -480,7 +609,23 @@ class AIESInternalSigningTests(unittest.TestCase):
             "CFBundleExecutable": executable_name,
             "CFBundleIdentifier": bundle_id,
         }
+        if bundle_id == f"{MAIN_ID}.watchkitapp":
+            info.update(
+                {
+                    "WKWatchKitApp": True,
+                    "WKCompanionAppBundleIdentifier": MAIN_ID,
+                }
+            )
         (path / executable_name).write_bytes(executable)
+        if bundle_id == f"{MAIN_ID}.watchkitapp":
+            stub = path / "_WatchKitStub" / "WK"
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            normalized = executable
+            for prefix in (b"archive-signature:", b"ipa-signature:"):
+                if normalized.startswith(prefix):
+                    normalized = normalized[len(prefix) :]
+                    break
+            stub.write_bytes(b"sdk-stub-signature:" + normalized)
         if main:
             info.update(
                 {
@@ -499,6 +644,29 @@ class AIESInternalSigningTests(unittest.TestCase):
         with (path / "Info.plist").open("wb") as handle:
             plistlib.dump(info, handle)
         (path / "embedded.mobileprovision").write_bytes(b"profile")
+
+    @staticmethod
+    def bundle_path(app: pathlib.Path, bundle_id: str) -> pathlib.Path:
+        relative = BUNDLE_PATHS[bundle_id]
+        return app if relative == pathlib.PurePosixPath(".") else app / relative
+
+    @staticmethod
+    def dsym_binary(archive: pathlib.Path, bundle_id: str) -> pathlib.Path:
+        relative = BUNDLE_PATHS[bundle_id]
+        bundle_name = (
+            "OpenClaw.app"
+            if relative == pathlib.PurePosixPath(".")
+            else relative.name
+        )
+        return (
+            archive
+            / "dSYMs"
+            / f"{bundle_name}.dSYM"
+            / "Contents"
+            / "Resources"
+            / "DWARF"
+            / BUNDLE_EXECUTABLES[bundle_id]
+        )
 
     @staticmethod
     def mock_signing(
@@ -556,7 +724,11 @@ class AIESInternalSigningTests(unittest.TestCase):
 
         def stripped_hash(path: pathlib.Path, _codesign: str) -> str:
             content = path.read_bytes()
-            for prefix in (b"archive-signature:", b"ipa-signature:"):
+            for prefix in (
+                b"archive-signature:",
+                b"ipa-signature:",
+                b"sdk-stub-signature:",
+            ):
                 if content.startswith(prefix):
                     content = content[len(prefix) :]
                     break

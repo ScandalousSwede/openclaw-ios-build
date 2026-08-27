@@ -262,10 +262,23 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
                 report = verifier.build_report(args)
 
             self.assertEqual(report["status"], "verified")
+            self.assertEqual(
+                report["schema"],
+                "argus.openclaw-ios.unsigned-archive-report.v2",
+            )
             self.assertEqual(report["bundle_count"], 5)
             self.assertEqual(len(report["archive"]["bundles"]), 5)
             self.assertEqual(len(report["ipa"]["bundles"]), 5)
             self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
+            self.assertEqual(report["binary_binding"]["bundle_count"], 5)
+            self.assertEqual(
+                report["binary_binding"]["compiled_executable_count"], 4
+            )
+            self.assertEqual(
+                report["binary_binding"]["sdk_watchkit_stub_count"], 1
+            )
+            self.assertEqual(report["binary_binding"]["required_dsym_count"], 4)
+            self.assertEqual(report["binary_binding"]["verified_dsym_count"], 4)
             self.assertEqual(
                 report["ipa"]["artifact"]["sha256"],
                 hashlib.sha256(args.ipa.read_bytes()).hexdigest(),
@@ -279,10 +292,20 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
                 self.assertEqual(
                     binding["archive_executable"], binding["ipa_executable"]
                 )
-                self.assertEqual(
-                    binding["archive_executable"]["uuids"],
-                    binding["dsym"]["uuids"],
-                )
+                if binding["bundle_id"] == f"{MAIN_ID}.watchkitapp":
+                    self.assertEqual(binding["executable_role"], "sdk_watchkit_stub")
+                    self.assertIsNone(binding["dsym"])
+                    self.assertEqual(binding["dsym_status"], "not_emitted")
+                    self.assertEqual(
+                        binding["watchkit_stub"]["archive"],
+                        binding["watchkit_stub"]["ipa"],
+                    )
+                else:
+                    self.assertEqual(binding["executable_role"], "compiled_product")
+                    self.assertEqual(
+                        binding["archive_executable"]["uuids"],
+                        binding["dsym"]["uuids"],
+                    )
 
     def test_rejects_missing_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -304,15 +327,116 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
             ):
                 verifier.build_report(args)
 
-    def test_rejects_dsym_uuid_mismatch(self) -> None:
+    def test_rejects_dsym_uuid_mismatch_for_every_compiled_product(self) -> None:
+        compiled = [
+            bundle_id
+            for bundle_id in BUNDLE_PATHS
+            if bundle_id != f"{MAIN_ID}.watchkitapp"
+        ]
+        for bundle_id in compiled:
+            with self.subTest(bundle_id=bundle_id):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(
+                        pathlib.Path(raw_temp), mismatched_dsym_bundle=bundle_id
+                    )
+                    with (
+                        mock.patch.object(
+                            verifier, "macho_uuids", side_effect=self.uuids
+                        ),
+                        self.assertRaisesRegex(ValueError, "dSYM UUIDs differ"),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_missing_dsym_for_every_compiled_product(self) -> None:
+        compiled = [
+            bundle_id
+            for bundle_id in BUNDLE_PATHS
+            if bundle_id != f"{MAIN_ID}.watchkitapp"
+        ]
+        for bundle_id in compiled:
+            with self.subTest(bundle_id=bundle_id):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    self.dsym_binary(args.archive, bundle_id).unlink()
+                    with (
+                        mock.patch.object(
+                            verifier, "macho_uuids", side_effect=self.uuids
+                        ),
+                        self.assertRaisesRegex(ValueError, "missing matching dSYM"),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_missing_or_mismatched_watchkit_stub(self) -> None:
+        mutations = ("missing", "mismatched")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    watch_bundle = self.bundle_path(
+                        args.archive / "Products" / "Applications" / "OpenClaw.app",
+                        f"{MAIN_ID}.watchkitapp",
+                    )
+                    stub = watch_bundle / "_WatchKitStub" / "WK"
+                    if mutation == "missing":
+                        stub.unlink()
+                    else:
+                        stub.write_bytes(b"different-sdk-stub")
+                    with (
+                        mock.patch.object(
+                            verifier, "macho_uuids", side_effect=self.uuids
+                        ),
+                        self.assertRaisesRegex(
+                            ValueError, "WatchKit SDK stub|does not match"
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_wrong_watchkit_plist_contract(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
-            args = self.make_fixture(
-                pathlib.Path(raw_temp),
-                mismatched_dsym_bundle=f"{MAIN_ID}.watchkitapp.extension",
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            watch_bundle = self.bundle_path(
+                args.archive / "Products" / "Applications" / "OpenClaw.app",
+                f"{MAIN_ID}.watchkitapp",
             )
+            info_path = watch_bundle / "Info.plist"
+            info = verifier.read_plist(info_path)
+            info["WKCompanionAppBundleIdentifier"] = "ai.openclaw.invalid"
+            with info_path.open("wb") as handle:
+                plistlib.dump(info, handle)
             with (
                 mock.patch.object(verifier, "macho_uuids", side_effect=self.uuids),
-                self.assertRaisesRegex(ValueError, "dSYM UUIDs differ.*extension"),
+                self.assertRaisesRegex(ValueError, "companion identifier mismatch"),
+            ):
+                verifier.build_report(args)
+
+    def test_rejects_missing_or_mismatched_ipa_watchkit_stub(self) -> None:
+        cases = (
+            {"missing_ipa_watch_stub": True},
+            {"mismatched_ipa_watch_stub": True},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp), **options)
+                    with (
+                        mock.patch.object(
+                            verifier, "macho_uuids", side_effect=self.uuids
+                        ),
+                        self.assertRaisesRegex(
+                            ValueError, "WatchKit SDK stub|does not match"
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_unexpected_watchkit_stub_dsym(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            dsym = self.dsym_binary(args.archive, f"{MAIN_ID}.watchkitapp")
+            dsym.parent.mkdir(parents=True, exist_ok=True)
+            dsym.write_bytes(b"unexpected-watch-stub-dsym")
+            with (
+                mock.patch.object(verifier, "macho_uuids", side_effect=self.uuids),
+                self.assertRaisesRegex(ValueError, "unexpected dSYM"),
             ):
                 verifier.build_report(args)
 
@@ -381,6 +505,8 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
         mismatched_dsym_bundle: str | None = None,
         mismatched_ipa_bundle: str | None = None,
         missing_executable_bundle: str | None = None,
+        missing_ipa_watch_stub: bool = False,
+        mismatched_ipa_watch_stub: bool = False,
     ) -> argparse.Namespace:
         archive = temp / "OpenClaw.xcarchive"
         archive_app = archive / "Products" / "Applications" / "OpenClaw.app"
@@ -396,6 +522,8 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
 
         for bundle_id, relative in BUNDLE_PATHS.items():
             if bundle_id == omit_bundle:
+                continue
+            if bundle_id == f"{MAIN_ID}.watchkitapp":
                 continue
             bundle = archive_app if str(relative) == "." else archive_app / relative
             executable = BUNDLE_EXECUTABLES[bundle_id]
@@ -423,6 +551,15 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
             (bundle / BUNDLE_EXECUTABLES[mismatched_ipa_bundle]).write_bytes(
                 b"different-unsigned-executable"
             )
+        ipa_watch_stub = (
+            self.bundle_path(payload_app, f"{MAIN_ID}.watchkitapp")
+            / "_WatchKitStub"
+            / "WK"
+        )
+        if missing_ipa_watch_stub:
+            ipa_watch_stub.unlink()
+        elif mismatched_ipa_watch_stub:
+            ipa_watch_stub.write_bytes(b"different-ipa-sdk-stub")
         ipa = temp / "OpenClaw.ipa"
         self.zip_tree(ipa_root, ipa)
 
@@ -453,20 +590,47 @@ class AIESUnsignedArchiveTests(unittest.TestCase):
     def write_bundle(path: pathlib.Path, bundle_id: str) -> None:
         path.mkdir(parents=True, exist_ok=True)
         executable_name = BUNDLE_EXECUTABLES.get(bundle_id, "Unexpected")
+        info = {
+            "CFBundleIdentifier": bundle_id,
+            "CFBundleExecutable": executable_name,
+        }
+        if bundle_id == f"{MAIN_ID}.watchkitapp":
+            info.update(
+                {
+                    "WKWatchKitApp": True,
+                    "WKCompanionAppBundleIdentifier": MAIN_ID,
+                }
+            )
         with (path / "Info.plist").open("wb") as handle:
             plistlib.dump(
-                {
-                    "CFBundleIdentifier": bundle_id,
-                    "CFBundleExecutable": executable_name,
-                },
+                info,
                 handle,
             )
-        (path / executable_name).write_bytes(f"unsigned:{bundle_id}".encode())
+        executable = f"unsigned:{bundle_id}".encode()
+        (path / executable_name).write_bytes(executable)
+        if bundle_id == f"{MAIN_ID}.watchkitapp":
+            stub = path / "_WatchKitStub" / "WK"
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            stub.write_bytes(executable)
 
     @staticmethod
     def bundle_path(app: pathlib.Path, bundle_id: str) -> pathlib.Path:
         relative = BUNDLE_PATHS[bundle_id]
         return app if str(relative) == "." else app / relative
+
+    @staticmethod
+    def dsym_binary(archive: pathlib.Path, bundle_id: str) -> pathlib.Path:
+        relative = BUNDLE_PATHS[bundle_id]
+        bundle_name = "OpenClaw.app" if str(relative) == "." else relative.name
+        return (
+            archive
+            / "dSYMs"
+            / f"{bundle_name}.dSYM"
+            / "Contents"
+            / "Resources"
+            / "DWARF"
+            / BUNDLE_EXECUTABLES[bundle_id]
+        )
 
     @staticmethod
     def zip_tree(root: pathlib.Path, output: pathlib.Path) -> None:

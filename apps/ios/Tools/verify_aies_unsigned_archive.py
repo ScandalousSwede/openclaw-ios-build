@@ -17,8 +17,11 @@ import tempfile
 import zipfile
 from typing import Any
 
-SCHEMA = "argus.openclaw-ios.unsigned-archive-report.v1"
+SCHEMA = "argus.openclaw-ios.unsigned-archive-report.v2"
 BUILD_SETTINGS_SCHEMA = "argus.openclaw-ios.unsigned-build-settings-report.v2"
+WATCH_APP_RELATIVE_PATH = pathlib.PurePosixPath("Watch/OpenClawWatchApp.app")
+WATCH_APP_EXECUTABLE = "OpenClawWatchApp"
+WATCHKIT_STUB_RELATIVE_PATH = pathlib.PurePosixPath("_WatchKitStub/WK")
 
 
 def expected_target_bundle_identifiers(main_bundle_id: str) -> dict[str, str]:
@@ -450,6 +453,65 @@ def executable_identity(bundle_path: pathlib.Path, dwarfdump: str) -> dict[str, 
     }
 
 
+def verify_watchkit_stub_binding(
+    bundle_path: pathlib.Path,
+    executable: dict[str, Any],
+    expected_main_bundle_id: str,
+    dwarfdump: str,
+) -> dict[str, Any]:
+    """Prove the legacy Watch app launcher is Xcode's embedded SDK stub."""
+
+    info_path = bundle_path / "Info.plist"
+    info = read_plist(info_path)
+    if info.get("WKWatchKitApp") is not True:
+        raise ValueError("Watch app SDK-stub role requires WKWatchKitApp=true")
+    companion = info.get("WKCompanionAppBundleIdentifier")
+    if companion != expected_main_bundle_id:
+        raise ValueError(
+            "Watch app SDK-stub companion identifier mismatch: "
+            f"expected={expected_main_bundle_id!r} actual={companion!r}"
+        )
+    if executable.get("name") != WATCH_APP_EXECUTABLE:
+        raise ValueError(
+            "Watch app SDK-stub executable mismatch: "
+            f"expected={WATCH_APP_EXECUTABLE!r} actual={executable.get('name')!r}"
+        )
+
+    stub_directory = bundle_path / WATCHKIT_STUB_RELATIVE_PATH.parent
+    stub_path = bundle_path / WATCHKIT_STUB_RELATIVE_PATH
+    if (
+        not stub_directory.is_dir()
+        or stub_directory.is_symlink()
+        or not stub_path.is_file()
+        or stub_path.is_symlink()
+    ):
+        raise ValueError("missing regular Xcode WatchKit SDK stub")
+    stub = {
+        "relative_path": WATCHKIT_STUB_RELATIVE_PATH.as_posix(),
+        "raw_sha256": sha256_file(stub_path),
+        "bytes": stub_path.stat().st_size,
+        "uuids": macho_uuids(stub_path, dwarfdump),
+    }
+    for key in ("raw_sha256", "bytes", "uuids"):
+        if stub[key] != executable.get(key):
+            raise ValueError(
+                f"Watch app executable does not match embedded SDK stub: {key}"
+            )
+    return {
+        "kind": "xcode_watchkit_sdk_stub",
+        "plist_contract": {
+            "WKWatchKitApp": True,
+            "WKCompanionAppBundleIdentifier": expected_main_bundle_id,
+        },
+        "embedded_stub": stub,
+        "bundle_executable_match": {
+            "raw_sha256": True,
+            "bytes": True,
+            "uuids": True,
+        },
+    }
+
+
 def verify_app_topology(
     app_path: pathlib.Path, expected_main_bundle_id: str, dwarfdump: str
 ) -> list[dict[str, Any]]:
@@ -491,6 +553,7 @@ def verify_dsym_bindings(
     archive: pathlib.Path,
     archive_app: pathlib.Path,
     archive_bundles: list[dict[str, Any]],
+    expected_main_bundle_id: str,
     dwarfdump: str,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
@@ -515,6 +578,35 @@ def verify_dsym_bindings(
         if dsym_binary in seen:
             raise ValueError(f"duplicate dSYM binding for {bundle['bundle_id']}")
         seen.add(dsym_binary)
+        if relative == WATCH_APP_RELATIVE_PATH:
+            expected_watch_id = f"{expected_main_bundle_id}.watchkitapp"
+            if bundle["bundle_id"] != expected_watch_id:
+                raise ValueError("Watch app SDK-stub bundle identifier mismatch")
+            dsym_root = archive / "dSYMs" / f"{bundle_path.name}.dSYM"
+            if dsym_root.exists() or dsym_root.is_symlink():
+                raise ValueError(
+                    "unexpected dSYM for Xcode WatchKit SDK-stub executable"
+                )
+            records.append(
+                {
+                    "bundle_id": bundle["bundle_id"],
+                    "bundle_relative_path": bundle["relative_path"],
+                    "archive_executable": executable,
+                    "executable_role": "sdk_watchkit_stub",
+                    "dsym_requirement": "not_applicable_sdk_watchkit_stub",
+                    "dsym_status": "not_emitted",
+                    "dsym": None,
+                    "watchkit_stub": {
+                        "archive": verify_watchkit_stub_binding(
+                            bundle_path,
+                            executable,
+                            expected_main_bundle_id,
+                            dwarfdump,
+                        )
+                    },
+                }
+            )
+            continue
         if not dsym_binary.is_file() or dsym_binary.is_symlink():
             raise ValueError(f"missing matching dSYM binary for {bundle['bundle_id']}")
         dsym_uuids = macho_uuids(dsym_binary, dwarfdump)
@@ -527,6 +619,9 @@ def verify_dsym_bindings(
                 "bundle_id": bundle["bundle_id"],
                 "bundle_relative_path": bundle["relative_path"],
                 "archive_executable": executable,
+                "executable_role": "compiled_product",
+                "dsym_requirement": "required_compiled_executable",
+                "dsym_status": "uuid_matched",
                 "dsym": {
                     "relative_path": dsym_binary.relative_to(archive).as_posix(),
                     "sha256": sha256_file(dsym_binary),
@@ -581,17 +676,55 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         args.archive,
         archive_app,
         archive_bundles,
+        args.expected_main_bundle_id,
         args.dwarfdump,
     )
+    symbols_by_id = {record["bundle_id"]: record for record in dsym_bindings}
     with tempfile.TemporaryDirectory() as raw_temp:
         ipa_app = safely_extract_ipa(args.ipa, pathlib.Path(raw_temp))
         ipa_bundles = verify_app_topology(
             ipa_app, args.expected_main_bundle_id, args.dwarfdump
         )
         binary_bindings = verify_archive_ipa_binding(archive_bundles, ipa_bundles)
-    dsyms_by_id = {record["bundle_id"]: record["dsym"] for record in dsym_bindings}
+        watch_id = f"{args.expected_main_bundle_id}.watchkitapp"
+        watch_symbol = symbols_by_id[watch_id]
+        ipa_watch_bundle = ipa_app / WATCH_APP_RELATIVE_PATH
+        ipa_watch_record = next(
+            record for record in ipa_bundles if record["bundle_id"] == watch_id
+        )
+        ipa_stub = verify_watchkit_stub_binding(
+            ipa_watch_bundle,
+            ipa_watch_record["executable"],
+            args.expected_main_bundle_id,
+            args.dwarfdump,
+        )
+        archive_stub = watch_symbol["watchkit_stub"]["archive"]
+        if archive_stub != ipa_stub:
+            raise ValueError("archive and IPA WatchKit SDK-stub identity differ")
+        watch_symbol["watchkit_stub"]["ipa"] = ipa_stub
     for record in binary_bindings:
-        record["dsym"] = dsyms_by_id[record["bundle_id"]]
+        symbol = symbols_by_id[record["bundle_id"]]
+        for key in (
+            "executable_role",
+            "dsym_requirement",
+            "dsym_status",
+            "dsym",
+            "watchkit_stub",
+        ):
+            if key in symbol:
+                record[key] = symbol[key]
+    compiled = [
+        record
+        for record in binary_bindings
+        if record["executable_role"] == "compiled_product"
+    ]
+    stubs = [
+        record
+        for record in binary_bindings
+        if record["executable_role"] == "sdk_watchkit_stub"
+    ]
+    if len(compiled) != 4 or len(stubs) != 1:
+        raise ValueError("unexpected compiled-product/WatchKit-stub role topology")
     return {
         "schema": SCHEMA,
         "status": "verified",
@@ -606,7 +739,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "bundles": ipa_bundles,
         },
         "archive_zip": archive_zip,
-        "binary_binding": {"bundles": binary_bindings},
+        "binary_binding": {
+            "bundle_count": len(binary_bindings),
+            "compiled_executable_count": len(compiled),
+            "sdk_watchkit_stub_count": len(stubs),
+            "required_dsym_count": len(compiled),
+            "verified_dsym_count": sum(
+                record["dsym_status"] == "uuid_matched" for record in compiled
+            ),
+            "bundles": binary_bindings,
+        },
     }
 
 
