@@ -86,6 +86,7 @@ jobs:
               "apps/ios/Tools/verify_aies_unsigned_archive.py",
               "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatViewModelTests.swift",
               "apps/shared/OpenClawKit/Tests/OpenClawKitTests/TestAsyncHelpers.swift",
+              "scripts/ios-beta-prepare.sh",
           }
           observed = set(pathlib.Path(sys.argv[1]).read_text().splitlines())
           if not observed or observed - allowed:
