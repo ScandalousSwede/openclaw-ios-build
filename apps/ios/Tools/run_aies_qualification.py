@@ -1509,7 +1509,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=args.output,
                 extra_arguments=extra,
                 timeout_seconds=args.timeout_seconds,
-                reset_simulator_before_each_run=args.reset_simulator_before_each_run,
             )
             print(json.dumps(manifest, sort_keys=True))
         elif args.command == "narrow-enumeration":
@@ -1538,6 +1537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=args.output,
                 extra_arguments=extra,
                 timeout_seconds=args.timeout_seconds,
+                reset_simulator_before_each_run=args.reset_simulator_before_each_run,
             )
             print(json.dumps(manifest, sort_keys=True))
         elif args.command == "seal":

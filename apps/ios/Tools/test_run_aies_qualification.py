@@ -713,6 +713,93 @@ class QualificationHarnessTests(unittest.TestCase):
                 )
             )
 
+    def test_main_enumerate_does_not_forward_run_only_simulator_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            arguments_file = root / "xcode-arguments.txt"
+            arguments_file.write_text(
+                "\n".join(self.strict_arguments(root)) + "\n", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(
+                    qualification,
+                    "enumerate_tests",
+                    return_value={"schema": qualification.ENUMERATION_SCHEMA},
+                ) as mocked,
+                mock.patch("builtins.print"),
+            ):
+                status = qualification.main(
+                    [
+                        "enumerate",
+                        "--xctestrun",
+                        str(root / "tests.xctestrun"),
+                        "--destination",
+                        DESTINATION,
+                        "--only-testing",
+                        FILTER,
+                        "--expected-test-count",
+                        "1",
+                        "--products-manifest",
+                        str(root / "products.json"),
+                        "--timeout-seconds",
+                        "300",
+                        "--output",
+                        str(root / "enumeration"),
+                        "--xcode-args-file",
+                        str(arguments_file),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            self.assertNotIn(
+                "reset_simulator_before_each_run", mocked.call_args.kwargs
+            )
+
+    def test_main_run_forwards_simulator_reset_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            arguments_file = root / "xcode-arguments.txt"
+            arguments_file.write_text(
+                "\n".join(self.strict_arguments(root)) + "\n", encoding="utf-8"
+            )
+            with (
+                mock.patch.object(
+                    qualification,
+                    "run_repetitions",
+                    return_value={"schema": qualification.MATRIX_SCHEMA},
+                ) as mocked,
+                mock.patch("builtins.print"),
+            ):
+                status = qualification.main(
+                    [
+                        "run",
+                        "--xctestrun",
+                        str(root / "tests.xctestrun"),
+                        "--destination",
+                        DESTINATION,
+                        "--only-testing",
+                        FILTER,
+                        "--count",
+                        "1",
+                        "--expected-test-count",
+                        "1",
+                        "--enumeration",
+                        str(root / "enumeration.json"),
+                        "--products-manifest",
+                        str(root / "products.json"),
+                        "--timeout-seconds",
+                        "300",
+                        "--output",
+                        str(root / "matrix"),
+                        "--reset-simulator-before-each-run",
+                        "--xcode-args-file",
+                        str(arguments_file),
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            self.assertTrue(mocked.call_args.kwargs["reset_simulator_before_each_run"])
+
     def test_run_repetitions_stops_after_first_invalid_result(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
