@@ -4792,25 +4792,38 @@ struct ChatViewModelTests {
             sessionId: "sess-main",
             messages: [],
             thinkingLevel: "off")
+        let staleThinkingPatchGate = AsyncGate()
 
         let (transport, vm) = await makeViewModel(
             historyResponses: [history],
             setSessionThinkingHook: { level in
                 if level == "medium" {
-                    try await Task.sleep(for: .milliseconds(200))
+                    await staleThinkingPatchGate.wait()
                 }
             })
 
         try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
 
-        await MainActor.run {
-            vm.selectThinkingLevel("medium")
-            vm.selectThinkingLevel("high")
-        }
+        do {
+            await MainActor.run { vm.selectThinkingLevel("medium") }
+            try await waitUntil("first thinking patch admitted") {
+                await transport.patchedThinkingLevels() == ["medium"]
+            }
 
-        try await waitUntil("thinking patch replayed latest selection") {
-            let patched = await transport.patchedThinkingLevels()
-            return patched == ["medium", "high", "high"]
+            await MainActor.run { vm.selectThinkingLevel("high") }
+            try await waitUntil("latest thinking patch completes while stale patch is held") {
+                await transport.patchedThinkingLevels() == ["medium", "high"]
+            }
+
+            await staleThinkingPatchGate.open()
+
+            try await waitUntil("thinking patch replayed latest selection") {
+                let patched = await transport.patchedThinkingLevels()
+                return patched == ["medium", "high", "high"]
+            }
+        } catch {
+            await staleThinkingPatchGate.open()
+            throw error
         }
 
         #expect(await MainActor.run { vm.thinkingLevel } == "high")
