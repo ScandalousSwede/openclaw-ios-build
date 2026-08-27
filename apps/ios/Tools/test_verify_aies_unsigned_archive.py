@@ -56,6 +56,12 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
         self.assertTrue(
             all(item["occurrence_count"] == 1 for item in report["targets"])
         )
+        self.assertTrue(
+            all(
+                item["debug_information_format"] == "dwarf-with-dsym"
+                for item in report["targets"]
+            )
+        )
 
     def test_rejects_missing_required_target(self) -> None:
         payload = self.build_settings_payload()
@@ -150,6 +156,46 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "CODE_SIGNING_ALLOWED.*index 6"):
             verifier.build_settings_topology_report(payload, MAIN_ID)
 
+    def test_rejects_wrong_dsym_format_for_every_required_target(self) -> None:
+        for source_index, item in enumerate(self.build_settings_payload()[:5]):
+            with self.subTest(target=item["target"]):
+                payload = self.build_settings_payload()
+                payload[source_index]["buildSettings"][
+                    "DEBUG_INFORMATION_FORMAT"
+                ] = "dwarf"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"DEBUG_INFORMATION_FORMAT.*index {source_index}",
+                ):
+                    verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_missing_dsym_format_for_every_required_target(self) -> None:
+        for source_index, item in enumerate(self.build_settings_payload()[:5]):
+            with self.subTest(target=item["target"]):
+                payload = self.build_settings_payload()
+                del payload[source_index]["buildSettings"][
+                    "DEBUG_INFORMATION_FORMAT"
+                ]
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"DEBUG_INFORMATION_FORMAT.*index {source_index}",
+                ):
+                    verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_wrong_dsym_format_in_later_occurrence(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append(
+            {
+                **payload[0],
+                "buildSettings": {
+                    **payload[0]["buildSettings"],
+                    "DEBUG_INFORMATION_FORMAT": "dwarf",
+                },
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "DEBUG_INFORMATION_FORMAT.*index 6"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
     def test_rejects_missing_settings_in_later_occurrence(self) -> None:
         payload = self.build_settings_payload()
         payload.append({"target": "OpenClaw"})
@@ -196,6 +242,7 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
                 "buildSettings": {
                     **variables,
                     "PRODUCT_BUNDLE_IDENTIFIER": bundle_id,
+                    "DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym",
                     "CODE_SIGNING_ALLOWED": "NO",
                     "CODE_SIGNING_REQUIRED": "NO",
                     "CODE_SIGN_IDENTITY": "",

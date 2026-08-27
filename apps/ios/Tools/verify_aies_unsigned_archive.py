@@ -79,6 +79,13 @@ def build_settings_topology_report(
                     f"at source index {source_index}: "
                     f"expected={expected_value!r} actual={actual_value!r}"
                 )
+        debug_information_format = settings.get("DEBUG_INFORMATION_FORMAT")
+        if debug_information_format != "dwarf-with-dsym":
+            raise ValueError(
+                "unsigned build setting DEBUG_INFORMATION_FORMAT must be "
+                f"dwarf-with-dsym for {target} at source index {source_index}: "
+                f"actual={debug_information_format!r}"
+            )
         for name in ("CODE_SIGNING_ALLOWED", "CODE_SIGNING_REQUIRED"):
             actual_value = settings.get(name)
             if actual_value != "NO":
@@ -111,6 +118,7 @@ def build_settings_topology_report(
                         "PROVISIONING_PROFILE_SPECIFIER", ""
                     ),
                 },
+                "debug_information_format": debug_information_format,
                 "topology_variables": dict(sorted(expected_variables.items())),
                 "occurrences": [],
             }

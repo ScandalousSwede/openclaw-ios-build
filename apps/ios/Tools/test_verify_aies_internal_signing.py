@@ -882,6 +882,23 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertLess(script.index(build_validation), prepare_invocation)
         self.assertLess(script.index(team_validation), prepare_invocation)
 
+    def test_beta_prepare_requires_dsyms_for_every_embedded_target(self) -> None:
+        script = (REPO_ROOT / "scripts" / "ios-beta-prepare.sh").read_text(
+            encoding="utf-8"
+        )
+        block_start = script.index(
+            'write_generated_file "${BETA_XCCONFIG}" <<EOF\n'
+        )
+        block_end = script.index("\nEOF\n", block_start)
+        beta_xcconfig = script[block_start:block_end]
+
+        self.assertEqual(
+            beta_xcconfig.count(
+                "DEBUG_INFORMATION_FORMAT = dwarf-with-dsym"
+            ),
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
