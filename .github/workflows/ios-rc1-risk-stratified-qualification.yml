@@ -331,6 +331,8 @@ jobs:
             > "${AIES_EVIDENCE}/toolchain/selected-simulator.txt"
 
       - name: Build Talk test products exactly once without signing
+        env:
+          OPENCLAW_SKIP_SOURCE_LINT: "YES"
         shell: bash
         run: |
           set -euo pipefail

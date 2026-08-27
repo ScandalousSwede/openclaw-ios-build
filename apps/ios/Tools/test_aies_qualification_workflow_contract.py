@@ -8,6 +8,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 QUALIFICATION = REPO_ROOT / ".github/workflows/ios-rc1-risk-stratified-qualification.yml"
 RELEASE = REPO_ROOT / ".github/workflows/ios-build-ipa.yml"
+PROJECT = REPO_ROOT / "apps/ios/project.yml"
 
 
 class AIESQualificationWorkflowContractTests(unittest.TestCase):
@@ -86,6 +87,36 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "path: ${{ runner.temp }}/aies-package-talk-runtime/evidence", workflow
         )
+
+    def test_scoped_ios_compile_uses_the_existing_source_lint_contract(self) -> None:
+        workflow = QUALIFICATION.read_text(encoding="utf-8")
+        release = RELEASE.read_text(encoding="utf-8")
+        project = PROJECT.read_text(encoding="utf-8")
+        package_talk = workflow.split(
+            "  package-and-talk-qualification:\n", maxsplit=1
+        )[1].split("  compact-bootstrap-qualification:\n", maxsplit=1)[0]
+        compact_bootstrap = workflow.split(
+            "  compact-bootstrap-qualification:\n", maxsplit=1
+        )[1]
+        build_step = package_talk.split(
+            "      - name: Build Talk test products exactly once without signing\n",
+            maxsplit=1,
+        )[1].split(
+            "      - name: Seal test-product identity and enumerate exact tests\n",
+            maxsplit=1,
+        )[0]
+        self.assertIn(
+            '        env:\n          OPENCLAW_SKIP_SOURCE_LINT: "YES"\n'
+            "        shell: bash\n",
+            build_step,
+        )
+        self.assertEqual(package_talk.count("OPENCLAW_SKIP_SOURCE_LINT"), 1)
+        self.assertNotIn("OPENCLAW_SKIP_SOURCE_LINT", compact_bootstrap)
+        self.assertEqual(workflow.count("OPENCLAW_SKIP_SOURCE_LINT"), 1)
+        self.assertEqual(
+            project.count('${OPENCLAW_SKIP_SOURCE_LINT:-NO}'), 2
+        )
+        self.assertEqual(release.count("OPENCLAW_SKIP_SOURCE_LINT"), 2)
 
 
 if __name__ == "__main__":
