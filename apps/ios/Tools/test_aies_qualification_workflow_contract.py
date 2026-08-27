@@ -71,6 +71,10 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertEqual(qualification.count("          narrow "), 4)
         self.assertIn('value.endswith("()")', qualification)
         self.assertEqual(
+            qualification.count("--reset-simulator-before-each-run"), 2
+        )
+        self.assertNotIn("simctl erase", qualification)
+        self.assertEqual(
             release.count("prepare_aies_package_build_root.py prepare"), 2
         )
         self.assertIn("signed-internal-testflight", release)

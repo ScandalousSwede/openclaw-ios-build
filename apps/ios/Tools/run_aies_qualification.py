@@ -26,6 +26,8 @@ ENUMERATION_SCHEMA = "aies.ios.test-enumeration.v1"
 PRODUCTS_SCHEMA = "aies.ios.test-products.v1"
 RUN_SCHEMA = "aies.ios.test-without-building-run.v1"
 MATRIX_SCHEMA = "aies.ios.test-without-building-matrix.v1"
+SIMULATOR_RESET_SCHEMA = "aies.ios.simulator-reset.v1"
+SIMULATOR_RESET_TIMEOUT_SECONDS = 180
 
 SAFE_FLAG_ARGUMENTS = {
     "-disableAutomaticPackageResolution",
@@ -41,6 +43,14 @@ SAFE_VALUE_ARGUMENTS = {
 
 class QualificationError(RuntimeError):
     """A fail-closed qualification harness error."""
+
+
+class QualificationInfrastructureError(QualificationError):
+    """An evidenced XCTest/CoreSimulator failure before a product test ran."""
+
+    def __init__(self, classification: str, message: str) -> None:
+        super().__init__(message)
+        self.classification = classification
 
 
 @dataclasses.dataclass(frozen=True)
@@ -498,9 +508,15 @@ def narrow_enumeration(
 def collect_xcresult_cases(payload: Any) -> list[dict[str, str]]:
     cases: list[dict[str, str]] = []
 
-    def walk(value: Any) -> None:
+    def walk(value: Any, inside_system_failures: bool = False) -> None:
         if isinstance(value, dict):
+            is_system_failures = inside_system_failures or (
+                value.get("nodeType") == "Test Suite"
+                and value.get("name") == "System Failures"
+            )
             if value.get("nodeType") == "Test Case":
+                if is_system_failures:
+                    return
                 identifier = value.get("nodeIdentifier")
                 result = value.get("result")
                 if not isinstance(identifier, str) or not isinstance(result, str):
@@ -525,13 +541,55 @@ def collect_xcresult_cases(payload: Any) -> list[dict[str, str]]:
                     }
                 )
             for child in value.values():
-                walk(child)
+                walk(child, is_system_failures)
         elif isinstance(value, list):
             for child in value:
-                walk(child)
+                walk(child, inside_system_failures)
 
     walk(payload)
     return cases
+
+
+def collect_xcresult_system_failures(payload: Any) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+
+    def failure_messages(value: Any) -> list[str]:
+        messages: list[str] = []
+        if isinstance(value, dict):
+            if value.get("nodeType") == "Failure Message" and isinstance(
+                value.get("name"), str
+            ):
+                messages.append(value["name"])
+            for child in value.values():
+                messages.extend(failure_messages(child))
+        elif isinstance(value, list):
+            for child in value:
+                messages.extend(failure_messages(child))
+        return messages
+
+    def walk(value: Any, inside_system_failures: bool = False) -> None:
+        if isinstance(value, dict):
+            is_system_failures = inside_system_failures or (
+                value.get("nodeType") == "Test Suite"
+                and value.get("name") == "System Failures"
+            )
+            if value.get("nodeType") == "Test Case" and is_system_failures:
+                failures.append(
+                    {
+                        "identifier": value.get("nodeIdentifier"),
+                        "messages": failure_messages(value),
+                        "result": value.get("result"),
+                    }
+                )
+                return
+            for child in value.values():
+                walk(child, is_system_failures)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, inside_system_failures)
+
+    walk(payload)
+    return failures
 
 
 def summary_integer(summary: dict[str, Any], key: str) -> int | None:
@@ -556,8 +614,43 @@ def verify_passing_xcresult(
             "saved enumeration does not contain the exact expected unique test count"
         )
     observed_cases = collect_xcresult_cases(tests)
+    system_failures = collect_xcresult_system_failures(tests)
+    system_failure_details = ""
+    if system_failures:
+        rendered = []
+        for failure in system_failures:
+            identifier = failure.get("identifier") or "unnamed XCTest system failure"
+            messages = failure.get("messages") or []
+            detail = "; ".join(str(message) for message in messages)
+            rendered.append(f"{identifier}: {detail}" if detail else str(identifier))
+        summary_failures = summary.get("testFailures")
+        if isinstance(summary_failures, list):
+            for failure in summary_failures:
+                if isinstance(failure, dict) and isinstance(
+                    failure.get("failureText"), str
+                ):
+                    text = failure["failureText"]
+                    if not any(text in value for value in rendered):
+                        rendered.append(f"XCResult summary: {text}")
+        system_failure_details = " | ".join(rendered)
+        classification = (
+            "SIMULATOR_APP_LIFECYCLE_BUSY"
+            if "installing or uninstalling" in system_failure_details
+            else "XCTEST_INFRASTRUCTURE_FAILURE"
+        )
+        if not observed_cases:
+            raise QualificationInfrastructureError(
+                classification,
+                "XCResult infrastructure/system failure before the expected test ran: "
+                + system_failure_details,
+            )
     observed_identifiers = [case["identifier"] for case in observed_cases]
     errors: list[str] = []
+    if system_failure_details:
+        errors.append(
+            "XCResult contains a system failure in addition to executed tests: "
+            + system_failure_details
+        )
     if len(set(observed_identifiers)) != len(observed_identifiers):
         errors.append("XCResult contains duplicate canonical Test Case identifiers")
     if set(observed_identifiers) != set(expected):
@@ -583,11 +676,7 @@ def verify_passing_xcresult(
     if summary.get("testFailures") != []:
         errors.append("XCResult summary testFailures is not empty")
     configurations = summary.get("devicesAndConfigurations")
-    destination_fields = dict(
-        (part.strip() for part in field.split("=", 1))
-        for field in destination.split(",")
-        if "=" in field
-    )
+    requested_destination = destination_fields(destination)
     if not isinstance(configurations, list) or len(configurations) != 1:
         errors.append("XCResult must contain exactly one device/configuration result")
     else:
@@ -607,9 +696,9 @@ def verify_passing_xcresult(
         if not isinstance(device, dict):
             errors.append("XCResult device/configuration lacks a device")
         else:
-            if device.get("platform") != destination_fields.get("platform"):
+            if device.get("platform") != requested_destination.get("platform"):
                 errors.append("XCResult platform differs from the requested destination")
-            expected_device_id = destination_fields.get("id")
+            expected_device_id = requested_destination.get("id")
             if expected_device_id and device.get("deviceId") != expected_device_id:
                 errors.append("XCResult device ID differs from the requested destination")
     report = {
@@ -735,6 +824,136 @@ def capture_command(
             f"command failed with status {result.returncode}: {shlex.join(arguments)}"
         )
     return result.stdout
+
+
+def destination_fields(destination: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for field in destination.split(","):
+        if "=" not in field:
+            continue
+        key, value = (part.strip() for part in field.split("=", 1))
+        if not key or not value or key in fields:
+            raise QualificationError(f"invalid or duplicate destination field: {field!r}")
+        fields[key] = value
+    return fields
+
+
+def simulator_state(payload: Any, udid: str) -> str:
+    if not isinstance(payload, dict) or not isinstance(payload.get("devices"), dict):
+        raise QualificationError("simctl device inventory has an unsupported shape")
+    matches = [
+        device
+        for devices in payload["devices"].values()
+        if isinstance(devices, list)
+        for device in devices
+        if isinstance(device, dict) and device.get("udid") == udid
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("state"), str):
+        raise QualificationError(
+            f"simctl inventory does not contain exactly one state for {udid}"
+        )
+    return matches[0]["state"]
+
+
+def reset_simulator(
+    *,
+    xcrun: str,
+    destination: str,
+    output: pathlib.Path,
+    timeout_seconds: int = SIMULATOR_RESET_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Reboot the selected simulator and wait for CoreSimulator boot completion.
+
+    Fresh xcodebuild processes can otherwise overlap SpringBoard's asynchronous
+    app install teardown. A completed shutdown/boot boundary clears that
+    infrastructure state without retrying or changing any product assertion.
+    """
+
+    fields = destination_fields(destination)
+    if fields.get("platform") != "iOS Simulator" or not fields.get("id"):
+        raise QualificationError(
+            "simulator reset requires an exact iOS Simulator destination ID"
+        )
+    if timeout_seconds < 1:
+        raise QualificationError("simulator reset timeout must be positive")
+    udid = fields["id"]
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    started_at = utc_now()
+
+    def read_state(label: str) -> str:
+        raw = capture_command(
+            [xcrun, "simctl", "list", "-j", "devices"],
+            output / label,
+            timeout_seconds,
+        )
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise QualificationError("simctl returned invalid device JSON") from error
+        return simulator_state(payload, udid)
+
+    try:
+        state_before = read_state("list-before")
+        if state_before == "Booted":
+            capture_command(
+                [xcrun, "simctl", "shutdown", udid],
+                output / "shutdown",
+                timeout_seconds,
+            )
+        elif state_before != "Shutdown":
+            raise QualificationError(
+                f"simulator {udid} is in unsupported state {state_before!r}"
+            )
+        state_after_shutdown = read_state("list-after-shutdown")
+        if state_after_shutdown != "Shutdown":
+            raise QualificationError(
+                f"simulator {udid} did not reach Shutdown: {state_after_shutdown!r}"
+            )
+        capture_command(
+            [xcrun, "simctl", "boot", udid],
+            output / "boot",
+            timeout_seconds,
+        )
+        capture_command(
+            [xcrun, "simctl", "bootstatus", udid, "-b"],
+            output / "bootstatus",
+            timeout_seconds,
+        )
+        state_after_boot = read_state("list-after-boot")
+        if state_after_boot != "Booted":
+            raise QualificationError(
+                f"simulator {udid} did not reach Booted: {state_after_boot!r}"
+            )
+        report = {
+            "schema": SIMULATOR_RESET_SCHEMA,
+            "destination": destination,
+            "finishedAt": utc_now(),
+            "startedAt": started_at,
+            "stateAfterBoot": state_after_boot,
+            "stateAfterShutdown": state_after_shutdown,
+            "stateBefore": state_before,
+            "status": "passed",
+            "timeoutSeconds": timeout_seconds,
+            "udid": udid,
+        }
+        write_json(output / "simulator-reset.json", report)
+        return report
+    except Exception as error:
+        write_json(
+            output / "simulator-reset-status.json",
+            {
+                "error": str(error),
+                "finishedAt": utc_now(),
+                "startedAt": started_at,
+                "status": "failed",
+                "type": type(error).__name__,
+                "udid": udid,
+            },
+        )
+        if isinstance(error, QualificationError):
+            raise
+        raise QualificationError(f"simulator reset failed: {error}") from error
 
 
 def extract_xcresult(
@@ -930,6 +1149,7 @@ def write_matrix_summary(
     runs: Sequence[dict[str, Any]],
     first_failure: dict[str, Any] | None = None,
     products_tree_sha256: str | None = None,
+    reset_simulator_before_each_run: bool = False,
 ) -> dict[str, Any]:
     payload = {
         "schema": MATRIX_SCHEMA,
@@ -941,6 +1161,7 @@ def write_matrix_summary(
         "requested": requested,
         "runs": list(runs),
         "status": status,
+        "simulatorResetBeforeEachRun": reset_simulator_before_each_run,
         "xcodebuildPIDs": [run.get("xcodebuildPID") for run in runs],
     }
     write_json(output / "matrix-summary.json", payload)
@@ -961,6 +1182,7 @@ def run_repetitions(
     output: pathlib.Path,
     extra_arguments: Sequence[str],
     timeout_seconds: int,
+    reset_simulator_before_each_run: bool = False,
 ) -> dict[str, Any]:
     xctestrun = require_xctestrun(xctestrun)
     only_testing = validate_only_testing(only_testing)
@@ -999,6 +1221,7 @@ def run_repetitions(
             runs=[],
             first_failure=failure,
             products_tree_sha256=products_payload.get("treeSHA256"),
+            reset_simulator_before_each_run=reset_simulator_before_each_run,
         )
         if isinstance(error, QualificationError):
             raise
@@ -1012,6 +1235,14 @@ def run_repetitions(
             xcodebuild, xctestrun, destination, only_testing, extra_arguments
         ) + ["-resultBundlePath", str(result_bundle), "test-without-building"]
         try:
+            reset_report = None
+            if reset_simulator_before_each_run:
+                reset_output = output / f"simulator-reset-{iteration:03d}"
+                reset_report = reset_simulator(
+                    xcrun=xcrun,
+                    destination=destination,
+                    output=reset_output,
+                )
             outcome = execute_logged(
                 command, iteration_output, timeout_seconds=timeout_seconds
             )
@@ -1025,6 +1256,18 @@ def run_repetitions(
                 "timedOut": outcome.timed_out,
                 "productsTreeSHA256": products["treeSHA256"],
             }
+            if reset_report is not None:
+                reset_manifest = (
+                    output
+                    / f"simulator-reset-{iteration:03d}"
+                    / "simulator-reset.json"
+                )
+                run_record["simulatorReset"] = {
+                    "manifest": str(reset_manifest),
+                    "manifestSHA256": sha256_file(reset_manifest),
+                    "stateAfterBoot": reset_report["stateAfterBoot"],
+                    "stateBefore": reset_report["stateBefore"],
+                }
             runs.append(run_record)
             if outcome.timed_out:
                 raise QualificationError(
@@ -1058,6 +1301,9 @@ def run_repetitions(
                 "iteration": iteration,
                 "type": type(error).__name__,
             }
+            classification = getattr(error, "classification", None)
+            if isinstance(classification, str):
+                failure["classification"] = classification
             try:
                 verify_products_manifest(products_manifest_path, xctestrun)
             except Exception as products_error:
@@ -1075,6 +1321,7 @@ def run_repetitions(
                 runs=runs,
                 first_failure=failure,
                 products_tree_sha256=products["treeSHA256"],
+                reset_simulator_before_each_run=reset_simulator_before_each_run,
             )
             if isinstance(error, QualificationError):
                 raise
@@ -1095,6 +1342,7 @@ def run_repetitions(
             runs=runs,
             first_failure=failure,
             products_tree_sha256=products["treeSHA256"],
+            reset_simulator_before_each_run=reset_simulator_before_each_run,
         )
         if isinstance(error, QualificationError):
             raise
@@ -1106,6 +1354,7 @@ def run_repetitions(
         requested=count,
         runs=runs,
         products_tree_sha256=products_after["treeSHA256"],
+        reset_simulator_before_each_run=reset_simulator_before_each_run,
     )
 
 
@@ -1210,6 +1459,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--products-manifest", type=pathlib.Path, required=True)
     run.add_argument("--timeout-seconds", type=int, required=True)
     run.add_argument("--output", type=pathlib.Path, required=True)
+    run.add_argument(
+        "--reset-simulator-before-each-run",
+        action="store_true",
+        help=(
+            "Before each fresh xcodebuild process, synchronously reboot the exact "
+            "destination and wait for CoreSimulator boot completion."
+        ),
+    )
     add_xcode_arguments(run)
 
     seal = subparsers.add_parser("seal")
@@ -1252,6 +1509,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output=args.output,
                 extra_arguments=extra,
                 timeout_seconds=args.timeout_seconds,
+                reset_simulator_before_each_run=args.reset_simulator_before_each_run,
             )
             print(json.dumps(manifest, sort_keys=True))
         elif args.command == "narrow-enumeration":

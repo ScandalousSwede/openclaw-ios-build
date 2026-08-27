@@ -435,6 +435,7 @@ jobs:
               --enumeration "${enumeration}" \
               --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
               --timeout-seconds 600 \
+              --reset-simulator-before-each-run \
               --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
               --output "${AIES_EVIDENCE}/matrix-${label}-focused-40"
           }
@@ -454,6 +455,7 @@ jobs:
             --enumeration "${AIES_EVIDENCE}/enumeration-talk-suite/enumeration.json" \
             --products-manifest "${AIES_EVIDENCE}/build/test-products.json" \
             --timeout-seconds 1200 \
+            --reset-simulator-before-each-run \
             --xcode-args-file "${AIES_STRICT_PACKAGE_ARGS_FILE}" \
             --output "${AIES_EVIDENCE}/matrix-talk-suite-10"
 

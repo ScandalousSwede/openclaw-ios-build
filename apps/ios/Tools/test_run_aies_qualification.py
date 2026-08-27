@@ -57,6 +57,44 @@ def xcresult_tests(*outcomes: tuple[str, str]) -> dict[str, object]:
     }
 
 
+def xcresult_system_failure(message: str) -> dict[str, object]:
+    return {
+        "devices": [
+            {
+                "deviceId": "00000000-0000-0000-0000-000000000000",
+                "platform": "iOS Simulator",
+            }
+        ],
+        "testNodes": [
+            {
+                "children": [
+                    {
+                        "children": [
+                            {
+                                "children": [
+                                    {
+                                        "name": message,
+                                        "nodeType": "Failure Message",
+                                    }
+                                ],
+                                "name": "OpenClaw encountered an error",
+                                "nodeIdentifier": "OpenClaw encountered an error",
+                                "nodeType": "Test Case",
+                                "result": "Failed",
+                            }
+                        ],
+                        "name": "System Failures",
+                        "nodeType": "Test Suite",
+                        "result": "Failed",
+                    }
+                ],
+                "nodeType": "Unit test bundle",
+                "result": "Failed",
+            }
+        ],
+    }
+
+
 def xcresult_summary(
     total: int, *, passed: int | None = None, failed: int = 0, skipped: int = 0
 ) -> dict[str, object]:
@@ -406,6 +444,61 @@ class QualificationHarnessTests(unittest.TestCase):
                 DESTINATION,
             )
 
+    def test_verify_xcresult_preserves_simulator_system_failure(self) -> None:
+        message = (
+            "Failed to install or launch the test runner: Application "
+            "ai.openclaw.client is installing or uninstalling"
+        )
+        with self.assertRaises(qualification.QualificationInfrastructureError) as raised:
+            qualification.verify_passing_xcresult(
+                xcresult_summary(1, passed=0, failed=1),
+                xcresult_system_failure(message),
+                ["TalkDurableOutboxTests/example"],
+                1,
+                DESTINATION,
+            )
+        self.assertEqual(
+            raised.exception.classification, "SIMULATOR_APP_LIFECYCLE_BUSY"
+        )
+        self.assertIn(message, str(raised.exception))
+        self.assertNotIn("invalid identifier", str(raised.exception))
+
+    def test_system_failure_does_not_hide_an_executed_product_test(self) -> None:
+        payload = xcresult_system_failure("simulator teardown failed")
+        nodes = payload["testNodes"]
+        assert isinstance(nodes, list)
+        bundle = nodes[0]
+        assert isinstance(bundle, dict)
+        children = bundle["children"]
+        assert isinstance(children, list)
+        children.append(
+            {
+                "children": [
+                    {
+                        "nodeIdentifier": "TalkDurableOutboxTests/example()",
+                        "nodeType": "Test Case",
+                        "result": "Failed",
+                    }
+                ],
+                "name": "TalkDurableOutboxTests",
+                "nodeType": "Test Suite",
+            }
+        )
+        with self.assertRaisesRegex(
+            qualification.QualificationError,
+            "system failure in addition to executed tests",
+        ) as raised:
+            qualification.verify_passing_xcresult(
+                xcresult_summary(1, passed=0, failed=1),
+                payload,
+                ["TalkDurableOutboxTests/example"],
+                1,
+                DESTINATION,
+            )
+        self.assertNotIsInstance(
+            raised.exception, qualification.QualificationInfrastructureError
+        )
+
     def test_enumerate_runs_only_fixed_test_without_building_command(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -465,6 +558,50 @@ class QualificationHarnessTests(unittest.TestCase):
             self.assertNotIn("archive", observed)
             self.assertNotIn("-allowProvisioningUpdates", observed)
 
+    def test_reset_simulator_records_shutdown_boot_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            states = iter(("Booted", "Shutdown", "Booted"))
+            commands: list[list[str]] = []
+
+            def fake_capture(
+                arguments: list[str],
+                output_prefix: pathlib.Path,
+                timeout_seconds: int,
+            ) -> str:
+                del output_prefix, timeout_seconds
+                commands.append(arguments)
+                if arguments[2:5] == ["list", "-j", "devices"]:
+                    state = next(states)
+                    payload = {
+                        "devices": {
+                            "com.apple.CoreSimulator.SimRuntime.iOS-18-5": [
+                                {
+                                    "state": state,
+                                    "udid": "00000000-0000-0000-0000-000000000000",
+                                }
+                            ]
+                        }
+                    }
+                    return json.dumps(payload)
+                return ""
+
+            with mock.patch.object(
+                qualification, "capture_command", side_effect=fake_capture
+            ):
+                report = qualification.reset_simulator(
+                    xcrun="xcrun",
+                    destination=DESTINATION,
+                    output=root / "reset",
+                )
+            self.assertEqual(report["stateBefore"], "Booted")
+            self.assertEqual(report["stateAfterShutdown"], "Shutdown")
+            self.assertEqual(report["stateAfterBoot"], "Booted")
+            self.assertEqual(
+                [command[2] for command in commands],
+                ["list", "shutdown", "list", "boot", "bootstatus", "list"],
+            )
+
     def test_run_repetitions_launches_one_fresh_process_per_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -501,9 +638,35 @@ class QualificationHarnessTests(unittest.TestCase):
                     False,
                 )
 
+            reset_calls: list[pathlib.Path] = []
+
+            def fake_reset(
+                *,
+                xcrun: str,
+                destination: str,
+                output: pathlib.Path,
+                timeout_seconds: int = qualification.SIMULATOR_RESET_TIMEOUT_SECONDS,
+            ) -> dict[str, object]:
+                del xcrun, destination, timeout_seconds
+                reset_calls.append(output)
+                output.mkdir(parents=True)
+                report: dict[str, object] = {
+                    "stateAfterBoot": "Booted",
+                    "stateAfterShutdown": "Shutdown",
+                    "stateBefore": "Booted",
+                    "status": "passed",
+                }
+                qualification.write_json(output / "simulator-reset.json", report)
+                return report
+
             with (
                 mock.patch.object(
                     qualification, "execute_logged", side_effect=fake_execute
+                ),
+                mock.patch.object(
+                    qualification,
+                    "reset_simulator",
+                    side_effect=fake_reset,
                 ),
                 mock.patch.object(
                     qualification,
@@ -529,11 +692,14 @@ class QualificationHarnessTests(unittest.TestCase):
                     output=root / "matrix",
                     extra_arguments=self.strict_arguments(root),
                     timeout_seconds=300,
+                    reset_simulator_before_each_run=True,
                 )
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["passed"], 3)
             self.assertEqual(result["xcodebuildPIDs"], [201, 202, 203])
             self.assertEqual(len(launches), 3)
+            self.assertEqual(len(reset_calls), 3)
+            self.assertTrue(result["simulatorResetBeforeEachRun"])
             self.assertTrue(
                 all(command[-1] == "test-without-building" for command in launches)
             )
