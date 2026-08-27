@@ -37,6 +37,81 @@ BUNDLE_EXECUTABLES = {
 }
 
 
+class AIESUnsignedBuildSettingsTests(unittest.TestCase):
+    def test_accepts_canonical_five_target_unsigned_settings(self) -> None:
+        report = verifier.build_settings_topology_report(
+            self.build_settings_payload(), MAIN_ID
+        )
+
+        self.assertEqual(report["status"], "verified")
+        self.assertEqual(report["target_count"], 5)
+        self.assertEqual(
+            {item["bundle_id"] for item in report["targets"]}, set(BUNDLE_PATHS)
+        )
+
+    def test_rejects_missing_required_target(self) -> None:
+        payload = self.build_settings_payload()
+        payload = [item for item in payload if item["target"] != "OpenClawWatchApp"]
+        with self.assertRaisesRegex(ValueError, "missing required.*OpenClawWatchApp"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_duplicate_required_target(self) -> None:
+        payload = self.build_settings_payload()
+        payload.append(payload[0])
+        with self.assertRaisesRegex(ValueError, "duplicate build-settings entry"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_short_bundle_identifier(self) -> None:
+        payload = self.build_settings_payload()
+        payload[0]["buildSettings"]["PRODUCT_BUNDLE_IDENTIFIER"] = (
+            "ai.openclaw.client"
+        )
+        with self.assertRaisesRegex(ValueError, "rendered bundle identifier mismatch"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_mismatched_canonical_variable(self) -> None:
+        payload = self.build_settings_payload()
+        payload[1]["buildSettings"]["OPENCLAW_SHARE_BUNDLE_ID"] = (
+            "ai.openclaw.client.share"
+        )
+        with self.assertRaisesRegex(ValueError, "topology variable mismatch"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    def test_rejects_enabled_signing(self) -> None:
+        payload = self.build_settings_payload()
+        payload[2]["buildSettings"]["CODE_SIGNING_ALLOWED"] = "YES"
+        with self.assertRaisesRegex(ValueError, "CODE_SIGNING_ALLOWED must be NO"):
+            verifier.build_settings_topology_report(payload, MAIN_ID)
+
+    @staticmethod
+    def build_settings_payload() -> list[dict[str, object]]:
+        identifiers = verifier.expected_target_bundle_identifiers(MAIN_ID)
+        variables = {
+            "OPENCLAW_APP_BUNDLE_ID": MAIN_ID,
+            "OPENCLAW_SHARE_BUNDLE_ID": f"{MAIN_ID}.share",
+            "OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID": f"{MAIN_ID}.activitywidget",
+            "OPENCLAW_WATCH_APP_BUNDLE_ID": f"{MAIN_ID}.watchkitapp",
+            "OPENCLAW_WATCH_EXTENSION_BUNDLE_ID": (
+                f"{MAIN_ID}.watchkitapp.extension"
+            ),
+        }
+        return [
+            {
+                "target": target,
+                "buildSettings": {
+                    **variables,
+                    "PRODUCT_BUNDLE_IDENTIFIER": bundle_id,
+                    "CODE_SIGNING_ALLOWED": "NO",
+                    "CODE_SIGNING_REQUIRED": "NO",
+                    "CODE_SIGN_IDENTITY": "",
+                    "DEVELOPMENT_TEAM": "",
+                    "PROVISIONING_PROFILE_SPECIFIER": "",
+                },
+            }
+            for target, bundle_id in identifiers.items()
+        ] + [{"target": "OpenClawTests", "buildSettings": {}}]
+
+
 class AIESUnsignedArchiveTests(unittest.TestCase):
     def test_valid_unsigned_archive_ipa_and_zip(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:

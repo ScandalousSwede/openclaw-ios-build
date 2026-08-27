@@ -122,6 +122,33 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(release.count("OPENCLAW_SKIP_SOURCE_LINT"), 2)
 
+    def test_unsigned_archive_uses_canonical_aies_identity_without_signing(self) -> None:
+        workflow = RELEASE.read_text(encoding="utf-8")
+        unsigned = workflow.split("  build:\n", maxsplit=1)[1].split(
+            "  signed-internal-testflight:\n", maxsplit=1
+        )[0]
+        self.assertEqual(unsigned.count("scripts/ios-beta-prepare.sh"), 1)
+        self.assertIn('--team-id J76B47MZ6V', unsigned)
+        self.assertIn('--push-mode direct', unsigned)
+        self.assertIn('build_number="${GITHUB_RUN_NUMBER}"', unsigned)
+        self.assertIn(
+            'beta_xcconfig="${AIES_BUILD_ROOT}/apps/ios/build/BetaRelease.xcconfig"',
+            unsigned,
+        )
+        self.assertEqual(
+            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 3
+        )
+        self.assertIn("build_settings_topology_report", unsigned)
+        self.assertIn('"ai.openclaw.client.J76B47MZ6V"', unsigned)
+        self.assertGreaterEqual(unsigned.count("CODE_SIGNING_ALLOWED=NO"), 3)
+        self.assertGreaterEqual(unsigned.count("CODE_SIGNING_REQUIRED=NO"), 3)
+        self.assertGreaterEqual(unsigned.count('CODE_SIGN_IDENTITY=""'), 3)
+        self.assertGreaterEqual(unsigned.count('DEVELOPMENT_TEAM=""'), 3)
+        self.assertNotIn("secrets.", unsigned)
+        self.assertNotIn("environment:", unsigned)
+        self.assertNotIn("-allowProvisioningUpdates", unsigned)
+        self.assertNotIn("-authenticationKey", unsigned)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,107 @@ import zipfile
 from typing import Any
 
 SCHEMA = "argus.openclaw-ios.unsigned-archive-report.v1"
+BUILD_SETTINGS_SCHEMA = "argus.openclaw-ios.unsigned-build-settings-report.v1"
+
+
+def expected_target_bundle_identifiers(main_bundle_id: str) -> dict[str, str]:
+    return {
+        "OpenClaw": main_bundle_id,
+        "OpenClawShareExtension": f"{main_bundle_id}.share",
+        "OpenClawActivityWidget": f"{main_bundle_id}.activitywidget",
+        "OpenClawWatchApp": f"{main_bundle_id}.watchkitapp",
+        "OpenClawWatchExtension": f"{main_bundle_id}.watchkitapp.extension",
+    }
+
+
+def build_settings_topology_report(
+    payload: Any, expected_main_bundle_id: str
+) -> dict[str, Any]:
+    """Verify the rendered unsigned build settings before archive creation."""
+
+    if not isinstance(payload, list):
+        raise ValueError("xcodebuild build-settings payload must be an array")
+    expected_targets = expected_target_bundle_identifiers(expected_main_bundle_id)
+    expected_variables = {
+        "OPENCLAW_APP_BUNDLE_ID": expected_main_bundle_id,
+        "OPENCLAW_SHARE_BUNDLE_ID": f"{expected_main_bundle_id}.share",
+        "OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID": (
+            f"{expected_main_bundle_id}.activitywidget"
+        ),
+        "OPENCLAW_WATCH_APP_BUNDLE_ID": f"{expected_main_bundle_id}.watchkitapp",
+        "OPENCLAW_WATCH_EXTENSION_BUNDLE_ID": (
+            f"{expected_main_bundle_id}.watchkitapp.extension"
+        ),
+    }
+    records: dict[str, dict[str, Any]] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("xcodebuild build-settings entry must be an object")
+        target = item.get("target")
+        if target not in expected_targets:
+            continue
+        if target in records:
+            raise ValueError(f"duplicate build-settings entry for target {target}")
+        settings = item.get("buildSettings")
+        if not isinstance(settings, dict):
+            raise ValueError(f"missing buildSettings object for target {target}")
+        actual_bundle_id = settings.get("PRODUCT_BUNDLE_IDENTIFIER")
+        expected_bundle_id = expected_targets[target]
+        if actual_bundle_id != expected_bundle_id:
+            raise ValueError(
+                f"rendered bundle identifier mismatch for {target}: "
+                f"expected={expected_bundle_id!r} actual={actual_bundle_id!r}"
+            )
+        for name, expected_value in expected_variables.items():
+            actual_value = settings.get(name)
+            if actual_value != expected_value:
+                raise ValueError(
+                    f"rendered AIES topology variable mismatch for {target}/{name}: "
+                    f"expected={expected_value!r} actual={actual_value!r}"
+                )
+        for name in ("CODE_SIGNING_ALLOWED", "CODE_SIGNING_REQUIRED"):
+            actual_value = settings.get(name)
+            if actual_value != "NO":
+                raise ValueError(
+                    f"unsigned build setting {name} must be NO for {target}: "
+                    f"actual={actual_value!r}"
+                )
+        for name in (
+            "CODE_SIGN_IDENTITY",
+            "DEVELOPMENT_TEAM",
+            "PROVISIONING_PROFILE_SPECIFIER",
+        ):
+            actual_value = settings.get(name)
+            if actual_value not in (None, ""):
+                raise ValueError(
+                    f"unsigned build setting {name} must be empty for {target}: "
+                    f"actual={actual_value!r}"
+                )
+        records[target] = {
+            "bundle_id": expected_bundle_id,
+            "signing": {
+                "CODE_SIGNING_ALLOWED": settings.get("CODE_SIGNING_ALLOWED"),
+                "CODE_SIGNING_REQUIRED": settings.get("CODE_SIGNING_REQUIRED"),
+                "CODE_SIGN_IDENTITY": settings.get("CODE_SIGN_IDENTITY", ""),
+                "DEVELOPMENT_TEAM": settings.get("DEVELOPMENT_TEAM", ""),
+                "PROVISIONING_PROFILE_SPECIFIER": settings.get(
+                    "PROVISIONING_PROFILE_SPECIFIER", ""
+                ),
+            },
+            "topology_variables": dict(sorted(expected_variables.items())),
+        }
+    missing = sorted(set(expected_targets) - set(records))
+    if missing:
+        raise ValueError(f"missing required AIES build-settings targets: {missing!r}")
+    return {
+        "schema": BUILD_SETTINGS_SCHEMA,
+        "status": "verified",
+        "expected_main_bundle_id": expected_main_bundle_id,
+        "target_count": len(records),
+        "targets": [
+            {"target": target, **records[target]} for target in sorted(records)
+        ],
+    }
 
 
 def parse_args() -> argparse.Namespace:

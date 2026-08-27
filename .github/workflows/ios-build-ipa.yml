@@ -215,6 +215,33 @@ jobs:
           pnpm install --frozen-lockfile
           [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
 
+      - name: Prepare canonical unsigned AIES archive identity
+        run: |
+          set -euo pipefail
+          build_number="${GITHUB_RUN_NUMBER}"
+          cd "${AIES_BUILD_ROOT}"
+          bash scripts/ios-beta-prepare.sh \
+            --build-number "${build_number}" \
+            --team-id J76B47MZ6V \
+            --push-mode direct
+          beta_xcconfig="${AIES_BUILD_ROOT}/apps/ios/build/BetaRelease.xcconfig"
+          [[ -f "${beta_xcconfig}" && ! -L "${beta_xcconfig}" ]]
+          grep -Fqx 'OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.share' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.activitywidget' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp.extension' "${beta_xcconfig}"
+          beta_xcconfig_sha256="$(shasum -a 256 "${beta_xcconfig}" | awk '{print $1}')"
+          python3 apps/ios/Tools/prepare_aies_package_build_root.py verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-beta-prepare-verification.json"
+          [[ -z "$(git status --porcelain=v2 --untracked-files=all)" ]]
+          {
+            echo "AIES_UNSIGNED_BUILD_NUMBER=${build_number}"
+            echo "AIES_UNSIGNED_XCCONFIG=${beta_xcconfig}"
+            echo "AIES_UNSIGNED_XCCONFIG_SHA256=${beta_xcconfig_sha256}"
+          } >> "${GITHUB_ENV}"
+
       - name: Capture build provenance
         run: |
           set -euo pipefail
@@ -253,6 +280,54 @@ jobs:
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_verify_aies_internal_signing.py
+
+      - name: Verify canonical unsigned AIES build settings
+        run: |
+          set -euo pipefail
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          raw_settings="${RUNNER_TEMP}/aies-unsigned-package/evidence/unsigned-build-settings.json"
+          report="${RUNNER_TEMP}/aies-unsigned-package/evidence/unsigned-bundle-topology.json"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -alltargets \
+            -configuration Debug \
+            -showBuildSettings \
+            -json \
+            "${strict_package_args[@]}" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            > "${raw_settings}"
+          PYTHONPATH="${AIES_BUILD_ROOT}/apps/ios/Tools" python3 - \
+            "${raw_settings}" "${report}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          from verify_aies_unsigned_archive import build_settings_topology_report
+
+          source = pathlib.Path(sys.argv[1])
+          output = pathlib.Path(sys.argv[2])
+          report = build_settings_topology_report(
+              json.loads(source.read_text(encoding="utf-8")),
+              "ai.openclaw.client.J76B47MZ6V",
+          )
+          output.write_text(
+              json.dumps(report, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-build-settings-verification.json"
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Build OpenClawKit and run S0-S3 reliability tests
         run: |
@@ -301,7 +376,7 @@ jobs:
             strict_package_args+=("${argument}")
           done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
           cd "${AIES_BUILD_ROOT}/apps/ios"
-          xcodebuild \
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
             -project OpenClaw.xcodeproj \
             -scheme OpenClaw \
             -configuration Debug \
@@ -345,7 +420,7 @@ jobs:
             "OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED=${AIES_APS_ENVIRONMENT}"
           )
 
-          xcodebuild \
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
             -project OpenClaw.xcodeproj \
             -scheme OpenClaw \
             -configuration Debug \
