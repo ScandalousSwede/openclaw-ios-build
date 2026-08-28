@@ -155,8 +155,24 @@ def thin_macho(
     return bytes(prefix) + superblob(signature_allocation, signature_payload)
 
 
+def fat_container(slices: list[tuple[int, int, bytes]]) -> bytes:
+    header_size = 8 + len(slices) * 20
+    entries: list[tuple[int, int, int, int, int]] = []
+    output = bytearray(struct.pack(">II", macho.FAT_MAGIC, len(slices)) + bytes(len(slices) * 20))
+    cursor = header_size
+    for cpu_type, cpu_subtype, value in slices:
+        offset = (cursor + 0x3FFF) & ~0x3FFF
+        output.extend(bytes(offset - len(output)))
+        output.extend(value)
+        entries.append((cpu_type, cpu_subtype, offset, len(value), 14))
+        cursor = offset + len(value)
+    for index, entry in enumerate(entries):
+        struct.pack_into(">IIIII", output, 8 + index * 20, *entry)
+    return bytes(output)
+
+
 def fat_macho(signature_allocation: int, signature_payload: bytes) -> bytes:
-    slices = [
+    return fat_container([
         (
             macho.CPU_TYPE_ARM64_32,
             1,
@@ -179,20 +195,7 @@ def fat_macho(signature_allocation: int, signature_payload: bytes) -> bytes:
                 signature_payload + b"-phone",
             ),
         ),
-    ]
-    header_size = 8 + len(slices) * 20
-    entries: list[tuple[int, int, int, int, int]] = []
-    output = bytearray(struct.pack(">II", macho.FAT_MAGIC, len(slices)) + bytes(len(slices) * 20))
-    cursor = header_size
-    for cpu_type, cpu_subtype, value in slices:
-        offset = (cursor + 0x3FFF) & ~0x3FFF
-        output.extend(bytes(offset - len(output)))
-        output.extend(value)
-        entries.append((cpu_type, cpu_subtype, offset, len(value), 14))
-        cursor = offset + len(value)
-    for index, entry in enumerate(entries):
-        struct.pack_into(">IIIII", output, 8 + index * 20, *entry)
-    return bytes(output)
+    ])
 
 
 class MachOSignatureEquivalenceTests(unittest.TestCase):
@@ -259,9 +262,20 @@ class MachOSignatureEquivalenceTests(unittest.TestCase):
 
     def test_extra_slice_and_malformed_container_fail(self) -> None:
         archive = fat_macho(0x4000, b"archive")
-        ipa = bytearray(fat_macho(0x2000, b"ipa"))
-        struct.pack_into(">I", ipa, 4, 3)
-        self.assert_rejected(archive, bytes(ipa), "NONCANONICAL_FAT_OFFSET")
+        base = fat_macho(0x2000, b"ipa")
+        _format, slices = macho._parse_container(base)
+        extra = thin_macho(
+            macho.CPU_TYPE_ARM64,
+            2,
+            bytes.fromhex("11111111222233334444555555555555"),
+            0x2000,
+            b"extra",
+        )
+        ipa = fat_container(
+            [(item.cpu_type, item.cpu_subtype, item.value) for item in slices]
+            + [(macho.CPU_TYPE_ARM64, 2, extra)]
+        )
+        self.assert_rejected(archive, ipa, "ARCHITECTURE_SET_MISMATCH")
         self.assert_rejected(archive, b"not-macho", "UNSUPPORTED_MACHO_MAGIC")
 
     def test_signature_offset_and_nonderived_linkedit_changes_fail(self) -> None:
