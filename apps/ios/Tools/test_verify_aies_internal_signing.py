@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import hashlib
+import json
 import pathlib
 import plistlib
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -49,9 +53,9 @@ class AIESInternalSigningTests(unittest.TestCase):
             args = self.make_fixture(pathlib.Path(raw_temp))
             with self.mock_signing():
                 report = verifier.build_report(args)
-            self.assertEqual(report["status"], "verified")
+            self.assertEqual(report["status"], "exported_ipa_distribution_verified")
             self.assertEqual(
-                report["schema"], "argus.openclaw-ios.signing-report.v2"
+                report["schema"], "argus.openclaw-ios.signing-report.v3"
             )
             self.assertEqual(report["push_contract"]["transport"], "direct")
             self.assertEqual(report["push_contract"]["relay_base_url"], "")
@@ -64,8 +68,8 @@ class AIESInternalSigningTests(unittest.TestCase):
                     binding["ipa_executable"]["raw_sha256"],
                 )
                 self.assertEqual(
-                    binding["archive_executable"]["signature_stripped_sha256"],
-                    binding["ipa_executable"]["signature_stripped_sha256"],
+                    binding["archive_to_ipa_payload_equivalence"]["status"],
+                    "signature_aware_payload_equivalent",
                 )
                 if binding["bundle_id"] == f"{MAIN_ID}.watchkitapp":
                     self.assertEqual(binding["executable_role"], "sdk_watchkit_stub")
@@ -77,12 +81,10 @@ class AIESInternalSigningTests(unittest.TestCase):
                         ],
                     )
                     self.assertEqual(
-                        binding["watchkit_stub"]["archive"]["embedded_stub"][
-                            "signature_stripped_sha256"
-                        ],
-                        binding["watchkit_stub"]["ipa"]["embedded_stub"][
-                            "signature_stripped_sha256"
-                        ],
+                        binding["watchkit_stub"][
+                            "archive_to_ipa_payload_equivalence"
+                        ]["status"],
+                        "signature_aware_payload_equivalent",
                     )
                 else:
                     self.assertEqual(binding["executable_role"], "compiled_product")
@@ -112,7 +114,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             args.ipa = None
             with self.mock_signing():
                 report = verifier.build_report(args)
-            self.assertEqual(report["status"], "archive_verified")
+            self.assertEqual(report["status"], "archive_integrity_verified")
             self.assertEqual(len(report["archive"]["bundles"]), 5)
             self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
             self.assertEqual(report["binary_binding"]["required_dsym_count"], 4)
@@ -130,6 +132,107 @@ class AIESInternalSigningTests(unittest.TestCase):
                         binding["archive_executable"]["uuids"],
                         binding["dsym"]["uuids"],
                     )
+
+            archive_bundles = report["archive"]["bundles"]
+            self.assertTrue(
+                all(item["get_task_allow"] is True for item in archive_bundles)
+            )
+            self.assertTrue(
+                all(
+                    item["profile"]["profile_type"] == "development"
+                    for item in archive_bundles
+                )
+            )
+
+    def test_stage_b_rejects_development_signed_ipa(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with (
+                self.mock_signing(
+                    ipa_get_task_allow=True,
+                    ipa_provisioned_devices=["fixture-device"],
+                    ipa_leaf_common_name="Apple Development: Example (Y5PE65HELJ)",
+                ),
+                self.assertRaisesRegex(ValueError, "get-task-allow"),
+            ):
+                verifier.build_report(args)
+
+    def test_stage_b_rejects_missing_get_task_allow(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with (
+                self.mock_signing(ipa_get_task_allow=MISSING),
+                self.assertRaisesRegex(ValueError, "explicitly disable get-task-allow"),
+            ):
+                verifier.build_report(args)
+
+    def test_stage_b_rejects_non_distribution_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with (
+                self.mock_signing(
+                    ipa_leaf_common_name="Apple Development: Example (Y5PE65HELJ)"
+                ),
+                self.assertRaisesRegex(ValueError, "not signed by Apple Distribution"),
+            ):
+                verifier.build_report(args)
+
+    def test_stage_b_rejects_devices_and_enterprise_profiles(self) -> None:
+        cases = (
+            {"ipa_provisioned_devices": ["fixture-device"]},
+            {"ipa_provisions_all_devices": True},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    with (
+                        self.mock_signing(**options),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "not App Store Connect distribution|non-App-Store",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_stage_b_rejects_missing_main_or_unexpected_child_aps(self) -> None:
+        cases = (
+            {"main_aps": None},
+            {"ipa_child_aps": "production"},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    with (
+                        self.mock_signing(**options),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "aps-environment is not production|unexpected signed aps-environment",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_missing_bundle_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            archive_app = args.archive / "Products" / "Applications" / "OpenClaw.app"
+            bundle = self.bundle_path(archive_app, f"{MAIN_ID}.share")
+            (bundle / BUNDLE_EXECUTABLES[f"{MAIN_ID}.share"]).unlink()
+            with (
+                self.mock_signing(),
+                self.assertRaisesRegex(ValueError, "missing bundle executable"),
+            ):
+                verifier.build_report(args)
+
+    def test_profile_and_entitlement_parsers_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "missing profile entitlements"):
+            verifier.selected_profile_fields({}, "fixture")
+        self.assertFalse(
+            verifier.entitlement_value_authorized(
+                {"allowed": True}, {"unrecognized": True}
+            )
+        )
 
     def test_rejects_relay_configuration_in_exported_ipa(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
@@ -193,6 +296,23 @@ class AIESInternalSigningTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "signed team mismatch"):
                     verifier.build_report(args)
 
+    def test_rejects_wrong_signed_or_profile_application_identifier(self) -> None:
+        cases = (
+            {"signed_application_identifier": f"{TEAM_ID}.wrong"},
+            {"profile_application_identifier": f"{TEAM_ID}.wrong"},
+        )
+        for options in cases:
+            with self.subTest(options=options):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    with (
+                        self.mock_signing(**options),
+                        self.assertRaisesRegex(
+                            ValueError, "application identifier mismatch"
+                        ),
+                    ):
+                        verifier.build_report(args)
+
     def test_rejects_expired_distribution_profile(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             args = self.make_fixture(pathlib.Path(raw_temp))
@@ -215,7 +335,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             args = self.make_fixture(pathlib.Path(raw_temp))
             with self.mock_signing(beta_reports_active=MISSING):
                 with self.assertRaisesRegex(
-                    ValueError, "not authorized for App Store Connect/TestFlight"
+                    ValueError, "not App Store Connect distribution"
                 ):
                     verifier.build_report(args)
 
@@ -224,7 +344,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             args = self.make_fixture(pathlib.Path(raw_temp))
             with self.mock_signing(beta_reports_active=False):
                 with self.assertRaisesRegex(
-                    ValueError, "not authorized for App Store Connect/TestFlight"
+                    ValueError, "not App Store Connect distribution"
                 ):
                     verifier.build_report(args)
 
@@ -269,7 +389,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             )
             with self.mock_signing():
                 with self.assertRaisesRegex(
-                    ValueError, "executable identity differ.*activitywidget"
+                    ValueError, "payload differ.*OpenClawActivityWidget"
                 ):
                     verifier.build_report(args)
 
@@ -319,7 +439,7 @@ class AIESInternalSigningTests(unittest.TestCase):
                     with (
                         self.mock_signing(),
                         self.assertRaisesRegex(
-                            ValueError, "WatchKit SDK stub|does not match"
+                            ValueError, "WatchKit SDK stub|does not match|payload differ"
                         ),
                     ):
                         verifier.build_report(args)
@@ -336,7 +456,7 @@ class AIESInternalSigningTests(unittest.TestCase):
                     with (
                         self.mock_signing(),
                         self.assertRaisesRegex(
-                            ValueError, "WatchKit SDK stub|does not match"
+                            ValueError, "WatchKit SDK stub|does not match|payload differ"
                         ),
                     ):
                         verifier.build_report(args)
@@ -377,7 +497,9 @@ class AIESInternalSigningTests(unittest.TestCase):
         def fake_run(command: list[str], *, combine_output: bool = False) -> bytes:
             del combine_output
             commands.append(command)
-            if command[0] == "codesign":
+            if command[0] == "codesign" and any(
+                item.startswith("--extract-certificates=") for item in command
+            ):
                 prefix = next(
                     item.split("=", 1)[1]
                     for item in command
@@ -385,6 +507,8 @@ class AIESInternalSigningTests(unittest.TestCase):
                 )
                 pathlib.Path(f"{prefix}0").write_bytes(SIGNING_CERTIFICATE)
                 pathlib.Path(f"{prefix}1").write_bytes(b"apple-intermediate")
+            if command[0] == "codesign":
+                return b"Authority=Apple Distribution: Example (Y5PE65HELJ)\n"
             return b""
 
         with mock.patch.object(verifier, "run_tool", side_effect=fake_run):
@@ -393,7 +517,10 @@ class AIESInternalSigningTests(unittest.TestCase):
             )
         self.assertEqual(result["certificate_chain_count"], 2)
         self.assertEqual(result["leaf_certificate_sha256"], SIGNING_CERTIFICATE_SHA256)
-        trust_command = commands[-1]
+        self.assertEqual(
+            result["leaf_common_name"], "Apple Distribution: Example (Y5PE65HELJ)"
+        )
+        trust_command = next(command for command in commands if command[0] == "security")
         self.assertEqual(trust_command[:2], ["security", "verify-cert"])
         self.assertEqual(trust_command[-3:], ["-p", "codeSign", "-L"])
         self.assertEqual(trust_command.count("-c"), 2)
@@ -457,6 +584,94 @@ class AIESInternalSigningTests(unittest.TestCase):
                 verifier.main()
             self.assertFalse(args.output.exists())
             self.assertFalse(args.output.with_suffix(".json.tmp").exists())
+
+    def test_main_writes_only_a_complete_valid_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with (
+                self.mock_signing(),
+                mock.patch.object(verifier, "parse_args", return_value=args),
+            ):
+                verifier.main()
+            payload = json.loads(args.output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                payload["status"], "exported_ipa_distribution_verified"
+            )
+
+    def test_receipt_validator_rejects_missing_malformed_and_partial_results(self) -> None:
+        malformed = (None, {}, {"schema": verifier.SCHEMA})
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                verifier.validate_report_contract(value, archive_only=False)
+
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            with self.mock_signing():
+                valid = verifier.build_report(args)
+            cases = []
+            missing_ipa = dict(valid)
+            missing_ipa.pop("ipa")
+            cases.append(missing_ipa)
+            partial_ipa = copy.deepcopy(valid)
+            partial_ipa["ipa"]["bundles"].pop()
+            cases.append(partial_ipa)
+            missing_binding = copy.deepcopy(valid)
+            missing_binding["binary_binding"]["bundles"][0].pop(
+                "archive_to_ipa_payload_equivalence"
+            )
+            cases.append(missing_binding)
+            malformed_status = copy.deepcopy(valid)
+            malformed_status["status"] = "verified-ish"
+            cases.append(malformed_status)
+            for value in cases:
+                with self.subTest(case=value.get("status")), self.assertRaises(
+                    ValueError
+                ):
+                    verifier.validate_report_contract(value, archive_only=False)
+
+    def test_main_rejects_zero_exit_style_malformed_report_and_removes_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            args.output.write_text('{"status":"stale"}\n', encoding="utf-8")
+            with (
+                mock.patch.object(verifier, "parse_args", return_value=args),
+                mock.patch.object(
+                    verifier,
+                    "build_report",
+                    return_value={"schema": verifier.SCHEMA, "status": "verified-ish"},
+                ),
+                self.assertRaisesRegex(ValueError, "invalid schema or status"),
+            ):
+                verifier.main()
+            self.assertFalse(args.output.exists())
+
+    def test_cli_returns_nonzero_and_no_receipt_when_verifier_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            root = pathlib.Path(raw_temp)
+            output = root / "missing-report.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(pathlib.Path(verifier.__file__).resolve()),
+                    "--archive",
+                    str(root / "missing.xcarchive"),
+                    "--archive-only",
+                    "--output",
+                    str(output),
+                    "--expected-main-bundle-id",
+                    MAIN_ID,
+                    "--expected-team-id",
+                    TEAM_ID,
+                    "--expected-git-sha",
+                    GIT_SHA,
+                    "--expected-archive-uuid",
+                    ARCHIVE_UUID,
+                ],
+                check=False,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(output.exists())
 
     def make_fixture(
         self,
@@ -681,31 +896,46 @@ class AIESInternalSigningTests(unittest.TestCase):
         beta_reports_active: object = True,
         signed_extra: dict[str, object] | None = None,
         profile_extra: dict[str, object] | None = None,
+        signed_application_identifier: str | None = None,
+        ipa_get_task_allow: object = False,
+        ipa_child_aps: str | None = None,
+        ipa_provisioned_devices: list[str] | None = None,
+        ipa_provisions_all_devices: bool = False,
+        ipa_leaf_common_name: str = "Apple Distribution: Example (Y5PE65HELJ)",
     ):
         def entitlements(path: pathlib.Path, _codesign: str) -> dict[str, object]:
             bundle_id = verifier.read_plist(path / "Info.plist")["CFBundleIdentifier"]
+            archive = ".xcarchive" in str(path)
             result: dict[str, object] = {
                 "com.apple.developer.team-identifier": team_id,
-                "application-identifier": f"{team_id}.{bundle_id}",
-                "get-task-allow": False,
+                "application-identifier": signed_application_identifier
+                or f"{team_id}.{bundle_id}",
+                "get-task-allow": True if archive else ipa_get_task_allow,
             }
             if bundle_id == MAIN_ID:
-                result["aps-environment"] = main_aps
+                result["aps-environment"] = "development" if archive else main_aps
                 result.update(signed_extra or {})
+            elif not archive and ipa_child_aps is not None:
+                result["aps-environment"] = ipa_child_aps
             return result
 
         def profile(path: pathlib.Path, _security: str) -> dict[str, object]:
             bundle_id = verifier.read_plist(path / "Info.plist")["CFBundleIdentifier"]
+            archive = ".xcarchive" in str(path)
             profile_entitlements: dict[str, object] = {
                 "application-identifier": profile_application_identifier
                 or f"{team_id}.{bundle_id}",
-                "get-task-allow": False,
+                "get-task-allow": True if archive else ipa_get_task_allow,
             }
-            if beta_reports_active is not MISSING:
+            if not archive and beta_reports_active is not MISSING:
                 profile_entitlements["beta-reports-active"] = beta_reports_active
             if bundle_id == MAIN_ID:
-                profile_entitlements["aps-environment"] = main_aps
+                profile_entitlements["aps-environment"] = (
+                    "development" if archive else main_aps
+                )
                 profile_entitlements.update(profile_extra or {})
+            elif not archive and ipa_child_aps is not None:
+                profile_entitlements["aps-environment"] = ipa_child_aps
             return {
                 "UUID": f"profile-{bundle_id}",
                 "Name": f"Profile {bundle_id}",
@@ -713,6 +943,12 @@ class AIESInternalSigningTests(unittest.TestCase):
                 "ExpirationDate": profile_expiration,
                 "DeveloperCertificates": [profile_certificate],
                 "Entitlements": profile_entitlements,
+                "ProvisionedDevices": (
+                    ["fixture-development-device"]
+                    if archive
+                    else list(ipa_provisioned_devices or [])
+                ),
+                "ProvisionsAllDevices": False if archive else ipa_provisions_all_devices,
             }
 
         def uuids(path: pathlib.Path, _dwarfdump: str) -> list[dict[str, str]]:
@@ -722,7 +958,7 @@ class AIESInternalSigningTests(unittest.TestCase):
                 else [{"architecture": "arm64", "uuid": MACHO_UUID}]
             )
 
-        def stripped_hash(path: pathlib.Path, _codesign: str) -> str:
+        def normalized_payload(path: pathlib.Path) -> bytes:
             content = path.read_bytes()
             for prefix in (
                 b"archive-signature:",
@@ -732,26 +968,95 @@ class AIESInternalSigningTests(unittest.TestCase):
                 if content.startswith(prefix):
                     content = content[len(prefix) :]
                     break
-            return hashlib.sha256(content).hexdigest()
+            return content
+
+        def payload_equivalence(
+            archive_path: pathlib.Path, ipa_path: pathlib.Path
+        ) -> dict[str, object]:
+            if normalized_payload(archive_path) != normalized_payload(ipa_path):
+                raise ValueError(
+                    "archive and exported IPA executable payload differ: "
+                    + archive_path.parent.name
+                )
+            return {
+                "schema": "aies.macho-signature-equivalence.v1",
+                "status": "signature_aware_payload_equivalent",
+                "architecture_count": 1,
+            }
+
+        def signing_identity(path: pathlib.Path, _codesign: str, _security: str):
+            archive = ".xcarchive" in str(path)
+            return {
+                "certificate_chain_count": 2,
+                "leaf_certificate_sha256": SIGNING_CERTIFICATE_SHA256,
+                "authorities": [
+                    "Apple Development: Example (Y5PE65HELJ)"
+                    if archive
+                    else ipa_leaf_common_name
+                ],
+                "leaf_common_name": (
+                    "Apple Development: Example (Y5PE65HELJ)"
+                    if archive
+                    else ipa_leaf_common_name
+                ),
+                "trust_verified": True,
+            }
 
         return mock.patch.multiple(
             verifier,
             read_code_entitlements=mock.Mock(side_effect=entitlements),
             read_profile=mock.Mock(side_effect=profile),
             verify_code_signature=mock.Mock(return_value=None),
-            verify_signing_identity=mock.Mock(
-                return_value={
-                    "certificate_chain_count": 2,
-                    "leaf_certificate_sha256": SIGNING_CERTIFICATE_SHA256,
-                    "trust_verified": True,
-                }
-            ),
+            verify_signing_identity=mock.Mock(side_effect=signing_identity),
             macho_uuids=mock.Mock(side_effect=uuids),
-            signature_stripped_sha256=mock.Mock(side_effect=stripped_hash),
+            compare_macho_payloads=mock.Mock(side_effect=payload_equivalence),
         )
 
 
 class AIESReleaseConfigurationTests(unittest.TestCase):
+    def test_exact_replay_workflow_is_credential_free_and_fixture_bound(self) -> None:
+        workflow = (
+            REPO_ROOT
+            / ".github"
+            / "workflows"
+            / "ios-post-export-verifier-qualification.yml"
+        ).read_text(encoding="utf-8")
+        fixture_path = (
+            REPO_ROOT
+            / "apps"
+            / "ios"
+            / "Tools"
+            / "fixtures"
+            / "aies_export_boundary_run_33188911517.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["archive"]["artifact_id"], 9676279420)
+        self.assertEqual(fixture["ipa"]["artifact_id"], 9692923415)
+        self.assertEqual(
+            fixture["archive"]["artifact_sha256"],
+            "d253acd7c1045d512dc8a1b9862d2a017f10b3ebd6005cf250ede0e539f52aa4",
+        )
+        self.assertEqual(
+            fixture["ipa"]["ipa_sha256"],
+            "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82",
+        )
+        self.assertEqual(workflow.count("for iteration in $(seq 1 10)"), 1)
+        self.assertIn("actions: read", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("environment:", workflow)
+        self.assertEqual(workflow.count('"secrets."'), 1)
+        self.assertNotIn("ASC_PRIVATE_KEY", workflow)
+        self.assertNotIn("OPENCLAW_APNS", workflow)
+        self.assertEqual(workflow.count("upload_to_testflight"), 1)
+        self.assertNotIn("xcodebuild -exportArchive", workflow)
+        self.assertNotIn("fastlane ios aies_internal_testflight", workflow)
+        fixture_files = sorted(fixture_path.parent.rglob("*"))
+        self.assertTrue(fixture_files)
+        self.assertTrue(
+            all(path.is_dir() or path.suffix == ".json" for path in fixture_files)
+        )
+
     def test_workflow_pins_third_party_actions_and_defers_private_key(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
@@ -790,6 +1095,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("name: Verify exact release checkout", workflow)
         self.assertGreaterEqual(
             workflow.count("test_verify_aies_internal_signing.py"), 2
+        )
+        self.assertEqual(
+            workflow.count("test_aies_macho_signature_equivalence.py"), 2
         )
         self.assertEqual(workflow.count("uses: ./.github/actions/setup-xcodegen"), 3)
         # The conformance job renders the tracked project twice in place. The
@@ -926,6 +1234,10 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             release_lane.index("export_aies_beta_archive"),
             release_lane.index("package_aies_internal_evidence!"),
         )
+        self.assertLess(
+            release_lane.index("package_aies_internal_evidence!"),
+            release_lane.index("upload_to_testflight"),
+        )
         self.assertIn('File.join(context.fetch(:output_directory), "unverified-export")', fastfile)
         self.assertIn("FileUtils.mv(ipa_path, final_ipa)", fastfile)
         self.assertIn('minimum_build_number: required_env!("GITHUB_RUN_NUMBER")', fastfile)
@@ -962,6 +1274,34 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertLess(
             signed_job.index("name: Upload signed release evidence"),
             signed_job.index("name: Remove ephemeral App Store Connect key"),
+        )
+        lane_step = signed_job.split(
+            "name: Build, verify, and upload internal TestFlight diagnostic",
+            maxsplit=1,
+        )[1].split("- name: Sanitize retained release log", maxsplit=1)[0]
+        self.assertIn("set -uo pipefail", lane_step)
+        self.assertIn('lane_status="${PIPESTATUS[0]}"', lane_step)
+        self.assertIn('if [[ "${lane_status}" -ne 0 ]]', lane_step)
+        self.assertIn('exit "${lane_status}"', lane_step)
+        self.assertNotIn("|| true", lane_step)
+        self.assertIn("OpenClaw-release-lane-status.json", signed_job)
+        self.assertIn("archive_integrity_verified", signed_job)
+        self.assertIn("exported_ipa_distribution_verified", signed_job)
+        self.assertLess(
+            signed_job.index("archive_integrity_verified"),
+            signed_job.index("exported_ipa_distribution_verified"),
+        )
+        self.assertLess(
+            signed_job.index("exported_ipa_distribution_verified"),
+            signed_job.index("name: Upload signed IPA"),
+        )
+
+        package_function = fastfile.split(
+            "\ndef package_aies_internal_evidence!", maxsplit=1
+        )[1].split("\ndef verify_aies_asc_build!", maxsplit=1)[0]
+        self.assertLess(
+            package_function.index("verify_aies_internal_signing.py"),
+            package_function.index("FileUtils.mv(ipa_path, final_ipa)"),
         )
 
     def test_rc1_single_owner_internal_release_policy_is_consistent(self) -> None:

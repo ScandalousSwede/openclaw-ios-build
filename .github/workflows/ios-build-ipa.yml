@@ -279,6 +279,7 @@ jobs:
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
+            test_aies_macho_signature_equivalence.py \
             test_verify_aies_internal_signing.py
 
       - name: Verify canonical unsigned AIES build settings
@@ -811,6 +812,7 @@ jobs:
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
+            test_aies_macho_signature_equivalence.py \
             test_verify_aies_internal_signing.py
 
       - name: Parse Fastlane release configuration without credentials
@@ -929,10 +931,19 @@ jobs:
 
       - name: Build, verify, and upload internal TestFlight diagnostic
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd "${AIES_BUILD_ROOT}/apps/ios"
+          set +e
           fastlane ios aies_internal_testflight 2>&1 | \
             tee "${RUNNER_TEMP}/aies-fastlane.raw.log"
+          lane_status="${PIPESTATUS[0]}"
+          set -e
+          printf '{"fastlane_exit_status":%s}\n' "${lane_status}" > \
+            "${RUNNER_TEMP}/aies-fastlane-exit-status.json"
+          if [[ "${lane_status}" -ne 0 ]]; then
+            echo "AIES release lane failed closed with status ${lane_status}." >&2
+            exit "${lane_status}"
+          fi
 
       - name: Sanitize retained release log
         if: always() && !cancelled()
@@ -947,6 +958,12 @@ jobs:
             python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/sanitize_aies_release_log.py" \
               --input "${raw_log}" \
               --output "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
+          fi
+          status_receipt="${RUNNER_TEMP}/aies-fastlane-exit-status.json"
+          if [[ -f "${status_receipt}" ]]; then
+            mkdir -p "${AIES_TESTFLIGHT_OUTPUT_DIR}"
+            cp "${status_receipt}" \
+              "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json"
           fi
 
       - name: Verify strict package custody after signed lane
@@ -968,12 +985,14 @@ jobs:
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json"
           test -s "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
           if grep -q "BEGIN PRIVATE KEY" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
             echo "Retained export log contains a private-key marker." >&2
@@ -1000,9 +1019,9 @@ jobs:
           )
           expected = (
               (archive_manifest, "evidence_stage", "archive"),
-              (archive_signing, "status", "archive_verified"),
+              (archive_signing, "status", "archive_integrity_verified"),
               (export_manifest, "evidence_stage", "export"),
-              (export_signing, "status", "verified"),
+              (export_signing, "status", "exported_ipa_distribution_verified"),
           )
           mismatches = [
               {"key": key, "expected": wanted, "actual": payload.get(key)}
@@ -1014,6 +1033,15 @@ jobs:
                   "retained archive/export evidence failed stage validation: "
                   + json.dumps(mismatches, sort_keys=True)
               )
+          PY
+          python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if receipt != {"fastlane_exit_status": 0}:
+              raise SystemExit("release lane did not finish with exact zero status")
           PY
           python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" "${GITHUB_SHA}" <<'PY'
           import json
@@ -1081,6 +1109,7 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-manifest.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-entitlements.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-release-lane-status.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
           retention-days: 90
           if-no-files-found: warn

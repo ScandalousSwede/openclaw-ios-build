@@ -16,7 +16,10 @@ import tempfile
 import zipfile
 from typing import Any
 
-SCHEMA = "argus.openclaw-ios.signing-report.v2"
+from aies_macho_signature_equivalence import compare_macho_payloads
+
+
+SCHEMA = "argus.openclaw-ios.signing-report.v3"
 WATCH_APP_RELATIVE_PATH = pathlib.PurePosixPath("Watch/OpenClawWatchApp.app")
 WATCH_APP_EXECUTABLE = "OpenClawWatchApp"
 WATCHKIT_STUB_RELATIVE_PATH = pathlib.PurePosixPath("_WatchKitStub/WK")
@@ -160,9 +163,17 @@ def verify_signing_identity(
             trust_command,
             combine_output=True,
         )
+        authority_output = run_tool(
+            [codesign, "-d", "--verbose=4", str(path)], combine_output=True
+        ).decode("utf-8", errors="replace")
+        authorities = re.findall(r"^Authority=(.+)$", authority_output, re.MULTILINE)
+        if not authorities:
+            raise ValueError(f"codesign returned no signing authority for {path.name}")
         return {
             "certificate_chain_count": len(certificate_chain),
             "leaf_certificate_sha256": sha256_bytes(leaf_path.read_bytes()),
+            "authorities": authorities,
+            "leaf_common_name": authorities[0],
             "trust_verified": True,
         }
 
@@ -194,18 +205,26 @@ def selected_profile_fields(profile: dict[str, Any], source: str) -> dict[str, A
         or not all(isinstance(item, bytes) and item for item in developer_certificates)
     ):
         raise ValueError(f"missing DeveloperCertificates in {source}")
-    if entitlements.get("beta-reports-active") is not True:
-        raise ValueError(
-            f"profile is not authorized for App Store Connect/TestFlight in {source}"
-        )
+    get_task_allow = entitlements.get("get-task-allow")
+    beta_reports_active = entitlements.get("beta-reports-active")
+    if get_task_allow is True or provisioned_devices:
+        profile_type = "development"
+    elif profile.get("ProvisionsAllDevices") is True:
+        profile_type = "enterprise"
+    elif beta_reports_active is True:
+        profile_type = "app-store-connect"
+    else:
+        profile_type = "unknown"
     return {
         "uuid": require_text(profile, "UUID", source),
         "name": require_text(profile, "Name", source),
         "team_identifiers": sorted(team_ids),
         "application_identifier": entitlements.get("application-identifier"),
+        "keychain_access_groups": entitlements.get("keychain-access-groups", []),
         "aps_environment": entitlements.get("aps-environment"),
-        "beta_reports_active": True,
-        "get_task_allow": entitlements.get("get-task-allow", False),
+        "beta_reports_active": beta_reports_active,
+        "get_task_allow": get_task_allow,
+        "profile_type": profile_type,
         "expiration_at": as_iso8601(expiration, source),
         "provisioned_device_count": len(provisioned_devices),
         "provisions_all_devices": profile.get("ProvisionsAllDevices", False) is True,
@@ -293,6 +312,8 @@ def verify_bundle(
     expected_team_id: str,
     codesign: str,
     security: str,
+    *,
+    distribution: bool,
 ) -> dict[str, Any]:
     info_path = path / "Info.plist"
     info = read_plist(info_path)
@@ -305,14 +326,11 @@ def verify_bundle(
         raise ValueError(f"signed team mismatch for {bundle_id}")
     if application_identifier != expected_application_identifier:
         raise ValueError(f"signed application identifier mismatch for {bundle_id}")
-    if entitlements.get("get-task-allow") is True:
-        raise ValueError(f"distribution bundle has get-task-allow enabled: {bundle_id}")
-
     verify_code_signature(path, codesign, deep=path == app_path)
     signing_identity = verify_signing_identity(path, codesign, security)
     raw_profile = read_profile(path, security)
     profile = selected_profile_fields(raw_profile, bundle_id)
-    if expected_team_id not in profile["team_identifiers"]:
+    if profile["team_identifiers"] != [expected_team_id]:
         raise ValueError(f"profile team mismatch for {bundle_id}")
     if not isinstance(
         profile["application_identifier"], str
@@ -320,12 +338,6 @@ def verify_bundle(
         profile["application_identifier"], expected_application_identifier
     ):
         raise ValueError(f"profile application identifier mismatch for {bundle_id}")
-    if profile["get_task_allow"] is True:
-        raise ValueError(
-            f"distribution profile has get-task-allow enabled: {bundle_id}"
-        )
-    if profile["provisioned_device_count"] != 0 or profile["provisions_all_devices"]:
-        raise ValueError(f"non-App-Store provisioning profile for {bundle_id}")
     if (
         signing_identity["leaf_certificate_sha256"]
         not in profile["developer_certificate_sha256"]
@@ -339,12 +351,43 @@ def verify_bundle(
         expected_team_id,
         bundle_id,
     )
+    if distribution:
+        if entitlements.get("get-task-allow") is not False:
+            raise ValueError(
+                f"distribution bundle must explicitly disable get-task-allow: {bundle_id}"
+            )
+        if profile["get_task_allow"] is not False:
+            raise ValueError(
+                f"distribution profile must explicitly disable get-task-allow: {bundle_id}"
+            )
+        if profile["profile_type"] != "app-store-connect":
+            raise ValueError(
+                f"profile is not App Store Connect distribution: {bundle_id}"
+            )
+        if profile["beta_reports_active"] is not True:
+            raise ValueError(
+                f"profile is not authorized for App Store Connect/TestFlight: {bundle_id}"
+            )
+        if (
+            profile["provisioned_device_count"] != 0
+            or profile["provisions_all_devices"]
+        ):
+            raise ValueError(f"non-App-Store provisioning profile for {bundle_id}")
+        leaf_common_name = signing_identity.get("leaf_common_name")
+        if not isinstance(leaf_common_name, str) or not leaf_common_name.startswith(
+            "Apple Distribution:"
+        ):
+            raise ValueError(
+                f"bundle is not signed by Apple Distribution: {bundle_id}"
+            )
 
     return {
         "bundle_id": bundle_id,
         "relative_path": str(path.relative_to(app_path.parent)),
         "team_identifier": team_id,
         "application_identifier": application_identifier,
+        "keychain_access_groups": entitlements.get("keychain-access-groups", []),
+        "get_task_allow": entitlements.get("get-task-allow"),
         "aps_environment": entitlements.get("aps-environment"),
         "authorized_entitlement_keys": authorized_entitlement_keys,
         "profile": profile,
@@ -400,6 +443,8 @@ def verify_app(
     expected_archive_uuid: str,
     codesign: str,
     security: str,
+    *,
+    distribution: bool = True,
 ) -> dict[str, Any]:
     if not app_path.is_dir():
         raise ValueError(f"missing app bundle: {app_path}")
@@ -431,7 +476,14 @@ def verify_app(
         )
     bundles = []
     for path, relative_path in zip(paths, actual_relative_paths):
-        record = verify_bundle(path, app_path, expected_team_id, codesign, security)
+        record = verify_bundle(
+            path,
+            app_path,
+            expected_team_id,
+            codesign,
+            security,
+            distribution=distribution,
+        )
         expected_bundle_id = topology[relative_path]
         if record["bundle_id"] != expected_bundle_id:
             raise ValueError(
@@ -442,11 +494,28 @@ def verify_app(
     main_record = next(
         item for item in bundles if item["bundle_id"] == expected_main_bundle_id
     )
-    if main_record["aps_environment"] != "production":
-        raise ValueError("main app signed aps-environment is not production")
-    if main_record["profile"]["aps_environment"] != "production":
-        raise ValueError("main app profile aps-environment is not production")
+    if distribution:
+        if main_record["aps_environment"] != "production":
+            raise ValueError("main app signed aps-environment is not production")
+        if main_record["profile"]["aps_environment"] != "production":
+            raise ValueError("main app profile aps-environment is not production")
+        for record in bundles:
+            if record is main_record:
+                continue
+            if record["aps_environment"] is not None:
+                raise ValueError(
+                    "unexpected signed aps-environment for non-push target: "
+                    + record["bundle_id"]
+                )
+            if record["profile"]["aps_environment"] is not None:
+                raise ValueError(
+                    "unexpected profile aps-environment for non-push target: "
+                    + record["bundle_id"]
+                )
     return {
+        "verification_stage": (
+            "exported_ipa_distribution" if distribution else "archive_integrity"
+        ),
         "app": app_info,
         "bundles": sorted(bundles, key=lambda item: item["relative_path"]),
     }
@@ -497,17 +566,7 @@ def macho_uuids(path: pathlib.Path, dwarfdump: str) -> list[dict[str, str]]:
     ]
 
 
-def signature_stripped_sha256(path: pathlib.Path, codesign: str) -> str:
-    with tempfile.TemporaryDirectory() as raw_temp:
-        stripped = pathlib.Path(raw_temp) / path.name
-        shutil.copy2(path, stripped)
-        run_tool([codesign, "--remove-signature", str(stripped)], combine_output=True)
-        return sha256_bytes(stripped.read_bytes())
-
-
-def executable_identity(
-    app_path: pathlib.Path, codesign: str, dwarfdump: str
-) -> dict[str, Any]:
+def bundle_executable_path(app_path: pathlib.Path) -> pathlib.Path:
     info = read_plist(app_path / "Info.plist")
     executable_name = require_text(
         info, "CFBundleExecutable", str(app_path / "Info.plist")
@@ -517,10 +576,16 @@ def executable_identity(
     executable = app_path / executable_name
     if not executable.is_file():
         raise ValueError(f"missing bundle executable: {executable_name}")
+    return executable
+
+
+def executable_identity(
+    app_path: pathlib.Path, codesign: str, dwarfdump: str
+) -> dict[str, Any]:
+    executable = bundle_executable_path(app_path)
     return {
-        "name": executable_name,
+        "name": executable.name,
         "raw_sha256": sha256_bytes(executable.read_bytes()),
-        "signature_stripped_sha256": signature_stripped_sha256(executable, codesign),
         "uuids": macho_uuids(executable, dwarfdump),
     }
 
@@ -562,16 +627,13 @@ def verify_watchkit_stub_binding(
     stub = {
         "relative_path": WATCHKIT_STUB_RELATIVE_PATH.as_posix(),
         "raw_sha256": sha256_bytes(stub_path.read_bytes()),
-        "signature_stripped_sha256": signature_stripped_sha256(
-            stub_path, codesign
-        ),
         "uuids": macho_uuids(stub_path, dwarfdump),
     }
-    for key in ("signature_stripped_sha256", "uuids"):
-        if stub[key] != executable.get(key):
-            raise ValueError(
-                f"Watch app executable does not match embedded SDK stub: {key}"
-            )
+    if stub["uuids"] != executable.get("uuids"):
+        raise ValueError("Watch app executable does not match embedded SDK stub: uuids")
+    stub_equivalence = compare_macho_payloads(
+        bundle_executable_path(bundle_path), stub_path
+    )
     return {
         "kind": "xcode_watchkit_sdk_stub",
         "plist_contract": {
@@ -580,8 +642,8 @@ def verify_watchkit_stub_binding(
         },
         "embedded_stub": stub,
         "bundle_executable_match": {
-            "signature_stripped_sha256": True,
             "uuids": True,
+            "signature_aware_payload_equivalence": stub_equivalence,
         },
     }
 
@@ -715,7 +777,7 @@ def verify_binary_binding(
         )
         ipa_identity = executable_identity(ipa_bundle, codesign, dwarfdump)
         archive_identity = record["archive_executable"]
-        bound_fields = ("name", "signature_stripped_sha256", "uuids")
+        bound_fields = ("name", "uuids")
         if any(
             archive_identity[field] != ipa_identity[field] for field in bound_fields
         ):
@@ -723,7 +785,19 @@ def verify_binary_binding(
                 "archive and exported IPA executable identity differ for "
                 f"{record['bundle_id']}"
             )
-        final_record = {**record, "ipa_executable": ipa_identity}
+        payload_equivalence = compare_macho_payloads(
+            bundle_executable_path(
+                archive_app
+                if relative_path == pathlib.PurePosixPath(".")
+                else archive_app / relative_path
+            ),
+            bundle_executable_path(ipa_bundle),
+        )
+        final_record = {
+            **record,
+            "ipa_executable": ipa_identity,
+            "archive_to_ipa_payload_equivalence": payload_equivalence,
+        }
         if record["executable_role"] == "sdk_watchkit_stub":
             ipa_stub = verify_watchkit_stub_binding(
                 ipa_bundle,
@@ -733,22 +807,80 @@ def verify_binary_binding(
                 dwarfdump,
             )
             archive_stub = record["watchkit_stub"]["archive"]
-            for key in ("signature_stripped_sha256", "uuids"):
-                if (
-                    archive_stub["embedded_stub"][key]
-                    != ipa_stub["embedded_stub"][key]
-                ):
-                    raise ValueError(
-                        "archive and IPA WatchKit SDK-stub identity differ: " + key
-                    )
+            if archive_stub["embedded_stub"]["uuids"] != ipa_stub[
+                "embedded_stub"
+            ]["uuids"]:
+                raise ValueError(
+                    "archive and IPA WatchKit SDK-stub identity differ: uuids"
+                )
+            archive_bundle = archive_app / relative_path
+            stub_payload_equivalence = compare_macho_payloads(
+                archive_bundle / WATCHKIT_STUB_RELATIVE_PATH,
+                ipa_bundle / WATCHKIT_STUB_RELATIVE_PATH,
+            )
             final_record["watchkit_stub"] = {
                 "archive": archive_stub,
                 "ipa": ipa_stub,
+                "archive_to_ipa_payload_equivalence": stub_payload_equivalence,
             }
         records.append(final_record)
     return {
         key: value for key, value in archive_binding.items() if key != "bundles"
     } | {"bundles": records}
+
+
+def validate_report_contract(report: Any, *, archive_only: bool) -> None:
+    """Reject missing, malformed, ambiguous, or partial verifier receipts."""
+
+    if not isinstance(report, dict):
+        raise ValueError("signing verifier output is not a JSON object")
+    expected_status = (
+        "archive_integrity_verified"
+        if archive_only
+        else "exported_ipa_distribution_verified"
+    )
+    if report.get("schema") != SCHEMA or report.get("status") != expected_status:
+        raise ValueError("signing verifier output has an invalid schema or status")
+    contract = report.get("verification_contract")
+    if not isinstance(contract, dict) or contract.get(
+        "upload_requires_exported_ipa_distribution_verified"
+    ) is not True:
+        raise ValueError("signing verifier output has no fail-closed upload contract")
+    expected_main_bundle_id = require_text(
+        report, "expected_main_bundle_id", "report"
+    )
+    expected_ids = set(expected_bundle_topology(expected_main_bundle_id).values())
+    required_sections = ["archive", "binary_binding"]
+    if not archive_only:
+        required_sections.append("ipa")
+    for section_name in required_sections:
+        section = report.get(section_name)
+        if not isinstance(section, dict):
+            raise ValueError(f"signing verifier output is missing {section_name}")
+        bundles = section.get("bundles")
+        if not isinstance(bundles, list) or len(bundles) != len(expected_ids):
+            raise ValueError(
+                f"signing verifier output has partial target coverage: {section_name}"
+            )
+        actual_ids = {
+            item.get("bundle_id") for item in bundles if isinstance(item, dict)
+        }
+        if actual_ids != expected_ids:
+            raise ValueError(
+                f"signing verifier output target identities differ: {section_name}"
+            )
+    if not archive_only:
+        ipa = report["ipa"]
+        if ipa.get("verification_stage") != "exported_ipa_distribution":
+            raise ValueError("exported IPA distribution stage is missing or ambiguous")
+        for bundle in report["binary_binding"]["bundles"]:
+            equivalence = bundle.get("archive_to_ipa_payload_equivalence")
+            if not isinstance(equivalence, dict) or equivalence.get("status") != (
+                "signature_aware_payload_equivalent"
+            ):
+                raise ValueError(
+                    "signing verifier output lacks executable payload equivalence"
+                )
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -772,6 +904,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         args.expected_archive_uuid,
         args.codesign,
         args.security,
+        distribution=False,
     )
     archive_binding = verify_archive_dsym_binding(
         args.archive,
@@ -794,13 +927,21 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "relay_base_url_present": relay_base_url != "",
         },
         "archive": archive_result,
+        "verification_contract": {
+            "archive_stage": "integrity_and_provenance_only",
+            "distribution_stage": "exported_ipa_before_upload",
+            "archive_development_signing_permitted": True,
+            "upload_requires_exported_ipa_distribution_verified": True,
+        },
     }
     if getattr(args, "archive_only", False):
-        return {
+        report = {
             **common,
-            "status": "archive_verified",
+            "status": "archive_integrity_verified",
             "binary_binding": archive_binding,
         }
+        validate_report_contract(report, archive_only=True)
+        return report
 
     with tempfile.TemporaryDirectory() as raw_temp:
         ipa_app = safely_extract_ipa(args.ipa, pathlib.Path(raw_temp))
@@ -812,6 +953,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             args.expected_archive_uuid,
             args.codesign,
             args.security,
+            distribution=True,
         )
         binary_binding = verify_binary_binding(
             args.archive,
@@ -831,12 +973,14 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     ]
     if archive_bundles != ipa_bundles:
         raise ValueError("archive and exported IPA bundle topology differs")
-    return {
+    report = {
         **common,
-        "status": "verified",
+        "status": "exported_ipa_distribution_verified",
         "binary_binding": binary_binding,
         "ipa": ipa_result,
     }
+    validate_report_contract(report, archive_only=False)
+    return report
 
 
 def main() -> None:
@@ -849,6 +993,9 @@ def main() -> None:
             raise ValueError(f"refusing non-file signing report path: {candidate}")
     try:
         report = build_report(args)
+        validate_report_contract(
+            report, archive_only=getattr(args, "archive_only", False)
+        )
         args.output.parent.mkdir(parents=True, exist_ok=True)
         temp_output.write_text(
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
