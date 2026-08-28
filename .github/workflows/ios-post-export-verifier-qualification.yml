@@ -1,21 +1,21 @@
-name: AIES post-export verifier credential-free qualification
+name: AIES stage-aware manifest credential-free qualification
 
 on:
   push:
     branches:
-      - aies/ios-rc1-post-export-verifier
+      - aies/ios-rc1-stage-aware-manifest
 
 permissions:
   actions: read
   contents: read
 
 concurrency:
-  group: aies-ios-post-export-verifier-qualification
+  group: aies-ios-stage-aware-manifest-qualification
   cancel-in-progress: false
 
 env:
-  AIES_BASE_SHA: a173c98d0d4e0f3c7159c4780ba797ff9efdf17e
-  AIES_BASE_TREE: 73c54afbf6d5a8579234376b31f7ef9a6ceff273
+  AIES_BASE_SHA: 72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3
+  AIES_BASE_TREE: a3d8ffc6985bcea5c7a4ad9c7a61a485b4567d90
   AIES_FIXTURE: apps/ios/Tools/fixtures/aies_export_boundary_run_33188911517.json
   PYTHONDONTWRITEBYTECODE: "1"
 
@@ -24,7 +24,7 @@ jobs:
     if: >-
       github.repository == 'ScandalousSwede/openclaw-ios-build' &&
       github.repository_owner == 'ScandalousSwede' &&
-      github.ref == 'refs/heads/aies/ios-rc1-post-export-verifier'
+      github.ref == 'refs/heads/aies/ios-rc1-stage-aware-manifest'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -62,16 +62,14 @@ jobs:
           allowed = {
               ".github/workflows/ios-build-ipa.yml",
               ".github/workflows/ios-post-export-verifier-qualification.yml",
-              "apps/ios/Tools/aies_macho_signature_equivalence.py",
               "apps/ios/Tools/test_aies_release_gate_behavior.py",
-              "apps/ios/Tools/fixtures/aies_export_boundary_run_33188911517.json",
-              "apps/ios/Tools/test_aies_macho_signature_equivalence.py",
               "apps/ios/Tools/test_verify_aies_internal_signing.py",
-              "apps/ios/Tools/verify_aies_internal_signing.py",
+              "apps/ios/Tools/test_write_build_manifest.py",
+              "apps/ios/Tools/write_build_manifest.py",
           }
           changed = set(
               subprocess.check_output(
-                  ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "a173c98d0d4e0f3c7159c4780ba797ff9efdf17e", "HEAD"],
+                  ["git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3", "HEAD"],
                   text=True,
               ).splitlines()
           )
@@ -82,7 +80,7 @@ jobs:
           (pathlib.Path(os.environ["RUNNER_TEMP"]) / "source-custody.txt").write_text(
               "head=" + subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() + "\n"
               "tree=" + subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip() + "\n"
-              "base=a173c98d0d4e0f3c7159c4780ba797ff9efdf17e\n"
+              "base=72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3\n"
               "changed_paths=" + ",".join(sorted(changed)) + "\n",
               encoding="utf-8",
           )
@@ -93,7 +91,7 @@ jobs:
           import pathlib
           import subprocess
 
-          base = "a173c98d0d4e0f3c7159c4780ba797ff9efdf17e"
+          base = "72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3"
           paths = [
               ".github/workflows/ios-build-ipa.yml",
               "apps/ios/Config/Signing.xcconfig",
@@ -133,7 +131,7 @@ jobs:
           output.write_text(
               json.dumps(
                   {
-                      "schema": "aies.post-export-verifier-protected-objects.v1",
+                      "schema": "aies.stage-aware-manifest-protected-objects.v1",
                       "base": base,
                       "candidate": subprocess.check_output(
                           ["git", "rev-parse", "HEAD"], text=True
@@ -188,14 +186,24 @@ jobs:
           if ordered != sorted(ordered):
               raise SystemExit("release lane verifier/upload ordering is not fail closed")
           package = fastfile.split("\ndef package_aies_internal_evidence!", 1)[1].split("\ndef verify_aies_asc_build!", 1)[0]
-          if package.index("verify_aies_internal_signing.py") > package.index("FileUtils.mv(ipa_path, final_ipa)"):
-              raise SystemExit("unverified IPA can reach final output")
+          post_export_order = [
+              package.index("verify_aies_internal_signing.py"),
+              package.index("write_build_manifest.py"),
+              package.index("FileUtils.mv(ipa_path, final_ipa)"),
+          ]
+          if post_export_order != sorted(post_export_order):
+              raise SystemExit("Stage B and post-export manifest do not gate final IPA")
           required = (
               'lane_status="${PIPESTATUS[0]}"',
               'if [[ "${lane_status}" -ne 0 ]]',
               'exit "${lane_status}"',
               "archive_integrity_verified",
               "exported_ipa_distribution_verified",
+              "ARCHIVE_PRE_EXPORT",
+              "EXPORTED_IPA_POST_EXPORT",
+              "UNSIGNED_ARCHIVE_QUALIFICATION",
+              "NOT_FINAL_PRE_EXPORT",
+              "VERIFIED_POST_EXPORT",
           )
           if any(value not in signed for value in required) or "|| true" in signed.split(
               "name: Build, verify, and upload internal TestFlight diagnostic", 1
@@ -205,6 +213,9 @@ jobs:
           if "secrets." in precredential:
               raise SystemExit("credential-free dry-run surface references a secret")
           print("DRY_RUN_UPLOAD_SENTINEL=UNREACHABLE_ON_STAGE_B_FAILURE")
+          print("DRY_RUN_ARCHIVE_MANIFEST_UPLOAD_ELIGIBLE=false")
+          print("DRY_RUN_UNSIGNED_MANIFEST_UPLOAD_ELIGIBLE=false")
+          print("DRY_RUN_POST_EXPORT_MANIFEST_REQUIRES_STAGE_B=true")
           print("DRY_RUN_FINAL_STATUS=FAILS_ON_NONZERO_VERIFIER")
           PY
           test -z "$(git status --porcelain=v2 --untracked-files=all)"
@@ -213,19 +224,326 @@ jobs:
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: AIES-post-export-verifier-source-tooling-${{ github.run_id }}
+          name: AIES-stage-aware-manifest-source-tooling-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/source-custody.txt
             ${{ runner.temp }}/protected-object-hashes.json
             ${{ runner.temp }}/verifier-tooling-tests.log
             ${{ runner.temp }}/stage-b-failure-harness.log
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: error
+
+  failed-archive-manifest-replay:
+    needs: source-and-tooling
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact candidate without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record archive-replay executor and security boundary
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/aies-stage-aware-archive-replay"
+          mkdir -p "${root}/evidence"
+          python3 - "${root}/evidence/executor-source-security.json" <<'PY'
+          import json
+          import os
+          import pathlib
+          import platform
+          import subprocess
+          import sys
+
+          def output(*command: str) -> str:
+              return subprocess.check_output(command, text=True).strip()
+
+          def command_info(*command: str) -> dict[str, object]:
+              result = subprocess.run(command, text=True, capture_output=True, check=False)
+              return {
+                  "command": list(command),
+                  "exit_code": result.returncode,
+                  "output": (result.stdout + result.stderr).strip(),
+              }
+
+          payload = {
+              "schema": "aies.stage-aware-manifest.executor-source-security.v1",
+              "candidate_sha": output("git", "rev-parse", "HEAD"),
+              "candidate_tree": output("git", "rev-parse", "HEAD^{tree}"),
+              "runner": {
+                  "name": os.environ.get("RUNNER_NAME"),
+                  "os": os.environ.get("RUNNER_OS"),
+                  "architecture": os.environ.get("RUNNER_ARCH"),
+                  "macos": command_info("sw_vers"),
+                  "platform": platform.platform(),
+                  "xcode": command_info("xcodebuild", "-version"),
+                  "swift": command_info("swift", "--version"),
+                  "codesign": command_info("codesign", "--version"),
+                  "dwarfdump": command_info("dwarfdump", "--version"),
+              },
+              "security_boundary": {
+                  "github_environment": None,
+                  "permissions": ["actions:read", "contents:read"],
+                  "repository_secrets": [],
+                  "apple_credentials": False,
+                  "signing": False,
+                  "export": False,
+                  "upload": False,
+              },
+          }
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+
+      - name: Download and authenticate exact run-332116 archive evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/aies-stage-aware-archive-replay"
+          downloads="${root}/downloads"
+          mkdir -p "${downloads}" "${root}/archive-wrapper" \
+            "${root}/dsym-wrapper" "${root}/stage-a-wrapper" \
+            "${root}/archive-root" "${root}/reports" "${root}/evidence"
+          download_artifact() {
+            local artifact_id="$1"
+            local output="$2"
+            curl --fail --silent --show-error --location \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              --output "${output}"
+          }
+          download_artifact 9702408599 "${downloads}/archive-artifact.zip"
+          download_artifact 9702409910 "${downloads}/dsym-artifact.zip"
+          download_artifact 9702410490 "${downloads}/stage-a-artifact.zip"
+          echo "c767be58cd1a6afc70b9be3ad5ae41ea5637b5dbcc1f4dfae4c1ed248ce17192  ${downloads}/archive-artifact.zip" | shasum -a 256 -c -
+          echo "de4737ce237e66b9bb2777ec6db71503cbc03973e3ae04437465dd493cbf9e09  ${downloads}/dsym-artifact.zip" | shasum -a 256 -c -
+          echo "9052f14fb42a761a881090891b4985ed6571cca0c2c3d9e44b1b313db7e7bf82  ${downloads}/stage-a-artifact.zip" | shasum -a 256 -c -
+          ditto -x -k "${downloads}/archive-artifact.zip" "${root}/archive-wrapper"
+          ditto -x -k "${downloads}/dsym-artifact.zip" "${root}/dsym-wrapper"
+          ditto -x -k "${downloads}/stage-a-artifact.zip" "${root}/stage-a-wrapper"
+          archive_zip="$(find "${root}/archive-wrapper" -type f -name 'OpenClaw.xcarchive.zip' -print -quit)"
+          dsym_zip="$(find "${root}/dsym-wrapper" -type f -name 'OpenClaw-dSYMs.zip' -print -quit)"
+          retained_stage_a="$(find "${root}/stage-a-wrapper" -type f -name 'OpenClaw-archive-signing-entitlements.json' -print -quit)"
+          test -n "${archive_zip}" && test -n "${dsym_zip}" && test -n "${retained_stage_a}"
+          echo "d4585c114204db941acda47e6edc8d4740136e14352c9166bb4f503ee4ef2361  ${archive_zip}" | shasum -a 256 -c -
+          echo "611df36f24a8e3f38b35702eb4d945d9fac327d7e105268fdef979a9022665d1  ${dsym_zip}" | shasum -a 256 -c -
+          echo "41cada598241b001ccac38c82ebf7488c2fd4fe7c328234442eea72eb6829bcc  ${retained_stage_a}" | shasum -a 256 -c -
+          cp "${retained_stage_a}" "${root}/evidence/original-OpenClaw-archive-signing-entitlements.json"
+          ditto -x -k "${archive_zip}" "${root}/archive-root"
+          archive="$(find "${root}/archive-root" -type d -name 'OpenClaw.xcarchive' -print -quit)"
+          test -n "${archive}"
+          {
+            echo "AIES_FAILED_ARCHIVE=${archive}"
+            echo "AIES_FAILED_ARCHIVE_ZIP=${archive_zip}"
+            echo "AIES_FAILED_DSYM_ZIP=${dsym_zip}"
+            echo "AIES_FAILED_RETAINED_STAGE_A=${retained_stage_a}"
+          } >> "${GITHUB_ENV}"
+          python3 - "${root}/evidence/input-binding.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          payload = {
+              "schema": "aies.stage-aware-manifest.archive-replay-input.v1",
+              "source_run_id": 33211690023,
+              "source_sha": "72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3",
+              "source_tree": "a3d8ffc6985bcea5c7a4ad9c7a61a485b4567d90",
+              "archive_uuid": "1572a9d7-5334-4928-a387-2b683dafa31f",
+              "version": "2026.6.2",
+              "build_number": "70",
+              "artifact_expires_at": "2026-11-26T21:14:32Z",
+              "artifacts": [
+                  {
+                      "kind": "xcarchive",
+                      "artifact_id": 9702408599,
+                      "wrapper_sha256": "c767be58cd1a6afc70b9be3ad5ae41ea5637b5dbcc1f4dfae4c1ed248ce17192",
+                      "inner_sha256": "d4585c114204db941acda47e6edc8d4740136e14352c9166bb4f503ee4ef2361",
+                  },
+                  {
+                      "kind": "dsyms",
+                      "artifact_id": 9702409910,
+                      "wrapper_sha256": "de4737ce237e66b9bb2777ec6db71503cbc03973e3ae04437465dd493cbf9e09",
+                      "inner_sha256": "611df36f24a8e3f38b35702eb4d945d9fac327d7e105268fdef979a9022665d1",
+                  },
+                  {
+                      "kind": "stage_a_release_evidence",
+                      "artifact_id": 9702410490,
+                      "wrapper_sha256": "9052f14fb42a761a881090891b4985ed6571cca0c2c3d9e44b1b313db7e7bf82",
+                      "retained_stage_a_sha256": "41cada598241b001ccac38c82ebf7488c2fd4fe7c328234442eea72eb6829bcc",
+                  },
+              ],
+          }
+          pathlib.Path(sys.argv[1]).write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(json.dumps(payload, indent=2, sort_keys=True))
+          PY
+
+      - name: Replay Stage A and archive manifest ten times
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/aies-stage-aware-archive-replay"
+          for iteration in $(seq 1 10); do
+            output="${root}/reports/iteration-$(printf '%02d' "${iteration}")"
+            mkdir -p "${output}"
+            python3 apps/ios/Tools/verify_aies_internal_signing.py \
+              --archive "${AIES_FAILED_ARCHIVE}" \
+              --archive-only \
+              --output "${output}/stage-a.json" \
+              --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+              --expected-team-id J76B47MZ6V \
+              --expected-git-sha 72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3 \
+              --expected-archive-uuid 1572a9d7-5334-4928-a387-2b683dafa31f
+            python3 apps/ios/Tools/write_build_manifest.py \
+              --archive "${AIES_FAILED_ARCHIVE}" \
+              --output "${output}/OpenClaw-archive-manifest.json" \
+              --artifact-stage ARCHIVE_PRE_EXPORT \
+              --archive-verification "${output}/stage-a.json" \
+              --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+              --expected-team-id J76B47MZ6V \
+              --git-sha 72fbdfc979a6d4ec5905966f2f3bf9b28b96adc3 \
+              --git-branch aies/ios-rc1-testflight \
+              --build-timestamp 2026-08-28T21:20:12Z \
+              --xcode-version "Xcode 26.2 Build version 17C52" \
+              --swift-version "Apple Swift version 6.2.3 (swiftlang-6.2.3.3.21 clang-1700.6.3.2)" \
+              --sdk-version 26.2 \
+              --configuration Release \
+              --archive-uuid 1572a9d7-5334-4928-a387-2b683dafa31f \
+              --archive-only \
+              --archive-zip "${AIES_FAILED_ARCHIVE_ZIP}" \
+              --dsym-zip "${AIES_FAILED_DSYM_ZIP}" \
+              --github-run-id 33211690023
+          done
+
+      - name: Validate deterministic archive-stage evidence
+        run: |
+          set -euo pipefail
+          root="${RUNNER_TEMP}/aies-stage-aware-archive-replay"
+          python3 - "${root}/reports" "${root}/evidence/archive-replay-summary.json" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          reports = pathlib.Path(sys.argv[1])
+          stage_a_hashes = []
+          manifest_hashes = []
+          for iteration in range(1, 11):
+              directory = reports / f"iteration-{iteration:02d}"
+              stage_a_path = directory / "stage-a.json"
+              manifest_path = directory / "OpenClaw-archive-manifest.json"
+              stage_a = json.loads(stage_a_path.read_text(encoding="utf-8"))
+              manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+              if stage_a.get("status") != "archive_integrity_verified":
+                  raise SystemExit(f"{stage_a_path}: Stage A did not pass")
+              stage_a_main = next(
+                  (
+                      item
+                      for item in stage_a.get("archive", {}).get("bundles", [])
+                      if item.get("bundle_id")
+                      == "ai.openclaw.client.J76B47MZ6V"
+                  ),
+                  None,
+              )
+              archive_integrity = manifest.get("archive_integrity_verification", {})
+              stage_a_sha256 = hashlib.sha256(stage_a_path.read_bytes()).hexdigest()
+              expected_readiness = {
+                  "status": "NOT_FINAL_PRE_EXPORT",
+                  "final_distribution_verified": False,
+                  "upload_eligible": False,
+              }
+              if (
+                  manifest.get("artifact_stage") != "ARCHIVE_PRE_EXPORT"
+                  or manifest.get("distribution_readiness") != expected_readiness
+                  or manifest.get("embedded_distribution_expectations", {}).get(
+                      "main_app_aps_environment"
+                  ) != "production"
+                  or manifest.get("observed_archive_signing", {}).get(
+                      "main_app_aps_environment"
+                  ) != "development"
+                  or not isinstance(stage_a_main, dict)
+                  or manifest.get("observed_archive_signing", {}).get(
+                      "main_app_aps_environment"
+                  ) != stage_a_main.get("aps_environment")
+                  or archive_integrity.get("status")
+                  != "archive_integrity_verified"
+                  or archive_integrity.get("receipt_sha256") != stage_a_sha256
+                  or archive_integrity.get(
+                      "verifier_replayed_against_current_artifacts"
+                  ) is not True
+                  or archive_integrity.get("ipa_sha256") is not None
+                  or manifest.get("final_distribution_verification", {}).get(
+                      "status"
+                  ) != "pending_exported_ipa_stage_b"
+                  or manifest.get("final_distribution_verification", {}).get(
+                      "receipt_sha256"
+                  ) is not None
+                  or manifest.get("final_distribution_verification", {}).get(
+                      "ipa_sha256"
+                  ) is not None
+                  or manifest.get("aps_environment_if_signed") != "development"
+                  or any(
+                      item.get("kind") == "ipa"
+                      for item in manifest.get("artifacts", [])
+                      if isinstance(item, dict)
+                  )
+              ):
+                  raise SystemExit(f"{manifest_path}: archive-stage contract differs")
+              stage_a_hashes.append(stage_a_sha256)
+              manifest_hashes.append(hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+          if len(set(stage_a_hashes)) != 1 or len(set(manifest_hashes)) != 1:
+              raise SystemExit("archive replay output is nondeterministic")
+          if stage_a_hashes[0] != "41cada598241b001ccac38c82ebf7488c2fd4fe7c328234442eea72eb6829bcc":
+              raise SystemExit("regenerated Stage-A receipt differs from retained evidence")
+          summary = {
+              "schema": "aies.stage-aware-archive-manifest-replay.v1",
+              "status": "passed",
+              "source_run_id": 33211690023,
+              "iterations": 10,
+              "stage_a_passes": 10,
+              "archive_manifest_passes": 10,
+              "embedded_distribution_aps_expectation": "production",
+              "observed_archive_aps_environment": "development",
+              "final_distribution_verified": False,
+              "upload_eligible": False,
+              "stage_a_sha256": stage_a_hashes[0],
+              "archive_manifest_sha256": manifest_hashes[0],
+          }
+          pathlib.Path(sys.argv[2]).write_text(
+              json.dumps(summary, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+          (
+            cd "${root}"
+            find reports evidence -type f ! -name SHA256SUMS -print0 | \
+              sort -z | xargs -0 shasum -a 256 > evidence/SHA256SUMS
+            shasum -a 256 -c evidence/SHA256SUMS
+          )
+          test -z "$(git status --porcelain=v2 --untracked-files=all)"
+
+      - name: Upload failed-archive manifest replay evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AIES-stage-aware-archive-replay-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/aies-stage-aware-archive-replay/reports
+            ${{ runner.temp }}/aies-stage-aware-archive-replay/evidence
+          retention-days: 90
+          if-no-files-found: error
 
   exact-evidence-replay:
     needs: source-and-tooling
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Check out exact candidate without persisted credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -273,21 +591,26 @@ jobs:
               --output "${output}"
           }
           download_artifact 9676279420 "${downloads}/archive-artifact.zip"
+          download_artifact 9676280138 "${downloads}/dsym-artifact.zip"
           download_artifact 9692923415 "${downloads}/ipa-artifact.zip"
           download_artifact 9692924304 "${downloads}/diagnostic-evidence-artifact.zip"
           echo "d253acd7c1045d512dc8a1b9862d2a017f10b3ebd6005cf250ede0e539f52aa4  ${downloads}/archive-artifact.zip" | shasum -a 256 -c -
+          echo "34b811dce7f8684a6af7f7795d8a05418bfe40a61fb1e43310c95a418751002a  ${downloads}/dsym-artifact.zip" | shasum -a 256 -c -
           echo "e50abfab7a75daad7e995ae1e79a6b6439976d9860824f718f33632d2666e774  ${downloads}/ipa-artifact.zip" | shasum -a 256 -c -
           echo "cd0e3d2de5c3ce8057e38d94dffe5fe142ac502994bd6c35dc1e82da9848e06d  ${downloads}/diagnostic-evidence-artifact.zip" | shasum -a 256 -c -
-          mkdir -p "${root}/archive-wrapper" "${root}/ipa-wrapper" \
+          mkdir -p "${root}/archive-wrapper" "${root}/dsym-wrapper" "${root}/ipa-wrapper" \
             "${root}/diagnostic-evidence-wrapper" "${root}/archive-root"
           ditto -x -k "${downloads}/archive-artifact.zip" "${root}/archive-wrapper"
+          ditto -x -k "${downloads}/dsym-artifact.zip" "${root}/dsym-wrapper"
           ditto -x -k "${downloads}/ipa-artifact.zip" "${root}/ipa-wrapper"
           ditto -x -k "${downloads}/diagnostic-evidence-artifact.zip" \
             "${root}/diagnostic-evidence-wrapper"
           archive_zip="$(find "${root}/archive-wrapper" -type f -name 'OpenClaw.xcarchive.zip' -print -quit)"
+          dsym_zip="$(find "${root}/dsym-wrapper" -type f -name 'OpenClaw-dSYMs.zip' -print -quit)"
           ipa="$(find "${root}/ipa-wrapper" -type f -name '*.ipa' -print -quit)"
-          test -n "${archive_zip}" && test -n "${ipa}"
+          test -n "${archive_zip}" && test -n "${dsym_zip}" && test -n "${ipa}"
           echo "c0b446466e1e043159216784f066637345e1f5ec6b97e21c2f51a03c6d9215b9  ${archive_zip}" | shasum -a 256 -c -
+          echo "03d496187a5e27ccf0cdfe7ad26bc2152ece42abea2002f0ee3a35f3a6b250eb  ${dsym_zip}" | shasum -a 256 -c -
           echo "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82  ${ipa}" | shasum -a 256 -c -
           evidence_ipa="${root}/diagnostic-evidence-wrapper/OpenClaw-exported.ipa"
           evidence_sums="${root}/diagnostic-evidence-wrapper/SHA256SUMS"
@@ -348,12 +671,10 @@ jobs:
           test -n "${archive}"
           {
             echo "AIES_REPLAY_ARCHIVE=${archive}"
+            echo "AIES_REPLAY_ARCHIVE_ZIP=${archive_zip}"
+            echo "AIES_REPLAY_DSYM_ZIP=${dsym_zip}"
             echo "AIES_REPLAY_IPA=${ipa}"
           } >> "${GITHUB_ENV}"
-          shasum -a 256 "${downloads}/archive-artifact.zip" "${archive_zip}" \
-            "${downloads}/ipa-artifact.zip" "${ipa}" \
-            "${downloads}/diagnostic-evidence-artifact.zip" "${evidence_ipa}" | tee \
-            "${root}/evidence/input-SHA256SUMS"
 
       - name: Replay Stage A and Stage B ten times
         run: |
@@ -375,11 +696,30 @@ jobs:
             python3 apps/ios/Tools/verify_aies_internal_signing.py \
               --archive "${AIES_REPLAY_ARCHIVE}" \
               --ipa "${AIES_REPLAY_IPA}" \
-              --output "${output}/stage-b.json" \
+              --output "${output}/OpenClaw-signing-entitlements.json" \
               --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
               --expected-team-id J76B47MZ6V \
               --expected-git-sha a173c98d0d4e0f3c7159c4780ba797ff9efdf17e \
               --expected-archive-uuid 1d8cf8b5-c626-45d7-97a5-87bddd089249
+            python3 apps/ios/Tools/write_build_manifest.py \
+              --archive "${AIES_REPLAY_ARCHIVE}" \
+              --output "${output}/OpenClaw-build-manifest.json" \
+              --artifact-stage EXPORTED_IPA_POST_EXPORT \
+              --distribution-verification "${output}/OpenClaw-signing-entitlements.json" \
+              --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+              --expected-team-id J76B47MZ6V \
+              --git-sha a173c98d0d4e0f3c7159c4780ba797ff9efdf17e \
+              --git-branch aies/ios-rc1-testflight \
+              --build-timestamp 2026-08-28T05:56:24Z \
+              --xcode-version "Xcode 26.2 Build version 17C52" \
+              --swift-version "Apple Swift version 6.2.3 (swiftlang-6.2.3.3.21 clang-1700.6.3.2)" \
+              --sdk-version 26.2 \
+              --configuration Release \
+              --archive-uuid 1d8cf8b5-c626-45d7-97a5-87bddd089249 \
+              --ipa "${AIES_REPLAY_IPA}" \
+              --archive-zip "${AIES_REPLAY_ARCHIVE_ZIP}" \
+              --dsym-zip "${AIES_REPLAY_DSYM_ZIP}" \
+              --github-run-id 33145992424
           done
 
       - name: Validate deterministic five-target replay receipts
@@ -400,12 +740,16 @@ jobs:
               "ai.openclaw.client.J76B47MZ6V.watchkitapp",
               "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
           }
-          stage_hashes = {"stage-a": [], "stage-b": []}
+          stage_hashes = {"stage-a": [], "stage-b": [], "manifest": []}
           for iteration in range(1, 11):
               directory = reports / f"iteration-{iteration:02d}"
               for stage, status, section in (
                   ("stage-a", "archive_integrity_verified", "archive"),
-                  ("stage-b", "exported_ipa_distribution_verified", "ipa"),
+                  (
+                      "OpenClaw-signing-entitlements",
+                      "exported_ipa_distribution_verified",
+                      "ipa",
+                  ),
               ):
                   path = directory / f"{stage}.json"
                   raw = path.read_bytes()
@@ -476,10 +820,66 @@ jobs:
                           or global_topology.get("discovered_mach_o_count") != 8
                       ):
                           raise SystemExit(f"{path}: global IPA topology differs")
-                  stage_hashes[stage].append(hashlib.sha256(raw).hexdigest())
+                  stage_key = "stage-a" if stage == "stage-a" else "stage-b"
+                  stage_hashes[stage_key].append(hashlib.sha256(raw).hexdigest())
+              manifest_path = directory / "OpenClaw-build-manifest.json"
+              manifest_raw = manifest_path.read_bytes()
+              manifest = json.loads(manifest_raw)
+              readiness = {
+                  "status": "VERIFIED_POST_EXPORT",
+                  "final_distribution_verified": True,
+                  "upload_eligible": True,
+              }
+              verification = manifest.get("final_distribution_verification", {})
+              receipt_path = directory / "OpenClaw-signing-entitlements.json"
+              stage_b = json.loads(receipt_path.read_text(encoding="utf-8"))
+              archive_main = next(
+                  item
+                  for item in stage_b["archive"]["bundles"]
+                  if item["bundle_id"] == "ai.openclaw.client.J76B47MZ6V"
+              )
+              ipa_artifacts = [
+                  item
+                  for item in manifest.get("artifacts", [])
+                  if isinstance(item, dict) and item.get("kind") == "ipa"
+              ]
+              expected_ipa_sha256 = (
+                  "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82"
+              )
+              if (
+                  manifest.get("artifact_stage") != "EXPORTED_IPA_POST_EXPORT"
+                  or manifest.get("distribution_readiness") != readiness
+                  or manifest.get("embedded_distribution_expectations", {}).get(
+                      "main_app_aps_environment"
+                  ) != "production"
+                  or manifest.get("observed_archive_signing", {}).get(
+                      "main_app_aps_environment"
+                  ) != "development"
+                  or manifest.get("observed_archive_signing", {}).get(
+                      "main_app_aps_environment"
+                  ) != archive_main.get("aps_environment")
+                  or verification.get("status")
+                  != "exported_ipa_distribution_verified"
+                  or verification.get("receipt_file_name") != receipt_path.name
+                  or verification.get("receipt_sha256")
+                  != hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+                  or verification.get("verifier_replayed_against_current_artifacts")
+                  is not True
+                  or verification.get("ipa_sha256") != expected_ipa_sha256
+                  or len(ipa_artifacts) != 1
+                  or ipa_artifacts[0].get("sha256") != expected_ipa_sha256
+              ):
+                  raise SystemExit(f"{manifest_path}: post-export manifest differs")
+              stage_hashes["manifest"].append(hashlib.sha256(manifest_raw).hexdigest())
           if any(len(set(values)) != 1 for values in stage_hashes.values()):
               raise SystemExit(f"replay reports are nondeterministic: {stage_hashes!r}")
-          final = json.loads((reports / "iteration-01" / "stage-b.json").read_text())
+          final = json.loads(
+              (
+                  reports
+                  / "iteration-01"
+                  / "OpenClaw-signing-entitlements.json"
+              ).read_text()
+          )
           watch = next(
               item for item in final["binary_binding"]["bundles"]
               if item["bundle_id"].endswith("watchkitapp.extension")
@@ -526,11 +926,12 @@ jobs:
           ):
               raise SystemExit("WatchKitSupport2 replay failed")
           summary = {
-              "schema": "aies.post-export-verifier-replay.v1",
+              "schema": "aies.stage-aware-post-export-manifest-replay.v1",
               "status": "passed",
               "iterations": 10,
               "stage_a_passes": 10,
               "stage_b_passes": 10,
+              "post_export_manifest_passes": 10,
               "bundle_count_per_stage": 5,
               "application_mach_o_count": 7,
               "ipa_global_mach_o_count": 8,
@@ -554,16 +955,19 @@ jobs:
           )
           print(json.dumps(summary, indent=2, sort_keys=True))
           PY
-          find "${root}/reports" "${root}/evidence" -type f \
-            ! -name SHA256SUMS -print0 | \
-            sort -z | xargs -0 shasum -a 256 > "${root}/evidence/SHA256SUMS"
+          (
+            cd "${root}"
+            find reports evidence -type f ! -name SHA256SUMS -print0 | \
+              sort -z | xargs -0 shasum -a 256 > evidence/SHA256SUMS
+            shasum -a 256 -c evidence/SHA256SUMS
+          )
           test -z "$(git status --porcelain=v2 --untracked-files=all)"
 
       - name: Upload exact replay evidence
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: AIES-post-export-verifier-exact-replay-${{ github.run_id }}
+          name: AIES-stage-aware-post-export-replay-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/aies-verifier-replay/reports
             ${{ runner.temp }}/aies-verifier-replay/evidence

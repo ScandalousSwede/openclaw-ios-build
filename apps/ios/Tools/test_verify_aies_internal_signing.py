@@ -1351,7 +1351,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             fixture["webrtc_framework"]["canonical_payload_sha256"],
             "57a623f9b84f041059af690feac199f5fb3def5a2ad09ead1e3461ad748e513e",
         )
-        self.assertEqual(workflow.count("for iteration in $(seq 1 10)"), 1)
+        self.assertEqual(workflow.count("for iteration in $(seq 1 10)"), 2)
         self.assertIn("actions: read", workflow)
         self.assertIn("contents: read", workflow)
         self.assertIn("persist-credentials: false", workflow)
@@ -1363,6 +1363,12 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("xcodebuild -exportArchive", workflow)
         self.assertNotIn("fastlane ios aies_internal_testflight", workflow)
         self.assertIn("download_artifact 9692924304", workflow)
+        self.assertIn("download_artifact 9702408599", workflow)
+        self.assertIn("download_artifact 9702409910", workflow)
+        self.assertIn("ARCHIVE_PRE_EXPORT", workflow)
+        self.assertIn("EXPORTED_IPA_POST_EXPORT", workflow)
+        self.assertIn("pending_exported_ipa_stage_b", workflow)
+        self.assertIn("VERIFIED_POST_EXPORT", workflow)
         self.assertIn("artifact_root_sha256_entries_verified", workflow)
         self.assertIn("artifact_nested_package_sha256_entries_verified", workflow)
         self.assertIn(
@@ -1606,6 +1612,10 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("OpenClaw-release-lane-status.json", signed_job)
         self.assertIn("archive_integrity_verified", signed_job)
         self.assertIn("exported_ipa_distribution_verified", signed_job)
+        self.assertIn("ARCHIVE_PRE_EXPORT", signed_job)
+        self.assertIn("EXPORTED_IPA_POST_EXPORT", signed_job)
+        self.assertIn("VERIFIED_POST_EXPORT", signed_job)
+        self.assertIn("NOT_FINAL_PRE_EXPORT", signed_job)
         self.assertLess(
             signed_job.index("archive_integrity_verified"),
             signed_job.index("exported_ipa_distribution_verified"),
@@ -1614,6 +1624,14 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             signed_job.index("exported_ipa_distribution_verified"),
             signed_job.index("name: Upload signed IPA"),
         )
+        unsigned_job = workflow.split("\n  build:\n", maxsplit=1)[1].split(
+            "\n  signed-internal-testflight:\n", maxsplit=1
+        )[0]
+        self.assertIn(
+            "--artifact-stage UNSIGNED_ARCHIVE_QUALIFICATION", unsigned_job
+        )
+        self.assertIn("NOT_APPLICABLE_UNSIGNED", unsigned_job)
+        self.assertIn('"upload_eligible": False', unsigned_job)
 
         package_function = fastfile.split(
             "\ndef package_aies_internal_evidence!", maxsplit=1

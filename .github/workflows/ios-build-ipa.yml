@@ -480,10 +480,53 @@ jobs:
             --configuration Debug \
             --archive-uuid "${AIES_ARCHIVE_UUID}" \
             --ipa /tmp/OpenClaw.ipa \
+            --artifact-stage UNSIGNED_ARCHIVE_QUALIFICATION \
             --archive-zip /tmp/OpenClaw.xcarchive.zip \
             --dsym-zip /tmp/OpenClaw-dSYMs.zip \
             --github-run-id "${GITHUB_RUN_ID}"
-          python3 -m json.tool /tmp/OpenClaw-build-manifest.json >/dev/null
+          python3 - /tmp/OpenClaw-build-manifest.json <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected = {
+              "artifact_stage": "UNSIGNED_ARCHIVE_QUALIFICATION",
+              "evidence_stage": "unsigned",
+              "distribution_readiness": {
+                  "status": "NOT_APPLICABLE_UNSIGNED",
+                  "final_distribution_verified": False,
+                  "upload_eligible": False,
+              },
+          }
+          mismatches = {
+              key: {"expected": value, "actual": manifest.get(key)}
+              for key, value in expected.items()
+              if manifest.get(key) != value
+          }
+          verification = manifest.get("final_distribution_verification")
+          if (
+              not isinstance(verification, dict)
+              or verification.get("status")
+              != "not_applicable_unsigned_qualification"
+              or verification.get("receipt_sha256") is not None
+              or verification.get("ipa_sha256") is not None
+          ):
+              mismatches["final_distribution_verification"] = verification
+          archive_integrity = manifest.get("archive_integrity_verification")
+          if archive_integrity != {
+              "status": "not_applicable_unsigned_qualification",
+              "receipt_file_name": None,
+              "receipt_sha256": None,
+              "verifier_replayed_against_current_artifacts": False,
+          }:
+              mismatches["archive_integrity_verification"] = archive_integrity
+          if mismatches:
+              raise SystemExit(
+                  "unsigned manifest claimed a release distribution stage: "
+                  + json.dumps(mismatches, sort_keys=True)
+              )
+          PY
 
       - name: Verify unsigned five-bundle archive and seal provenance
         run: |
@@ -1011,29 +1054,194 @@ jobs:
             "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" \
             "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" \
             "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" <<'PY'
+          import hashlib
           import json
           import pathlib
           import sys
 
+          paths = [pathlib.Path(path) for path in sys.argv[1:]]
           archive_manifest, archive_signing, export_manifest, export_signing = (
-              json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
-              for path in sys.argv[1:]
+              json.loads(path.read_text(encoding="utf-8")) for path in paths
           )
           expected = (
+              (archive_manifest, "artifact_stage", "ARCHIVE_PRE_EXPORT"),
               (archive_manifest, "evidence_stage", "archive"),
               (archive_signing, "status", "archive_integrity_verified"),
+              (export_manifest, "artifact_stage", "EXPORTED_IPA_POST_EXPORT"),
               (export_manifest, "evidence_stage", "export"),
               (export_signing, "status", "exported_ipa_distribution_verified"),
           )
-          mismatches = [
+          failures = [
               {"key": key, "expected": wanted, "actual": payload.get(key)}
               for payload, key, wanted in expected
               if payload.get(key) != wanted
           ]
-          if mismatches:
+          archive_readiness = {
+              "status": "NOT_FINAL_PRE_EXPORT",
+              "final_distribution_verified": False,
+              "upload_eligible": False,
+          }
+          export_readiness = {
+              "status": "VERIFIED_POST_EXPORT",
+              "final_distribution_verified": True,
+              "upload_eligible": True,
+          }
+          if archive_manifest.get("distribution_readiness") != archive_readiness:
+              failures.append({"archive_distribution_readiness": archive_manifest.get("distribution_readiness")})
+          if export_manifest.get("distribution_readiness") != export_readiness:
+              failures.append({"export_distribution_readiness": export_manifest.get("distribution_readiness")})
+
+          archive_expectation = archive_manifest.get("embedded_distribution_expectations")
+          export_expectation = export_manifest.get("embedded_distribution_expectations")
+          expected_expectation = {
+              "main_app_aps_environment": "production",
+              "enforcement_stage": "EXPORTED_IPA_POST_EXPORT",
+          }
+          if archive_expectation != expected_expectation or export_expectation != expected_expectation:
+              failures.append({
+                  "embedded_distribution_expectations": {
+                      "archive": archive_expectation,
+                      "export": export_expectation,
+                  }
+              })
+          archive_observation = archive_manifest.get("observed_archive_signing")
+          export_observation = export_manifest.get("observed_archive_signing")
+          archive_main = next(
+              (
+                  item
+                  for item in archive_signing.get("archive", {}).get("bundles", [])
+                  if item.get("bundle_id") == "ai.openclaw.client.J76B47MZ6V"
+              ),
+              None,
+          )
+          export_archive_main = next(
+              (
+                  item
+                  for item in export_signing.get("archive", {}).get("bundles", [])
+                  if item.get("bundle_id") == "ai.openclaw.client.J76B47MZ6V"
+              ),
+              None,
+          )
+          if (
+              not isinstance(archive_observation, dict)
+              or archive_observation != export_observation
+              or not isinstance(archive_main, dict)
+              or not isinstance(export_archive_main, dict)
+              or archive_observation.get("main_app_aps_environment")
+              != archive_main.get("aps_environment")
+              or archive_observation.get("main_app_aps_environment")
+              != export_archive_main.get("aps_environment")
+              or archive_observation.get("main_app_get_task_allow")
+              != archive_main.get("get_task_allow")
+              or archive_observation.get("main_app_get_task_allow")
+              != export_archive_main.get("get_task_allow")
+              or archive_observation.get("main_app_team_identifier")
+              != archive_main.get("team_identifier")
+              or archive_observation.get("main_app_team_identifier")
+              != export_archive_main.get("team_identifier")
+              or archive_observation.get("main_app_profile_type")
+              != archive_main.get("profile", {}).get("profile_type")
+              or archive_observation.get("main_app_profile_type")
+              != export_archive_main.get("profile", {}).get("profile_type")
+              or archive_observation.get(
+                  "distribution_expectation_enforced_against_archive"
+              ) is not False
+          ):
+              failures.append({
+                  "observed_archive_signing": {
+                      "archive": archive_observation,
+                      "export": export_observation,
+                  }
+              })
+
+          archive_integrity = archive_manifest.get("archive_integrity_verification")
+          export_archive_integrity = export_manifest.get(
+              "archive_integrity_verification"
+          )
+          archive_receipt_sha256 = hashlib.sha256(paths[1].read_bytes()).hexdigest()
+          if (
+              not isinstance(archive_integrity, dict)
+              or archive_integrity.get("status") != "archive_integrity_verified"
+              or archive_integrity.get("receipt_sha256") != archive_receipt_sha256
+              or archive_integrity.get(
+                  "verifier_replayed_against_current_artifacts"
+              ) is not True
+              or archive_integrity.get("expected_main_bundle_id")
+              != "ai.openclaw.client.J76B47MZ6V"
+              or archive_integrity.get("expected_team_id") != "J76B47MZ6V"
+              or not isinstance(export_archive_integrity, dict)
+              or export_archive_integrity.get("status")
+              != "verified_within_stage_b_replay"
+              or export_archive_integrity.get(
+                  "verifier_replayed_against_current_artifacts"
+              ) is not True
+              or export_archive_integrity.get("expected_main_bundle_id")
+              != "ai.openclaw.client.J76B47MZ6V"
+              or export_archive_integrity.get("expected_team_id") != "J76B47MZ6V"
+          ):
+              failures.append({
+                  "archive_integrity_verification": {
+                      "archive": archive_integrity,
+                      "export": export_archive_integrity,
+                  }
+              })
+
+          archive_verification = archive_manifest.get("final_distribution_verification")
+          if (
+              not isinstance(archive_verification, dict)
+              or archive_verification.get("status") != "pending_exported_ipa_stage_b"
+              or archive_verification.get("receipt_sha256") is not None
+              or archive_verification.get("ipa_sha256") is not None
+          ):
+              failures.append({"archive_final_distribution_verification": archive_verification})
+          export_verification = export_manifest.get("final_distribution_verification")
+          receipt_sha256 = hashlib.sha256(paths[3].read_bytes()).hexdigest()
+          ipa_path = paths[2].parent / "OpenClaw.ipa"
+          ipa_sha256 = hashlib.sha256(ipa_path.read_bytes()).hexdigest()
+          if (
+              not isinstance(export_verification, dict)
+              or export_verification.get("status")
+              != "exported_ipa_distribution_verified"
+              or export_verification.get("receipt_file_name") != paths[3].name
+              or export_verification.get("receipt_sha256") != receipt_sha256
+              or export_verification.get(
+                  "verifier_replayed_against_current_artifacts"
+              ) is not True
+              or export_verification.get("ipa_sha256") != ipa_sha256
+          ):
+              failures.append({"export_final_distribution_verification": export_verification})
+          ipa_artifacts = [
+              item
+              for item in export_manifest.get("artifacts", [])
+              if isinstance(item, dict) and item.get("kind") == "ipa"
+          ]
+          if len(ipa_artifacts) != 1 or ipa_artifacts[0].get("sha256") != ipa_sha256:
+              failures.append({"export_ipa_artifacts": ipa_artifacts})
+
+          identity_keys = (
+              "git_sha",
+              "git_branch",
+              "version",
+              "build_number",
+              "archive_uuid",
+              "main_bundle_id",
+              "extension_bundle_ids",
+              "watch_bundle_ids_if_present",
+          )
+          identity_mismatches = {
+              key: {
+                  "archive": archive_manifest.get(key),
+                  "export": export_manifest.get(key),
+              }
+              for key in identity_keys
+              if archive_manifest.get(key) != export_manifest.get(key)
+          }
+          if identity_mismatches:
+              failures.append({"archive_export_identity_mismatches": identity_mismatches})
+          if failures:
               raise SystemExit(
                   "retained archive/export evidence failed stage validation: "
-                  + json.dumps(mismatches, sort_keys=True)
+                  + json.dumps(failures, sort_keys=True)
               )
           PY
           python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" <<'PY'
