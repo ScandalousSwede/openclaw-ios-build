@@ -339,6 +339,25 @@ class AIESInternalSigningTests(unittest.TestCase):
                     ):
                         verifier.build_report(args)
 
+    def test_rejects_wrong_distributable_child_bundle_identifier(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_temp:
+            args = self.make_fixture(pathlib.Path(raw_temp))
+            app = args.ipa.parent / "ipa-root" / "Payload" / "OpenClaw.app"
+            share = self.bundle_path(app, f"{MAIN_ID}.share")
+            info_path = share / "Info.plist"
+            info = verifier.read_plist(info_path)
+            info["CFBundleIdentifier"] = f"{MAIN_ID}.wrong-share"
+            with info_path.open("wb") as handle:
+                plistlib.dump(info, handle)
+            self.rewrite_ipa(args)
+            with (
+                self.mock_signing(),
+                self.assertRaisesRegex(
+                    ValueError, "bundle identifier does not match expected path"
+                ),
+            ):
+                verifier.build_report(args)
+
     def test_rejects_expired_distribution_profile(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             args = self.make_fixture(pathlib.Path(raw_temp))
