@@ -193,7 +193,7 @@ jobs:
           ]
           if post_export_order != sorted(post_export_order):
               raise SystemExit("Stage B and post-export manifest do not gate final IPA")
-          required = (
+          required_signed = (
               'lane_status="${PIPESTATUS[0]}"',
               'if [[ "${lane_status}" -ne 0 ]]',
               'exit "${lane_status}"',
@@ -201,14 +201,21 @@ jobs:
               "exported_ipa_distribution_verified",
               "ARCHIVE_PRE_EXPORT",
               "EXPORTED_IPA_POST_EXPORT",
-              "UNSIGNED_ARCHIVE_QUALIFICATION",
               "NOT_FINAL_PRE_EXPORT",
               "VERIFIED_POST_EXPORT",
           )
-          if any(value not in signed for value in required) or "|| true" in signed.split(
+          if any(value not in signed for value in required_signed) or "|| true" in signed.split(
               "name: Build, verify, and upload internal TestFlight diagnostic", 1
           )[1].split("- name: Sanitize retained release log", 1)[0]:
               raise SystemExit("signed workflow failure propagation is incomplete")
+          unsigned = workflow.split("\n  build:\n", 1)[1].split(
+              "\n  signed-internal-testflight:\n", 1
+          )[0]
+          if (
+              "--artifact-stage UNSIGNED_ARCHIVE_QUALIFICATION" not in unsigned
+              or "NOT_APPLICABLE_UNSIGNED" not in unsigned
+          ):
+              raise SystemExit("unsigned manifest stage is not explicit and fail closed")
           precredential = signed.split("name: Materialize ephemeral App Store Connect key", 1)[0]
           if "secrets." in precredential:
               raise SystemExit("credential-free dry-run surface references a secret")
