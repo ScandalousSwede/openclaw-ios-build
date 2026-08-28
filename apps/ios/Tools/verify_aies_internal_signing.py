@@ -16,13 +16,38 @@ import tempfile
 import zipfile
 from typing import Any
 
-from aies_macho_signature_equivalence import compare_macho_payloads
+from aies_macho_signature_equivalence import MH_DYLIB, compare_macho_payloads
 
 
-SCHEMA = "argus.openclaw-ios.signing-report.v3"
+SCHEMA = "argus.openclaw-ios.signing-report.v4"
 WATCH_APP_RELATIVE_PATH = pathlib.PurePosixPath("Watch/OpenClawWatchApp.app")
 WATCH_APP_EXECUTABLE = "OpenClawWatchApp"
 WATCHKIT_STUB_RELATIVE_PATH = pathlib.PurePosixPath("_WatchKitStub/WK")
+WEBRTC_FRAMEWORK_RELATIVE_PATH = pathlib.PurePosixPath(
+    "Frameworks/WebRTC.framework"
+)
+WEBRTC_EXECUTABLE_RELATIVE_PATH = WEBRTC_FRAMEWORK_RELATIVE_PATH / "WebRTC"
+WEBRTC_BUNDLE_ID = "org.webrtc.WebRTC"
+EXPECTED_RESOURCE_BUNDLES = {
+    pathlib.PurePosixPath("GRDB_GRDB.bundle"),
+    pathlib.PurePosixPath("OpenClawKit_OpenClawKit.bundle"),
+    pathlib.PurePosixPath(
+        "PlugIns/OpenClawShareExtension.appex/OpenClawKit_OpenClawKit.bundle"
+    ),
+    pathlib.PurePosixPath("swiftui-math_SwiftUIMath.bundle"),
+    pathlib.PurePosixPath("swiftui-math_SwiftUIMath.bundle/mathFonts.bundle"),
+    pathlib.PurePosixPath("textual_Textual.bundle"),
+}
+KNOWN_MACHO_MAGICS = {
+    b"\xce\xfa\xed\xfe",  # MH_MAGIC
+    b"\xcf\xfa\xed\xfe",  # MH_MAGIC_64
+    b"\xfe\xed\xfa\xce",  # MH_CIGAM
+    b"\xfe\xed\xfa\xcf",  # MH_CIGAM_64
+    b"\xca\xfe\xba\xbe",  # FAT_MAGIC
+    b"\xbe\xba\xfe\xca",  # FAT_CIGAM
+    b"\xca\xfe\xba\xbf",  # FAT_MAGIC_64
+    b"\xbf\xba\xfe\xca",  # FAT_CIGAM_64
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +111,20 @@ def read_code_entitlements(path: pathlib.Path, codesign: str) -> dict[str, Any]:
     return plist_from_tool_output(output, "codesign")
 
 
+def read_optional_code_entitlements(
+    path: pathlib.Path, codesign: str
+) -> dict[str, Any]:
+    """Read an auxiliary code object's entitlements, treating no plist as empty."""
+
+    output = run_tool(
+        [codesign, "-d", "--entitlements", ":-", str(path)],
+        combine_output=True,
+    )
+    if b"<?xml" not in output:
+        return {}
+    return plist_from_tool_output(output, "codesign")
+
+
 def verify_code_signature(path: pathlib.Path, codesign: str, *, deep: bool) -> None:
     command = [codesign, "--verify", "--strict", "--verbose=2"]
     if deep:
@@ -137,7 +176,11 @@ def sha256_bytes(value: bytes) -> str:
 
 
 def verify_signing_identity(
-    path: pathlib.Path, codesign: str, security: str
+    path: pathlib.Path,
+    codesign: str,
+    security: str,
+    expected_team_id: str,
+    expected_code_identifier: str,
 ) -> dict[str, Any]:
     with tempfile.TemporaryDirectory() as raw_temp:
         certificate_prefix = pathlib.Path(raw_temp) / "signing-cert-"
@@ -169,11 +212,29 @@ def verify_signing_identity(
         authorities = re.findall(r"^Authority=(.+)$", authority_output, re.MULTILINE)
         if not authorities:
             raise ValueError(f"codesign returned no signing authority for {path.name}")
+        team_identifiers = re.findall(
+            r"^TeamIdentifier=(.+)$", authority_output, re.MULTILINE
+        )
+        if team_identifiers != [expected_team_id]:
+            raise ValueError(
+                f"codesign team identifier mismatch for {path.name}: "
+                f"{team_identifiers!r}"
+            )
+        code_identifiers = re.findall(
+            r"^Identifier=(.+)$", authority_output, re.MULTILINE
+        )
+        if code_identifiers != [expected_code_identifier]:
+            raise ValueError(
+                f"codesign code identifier mismatch for {path.name}: "
+                f"{code_identifiers!r}"
+            )
         return {
             "certificate_chain_count": len(certificate_chain),
             "leaf_certificate_sha256": sha256_bytes(leaf_path.read_bytes()),
             "authorities": authorities,
             "leaf_common_name": authorities[0],
+            "team_identifier": expected_team_id,
+            "code_identifier": expected_code_identifier,
             "trust_verified": True,
         }
 
@@ -327,7 +388,14 @@ def verify_bundle(
     if application_identifier != expected_application_identifier:
         raise ValueError(f"signed application identifier mismatch for {bundle_id}")
     verify_code_signature(path, codesign, deep=path == app_path)
-    signing_identity = verify_signing_identity(path, codesign, security)
+    signing_identity = verify_signing_identity(
+        path, codesign, security, expected_team_id, bundle_id
+    )
+    if (
+        signing_identity.get("team_identifier") != expected_team_id
+        or signing_identity.get("code_identifier") != bundle_id
+    ):
+        raise ValueError(f"code-signing identity metadata mismatch for {bundle_id}")
     raw_profile = read_profile(path, security)
     profile = selected_profile_fields(raw_profile, bundle_id)
     if profile["team_identifiers"] != [expected_team_id]:
@@ -443,6 +511,7 @@ def verify_app(
     expected_archive_uuid: str,
     codesign: str,
     security: str,
+    dwarfdump: str,
     *,
     distribution: bool = True,
 ) -> dict[str, Any]:
@@ -512,12 +581,25 @@ def verify_app(
                     "unexpected profile aps-environment for non-push target: "
                     + record["bundle_id"]
                 )
+    code_object_topology = verify_code_object_topology(
+        app_path, expected_main_bundle_id
+    )
+    auxiliary_code_objects = verify_auxiliary_code_objects(
+        app_path,
+        expected_team_id,
+        codesign,
+        security,
+        dwarfdump,
+        distribution=distribution,
+    )
     return {
         "verification_stage": (
             "exported_ipa_distribution" if distribution else "archive_integrity"
         ),
         "app": app_info,
         "bundles": sorted(bundles, key=lambda item: item["relative_path"]),
+        "auxiliary_code_objects": auxiliary_code_objects,
+        "code_object_topology": code_object_topology,
     }
 
 
@@ -574,8 +656,8 @@ def bundle_executable_path(app_path: pathlib.Path) -> pathlib.Path:
     if pathlib.PurePath(executable_name).name != executable_name:
         raise ValueError("CFBundleExecutable must be a single path component")
     executable = app_path / executable_name
-    if not executable.is_file():
-        raise ValueError(f"missing bundle executable: {executable_name}")
+    if not executable.is_file() or executable.is_symlink():
+        raise ValueError(f"missing regular bundle executable: {executable_name}")
     return executable
 
 
@@ -588,6 +670,282 @@ def executable_identity(
         "raw_sha256": sha256_bytes(executable.read_bytes()),
         "uuids": macho_uuids(executable, dwarfdump),
     }
+
+
+def is_recognized_macho(path: pathlib.Path) -> bool:
+    if not path.is_file() or path.is_symlink():
+        return False
+    with path.open("rb") as handle:
+        return handle.read(4) in KNOWN_MACHO_MAGICS
+
+
+def discovered_macho_paths(root: pathlib.Path) -> set[pathlib.PurePosixPath]:
+    return {
+        pathlib.PurePosixPath(path.relative_to(root).as_posix())
+        for path in root.rglob("*")
+        if is_recognized_macho(path)
+    }
+
+
+def expected_code_object_paths(
+    app_path: pathlib.Path, expected_main_bundle_id: str
+) -> set[pathlib.PurePosixPath]:
+    paths: set[pathlib.PurePosixPath] = set()
+    for relative_path in expected_bundle_topology(expected_main_bundle_id):
+        bundle_path = (
+            app_path
+            if relative_path == pathlib.PurePosixPath(".")
+            else app_path / relative_path
+        )
+        executable = bundle_executable_path(bundle_path)
+        paths.add(pathlib.PurePosixPath(executable.relative_to(app_path).as_posix()))
+    paths.add(WATCH_APP_RELATIVE_PATH / WATCHKIT_STUB_RELATIVE_PATH)
+    paths.add(WEBRTC_EXECUTABLE_RELATIVE_PATH)
+    return paths
+
+
+def verify_code_object_topology(
+    app_path: pathlib.Path, expected_main_bundle_id: str
+) -> dict[str, Any]:
+    """Fail closed on any unrecognized embedded framework, dylib, or Mach-O."""
+
+    expected_frameworks = {WEBRTC_FRAMEWORK_RELATIVE_PATH}
+    actual_frameworks = {
+        pathlib.PurePosixPath(path.relative_to(app_path).as_posix())
+        for path in app_path.rglob("*.framework")
+        if path.is_dir()
+    }
+    if actual_frameworks != expected_frameworks:
+        raise ValueError(
+            "embedded framework topology mismatch: "
+            f"expected={sorted(map(str, expected_frameworks))!r} "
+            f"actual={sorted(map(str, actual_frameworks))!r}"
+        )
+    dylibs = sorted(
+        pathlib.PurePosixPath(path.relative_to(app_path).as_posix())
+        for path in app_path.rglob("*.dylib")
+        if path.is_file() or path.is_symlink()
+    )
+    if dylibs:
+        raise ValueError(f"unexpected embedded dylib topology: {list(map(str, dylibs))!r}")
+    xpc_bundles = sorted(
+        pathlib.PurePosixPath(path.relative_to(app_path).as_posix())
+        for path in app_path.rglob("*.xpc")
+        if path.is_dir() or path.is_symlink()
+    )
+    if xpc_bundles:
+        raise ValueError(
+            f"unexpected embedded XPC topology: {list(map(str, xpc_bundles))!r}"
+        )
+    resource_bundles = {
+        pathlib.PurePosixPath(path.relative_to(app_path).as_posix())
+        for path in app_path.rglob("*.bundle")
+        if path.is_dir()
+    }
+    if resource_bundles != EXPECTED_RESOURCE_BUNDLES:
+        raise ValueError(
+            "resource-only bundle topology mismatch: "
+            f"expected={sorted(map(str, EXPECTED_RESOURCE_BUNDLES))!r} "
+            f"actual={sorted(map(str, resource_bundles))!r}"
+        )
+    expected_signed_containers = {
+        pathlib.PurePosixPath("."),
+        *(
+            path
+            for path in expected_bundle_topology(expected_main_bundle_id)
+            if path != pathlib.PurePosixPath(".")
+        ),
+        WEBRTC_FRAMEWORK_RELATIVE_PATH,
+    }
+    actual_signed_containers = {
+        pathlib.PurePosixPath(path.parent.relative_to(app_path).as_posix())
+        for path in app_path.rglob("_CodeSignature")
+        if path.is_dir()
+    }
+    if actual_signed_containers != expected_signed_containers:
+        raise ValueError(
+            "signed code-container topology mismatch: "
+            f"expected={sorted(map(str, expected_signed_containers))!r} "
+            f"actual={sorted(map(str, actual_signed_containers))!r}"
+        )
+    expected_machos = expected_code_object_paths(app_path, expected_main_bundle_id)
+    actual_machos = discovered_macho_paths(app_path)
+    if actual_machos != expected_machos:
+        missing = sorted(map(str, expected_machos - actual_machos))
+        unexpected = sorted(map(str, actual_machos - expected_machos))
+        raise ValueError(
+            f"Mach-O code-object topology mismatch: missing={missing!r} "
+            f"unexpected={unexpected!r}"
+        )
+    return {
+        "expected_mach_o_count": len(expected_machos),
+        "discovered_mach_o_count": len(actual_machos),
+        "fixture_opaque_executables": not actual_machos,
+        "mach_o_relative_paths": sorted(map(str, expected_machos)),
+        "framework_relative_paths": sorted(map(str, actual_frameworks)),
+        "dylib_relative_paths": [],
+        "xpc_relative_paths": [],
+        "resource_bundle_relative_paths": sorted(map(str, resource_bundles)),
+        "signed_container_relative_paths": sorted(
+            map(str, actual_signed_containers)
+        ),
+    }
+
+
+def verify_ipa_global_code_topology(
+    ipa_app: pathlib.Path, expected_main_bundle_id: str
+) -> dict[str, Any]:
+    ipa_root = ipa_app.parents[1]
+    expected = {
+        pathlib.PurePosixPath("Payload/OpenClaw.app") / path
+        for path in expected_code_object_paths(ipa_app, expected_main_bundle_id)
+    }
+    expected.add(pathlib.PurePosixPath("WatchKitSupport2/WK"))
+    actual = discovered_macho_paths(ipa_root)
+    if actual != expected:
+        raise ValueError(
+            "exported IPA global Mach-O topology mismatch: "
+            f"missing={sorted(map(str, expected - actual))!r} "
+            f"unexpected={sorted(map(str, actual - expected))!r}"
+        )
+    return {
+        "expected_mach_o_count": len(expected),
+        "discovered_mach_o_count": len(actual),
+        "mach_o_relative_paths": sorted(map(str, actual)),
+    }
+
+
+def verify_archive_global_code_topology(
+    archive: pathlib.Path,
+    archive_app: pathlib.Path,
+    expected_main_bundle_id: str,
+    compiled_records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    expected = {
+        pathlib.PurePosixPath("Products/Applications/OpenClaw.app") / path
+        for path in expected_code_object_paths(
+            archive_app, expected_main_bundle_id
+        )
+    }
+    expected.add(pathlib.PurePosixPath("WatchKitSupport2/WK"))
+    for record in compiled_records:
+        dsym = record.get("dsym")
+        if not isinstance(dsym, dict) or not isinstance(
+            dsym.get("relative_path"), str
+        ):
+            raise ValueError("compiled product lacks an exact dSYM path")
+        expected.add(pathlib.PurePosixPath(dsym["relative_path"]))
+    actual = discovered_macho_paths(archive)
+    if actual != expected:
+        raise ValueError(
+            "archive global Mach-O topology mismatch: "
+            f"missing={sorted(map(str, expected - actual))!r} "
+            f"unexpected={sorted(map(str, actual - expected))!r}"
+        )
+    return {
+        "expected_mach_o_count": len(expected),
+        "discovered_mach_o_count": len(actual),
+        "mach_o_relative_paths": sorted(map(str, actual)),
+    }
+def verify_watchkit_support_copy(
+    root: pathlib.Path,
+    app_path: pathlib.Path,
+    codesign: str,
+    dwarfdump: str,
+) -> dict[str, Any]:
+    support_directory = root / "WatchKitSupport2"
+    support_path = support_directory / "WK"
+    entries = sorted(support_directory.iterdir()) if support_directory.is_dir() else []
+    if (
+        entries != [support_path]
+        or not support_path.is_file()
+        or support_path.is_symlink()
+    ):
+        raise ValueError("WatchKitSupport2 must contain exactly one regular WK launcher")
+    embedded_path = (
+        app_path / WATCH_APP_RELATIVE_PATH / WATCHKIT_STUB_RELATIVE_PATH
+    )
+    if support_path.read_bytes() != embedded_path.read_bytes():
+        raise ValueError("WatchKitSupport2 launcher is not byte-identical to embedded stub")
+    verify_code_signature(support_path, codesign, deep=False)
+    return {
+        "relative_path": "WatchKitSupport2/WK",
+        "raw_sha256": sha256_bytes(support_path.read_bytes()),
+        "uuids": macho_uuids(support_path, dwarfdump),
+        "embedded_stub_relative_path": (
+            WATCH_APP_RELATIVE_PATH / WATCHKIT_STUB_RELATIVE_PATH
+        ).as_posix(),
+        "embedded_stub_byte_identical": True,
+        "embedded_stub_payload_equivalence": compare_macho_payloads(
+            embedded_path, support_path
+        ),
+    }
+
+
+def verify_auxiliary_code_objects(
+    app_path: pathlib.Path,
+    expected_team_id: str,
+    codesign: str,
+    security: str,
+    dwarfdump: str,
+    *,
+    distribution: bool,
+) -> list[dict[str, Any]]:
+    framework = app_path / WEBRTC_FRAMEWORK_RELATIVE_PATH
+    executable = app_path / WEBRTC_EXECUTABLE_RELATIVE_PATH
+    if (
+        not framework.is_dir()
+        or framework.is_symlink()
+        or not executable.is_file()
+        or executable.is_symlink()
+    ):
+        raise ValueError("missing regular WebRTC framework code object")
+    info = read_plist(framework / "Info.plist")
+    if require_text(info, "CFBundleIdentifier", str(framework / "Info.plist")) != WEBRTC_BUNDLE_ID:
+        raise ValueError("WebRTC framework bundle identifier mismatch")
+    if require_text(info, "CFBundleExecutable", str(framework / "Info.plist")) != "WebRTC":
+        raise ValueError("WebRTC framework executable mismatch")
+    if info.get("CFBundlePackageType") != "FMWK":
+        raise ValueError("WebRTC framework package type mismatch")
+    if (framework / "embedded.mobileprovision").exists():
+        raise ValueError("embedded framework must not contain a provisioning profile")
+    verify_code_signature(framework, codesign, deep=False)
+    signing_identity = verify_signing_identity(
+        framework, codesign, security, expected_team_id, WEBRTC_BUNDLE_ID
+    )
+    if (
+        signing_identity.get("team_identifier") != expected_team_id
+        or signing_identity.get("code_identifier") != WEBRTC_BUNDLE_ID
+    ):
+        raise ValueError("WebRTC framework code-signing identity mismatch")
+    if distribution and not signing_identity["leaf_common_name"].startswith(
+        "Apple Distribution:"
+    ):
+        raise ValueError("embedded framework is not signed by Apple Distribution")
+    entitlements = read_optional_code_entitlements(framework, codesign)
+    if entitlements:
+        raise ValueError(
+            "embedded framework must not carry application entitlements: "
+            f"{sorted(entitlements)!r}"
+        )
+    return [
+        {
+            "kind": "embedded_dynamic_framework",
+            "bundle_id": WEBRTC_BUNDLE_ID,
+            "bundle_relative_path": WEBRTC_FRAMEWORK_RELATIVE_PATH.as_posix(),
+            "executable_relative_path": WEBRTC_EXECUTABLE_RELATIVE_PATH.as_posix(),
+            "mach_o_file_type": "MH_DYLIB",
+            "profile": None,
+            "profile_requirement": "not_applicable_embedded_framework",
+            "entitlements": entitlements,
+            "signing_identity": signing_identity,
+            "executable": {
+                "name": executable.name,
+                "raw_sha256": sha256_bytes(executable.read_bytes()),
+                "uuids": macho_uuids(executable, dwarfdump),
+            },
+        }
+    ]
 
 
 def verify_watchkit_stub_binding(
@@ -724,7 +1082,7 @@ def verify_archive_dsym_binding(
                 "dsym_requirement": "required_compiled_executable",
                 "dsym_status": "uuid_matched",
                 "dsym": {
-                    "relative_path": str(dsym_binary.relative_to(archive)),
+                    "relative_path": dsym_binary.relative_to(archive).as_posix(),
                     "sha256": sha256_bytes(dsym_binary.read_bytes()),
                     "uuids": dsym_uuids,
                 },
@@ -740,6 +1098,38 @@ def verify_archive_dsym_binding(
     ]
     if len(compiled) != 4 or len(stubs) != 1:
         raise ValueError("unexpected compiled-product/WatchKit-stub role topology")
+    framework_executable = archive_app / WEBRTC_EXECUTABLE_RELATIVE_PATH
+    framework_dsym = archive / "dSYMs" / "WebRTC.framework.dSYM"
+    if framework_dsym.exists() or framework_dsym.is_symlink():
+        raise ValueError("unexpected project dSYM for prebuilt WebRTC framework")
+    auxiliary_code_objects = [
+        {
+            "kind": "embedded_dynamic_framework",
+            "bundle_id": WEBRTC_BUNDLE_ID,
+            "executable_role": "prebuilt_dependency",
+            "executable_relative_path": WEBRTC_EXECUTABLE_RELATIVE_PATH.as_posix(),
+            "mach_o_file_type": "MH_DYLIB",
+            "archive_executable": {
+                "name": framework_executable.name,
+                "raw_sha256": sha256_bytes(framework_executable.read_bytes()),
+                "uuids": macho_uuids(framework_executable, dwarfdump),
+            },
+            "dsym_requirement": "not_emitted_for_prebuilt_dependency",
+            "dsym_status": "not_applicable",
+            "dsym": None,
+        }
+    ]
+    watchkit_support = {
+        "archive": verify_watchkit_support_copy(
+            archive, archive_app, codesign, dwarfdump
+        )
+    }
+    archive_global_topology = verify_archive_global_code_topology(
+        archive,
+        archive_app,
+        expected_main_bundle_id,
+        compiled,
+    )
     return {
         "bundle_count": len(records),
         "compiled_executable_count": len(compiled),
@@ -749,6 +1139,10 @@ def verify_archive_dsym_binding(
             record["dsym_status"] == "uuid_matched" for record in compiled
         ),
         "bundles": records,
+        "auxiliary_code_object_count": len(auxiliary_code_objects),
+        "auxiliary_code_objects": auxiliary_code_objects,
+        "watchkit_support": watchkit_support,
+        "archive_global_code_object_topology": archive_global_topology,
     }
 
 
@@ -824,9 +1218,54 @@ def verify_binary_binding(
                 "archive_to_ipa_payload_equivalence": stub_payload_equivalence,
             }
         records.append(final_record)
+    auxiliary_records: list[dict[str, Any]] = []
+    for record in archive_binding["auxiliary_code_objects"]:
+        relative_path = pathlib.PurePosixPath(record["executable_relative_path"])
+        archive_executable = archive_app / relative_path
+        ipa_executable = ipa_app / relative_path
+        if not ipa_executable.is_file() or ipa_executable.is_symlink():
+            raise ValueError("missing regular exported WebRTC framework executable")
+        ipa_identity = {
+            "name": ipa_executable.name,
+            "raw_sha256": sha256_bytes(ipa_executable.read_bytes()),
+            "uuids": macho_uuids(ipa_executable, dwarfdump),
+        }
+        if record["archive_executable"]["uuids"] != ipa_identity["uuids"]:
+            raise ValueError("archive and exported WebRTC framework UUIDs differ")
+        auxiliary_records.append(
+            {
+                **record,
+                "ipa_executable": ipa_identity,
+                "archive_to_ipa_payload_equivalence": compare_macho_payloads(
+                    archive_executable,
+                    ipa_executable,
+                    expected_file_type=MH_DYLIB,
+                ),
+            }
+        )
+    archive_support = archive_binding["watchkit_support"]["archive"]
+    ipa_support = verify_watchkit_support_copy(
+        ipa_app.parents[1], ipa_app, codesign, dwarfdump
+    )
+    if archive_support["uuids"] != ipa_support["uuids"]:
+        raise ValueError("archive and exported IPA WatchKitSupport2 UUIDs differ")
+    watchkit_support = {
+        "archive": archive_support,
+        "ipa": ipa_support,
+        "archive_to_ipa_payload_equivalence": compare_macho_payloads(
+            archive / "WatchKitSupport2" / "WK",
+            ipa_app.parents[1] / "WatchKitSupport2" / "WK",
+        ),
+    }
     return {
-        key: value for key, value in archive_binding.items() if key != "bundles"
-    } | {"bundles": records}
+        key: value
+        for key, value in archive_binding.items()
+        if key not in {"bundles", "auxiliary_code_objects"}
+    } | {
+        "bundles": records,
+        "auxiliary_code_objects": auxiliary_records,
+        "watchkit_support": watchkit_support,
+    }
 
 
 def validate_report_contract(report: Any, *, archive_only: bool) -> None:
@@ -869,6 +1308,38 @@ def validate_report_contract(report: Any, *, archive_only: bool) -> None:
             raise ValueError(
                 f"signing verifier output target identities differ: {section_name}"
             )
+        auxiliary = section.get("auxiliary_code_objects")
+        if (
+            not isinstance(auxiliary, list)
+            or len(auxiliary) != 1
+            or not isinstance(auxiliary[0], dict)
+            or auxiliary[0].get("bundle_id") != WEBRTC_BUNDLE_ID
+        ):
+            raise ValueError(
+                f"signing verifier output has partial auxiliary-code coverage: {section_name}"
+            )
+    archive_topology = report["archive"].get("code_object_topology")
+    if (
+        not isinstance(archive_topology, dict)
+        or archive_topology.get("expected_mach_o_count") != 7
+        or archive_topology.get("discovered_mach_o_count") != 7
+        or archive_topology.get("fixture_opaque_executables") is not False
+    ):
+        raise ValueError("archive code-object topology receipt is missing")
+    watchkit_support = report["binary_binding"].get("watchkit_support")
+    if not isinstance(watchkit_support, dict) or not isinstance(
+        watchkit_support.get("archive"), dict
+    ):
+        raise ValueError("archive WatchKitSupport2 receipt is missing")
+    archive_global_topology = report["binary_binding"].get(
+        "archive_global_code_object_topology"
+    )
+    if (
+        not isinstance(archive_global_topology, dict)
+        or archive_global_topology.get("expected_mach_o_count") != 12
+        or archive_global_topology.get("discovered_mach_o_count") != 12
+    ):
+        raise ValueError("archive global code-object topology is incomplete")
     if not archive_only:
         ipa = report["ipa"]
         if ipa.get("verification_stage") != "exported_ipa_distribution":
@@ -881,6 +1352,32 @@ def validate_report_contract(report: Any, *, archive_only: bool) -> None:
                 raise ValueError(
                     "signing verifier output lacks executable payload equivalence"
                 )
+        auxiliary_binding = report["binary_binding"]["auxiliary_code_objects"]
+        equivalence = auxiliary_binding[0].get(
+            "archive_to_ipa_payload_equivalence"
+        )
+        if not isinstance(equivalence, dict) or equivalence.get("status") != (
+            "signature_aware_payload_equivalent"
+        ):
+            raise ValueError(
+                "signing verifier output lacks auxiliary payload equivalence"
+            )
+        global_topology = ipa.get("global_code_object_topology")
+        if (
+            not isinstance(global_topology, dict)
+            or global_topology.get("expected_mach_o_count") != 8
+            or global_topology.get("discovered_mach_o_count") != 8
+        ):
+            raise ValueError("exported IPA global code-object topology is incomplete")
+        if not isinstance(watchkit_support.get("ipa"), dict):
+            raise ValueError("exported IPA WatchKitSupport2 receipt is missing")
+        support_equivalence = watchkit_support.get(
+            "archive_to_ipa_payload_equivalence"
+        )
+        if not isinstance(support_equivalence, dict) or support_equivalence.get(
+            "status"
+        ) != "signature_aware_payload_equivalent":
+            raise ValueError("WatchKitSupport2 payload equivalence is missing")
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
@@ -904,6 +1401,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         args.expected_archive_uuid,
         args.codesign,
         args.security,
+        args.dwarfdump,
         distribution=False,
     )
     archive_binding = verify_archive_dsym_binding(
@@ -953,7 +1451,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             args.expected_archive_uuid,
             args.codesign,
             args.security,
+            args.dwarfdump,
             distribution=True,
+        )
+        ipa_result["global_code_object_topology"] = verify_ipa_global_code_topology(
+            ipa_app, args.expected_main_bundle_id
         )
         binary_binding = verify_binary_binding(
             args.archive,

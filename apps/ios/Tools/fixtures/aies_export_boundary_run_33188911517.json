@@ -33,6 +33,20 @@
     "size_bytes": 26466118
   },
   "schema": "aies.exact-export-boundary-fixture.v1",
+  "watchkit_support": {
+    "architectures": [
+      {
+        "architecture": "arm64_32",
+        "uuid": "03fe4bed-103a-3363-a03c-f6245cdf7dcb"
+      },
+      {
+        "architecture": "arm64",
+        "uuid": "bda0d008-4c52-39b9-a969-801bc5472761"
+      }
+    ],
+    "embedded_stub_byte_identical": true,
+    "sha256": "5d3149a79cbdb2d2b785869e3079bba91499813fbe5ed110b317d60212857db0"
+  },
   "watch_extension": {
     "archive_executable_sha256": "d168339a9dcb38c00460f7ba4e0e4e405128fc896307b58289c1a5f46845608a",
     "architectures": [
@@ -48,5 +62,15 @@
     "bundle_id": "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
     "extraction": "Exact executable paths are resolved from CFBundleExecutable after safe artifact extraction; no binary is committed.",
     "ipa_executable_sha256": "d70d2b88f30e7778d93a32c16e73ed4c60e28bf24057fa7a252a32c71b009c6a"
+  },
+  "webrtc_framework": {
+    "archive_executable_sha256": "868987fa1e05c972056f0991066d1a6fcebeada2f3a9d07c934e5b25cc1aba2",
+    "architecture": "arm64",
+    "bundle_id": "org.webrtc.WebRTC",
+    "canonical_payload_sha256": "57a623f9b84f041059af690feac199f5fb3def5a2ad09ead1e3461ad748e513e",
+    "executable": "WebRTC",
+    "ipa_executable_sha256": "4c352a5b8db5c0982625cd906d83a6c6283138c44873e7a2ff4ed466fa5bea99",
+    "mach_o_file_type": "MH_DYLIB",
+    "uuid": "4c4c44b5-5555-3144-a14e-5c0b504aa937"
   }
 }

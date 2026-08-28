@@ -33,6 +33,7 @@ def thin_macho(
     uuid: bytes,
     signature_allocation: int,
     signature_payload: bytes,
+    file_type: int = macho.MH_EXECUTE,
 ) -> bytes:
     is_64 = cpu_type == macho.CPU_TYPE_ARM64
     header_size = 32 if is_64 else 28
@@ -44,7 +45,7 @@ def thin_macho(
         macho.MH_MAGIC_64 if is_64 else macho.MH_MAGIC,
         cpu_type,
         cpu_subtype,
-        2,
+        file_type,
         4,
         sizeofcmds,
         0x200085,
@@ -218,8 +219,51 @@ class MachOSignatureEquivalenceTests(unittest.TestCase):
         self.assertEqual(report["architecture_count"], 2)
         architectures = report["architectures"]
         self.assertNotEqual(architectures[1]["archive"]["fat_offset"], architectures[1]["ipa"]["fat_offset"])
-        self.assertTrue(all(len(item["normalized_fields"]) == 3 for item in architectures))
+        self.assertTrue(
+            all(len(item["normalized_fields"]) == 3 for item in architectures)
+        )
 
+    def test_signature_only_dynamic_framework_changes_pass_when_role_bound(self) -> None:
+        archive = thin_macho(
+            macho.CPU_TYPE_ARM64,
+            0,
+            ARM64_UUID,
+            0x4000,
+            b"archive-framework",
+            macho.MH_DYLIB,
+        )
+        ipa = thin_macho(
+            macho.CPU_TYPE_ARM64,
+            0,
+            ARM64_UUID,
+            0x2000,
+            b"ipa-framework",
+            macho.MH_DYLIB,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            before = root / "WebRTC.archive"
+            after = root / "WebRTC.ipa"
+            before.write_bytes(archive)
+            after.write_bytes(ipa)
+            report = macho.compare_macho_payloads(
+                before, after, expected_file_type=macho.MH_DYLIB
+            )
+        self.assertEqual(report["mach_o_file_type"], macho.MH_DYLIB)
+        self.assertIn(
+            "fat_arch.size (derived signed-slice extent; slices compared independently)",
+            report["normalized_field_allowlist"],
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            before = root / "WebRTC.archive"
+            after = root / "WebRTC.ipa"
+            before.write_bytes(archive)
+            after.write_bytes(ipa)
+            with self.assertRaisesRegex(
+                macho.MachOEquivalenceError, "^MACHO_FILETYPE_MISMATCH:"
+            ):
+                macho.compare_macho_payloads(before, after)
     def test_signature_only_thin_changes_pass(self) -> None:
         archive = thin_macho(macho.CPU_TYPE_ARM64, 0, ARM64_UUID, 0x4000, b"archive")
         ipa = thin_macho(macho.CPU_TYPE_ARM64, 0, ARM64_UUID, 0x2000, b"ipa")
@@ -263,7 +307,9 @@ class MachOSignatureEquivalenceTests(unittest.TestCase):
     def test_extra_slice_and_malformed_container_fail(self) -> None:
         archive = fat_macho(0x4000, b"archive")
         base = fat_macho(0x2000, b"ipa")
-        _format, slices = macho._parse_container(base)
+        _format, slices = macho._parse_container(
+            base, expected_file_type=macho.MH_EXECUTE
+        )
         extra = thin_macho(
             macho.CPU_TYPE_ARM64,
             2,

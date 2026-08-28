@@ -84,7 +84,7 @@ jobs:
       - name: Select Xcode 26.2
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: '26.2'
+          xcode-version: "26.2"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -170,7 +170,7 @@ jobs:
       - name: Select Xcode 26.2
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: '26.2'
+          xcode-version: "26.2"
 
       - name: Show Swift toolchain
         run: |
@@ -280,6 +280,7 @@ jobs:
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
+            test_aies_release_gate_behavior.py \
             test_verify_aies_internal_signing.py
 
       - name: Verify canonical unsigned AIES build settings
@@ -610,7 +611,7 @@ jobs:
       - name: Select Xcode 26.2
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
-          xcode-version: '26.2'
+          xcode-version: "26.2"
 
       - name: Show Swift toolchain
         run: |
@@ -813,6 +814,7 @@ jobs:
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
+            test_aies_release_gate_behavior.py \
             test_verify_aies_internal_signing.py
 
       - name: Parse Fastlane release configuration without credentials

@@ -24,6 +24,8 @@ LC_UUID = 0x1B
 LC_SEGMENT_64 = 0x19
 LC_CODE_SIGNATURE = 0x1D
 CSMAGIC_EMBEDDED_SIGNATURE = 0xFADE0CC0
+MH_EXECUTE = 0x2
+MH_DYLIB = 0x6
 
 CPU_TYPE_ARM64 = 0x0100000C
 CPU_TYPE_ARM64_32 = 0x0200000C
@@ -73,6 +75,7 @@ class ThinMachO:
     cpu_type: int
     cpu_subtype: int
     is_64: bool
+    file_type: int
     uuid: str
     dataoff: int
     datasize: int
@@ -153,7 +156,12 @@ def _parse_code_signature(
     )
 
 
-def _parse_thin(value: bytes, expected_cpu: tuple[int, int] | None = None) -> ThinMachO:
+def _parse_thin(
+    value: bytes,
+    expected_cpu: tuple[int, int] | None = None,
+    *,
+    expected_file_type: int,
+) -> ThinMachO:
     if len(value) < 4:
         _fail("TRUNCATED_MACHO", "missing thin header")
     magic = struct.unpack_from("<I", value, 0)[0]
@@ -173,8 +181,15 @@ def _parse_thin(value: bytes, expected_cpu: tuple[int, int] | None = None) -> Th
         _fail("FAT_THIN_CPU_MISMATCH", f"descriptor={expected_cpu!r} thin={(cpu_type, cpu_subtype)!r}")
     if cpu_type not in SUPPORTED_PAGE_SIZES:
         _fail("UNSUPPORTED_ARCHITECTURE", _architecture_name(cpu_type, cpu_subtype))
-    if _read_u32(value, 12, "<", "filetype") != 2:
-        _fail("UNSUPPORTED_MACHO_FILETYPE", "release executable is not MH_EXECUTE")
+    file_type = _read_u32(value, 12, "<", "filetype")
+    if expected_file_type not in (MH_EXECUTE, MH_DYLIB):
+        _fail("UNSUPPORTED_EXPECTED_FILETYPE", f"filetype={expected_file_type}")
+    if file_type != expected_file_type:
+        names = {MH_EXECUTE: "MH_EXECUTE", MH_DYLIB: "MH_DYLIB"}
+        _fail(
+            "MACHO_FILETYPE_MISMATCH",
+            f"expected={names[expected_file_type]} actual={file_type:#x}",
+        )
     ncmds = _read_u32(value, 16, "<", "ncmds")
     sizeofcmds = _read_u32(value, 20, "<", "sizeofcmds")
     commands_end = header_size + sizeofcmds
@@ -294,6 +309,7 @@ def _parse_thin(value: bytes, expected_cpu: tuple[int, int] | None = None) -> Th
         cpu_type=cpu_type,
         cpu_subtype=cpu_subtype,
         is_64=is_64,
+        file_type=file_type,
         uuid=uuid,
         dataoff=dataoff,
         datasize=datasize,
@@ -314,12 +330,14 @@ def _parse_thin(value: bytes, expected_cpu: tuple[int, int] | None = None) -> Th
     )
 
 
-def _parse_container(value: bytes) -> tuple[str, list[ContainerSlice]]:
+def _parse_container(
+    value: bytes, *, expected_file_type: int
+) -> tuple[str, list[ContainerSlice]]:
     if len(value) < 4:
         _fail("TRUNCATED_MACHO", "missing container magic")
     big_magic = struct.unpack_from(">I", value, 0)[0]
     if big_magic != FAT_MAGIC:
-        thin = _parse_thin(value)
+        thin = _parse_thin(value, expected_file_type=expected_file_type)
         return (
             "thin",
             [ContainerSlice(0, thin.cpu_type, thin.cpu_subtype, 0, len(value), 0, value)],
@@ -351,7 +369,9 @@ def _parse_container(value: bytes) -> tuple[str, list[ContainerSlice]]:
         if any(value[previous_end:offset]):
             _fail("NONZERO_FAT_PADDING", f"architecture {index}")
         slice_value = value[offset : offset + size]
-        _parse_thin(slice_value, key)
+        _parse_thin(
+            slice_value, key, expected_file_type=expected_file_type
+        )
         slices.append(
             ContainerSlice(index, cpu_type, cpu_subtype, offset, size, align_exponent, slice_value)
         )
@@ -381,13 +401,22 @@ def _field_record(
     }
 
 
-def compare_macho_payloads(archive_path: pathlib.Path, ipa_path: pathlib.Path) -> dict[str, Any]:
+def compare_macho_payloads(
+    archive_path: pathlib.Path,
+    ipa_path: pathlib.Path,
+    *,
+    expected_file_type: int = MH_EXECUTE,
+) -> dict[str, Any]:
     """Return a deterministic report or raise on any non-signature difference."""
 
     archive_value = archive_path.read_bytes()
     ipa_value = ipa_path.read_bytes()
-    archive_format, archive_slices = _parse_container(archive_value)
-    ipa_format, ipa_slices = _parse_container(ipa_value)
+    archive_format, archive_slices = _parse_container(
+        archive_value, expected_file_type=expected_file_type
+    )
+    ipa_format, ipa_slices = _parse_container(
+        ipa_value, expected_file_type=expected_file_type
+    )
     if archive_format != ipa_format:
         _fail("CONTAINER_FORMAT_MISMATCH", f"{archive_format} != {ipa_format}")
     archive_keys = [(item.cpu_type, item.cpu_subtype) for item in archive_slices]
@@ -405,8 +434,12 @@ def compare_macho_payloads(archive_path: pathlib.Path, ipa_path: pathlib.Path) -
     canonical_container_cursor = 8 + len(archive_slices) * 20
     for archive_slice, ipa_slice in zip(archive_slices, ipa_slices):
         key = (archive_slice.cpu_type, archive_slice.cpu_subtype)
-        before = _parse_thin(archive_slice.value, key)
-        after = _parse_thin(ipa_slice.value, key)
+        before = _parse_thin(
+            archive_slice.value, key, expected_file_type=expected_file_type
+        )
+        after = _parse_thin(
+            ipa_slice.value, key, expected_file_type=expected_file_type
+        )
         if before.uuid != after.uuid:
             _fail("UUID_MISMATCH", f"{before.uuid} != {after.uuid}")
         if before.dataoff != after.dataoff:
@@ -465,6 +498,7 @@ def compare_macho_payloads(archive_path: pathlib.Path, ipa_path: pathlib.Path) -
                 "cpu_type": key[0],
                 "cpu_subtype": key[1],
                 "uuid": before.uuid,
+                "mach_o_file_type": before.file_type,
                 "archive": {
                     "fat_offset": archive_slice.offset,
                     "signed_slice_size": archive_slice.size,
@@ -529,12 +563,14 @@ def compare_macho_payloads(archive_path: pathlib.Path, ipa_path: pathlib.Path) -
         "ipa_raw_sha256": _sha256(ipa_value),
         "architecture_count": len(reports),
         "architecture_set": [item["architecture"] for item in reports],
+        "mach_o_file_type": expected_file_type,
         "canonical_payload_sha256": canonical_hasher.hexdigest(),
         "normalized_field_allowlist": [
             "LC_CODE_SIGNATURE.datasize",
             "__LINKEDIT.filesize",
             "__LINKEDIT.vmsize",
             "fat_arch.offset (derived container layout; slices compared independently)",
+            "fat_arch.size (derived signed-slice extent; slices compared independently)",
             "terminal code-signature blob bytes",
         ],
         "architectures": reports,

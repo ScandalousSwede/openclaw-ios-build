@@ -63,6 +63,7 @@ jobs:
               ".github/workflows/ios-build-ipa.yml",
               ".github/workflows/ios-post-export-verifier-qualification.yml",
               "apps/ios/Tools/aies_macho_signature_equivalence.py",
+              "apps/ios/Tools/test_aies_release_gate_behavior.py",
               "apps/ios/Tools/fixtures/aies_export_boundary_run_33188911517.json",
               "apps/ios/Tools/test_aies_macho_signature_equivalence.py",
               "apps/ios/Tools/test_verify_aies_internal_signing.py",
@@ -160,11 +161,16 @@ jobs:
             test_verify_aies_unsigned_archive.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
+            test_aies_release_gate_behavior.py \
             test_verify_aies_internal_signing.py 2>&1 | tee "${RUNNER_TEMP}/verifier-tooling-tests.log"
 
       - name: Prove dry-run ordering and credential boundary
         run: |
           set -euo pipefail
+          (
+            cd apps/ios/Tools
+            python3 -m unittest -v test_aies_release_gate_behavior.py
+          ) 2>&1 | tee "${RUNNER_TEMP}/stage-b-failure-harness.log"
           python3 - <<'PY'
           import pathlib
 
@@ -212,6 +218,7 @@ jobs:
             ${{ runner.temp }}/source-custody.txt
             ${{ runner.temp }}/protected-object-hashes.json
             ${{ runner.temp }}/verifier-tooling-tests.log
+            ${{ runner.temp }}/stage-b-failure-harness.log
           retention-days: 90
           if-no-files-found: warn
 
@@ -267,16 +274,64 @@ jobs:
           }
           download_artifact 9676279420 "${downloads}/archive-artifact.zip"
           download_artifact 9692923415 "${downloads}/ipa-artifact.zip"
+          download_artifact 9692924304 "${downloads}/diagnostic-evidence-artifact.zip"
           echo "d253acd7c1045d512dc8a1b9862d2a017f10b3ebd6005cf250ede0e539f52aa4  ${downloads}/archive-artifact.zip" | shasum -a 256 -c -
           echo "e50abfab7a75daad7e995ae1e79a6b6439976d9860824f718f33632d2666e774  ${downloads}/ipa-artifact.zip" | shasum -a 256 -c -
-          mkdir -p "${root}/archive-wrapper" "${root}/ipa-wrapper" "${root}/archive-root"
+          echo "cd0e3d2de5c3ce8057e38d94dffe5fe142ac502994bd6c35dc1e82da9848e06d  ${downloads}/diagnostic-evidence-artifact.zip" | shasum -a 256 -c -
+          mkdir -p "${root}/archive-wrapper" "${root}/ipa-wrapper" \
+            "${root}/diagnostic-evidence-wrapper" "${root}/archive-root"
           ditto -x -k "${downloads}/archive-artifact.zip" "${root}/archive-wrapper"
           ditto -x -k "${downloads}/ipa-artifact.zip" "${root}/ipa-wrapper"
+          ditto -x -k "${downloads}/diagnostic-evidence-artifact.zip" \
+            "${root}/diagnostic-evidence-wrapper"
           archive_zip="$(find "${root}/archive-wrapper" -type f -name 'OpenClaw.xcarchive.zip' -print -quit)"
           ipa="$(find "${root}/ipa-wrapper" -type f -name '*.ipa' -print -quit)"
           test -n "${archive_zip}" && test -n "${ipa}"
           echo "c0b446466e1e043159216784f066637345e1f5ec6b97e21c2f51a03c6d9215b9  ${archive_zip}" | shasum -a 256 -c -
           echo "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82  ${ipa}" | shasum -a 256 -c -
+          evidence_ipa="${root}/diagnostic-evidence-wrapper/OpenClaw-exported.ipa"
+          evidence_sums="${root}/diagnostic-evidence-wrapper/SHA256SUMS"
+          test -f "${evidence_ipa}" && test -f "${evidence_sums}"
+          test "$(wc -l < "${evidence_sums}" | tr -d ' ')" = "76"
+          (
+            cd "${root}/diagnostic-evidence-wrapper"
+            shasum -a 256 -c SHA256SUMS
+          ) | tee "${root}/evidence/diagnostic-artifact-76-file-verification.log"
+          echo "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82  ${evidence_ipa}" | shasum -a 256 -c -
+          cmp "${ipa}" "${evidence_ipa}"
+          python3 - "${root}/diagnostic-evidence-wrapper" \
+            apps/ios/Tools/fixtures/aies_export_boundary_run_33188911517.json \
+            "${root}/evidence/diagnostic-evidence-binding.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          evidence = pathlib.Path(sys.argv[1])
+          fixture = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+          source = json.loads((evidence / "source-custody.json").read_text(encoding="utf-8"))
+          result = json.loads((evidence / "workflow-result.json").read_text(encoding="utf-8"))
+          if fixture["diagnostic"]["run_id"] != 33188911517:
+              raise SystemExit("diagnostic fixture run identity mismatch")
+          if fixture["diagnostic"]["evidence_zip_sha256"] != (
+              "bddbd362aa61e053ecabf412c9bb5d4a9b5d9e8fabec2ad8ae66d04e964b421a"
+          ):
+              raise SystemExit("owner-sealed evidence ZIP binding mismatch")
+          if source.get("source_sha") != fixture["expected_source_sha"]:
+              raise SystemExit("diagnostic evidence source provenance mismatch")
+          if result.get("source_run_id") != fixture["archive"]["run_id"]:
+              raise SystemExit("diagnostic evidence archive-run provenance mismatch")
+          receipt = {
+              "artifact_id": fixture["diagnostic"]["artifact_id"],
+              "artifact_sha256": fixture["diagnostic"]["artifact_sha256"],
+              "artifact_internal_sha256_entries_verified": 76,
+              "embedded_ipa_byte_identical": True,
+              "owner_sealed_evidence_zip_sha256": fixture["diagnostic"]["evidence_zip_sha256"],
+              "owner_sealed_zip_binding_kind": "accepted-owner-evidence-digest",
+          }
+          pathlib.Path(sys.argv[3]).write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
           ditto -x -k "${archive_zip}" "${root}/archive-root"
           archive="$(find "${root}/archive-root" -type d -name 'OpenClaw.xcarchive' -print -quit)"
           test -n "${archive}"
@@ -285,7 +340,8 @@ jobs:
             echo "AIES_REPLAY_IPA=${ipa}"
           } >> "${GITHUB_ENV}"
           shasum -a 256 "${downloads}/archive-artifact.zip" "${archive_zip}" \
-            "${downloads}/ipa-artifact.zip" "${ipa}" | tee \
+            "${downloads}/ipa-artifact.zip" "${ipa}" \
+            "${downloads}/diagnostic-evidence-artifact.zip" "${evidence_ipa}" | tee \
             "${root}/evidence/input-SHA256SUMS"
 
       - name: Replay Stage A and Stage B ten times
@@ -348,6 +404,23 @@ jobs:
                   bundles = payload.get(section, {}).get("bundles", [])
                   if {item.get("bundle_id") for item in bundles} != expected_ids:
                       raise SystemExit(f"{path}: incomplete five-target receipt")
+                  auxiliary = payload.get(section, {}).get(
+                      "auxiliary_code_objects", []
+                  )
+                  if (
+                      len(auxiliary) != 1
+                      or auxiliary[0].get("bundle_id") != "org.webrtc.WebRTC"
+                      or auxiliary[0].get("profile") is not None
+                  ):
+                      raise SystemExit(f"{path}: incomplete WebRTC receipt")
+                  app_topology = payload.get(section, {}).get(
+                      "code_object_topology", {}
+                  )
+                  if (
+                      app_topology.get("expected_mach_o_count") != 7
+                      or app_topology.get("discovered_mach_o_count") != 7
+                  ):
+                      raise SystemExit(f"{path}: app code topology differs")
                   if stage == "stage-a":
                       if any(
                           item.get("get_task_allow") is not True
@@ -374,6 +447,24 @@ jobs:
                               )
                           ):
                               raise SystemExit(f"{path}: distribution receipt differs")
+                      auxiliary_identity = auxiliary[0].get("signing_identity", {})
+                      if (
+                          auxiliary_identity.get("team_identifier") != "J76B47MZ6V"
+                          or auxiliary_identity.get("code_identifier") != "org.webrtc.WebRTC"
+                          or not str(
+                              auxiliary_identity.get("leaf_common_name", "")
+                          ).startswith("Apple Distribution:")
+                          or auxiliary[0].get("entitlements") != {}
+                      ):
+                          raise SystemExit(f"{path}: WebRTC distribution receipt differs")
+                      global_topology = payload.get(section, {}).get(
+                          "global_code_object_topology", {}
+                      )
+                      if (
+                          global_topology.get("expected_mach_o_count") != 8
+                          or global_topology.get("discovered_mach_o_count") != 8
+                      ):
+                          raise SystemExit(f"{path}: global IPA topology differs")
                   stage_hashes[stage].append(hashlib.sha256(raw).hexdigest())
           if any(len(set(values)) != 1 for values in stage_hashes.values()):
               raise SystemExit(f"replay reports are nondeterministic: {stage_hashes!r}")
@@ -392,6 +483,37 @@ jobs:
               for item in equivalence.get("architectures", [])
           ):
               raise SystemExit("Watch extension normalized-field receipt differs")
+          binding = final["binary_binding"]
+          archive_topology = binding.get("archive_global_code_object_topology", {})
+          if (
+              archive_topology.get("expected_mach_o_count") != 12
+              or archive_topology.get("discovered_mach_o_count") != 12
+          ):
+              raise SystemExit("archive global code-object topology differs")
+          webrtc = binding.get("auxiliary_code_objects", [])
+          if len(webrtc) != 1:
+              raise SystemExit("WebRTC binary binding is incomplete")
+          webrtc_equivalence = webrtc[0].get(
+              "archive_to_ipa_payload_equivalence", {}
+          )
+          if (
+              webrtc_equivalence.get("status")
+              != "signature_aware_payload_equivalent"
+              or webrtc_equivalence.get("mach_o_file_type") != 6
+              or webrtc_equivalence.get("canonical_payload_sha256")
+              != "57a623f9b84f041059af690feac199f5fb3def5a2ad09ead1e3461ad748e513e"
+          ):
+              raise SystemExit("WebRTC signature-aware replay failed")
+          support = binding.get("watchkit_support", {})
+          if (
+              support.get("archive", {}).get("raw_sha256")
+              != "5d3149a79cbdb2d2b785869e3079bba91499813fbe5ed110b317d60212857db0"
+              or support.get("ipa", {}).get("raw_sha256")
+              != "5d3149a79cbdb2d2b785869e3079bba91499813fbe5ed110b317d60212857db0"
+              or support.get("archive_to_ipa_payload_equivalence", {}).get("status")
+              != "signature_aware_payload_equivalent"
+          ):
+              raise SystemExit("WatchKitSupport2 replay failed")
           summary = {
               "schema": "aies.post-export-verifier-replay.v1",
               "status": "passed",
@@ -399,12 +521,20 @@ jobs:
               "stage_a_passes": 10,
               "stage_b_passes": 10,
               "bundle_count_per_stage": 5,
+              "application_mach_o_count": 7,
+              "ipa_global_mach_o_count": 8,
+              "archive_global_mach_o_count": 12,
+              "auxiliary_code_object_count": 1,
               "stage_report_sha256": {
                   key: values[0] for key, values in sorted(stage_hashes.items())
               },
               "watch_extension_canonical_payload_sha256": equivalence[
                   "canonical_payload_sha256"
               ],
+              "webrtc_canonical_payload_sha256": webrtc_equivalence[
+                  "canonical_payload_sha256"
+              ],
+              "watchkit_support_sha256": support["ipa"]["raw_sha256"],
               "upload_performed": False,
               "apple_credentials_used": False,
           }

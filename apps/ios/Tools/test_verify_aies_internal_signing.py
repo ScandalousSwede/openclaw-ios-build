@@ -45,6 +45,7 @@ BUNDLE_EXECUTABLES = {
     f"{MAIN_ID}.watchkitapp.extension": "OpenClawWatchExtension",
 }
 MISSING = object()
+MACHO_PREFIX = b"\xcf\xfa\xed\xfe"
 
 
 class AIESInternalSigningTests(unittest.TestCase):
@@ -55,13 +56,29 @@ class AIESInternalSigningTests(unittest.TestCase):
                 report = verifier.build_report(args)
             self.assertEqual(report["status"], "exported_ipa_distribution_verified")
             self.assertEqual(
-                report["schema"], "argus.openclaw-ios.signing-report.v3"
+                report["schema"], "argus.openclaw-ios.signing-report.v4"
             )
             self.assertEqual(report["push_contract"]["transport"], "direct")
             self.assertEqual(report["push_contract"]["relay_base_url"], "")
             self.assertFalse(report["push_contract"]["relay_base_url_present"])
             self.assertEqual(len(report["ipa"]["bundles"]), 5)
             self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
+            self.assertEqual(len(report["ipa"]["auxiliary_code_objects"]), 1)
+            self.assertEqual(
+                len(report["binary_binding"]["auxiliary_code_objects"]), 1
+            )
+            self.assertEqual(
+                report["binary_binding"]["auxiliary_code_objects"][0][
+                    "archive_to_ipa_payload_equivalence"
+                ]["mach_o_file_type"],
+                verifier.MH_DYLIB,
+            )
+            self.assertEqual(
+                report["ipa"]["global_code_object_topology"][
+                    "discovered_mach_o_count"
+                ],
+                8,
+            )
             for binding in report["binary_binding"]["bundles"]:
                 self.assertNotEqual(
                     binding["archive_executable"]["raw_sha256"],
@@ -119,6 +136,15 @@ class AIESInternalSigningTests(unittest.TestCase):
             self.assertEqual(len(report["binary_binding"]["bundles"]), 5)
             self.assertEqual(report["binary_binding"]["required_dsym_count"], 4)
             self.assertEqual(report["binary_binding"]["verified_dsym_count"], 4)
+            self.assertEqual(
+                report["binary_binding"]["archive_global_code_object_topology"][
+                    "discovered_mach_o_count"
+                ],
+                12,
+            )
+            self.assertEqual(
+                len(report["binary_binding"]["auxiliary_code_objects"]), 1
+            )
             self.assertNotIn("ipa", report)
             for binding in report["binary_binding"]["bundles"]:
                 self.assertNotIn("ipa_executable", binding)
@@ -221,7 +247,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             (bundle / BUNDLE_EXECUTABLES[f"{MAIN_ID}.share"]).unlink()
             with (
                 self.mock_signing(),
-                self.assertRaisesRegex(ValueError, "missing bundle executable"),
+                self.assertRaisesRegex(ValueError, "missing regular bundle executable"),
             ):
                 verifier.build_report(args)
 
@@ -439,7 +465,8 @@ class AIESInternalSigningTests(unittest.TestCase):
                     with (
                         self.mock_signing(),
                         self.assertRaisesRegex(
-                            ValueError, "WatchKit SDK stub|does not match|payload differ"
+                            ValueError,
+                            "WatchKit SDK stub|does not match|payload differ|code-object topology",
                         ),
                     ):
                         verifier.build_report(args)
@@ -456,7 +483,8 @@ class AIESInternalSigningTests(unittest.TestCase):
                     with (
                         self.mock_signing(),
                         self.assertRaisesRegex(
-                            ValueError, "WatchKit SDK stub|does not match|payload differ"
+                            ValueError,
+                            "WatchKit SDK stub|does not match|payload differ|code-object topology",
                         ),
                     ):
                         verifier.build_report(args)
@@ -491,6 +519,150 @@ class AIESInternalSigningTests(unittest.TestCase):
             ):
                 verifier.build_report(args)
 
+    def test_auxiliary_framework_stage_a_topology_is_fail_closed(self) -> None:
+        mutations = ("missing", "extra", "wrong-bundle-id", "profile")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    app = (
+                        args.archive
+                        / "Products"
+                        / "Applications"
+                        / "OpenClaw.app"
+                    )
+                    framework = app / verifier.WEBRTC_FRAMEWORK_RELATIVE_PATH
+                    if mutation == "missing":
+                        framework.rename(framework.with_suffix(".removed"))
+                    elif mutation == "extra":
+                        extra = app / "Frameworks" / "Unexpected.framework"
+                        extra.mkdir(parents=True)
+                        (extra / "Unexpected").write_bytes(
+                            MACHO_PREFIX + b"unexpected-framework"
+                        )
+                    elif mutation == "wrong-bundle-id":
+                        info_path = framework / "Info.plist"
+                        info = verifier.read_plist(info_path)
+                        info["CFBundleIdentifier"] = "org.example.replaced"
+                        with info_path.open("wb") as handle:
+                            plistlib.dump(info, handle)
+                    else:
+                        (framework / "embedded.mobileprovision").write_bytes(b"profile")
+                    args.archive_only = True
+                    args.ipa = None
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "framework topology|WebRTC framework|provisioning profile",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_rejects_unexpected_auxiliary_code_containers(self) -> None:
+        mutations = ("dylib", "xpc", "resource-mach-o", "signature-container")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    app = (
+                        args.archive
+                        / "Products"
+                        / "Applications"
+                        / "OpenClaw.app"
+                    )
+                    if mutation == "dylib":
+                        (app / "Unexpected.dylib").write_bytes(
+                            MACHO_PREFIX + b"unexpected-dylib"
+                        )
+                    elif mutation == "xpc":
+                        (app / "XPCServices" / "Unexpected.xpc").mkdir(
+                            parents=True
+                        )
+                    elif mutation == "resource-mach-o":
+                        (app / "GRDB_GRDB.bundle" / "Unexpected").write_bytes(
+                            MACHO_PREFIX + b"unexpected-resource-code"
+                        )
+                    else:
+                        (app / "Unexpected.bundle" / "_CodeSignature").mkdir(
+                            parents=True
+                        )
+                    args.archive_only = True
+                    args.ipa = None
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "dylib topology|XPC topology|code-object topology|bundle topology|signed code-container",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_auxiliary_framework_stage_b_identity_and_payload_are_fail_closed(self) -> None:
+        cases = (
+            ({"ipa_aux_leaf_common_name": "Apple Development: Example"}, None),
+            ({"ipa_aux_team_identifier": "WRONGTEAM"}, None),
+            ({"ipa_aux_code_identifier": "org.example.replaced"}, None),
+            ({"auxiliary_entitlements": {"get-task-allow": False}}, None),
+            ({}, "payload"),
+            ({}, "uuid"),
+        )
+        for signing_options, mutation in cases:
+            with self.subTest(signing_options=signing_options, mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    if mutation:
+                        root = args.ipa.parent / "ipa-root"
+                        executable = (
+                            root
+                            / "Payload"
+                            / "OpenClaw.app"
+                            / verifier.WEBRTC_EXECUTABLE_RELATIVE_PATH
+                        )
+                        executable.write_bytes(
+                            MACHO_PREFIX
+                            + (
+                                b"ipa-signature:changed-webrtc"
+                                if mutation == "payload"
+                                else b"uuid-mismatch"
+                            )
+                        )
+                        self.rewrite_ipa(args)
+                    with (
+                        self.mock_signing(**signing_options),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "Apple Distribution|identity mismatch|entitlements|payload differ|UUIDs differ",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
+    def test_watchkit_support_and_global_ipa_topology_are_fail_closed(self) -> None:
+        mutations = ("missing-support", "changed-support", "extra-top-level-mach-o")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as raw_temp:
+                    args = self.make_fixture(pathlib.Path(raw_temp))
+                    root = args.ipa.parent / "ipa-root"
+                    support = root / "WatchKitSupport2" / "WK"
+                    if mutation == "missing-support":
+                        support.unlink()
+                    elif mutation == "changed-support":
+                        support.write_bytes(MACHO_PREFIX + b"changed-support")
+                    else:
+                        (root / "UnexpectedMachO").write_bytes(
+                            MACHO_PREFIX + b"unexpected-top-level"
+                        )
+                    self.rewrite_ipa(args)
+                    with (
+                        self.mock_signing(),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "global Mach-O topology|WatchKitSupport2",
+                        ),
+                    ):
+                        verifier.build_report(args)
+
     def test_signing_identity_verifies_entire_extracted_chain(self) -> None:
         commands: list[list[str]] = []
 
@@ -508,12 +680,19 @@ class AIESInternalSigningTests(unittest.TestCase):
                 pathlib.Path(f"{prefix}0").write_bytes(SIGNING_CERTIFICATE)
                 pathlib.Path(f"{prefix}1").write_bytes(b"apple-intermediate")
             if command[0] == "codesign":
-                return b"Authority=Apple Distribution: Example (Y5PE65HELJ)\n"
+                return (
+                    b"Authority=Apple Distribution: Example (Y5PE65HELJ)\n"
+                    + f"TeamIdentifier={TEAM_ID}\nIdentifier={MAIN_ID}\n".encode()
+                )
             return b""
 
         with mock.patch.object(verifier, "run_tool", side_effect=fake_run):
             result = verifier.verify_signing_identity(
-                pathlib.Path("OpenClaw.app"), "codesign", "security"
+                pathlib.Path("OpenClaw.app"),
+                "codesign",
+                "security",
+                TEAM_ID,
+                MAIN_ID,
             )
         self.assertEqual(result["certificate_chain_count"], 2)
         self.assertEqual(result["leaf_certificate_sha256"], SIGNING_CERTIFICATE_SHA256)
@@ -543,7 +722,11 @@ class AIESInternalSigningTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "security verification failed"),
         ):
             verifier.verify_signing_identity(
-                pathlib.Path("OpenClaw.app"), "codesign", "security"
+                pathlib.Path("OpenClaw.app"),
+                "codesign",
+                "security",
+                TEAM_ID,
+                MAIN_ID,
             )
 
     def test_macho_uuid_binding_keeps_architecture(self) -> None:
@@ -620,6 +803,22 @@ class AIESInternalSigningTests(unittest.TestCase):
                 "archive_to_ipa_payload_equivalence"
             )
             cases.append(missing_binding)
+            missing_auxiliary = copy.deepcopy(valid)
+            missing_auxiliary["ipa"]["auxiliary_code_objects"].clear()
+            cases.append(missing_auxiliary)
+            missing_auxiliary_binding = copy.deepcopy(valid)
+            missing_auxiliary_binding["binary_binding"][
+                "auxiliary_code_objects"
+            ].clear()
+            cases.append(missing_auxiliary_binding)
+            missing_watch_support = copy.deepcopy(valid)
+            missing_watch_support["binary_binding"].pop("watchkit_support")
+            cases.append(missing_watch_support)
+            partial_global_topology = copy.deepcopy(valid)
+            partial_global_topology["ipa"]["global_code_object_topology"][
+                "discovered_mach_o_count"
+            ] = 7
+            cases.append(partial_global_topology)
             malformed_status = copy.deepcopy(valid)
             malformed_status["status"] = "verified-ish"
             cases.append(malformed_status)
@@ -690,7 +889,7 @@ class AIESInternalSigningTests(unittest.TestCase):
         archive = temp / "OpenClaw.xcarchive"
         archive_app = archive / "Products" / "Applications" / "OpenClaw.app"
         archive_executables = {
-            bundle_id: f"archive-signature:{bundle_id}".encode()
+            bundle_id: MACHO_PREFIX + f"archive-signature:{bundle_id}".encode()
             for bundle_id in BUNDLE_PATHS
         }
         self.write_app_tree(
@@ -699,6 +898,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             omit_bundle=omit_bundle,
             executables=archive_executables,
             add_duplicate_bundle=add_duplicate_bundle,
+            auxiliary_executable=MACHO_PREFIX + b"archive-signature:webrtc",
         )
         if add_archive_sibling_app:
             self.write_bundle(
@@ -726,19 +926,19 @@ class AIESInternalSigningTests(unittest.TestCase):
             )
             dsym.parent.mkdir(parents=True, exist_ok=True)
             dsym.write_bytes(
-                b"uuid-mismatch"
+                MACHO_PREFIX + b"uuid-mismatch"
                 if bundle_id == mismatched_dsym_bundle
-                else f"matching-dsym:{bundle_id}".encode()
+                else MACHO_PREFIX + f"matching-dsym:{bundle_id}".encode()
             )
 
         ipa_root = temp / "ipa-root" / "Payload" / "OpenClaw.app"
         ipa_executables = {
-            bundle_id: f"ipa-signature:{bundle_id}".encode()
+            bundle_id: MACHO_PREFIX + f"ipa-signature:{bundle_id}".encode()
             for bundle_id in BUNDLE_PATHS
         }
         if mismatched_ipa_bundle is not None:
             ipa_executables[mismatched_ipa_bundle] = (
-                f"tampered-executable:{mismatched_ipa_bundle}".encode()
+                MACHO_PREFIX + f"tampered-executable:{mismatched_ipa_bundle}".encode()
             )
         self.write_app_tree(
             ipa_root,
@@ -747,6 +947,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             omit_bundle=omit_bundle,
             executables=ipa_executables,
             add_duplicate_bundle=add_duplicate_bundle,
+            auxiliary_executable=MACHO_PREFIX + b"ipa-signature:webrtc",
         )
         ipa_watch_stub = (
             self.bundle_path(ipa_root, f"{MAIN_ID}.watchkitapp")
@@ -756,7 +957,23 @@ class AIESInternalSigningTests(unittest.TestCase):
         if missing_ipa_watch_stub:
             ipa_watch_stub.unlink()
         elif mismatched_ipa_watch_stub:
-            ipa_watch_stub.write_bytes(b"sdk-stub-signature:different-payload")
+            ipa_watch_stub.write_bytes(
+                MACHO_PREFIX + b"sdk-stub-signature:different-payload"
+            )
+        archive_watch_support = archive / "WatchKitSupport2" / "WK"
+        archive_watch_support.parent.mkdir(parents=True, exist_ok=True)
+        archive_watch_support.write_bytes(
+            self.bundle_path(archive_app, f"{MAIN_ID}.watchkitapp")
+            .joinpath("_WatchKitStub", "WK")
+            .read_bytes()
+        )
+        ipa_watch_support = temp / "ipa-root" / "WatchKitSupport2" / "WK"
+        ipa_watch_support.parent.mkdir(parents=True, exist_ok=True)
+        ipa_watch_support.write_bytes(
+            ipa_watch_stub.read_bytes()
+            if ipa_watch_stub.is_file()
+            else archive_watch_support.read_bytes()
+        )
         ipa = temp / "OpenClaw.ipa"
         with zipfile.ZipFile(ipa, "w") as output:
             for path in sorted((temp / "ipa-root").rglob("*")):
@@ -785,6 +1002,7 @@ class AIESInternalSigningTests(unittest.TestCase):
         omit_bundle: str | None = None,
         executables: dict[str, bytes] | None = None,
         add_duplicate_bundle: bool = False,
+        auxiliary_executable: bytes = MACHO_PREFIX + b"signature:webrtc",
     ) -> None:
         executables = executables or {
             bundle_id: f"binary:{bundle_id}".encode() for bundle_id in BUNDLE_PATHS
@@ -807,6 +1025,25 @@ class AIESInternalSigningTests(unittest.TestCase):
             cls.write_bundle(
                 app / "PlugIns" / "UnexpectedDuplicate.appex", f"{MAIN_ID}.share"
             )
+        framework = app / verifier.WEBRTC_FRAMEWORK_RELATIVE_PATH
+        framework.mkdir(parents=True, exist_ok=True)
+        with (framework / "Info.plist").open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleExecutable": "WebRTC",
+                    "CFBundleIdentifier": verifier.WEBRTC_BUNDLE_ID,
+                    "CFBundlePackageType": "FMWK",
+                },
+                handle,
+            )
+        (framework / "WebRTC").write_bytes(auxiliary_executable)
+        (framework / "_CodeSignature").mkdir(parents=True, exist_ok=True)
+        (framework / "_CodeSignature" / "CodeResources").write_bytes(b"signature")
+        for relative in verifier.EXPECTED_RESOURCE_BUNDLES:
+            resource = app / relative
+            resource.mkdir(parents=True, exist_ok=True)
+            with (resource / "Info.plist").open("wb") as handle:
+                plistlib.dump({"CFBundlePackageType": "BNDL"}, handle)
 
     @staticmethod
     def write_bundle(
@@ -836,11 +1073,13 @@ class AIESInternalSigningTests(unittest.TestCase):
             stub = path / "_WatchKitStub" / "WK"
             stub.parent.mkdir(parents=True, exist_ok=True)
             normalized = executable
+            if normalized.startswith(MACHO_PREFIX):
+                normalized = normalized[len(MACHO_PREFIX) :]
             for prefix in (b"archive-signature:", b"ipa-signature:"):
                 if normalized.startswith(prefix):
                     normalized = normalized[len(prefix) :]
                     break
-            stub.write_bytes(b"sdk-stub-signature:" + normalized)
+            stub.write_bytes(MACHO_PREFIX + b"sdk-stub-signature:" + normalized)
         if main:
             info.update(
                 {
@@ -859,11 +1098,22 @@ class AIESInternalSigningTests(unittest.TestCase):
         with (path / "Info.plist").open("wb") as handle:
             plistlib.dump(info, handle)
         (path / "embedded.mobileprovision").write_bytes(b"profile")
+        (path / "_CodeSignature").mkdir(parents=True, exist_ok=True)
+        (path / "_CodeSignature" / "CodeResources").write_bytes(b"signature")
 
     @staticmethod
     def bundle_path(app: pathlib.Path, bundle_id: str) -> pathlib.Path:
         relative = BUNDLE_PATHS[bundle_id]
         return app if relative == pathlib.PurePosixPath(".") else app / relative
+
+    @staticmethod
+    def rewrite_ipa(args: argparse.Namespace) -> pathlib.Path:
+        root = args.ipa.parent / "ipa-root"
+        with zipfile.ZipFile(args.ipa, "w") as output:
+            for path in sorted(root.rglob("*")):
+                if path.is_file():
+                    output.write(path, path.relative_to(root))
+        return root
 
     @staticmethod
     def dsym_binary(archive: pathlib.Path, bundle_id: str) -> pathlib.Path:
@@ -902,6 +1152,10 @@ class AIESInternalSigningTests(unittest.TestCase):
         ipa_provisioned_devices: list[str] | None = None,
         ipa_provisions_all_devices: bool = False,
         ipa_leaf_common_name: str = "Apple Distribution: Example (Y5PE65HELJ)",
+        ipa_aux_leaf_common_name: str | None = None,
+        ipa_aux_team_identifier: str | None = None,
+        ipa_aux_code_identifier: str | None = None,
+        auxiliary_entitlements: dict[str, object] | None = None,
     ):
         def entitlements(path: pathlib.Path, _codesign: str) -> dict[str, object]:
             bundle_id = verifier.read_plist(path / "Info.plist")["CFBundleIdentifier"]
@@ -954,12 +1208,14 @@ class AIESInternalSigningTests(unittest.TestCase):
         def uuids(path: pathlib.Path, _dwarfdump: str) -> list[dict[str, str]]:
             return (
                 [{"architecture": "arm64", "uuid": OTHER_MACHO_UUID}]
-                if path.read_bytes() == b"uuid-mismatch"
+                if path.read_bytes().endswith(b"uuid-mismatch")
                 else [{"architecture": "arm64", "uuid": MACHO_UUID}]
             )
 
         def normalized_payload(path: pathlib.Path) -> bytes:
             content = path.read_bytes()
+            if content.startswith(MACHO_PREFIX):
+                content = content[len(MACHO_PREFIX) :]
             for prefix in (
                 b"archive-signature:",
                 b"ipa-signature:",
@@ -971,7 +1227,10 @@ class AIESInternalSigningTests(unittest.TestCase):
             return content
 
         def payload_equivalence(
-            archive_path: pathlib.Path, ipa_path: pathlib.Path
+            archive_path: pathlib.Path,
+            ipa_path: pathlib.Path,
+            *,
+            expected_file_type: int = 2,
         ) -> dict[str, object]:
             if normalized_payload(archive_path) != normalized_payload(ipa_path):
                 raise ValueError(
@@ -982,22 +1241,41 @@ class AIESInternalSigningTests(unittest.TestCase):
                 "schema": "aies.macho-signature-equivalence.v1",
                 "status": "signature_aware_payload_equivalent",
                 "architecture_count": 1,
+                "mach_o_file_type": expected_file_type,
             }
 
-        def signing_identity(path: pathlib.Path, _codesign: str, _security: str):
+        def signing_identity(
+            path: pathlib.Path,
+            _codesign: str,
+            _security: str,
+            expected_team_id: str,
+            expected_code_identifier: str,
+        ):
             archive = ".xcarchive" in str(path)
+            auxiliary = path.suffix == ".framework"
+            leaf_common_name = (
+                "Apple Development: Example (Y5PE65HELJ)"
+                if archive
+                else (
+                    ipa_aux_leaf_common_name
+                    if auxiliary and ipa_aux_leaf_common_name is not None
+                    else ipa_leaf_common_name
+                )
+            )
             return {
                 "certificate_chain_count": 2,
                 "leaf_certificate_sha256": SIGNING_CERTIFICATE_SHA256,
-                "authorities": [
-                    "Apple Development: Example (Y5PE65HELJ)"
-                    if archive
-                    else ipa_leaf_common_name
-                ],
-                "leaf_common_name": (
-                    "Apple Development: Example (Y5PE65HELJ)"
-                    if archive
-                    else ipa_leaf_common_name
+                "authorities": [leaf_common_name],
+                "leaf_common_name": leaf_common_name,
+                "team_identifier": (
+                    ipa_aux_team_identifier
+                    if auxiliary and not archive and ipa_aux_team_identifier
+                    else expected_team_id
+                ),
+                "code_identifier": (
+                    ipa_aux_code_identifier
+                    if auxiliary and not archive and ipa_aux_code_identifier
+                    else expected_code_identifier
                 ),
                 "trust_verified": True,
             }
@@ -1005,6 +1283,9 @@ class AIESInternalSigningTests(unittest.TestCase):
         return mock.patch.multiple(
             verifier,
             read_code_entitlements=mock.Mock(side_effect=entitlements),
+            read_optional_code_entitlements=mock.Mock(
+                return_value=dict(auxiliary_entitlements or {})
+            ),
             read_profile=mock.Mock(side_effect=profile),
             verify_code_signature=mock.Mock(return_value=None),
             verify_signing_identity=mock.Mock(side_effect=signing_identity),
@@ -1032,6 +1313,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         self.assertEqual(fixture["archive"]["artifact_id"], 9676279420)
         self.assertEqual(fixture["ipa"]["artifact_id"], 9692923415)
+        self.assertEqual(fixture["diagnostic"]["artifact_id"], 9692924304)
         self.assertEqual(
             fixture["archive"]["artifact_sha256"],
             "d253acd7c1045d512dc8a1b9862d2a017f10b3ebd6005cf250ede0e539f52aa4",
@@ -1039,6 +1321,14 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(
             fixture["ipa"]["ipa_sha256"],
             "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82",
+        )
+        self.assertEqual(
+            fixture["diagnostic"]["evidence_zip_sha256"],
+            "bddbd362aa61e053ecabf412c9bb5d4a9b5d9e8fabec2ad8ae66d04e964b421a",
+        )
+        self.assertEqual(
+            fixture["webrtc_framework"]["canonical_payload_sha256"],
+            "57a623f9b84f041059af690feac199f5fb3def5a2ad09ead1e3461ad748e513e",
         )
         self.assertEqual(workflow.count("for iteration in $(seq 1 10)"), 1)
         self.assertIn("actions: read", workflow)
@@ -1051,6 +1341,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(workflow.count("upload_to_testflight"), 1)
         self.assertNotIn("xcodebuild -exportArchive", workflow)
         self.assertNotIn("fastlane ios aies_internal_testflight", workflow)
+        self.assertIn("download_artifact 9692924304", workflow)
+        self.assertIn("artifact_internal_sha256_entries_verified", workflow)
+        self.assertIn("test_aies_release_gate_behavior.py", workflow)
         fixture_files = sorted(fixture_path.parent.rglob("*"))
         self.assertTrue(fixture_files)
         self.assertTrue(
@@ -1099,6 +1392,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(
             workflow.count("test_aies_macho_signature_equivalence.py"), 2
         )
+        self.assertEqual(workflow.count("test_aies_release_gate_behavior.py"), 2)
         self.assertEqual(workflow.count("uses: ./.github/actions/setup-xcodegen"), 3)
         # The conformance job renders the tracked project twice in place. The
         # unsigned and signed lanes each delegate their two-pass generation to
