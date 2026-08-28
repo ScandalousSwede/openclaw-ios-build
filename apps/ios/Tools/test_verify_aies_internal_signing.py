@@ -1323,7 +1323,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             "6ab71eb0f64158726ce83af72de344f337447179538d82ec91e804eff431aa82",
         )
         self.assertEqual(
-            fixture["diagnostic"]["evidence_zip_sha256"],
+            fixture["diagnostic"][
+                "accepted_owner_reported_evidence_zip_sha256"
+            ],
             "bddbd362aa61e053ecabf412c9bb5d4a9b5d9e8fabec2ad8ae66d04e964b421a",
         )
         self.assertEqual(
@@ -1342,7 +1344,11 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("xcodebuild -exportArchive", workflow)
         self.assertNotIn("fastlane ios aies_internal_testflight", workflow)
         self.assertIn("download_artifact 9692924304", workflow)
-        self.assertIn("artifact_internal_sha256_entries_verified", workflow)
+        self.assertIn("artifact_root_sha256_entries_verified", workflow)
+        self.assertIn("artifact_nested_package_sha256_entries_verified", workflow)
+        self.assertIn(
+            "accepted-owner-metadata-not-derived-from-downloaded-artifact", workflow
+        )
         self.assertIn("test_aies_release_gate_behavior.py", workflow)
         fixture_files = sorted(fixture_path.parent.rglob("*"))
         self.assertTrue(fixture_files)
