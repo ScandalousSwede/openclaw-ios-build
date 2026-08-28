@@ -1,0 +1,825 @@
+name: AIES RC1 retained-archive export signing boundary diagnostic
+
+on:
+  push:
+    branches:
+      - codex/aies-rc1-export-boundary-diagnostic
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: aies-rc1-retained-archive-export-diagnostic
+  cancel-in-progress: false
+
+jobs:
+  export-only:
+    if: >-
+      github.repository == 'ScandalousSwede/openclaw-ios-build' &&
+      github.repository_owner == 'ScandalousSwede' &&
+      github.actor == 'ScandalousSwede' &&
+      github.triggering_actor == 'ScandalousSwede' &&
+      github.run_attempt == 1
+    runs-on: macos-15
+    timeout-minutes: 75
+    environment: aies-testflight-internal
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      AIES_DIAGNOSTIC_BRANCH: codex/aies-rc1-export-boundary-diagnostic
+      AIES_SOURCE_BRANCH: aies/ios-rc1-testflight
+      AIES_SOURCE_SHA: a173c98d0d4e0f3c7159c4780ba797ff9efdf17e
+      AIES_SOURCE_TREE: 73c54afbf6d5a8579234376b31f7ef9a6ceff273
+      AIES_SOURCE_RUN_ID: "33145992424"
+      AIES_VERSION: "2026.6.2"
+      AIES_BUILD_NUMBER: "68"
+      AIES_ARCHIVE_UUID: 1d8cf8b5-c626-45d7-97a5-87bddd089249
+      AIES_MAIN_BUNDLE_ID: ai.openclaw.client.J76B47MZ6V
+      AIES_TEAM_ID: J76B47MZ6V
+      AIES_ARCHIVE_ARTIFACT_ID: "9676279420"
+      AIES_ARCHIVE_ARTIFACT_NAME: OpenClaw-AIES-signed-xcarchive-33145992424-1
+      AIES_ARCHIVE_ARTIFACT_BYTES: "45762319"
+      AIES_ARCHIVE_ARTIFACT_SHA256: d253acd7c1045d512dc8a1b9862d2a017f10b3ebd6005cf250ede0e539f52aa4
+      AIES_ARCHIVE_INNER_BYTES: "45954058"
+      AIES_ARCHIVE_INNER_SHA256: c0b446466e1e043159216784f066637345e1f5ec6b97e21c2f51a03c6d9215b9
+      AIES_DSYM_ARTIFACT_ID: "9676280138"
+      AIES_DSYM_ARTIFACT_NAME: OpenClaw-AIES-signed-dSYMs-33145992424-1
+      AIES_DSYM_ARTIFACT_BYTES: "26913752"
+      AIES_DSYM_ARTIFACT_SHA256: 34b811dce7f8684a6af7f7795d8a05418bfe40a61fb1e43310c95a418751002a
+      AIES_DSYM_INNER_BYTES: "27020280"
+      AIES_DSYM_INNER_SHA256: 03d496187a5e27ccf0cdfe7ad26bc2152ece42abea2002f0ee3a35f3a6b250eb
+      AIES_PACKAGE_ARTIFACT_ID: "9676280698"
+      AIES_PACKAGE_ARTIFACT_NAME: OpenClaw-AIES-package-authority-33145992424-1
+      AIES_PACKAGE_ARTIFACT_BYTES: "22175"
+      AIES_PACKAGE_ARTIFACT_SHA256: 1d0e687d6669973aa579a92541d491697f91e118c267f9934a9f45b0d54f849a
+      AIES_RELEASE_EVIDENCE_ARTIFACT_ID: "9676280381"
+      AIES_RELEASE_EVIDENCE_ARTIFACT_NAME: OpenClaw-AIES-TestFlight-evidence-33145992424-1
+      AIES_RELEASE_EVIDENCE_ARTIFACT_BYTES: "10174"
+      AIES_RELEASE_EVIDENCE_ARTIFACT_SHA256: e1d55b528256d1c5eeb75de32e8801f43f10dbb1cb3165167bdeb36398706e15
+      AIES_STANDALONE_LOCK_SHA256: 8db1bfc0cd61b0a2c479806004dc67ec0385d8f50c53b16edbd2df251149d7e1
+      AIES_AGGREGATE_SEMANTIC_SHA256: 85dfe395ae8cbb3bd8fb47e9e3a857ca58c22d642fd2ed58b92900a74f1534ba
+      AIES_CONCRETE_RESOLVED_SHA256: 89072716eda00baad2f908ac3797c6978b21aab99ee3f9b7a785b09db31ee943
+
+    steps:
+      - name: Check out diagnostic control revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-control
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Prove diagnostic authority and fail-closed command surface
+        env:
+          AIES_ENVIRONMENT_ENABLED: ${{ vars.AIES_TESTFLIGHT_INTERNAL_ENABLED }}
+          APP_BUNDLE_ID_VALUE: ${{ vars.APP_BUNDLE_ID }}
+          APPLE_TEAM_ID_VALUE: ${{ vars.APPLE_TEAM_ID }}
+          ASC_ISSUER_ID_VALUE: ${{ vars.ASC_ISSUER_ID }}
+          ASC_KEY_ID_VALUE: ${{ vars.ASC_KEY_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          control="${GITHUB_WORKSPACE}/workflow-control"
+          [[ "${GITHUB_EVENT_NAME}" == "push" ]]
+          [[ "${GITHUB_REF}" == "refs/heads/${AIES_DIAGNOSTIC_BRANCH}" ]]
+          [[ "${GITHUB_SHA}" == "$(git -C "${control}" rev-parse HEAD)" ]]
+          read -r -a commit_lineage <<< "$(git -C "${control}" rev-list --parents -n 1 HEAD)"
+          [[ "${#commit_lineage[@]}" -eq 2 ]]
+          [[ "$(git -C "${control}" rev-parse HEAD^)" == "${AIES_SOURCE_SHA}" ]]
+          [[ "$(git -C "${control}" rev-parse "${AIES_SOURCE_SHA}^{tree}")" == "${AIES_SOURCE_TREE}" ]]
+          [[ -z "$(git -C "${control}" status --porcelain=v2 --untracked-files=all)" ]]
+
+          changed=()
+          while IFS= read -r path; do
+            changed+=("${path}")
+          done < <(git -C "${control}" diff-tree --no-commit-id --name-only -r HEAD | LC_ALL=C sort)
+          expected=(
+            .github/scripts/aies_export_signing_boundary.py
+            .github/workflows/ios-export-signing-boundary-diagnostic.yml
+          )
+          [[ "${#changed[@]}" -eq "${#expected[@]}" ]]
+          [[ "${changed[*]}" == "${expected[*]}" ]]
+
+          python3 - "${control}/.github/workflows/ios-export-signing-boundary-diagnostic.yml" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+          forbidden = (
+              r"(?m)^\s*(?:bundle\s+exec\s+)?fastlane(?:\s|$)",
+              r"(?m)^\s*(?:bundle\s+exec\s+)?pilot(?:\s|$)",
+              r"(?m)^\s*(?:bundle\s+exec\s+)?deliver(?:\s|$)",
+              "iTMS" + "Transporter",
+              r"\b" + "al" + r"tool\b",
+              r"\b" + "notary" + r"tool\b",
+              r"destination\s*[=:]\s*upload",
+              "-export" + "NotarizedApp",
+          )
+          found = [pattern for pattern in forbidden if re.search(pattern, text, re.I)]
+          if found:
+              raise SystemExit(f"forbidden release/upload command surface: {found}")
+          needle = "xcodebuild " + '\"${export_arguments[@]}\"'
+          if text.count(needle) != 1:
+              raise SystemExit("workflow must execute exactly one declared xcodebuild export array")
+          if "-exportArchive" not in text or "<string>export</string>" not in text:
+              raise SystemExit("local export contract is missing")
+          secret_names = re.findall(r"\$\{\{\s*secrets\.([A-Z0-9_]+)\s*\}\}", text)
+          if secret_names != ["ASC_PRIVATE_KEY_P8"] or ("secrets" + "[") in text:
+              raise SystemExit(f"unexpected secret reference surface: {secret_names!r}")
+          PY
+
+          remote_authoritative="$(git -C "${control}" ls-remote --exit-code origin "refs/heads/${AIES_SOURCE_BRANCH}" | awk '{print $1}')"
+          [[ "${remote_authoritative}" == "${AIES_SOURCE_SHA}" ]]
+
+          [[ "${AIES_ENVIRONMENT_ENABLED}" == "true" ]]
+          [[ "${APP_BUNDLE_ID_VALUE}" == "${AIES_MAIN_BUNDLE_ID}" ]]
+          [[ "${APPLE_TEAM_ID_VALUE}" == "${AIES_TEAM_ID}" ]]
+          [[ "${ASC_KEY_ID_VALUE}" == "JLZMUA4KTQ" ]]
+          [[ "${ASC_ISSUER_ID_VALUE}" =~ ^[0-9a-fA-F-]{36}$ ]]
+
+          gh api --header "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/environments/aies-testflight-internal" \
+            > "${RUNNER_TEMP}/environment.json"
+          gh api --header "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/${GITHUB_REPOSITORY}/environments/aies-testflight-internal/deployment-branch-policies?per_page=100" \
+            > "${RUNNER_TEMP}/environment-branch-policies.json"
+          python3 - "${RUNNER_TEMP}/environment.json" "${RUNNER_TEMP}/environment-branch-policies.json" "${AIES_DIAGNOSTIC_BRANCH}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          environment = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          policies = json.loads(pathlib.Path(sys.argv[2]).read_text())
+          branch = sys.argv[3]
+          deployment = environment.get("deployment_branch_policy") or {}
+          if deployment != {"protected_branches": False, "custom_branch_policies": True}:
+              raise SystemExit(f"unexpected deployment policy: {deployment!r}")
+          reviewers = [
+              rule for rule in environment.get("protection_rules", [])
+              if rule.get("type") == "required_reviewers"
+          ]
+          if reviewers:
+              raise SystemExit("single-owner environment unexpectedly requires reviewers")
+          actual = {
+              (item.get("name"), item.get("type"))
+              for item in policies.get("branch_policies", [])
+          }
+          expected = {
+              ("aies/ios-rc1-testflight", "branch"),
+              (branch, "branch"),
+          }
+          if actual != expected:
+              raise SystemExit(f"unexpected temporary branch authority: {actual!r}")
+          PY
+
+      - name: Check out exact retained-archive source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.AIES_SOURCE_SHA }}
+          path: release-source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable source and protected release objects
+        run: |
+          set -euo pipefail
+          source="${GITHUB_WORKSPACE}/release-source"
+          [[ "$(git -C "${source}" rev-parse HEAD)" == "${AIES_SOURCE_SHA}" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD^{tree}')" == "${AIES_SOURCE_TREE}" ]]
+          [[ -z "$(git -C "${source}" status --porcelain=v2 --untracked-files=all)" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/Sources')" == "d034193e7f21102d444bbc7a694dd7f766bd1271" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/shared/OpenClawKit/Sources')" == "d76bc15087d19197f254db8c66a1cc39e80de100" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:.github/workflows/ios-build-ipa.yml')" == "d60c70090785189bdc2c04b721aee3bcbfa9c09e" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/fastlane/Fastfile')" == "e3e654e301862e8cd1b2416a960c6482059a4223" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/project.yml')" == "be05d0f289a8ac03e8f99cf8a370a6daee6dfe7e" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/Tools')" == "8a282fd4322f0b7410e42f400592c969d9496f76" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/Signing.xcconfig')" == "d6acc35dee879122941d4601c7aaf51998f03105" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/Config/Signing.xcconfig')" == "19d2975626b758919c1ad7e133e28e0b4e35c3cb" ]]
+          [[ "$(git -C "${source}" rev-parse 'HEAD:apps/ios/Sources/OpenClaw.entitlements')" == "ff60a879b1a25f566ee380339905df1fb525f690" ]]
+          [[ "$(shasum -a 256 "${source}/apps/swabble/Package.resolved" | awk '{print $1}')" == "${AIES_STANDALONE_LOCK_SHA256}" ]]
+
+      - name: Select Xcode 26.2
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: '26.2'
+
+      - name: Capture toolchain and establish disposable paths
+        run: |
+          set -euo pipefail
+          evidence="${RUNNER_TEMP}/aies-export-boundary/evidence"
+          inputs="${RUNNER_TEMP}/aies-export-boundary/inputs"
+          export_dir="${RUNNER_TEMP}/aies-export-boundary/export"
+          mkdir -p "${evidence}/artifacts" "${inputs}" "${export_dir}"
+          {
+            echo "AIES_EVIDENCE_DIR=${evidence}"
+            echo "AIES_INPUT_DIR=${inputs}"
+            echo "AIES_EXPORT_DIR=${export_dir}"
+            echo "AIES_EXPORT_STATUS=not_run"
+            echo "AIES_IPA_VERIFY_STATUS=not_run"
+            echo "AIES_CREDENTIAL_CLEANUP_STATUS=not_run"
+            echo "AIES_CUSTODY_STATUS=not_run"
+            echo "AIES_KEY_MATERIALIZED_STATUS=not_run"
+            echo "AIES_EVIDENCE_SEAL_STATUS=not_run"
+          } >> "${GITHUB_ENV}"
+          xcodebuild -version | tee "${evidence}/xcode-version.txt"
+          swift --version > "${evidence}/swift-version.txt" 2>&1
+          grep -Fxq 'Xcode 26.2' "${evidence}/xcode-version.txt"
+          grep -Fxq 'Build version 17C52' "${evidence}/xcode-version.txt"
+          grep -Fq 'Apple Swift version 6.2.3' "${evidence}/swift-version.txt"
+          sw_vers > "${evidence}/macos-version.txt"
+          uname -a > "${evidence}/runner-kernel.txt"
+          xcodebuild -help > "${evidence}/xcodebuild-help.txt" 2>&1
+          grep -Fq "The signing style to use when re-signing the app for distribution" "${evidence}/xcodebuild-help.txt"
+          grep -Fq "destination" "${evidence}/xcodebuild-help.txt"
+          grep -Fq "app-store-connect" "${evidence}/xcodebuild-help.txt"
+          python3 - "${evidence}/source-custody.json" "${GITHUB_SHA}" <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          output, control_sha = sys.argv[1:]
+          workspace = pathlib.Path.cwd()
+          control = workspace / "workflow-control"
+          source = workspace / "release-source"
+          def git(root, *arguments):
+              return subprocess.check_output(["git", "-C", str(root), *arguments], text=True).strip()
+          value = {
+              "workflow_control_branch": "codex/aies-rc1-export-boundary-diagnostic",
+              "workflow_control_sha": control_sha,
+              "workflow_control_parent": git(control, "rev-parse", "HEAD^"),
+              "workflow_control_changed_paths": sorted(git(control, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").splitlines()),
+              "source_branch": "aies/ios-rc1-testflight",
+              "source_sha": git(source, "rev-parse", "HEAD"),
+              "source_tree": git(source, "rev-parse", "HEAD^{tree}"),
+              "source_status_porcelain_v2": git(source, "status", "--porcelain=v2", "--untracked-files=all"),
+          }
+          pathlib.Path(output).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+          PY
+
+      - name: Download and verify exact retained artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          download_artifact() {
+            local label="$1"
+            local id="$2"
+            local expected_name="$3"
+            local expected_bytes="$4"
+            local expected_sha="$5"
+            local metadata="${AIES_EVIDENCE_DIR}/artifacts/${label}-metadata.json"
+            local wrapper="${AIES_INPUT_DIR}/${label}-artifact.zip"
+            gh api --header "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" > "${metadata}"
+            python3 - "${metadata}" "${id}" "${expected_name}" "${expected_bytes}" "${expected_sha}" "${AIES_SOURCE_RUN_ID}" "${AIES_SOURCE_BRANCH}" "${AIES_SOURCE_SHA}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          path, artifact_id, name, size, sha, run_id, branch, source_sha = sys.argv[1:]
+          value = json.loads(pathlib.Path(path).read_text())
+          workflow = value.get("workflow_run") or {}
+          expected = {
+              "id": int(artifact_id),
+              "name": name,
+              "size_in_bytes": int(size),
+              "digest": f"sha256:{sha}",
+              "expired": False,
+          }
+          mismatches = {
+              key: {"expected": wanted, "actual": value.get(key)}
+              for key, wanted in expected.items()
+              if value.get(key) != wanted
+          }
+          workflow_expected = {
+              "id": int(run_id),
+              "head_branch": branch,
+              "head_sha": source_sha,
+          }
+          mismatches.update({
+              f"workflow_run.{key}": {"expected": wanted, "actual": workflow.get(key)}
+              for key, wanted in workflow_expected.items()
+              if workflow.get(key) != wanted
+          })
+          if mismatches:
+              raise SystemExit(f"artifact provenance mismatch: {mismatches!r}")
+          PY
+            gh api --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > "${wrapper}"
+            [[ "$(stat -f '%z' "${wrapper}")" == "${expected_bytes}" ]]
+            [[ "$(shasum -a 256 "${wrapper}" | awk '{print $1}')" == "${expected_sha}" ]]
+          }
+
+          download_artifact archive "${AIES_ARCHIVE_ARTIFACT_ID}" "${AIES_ARCHIVE_ARTIFACT_NAME}" "${AIES_ARCHIVE_ARTIFACT_BYTES}" "${AIES_ARCHIVE_ARTIFACT_SHA256}"
+          download_artifact dsym "${AIES_DSYM_ARTIFACT_ID}" "${AIES_DSYM_ARTIFACT_NAME}" "${AIES_DSYM_ARTIFACT_BYTES}" "${AIES_DSYM_ARTIFACT_SHA256}"
+          download_artifact package "${AIES_PACKAGE_ARTIFACT_ID}" "${AIES_PACKAGE_ARTIFACT_NAME}" "${AIES_PACKAGE_ARTIFACT_BYTES}" "${AIES_PACKAGE_ARTIFACT_SHA256}"
+          download_artifact release-evidence "${AIES_RELEASE_EVIDENCE_ARTIFACT_ID}" "${AIES_RELEASE_EVIDENCE_ARTIFACT_NAME}" "${AIES_RELEASE_EVIDENCE_ARTIFACT_BYTES}" "${AIES_RELEASE_EVIDENCE_ARTIFACT_SHA256}"
+
+          for label in archive dsym package release-evidence; do
+            mkdir "${AIES_INPUT_DIR}/${label}"
+            ditto -x -k "${AIES_INPUT_DIR}/${label}-artifact.zip" "${AIES_INPUT_DIR}/${label}"
+          done
+          archive_inner="${AIES_INPUT_DIR}/archive/OpenClaw.xcarchive.zip"
+          dsym_inner="${AIES_INPUT_DIR}/dsym/OpenClaw-dSYMs.zip"
+          [[ "$(stat -f '%z' "${archive_inner}")" == "${AIES_ARCHIVE_INNER_BYTES}" ]]
+          [[ "$(shasum -a 256 "${archive_inner}" | awk '{print $1}')" == "${AIES_ARCHIVE_INNER_SHA256}" ]]
+          [[ "$(stat -f '%z' "${dsym_inner}")" == "${AIES_DSYM_INNER_BYTES}" ]]
+          [[ "$(shasum -a 256 "${dsym_inner}" | awk '{print $1}')" == "${AIES_DSYM_INNER_SHA256}" ]]
+          {
+            shasum -a 256 \
+              "${AIES_INPUT_DIR}/archive-artifact.zip" \
+              "${AIES_INPUT_DIR}/dsym-artifact.zip" \
+              "${AIES_INPUT_DIR}/package-artifact.zip" \
+              "${AIES_INPUT_DIR}/release-evidence-artifact.zip" \
+              "${archive_inner}" \
+              "${dsym_inner}"
+          } > "${AIES_EVIDENCE_DIR}/retained-input-SHA256SUMS"
+
+          package_dir="${AIES_INPUT_DIR}/package"
+          (cd "${package_dir}" && shasum -a 256 -c SHA256SUMS)
+          python3 - "${package_dir}/source-authority.json" "${package_dir}/concrete-resolved.json" "${package_dir}/package-preparation.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          source, concrete, preparation = (
+              json.loads(pathlib.Path(path).read_text()) for path in sys.argv[1:]
+          )
+          if source.get("standaloneLockSHA256") != "8db1bfc0cd61b0a2c479806004dc67ec0385d8f50c53b16edbd2df251149d7e1":
+              raise SystemExit("standalone package authority mismatch")
+          if concrete.get("semanticSHA256") != "85dfe395ae8cbb3bd8fb47e9e3a857ca58c22d642fd2ed58b92900a74f1534ba":
+              raise SystemExit("aggregate semantic graph mismatch")
+          if concrete.get("rawSHA256") != "89072716eda00baad2f908ac3797c6978b21aab99ee3f9b7a785b09db31ee943":
+              raise SystemExit("concrete resolved graph hash mismatch")
+          if concrete.get("pinCount") != 9 or preparation.get("sourceStatusPorcelainV2") != "":
+              raise SystemExit("package/source provenance mismatch")
+          PY
+          cp -R "${package_dir}" "${AIES_EVIDENCE_DIR}/package-provenance"
+          cp -R "${AIES_INPUT_DIR}/release-evidence" "${AIES_EVIDENCE_DIR}/prior-signed-run-evidence"
+
+      - name: Extract exact archive and record immutable input tree
+        run: |
+          set -euo pipefail
+          archive_root="${AIES_INPUT_DIR}/archive-expanded"
+          dsym_root="${AIES_INPUT_DIR}/dsym-expanded"
+          mkdir "${archive_root}"
+          mkdir "${dsym_root}"
+          ditto -x -k "${AIES_INPUT_DIR}/archive/OpenClaw.xcarchive.zip" "${archive_root}"
+          ditto -x -k "${AIES_INPUT_DIR}/dsym/OpenClaw-dSYMs.zip" "${dsym_root}"
+          archives=()
+          while IFS= read -r path; do
+            archives+=("${path}")
+          done < <(find "${archive_root}" -type d -name '*.xcarchive' -print -prune)
+          [[ "${#archives[@]}" -eq 1 ]]
+          archive="${archives[0]}"
+          echo "AIES_ARCHIVE_PATH=${archive}" >> "${GITHUB_ENV}"
+
+          python3 - \
+            "${archive}/dSYMs" \
+            "${dsym_root}/dSYMs" \
+            "${AIES_EVIDENCE_DIR}/external-dsym-artifact-binding.json" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          def content_manifest(root):
+              root = pathlib.Path(root).resolve()
+              if not root.is_dir():
+                  raise SystemExit(f"missing dSYM root: {root}")
+              records = []
+              for path in sorted(root.rglob("*")):
+                  relative = path.relative_to(root).as_posix()
+                  if path.is_symlink():
+                      records.append({"path": relative, "kind": "symlink", "target": os.readlink(path)})
+                  elif path.is_file():
+                      records.append({"path": relative, "kind": "file", "bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+                  elif not path.is_dir():
+                      raise SystemExit(f"unsupported dSYM entry: {path}")
+              canonical = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+              return {"root": str(root), "file_or_symlink_count": len(records), "content_tree_sha256": hashlib.sha256(canonical).hexdigest(), "entries": records}
+
+          archive_dsyms = content_manifest(sys.argv[1])
+          external_dsyms = content_manifest(sys.argv[2])
+          if archive_dsyms["entries"] != external_dsyms["entries"]:
+              raise SystemExit("retained external dSYM artifact differs from xcarchive dSYMs")
+          pathlib.Path(sys.argv[3]).write_text(json.dumps({"status": "exact_content_match", "archive_dsyms": archive_dsyms, "external_artifact_dsyms": external_dsyms}, indent=2, sort_keys=True) + "\n")
+          PY
+
+          python3 - "${archive}" "${AIES_EVIDENCE_DIR}/archive-tree-before.json" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import stat
+          import sys
+
+          root = pathlib.Path(sys.argv[1]).resolve()
+          output = pathlib.Path(sys.argv[2])
+          records = []
+          for path in sorted(root.rglob("*")):
+              relative = path.relative_to(root).as_posix()
+              mode = stat.S_IMODE(path.lstat().st_mode)
+              if path.is_symlink():
+                  records.append({"path": relative, "kind": "symlink", "target": os.readlink(path), "mode": mode})
+              elif path.is_file():
+                  records.append({"path": relative, "kind": "file", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size, "mode": mode})
+              elif path.is_dir():
+                  records.append({"path": relative, "kind": "directory", "mode": mode})
+              else:
+                  raise SystemExit(f"unsupported archive entry: {path}")
+          canonical = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+          output.write_text(json.dumps({"root": str(root), "entry_count": len(records), "tree_sha256": hashlib.sha256(canonical).hexdigest(), "entries": records}, indent=2, sort_keys=True) + "\n")
+          PY
+
+          /usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleIdentifier' "${archive}/Info.plist" | grep -Fx "${AIES_MAIN_BUNDLE_ID}"
+          /usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "${archive}/Info.plist" | grep -Fx "${AIES_VERSION}"
+          /usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "${archive}/Info.plist" | grep -Fx "${AIES_BUILD_NUMBER}"
+          /usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:Team' "${archive}/Info.plist" | grep -Fx "${AIES_TEAM_ID}"
+          /usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:SigningIdentity' "${archive}/Info.plist" | grep -Fx 'Apple Development: Created via API (JLZMUA4KTQ)'
+
+      - name: Observe retained archive signing without imposing distribution state
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 python3 \
+            "${GITHUB_WORKSPACE}/workflow-control/.github/scripts/aies_export_signing_boundary.py" \
+            --archive "${AIES_ARCHIVE_PATH}" \
+            --source-tools "${GITHUB_WORKSPACE}/release-source/apps/ios/Tools" \
+            --expected-main-bundle-id "${AIES_MAIN_BUNDLE_ID}" \
+            --expected-team-id "${AIES_TEAM_ID}" \
+            --expected-git-sha "${AIES_SOURCE_SHA}" \
+            --expected-archive-uuid "${AIES_ARCHIVE_UUID}" \
+            --output "${AIES_EVIDENCE_DIR}/archive-signing-observation.json"
+          python3 - "${AIES_EVIDENCE_DIR}/archive-signing-observation.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          value = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          bundles = value["archive"]["bundles"]
+          if len(bundles) != 5:
+              raise SystemExit("archive does not contain five signed bundles")
+          for bundle in bundles:
+              if bundle["profile"]["type"] != "development":
+                  raise SystemExit("retained archive is not consistently development provisioned")
+              if bundle["signed_get_task_allow"] is not True:
+                  raise SystemExit("retained archive observation changed unexpectedly")
+          main = next(item for item in bundles if item["bundle_id"] == "ai.openclaw.client.J76B47MZ6V")
+          if main["signed_aps_environment"] != "development":
+              raise SystemExit("retained archive main APNs state changed unexpectedly")
+          binding = value["archive_dsym_binding"]
+          if binding["compiled_executable_count"] != 4 or binding["verified_dsym_count"] != 4:
+              raise SystemExit("archive/dSYM identity verification failed")
+          PY
+
+      - name: Record exact local App Store Connect export contract
+        run: |
+          set -euo pipefail
+          options="${AIES_EVIDENCE_DIR}/ExportOptions.plist"
+          cat > "${options}" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>destination</key>
+            <string>export</string>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>teamID</key>
+            <string>J76B47MZ6V</string>
+            <key>testFlightInternalTestingOnly</key>
+            <true/>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "${options}"
+          plutil -convert xml1 "${options}"
+          python3 - \
+            "${AIES_EVIDENCE_DIR}/export-command.json" \
+            "${AIES_ARCHIVE_PATH}" \
+            "${AIES_EXPORT_DIR}" \
+            "${AIES_EVIDENCE_DIR}/ExportOptions.plist" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output, archive, export, options = sys.argv[1:]
+          arguments = [
+              "-exportArchive",
+              "-archivePath", archive,
+              "-exportPath", export,
+              "-exportOptionsPlist", options,
+              "-allowProvisioningUpdates",
+              "-authenticationKeyPath", "[EPHEMERAL_ASC_KEY_PATH]",
+              "-authenticationKeyID", "[PROTECTED_ASC_KEY_ID]",
+              "-authenticationKeyIssuerID", "[PROTECTED_ASC_ISSUER_ID]",
+          ]
+          required = ("-authenticationKeyPath", "-authenticationKeyID", "-authenticationKeyIssuerID")
+          for flag in required:
+              if arguments.count(flag) != 1:
+                  raise SystemExit(f"authentication argument count is not one: {flag}")
+          pathlib.Path(output).write_text(json.dumps({"executable": "xcodebuild", "arguments": arguments, "destination": "local_export_only", "archive_or_build_action": False, "app_store_connect_upload": False}, indent=2) + "\n")
+          PY
+
+      - name: Export retained archive with ephemeral protected authentication
+        env:
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          raw_log="${RUNNER_TEMP}/aies-export-boundary.raw.log"
+          key_path="${RUNNER_TEMP}/aies-export-boundary-auth-key.p8"
+          cleanup() {
+            rm -f -- "${key_path}" "${raw_log}"
+          }
+          trap cleanup EXIT
+          [[ -n "${ASC_PRIVATE_KEY_P8}" ]]
+          [[ "${ASC_PRIVATE_KEY_P8}" == *"BEGIN PRIVATE KEY"* ]]
+          [[ "${ASC_PRIVATE_KEY_P8}" == *"END PRIVATE KEY"* ]]
+          [[ "${ASC_KEY_ID}" == "JLZMUA4KTQ" ]]
+          [[ "${ASC_ISSUER_ID}" =~ ^[0-9a-fA-F-]{36}$ ]]
+          umask 077
+          printf '%s\n' "${ASC_PRIVATE_KEY_P8}" > "${key_path}"
+          chmod 600 "${key_path}"
+          python3 - "${AIES_EVIDENCE_DIR}/credential-materialization.json" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({"status": "materialized_ephemerally", "credential_alias": "ASC_PRIVATE_KEY_P8", "retained_private_material": False}, indent=2) + "\n")
+          PY
+          unset ASC_PRIVATE_KEY_P8
+
+          export_arguments=(
+            -exportArchive
+            -archivePath "${AIES_ARCHIVE_PATH}"
+            -exportPath "${AIES_EXPORT_DIR}"
+            -exportOptionsPlist "${AIES_EVIDENCE_DIR}/ExportOptions.plist"
+            -allowProvisioningUpdates
+            -authenticationKeyPath "${key_path}"
+            -authenticationKeyID "${ASC_KEY_ID}"
+            -authenticationKeyIssuerID "${ASC_ISSUER_ID}"
+          )
+          for flag in -authenticationKeyPath -authenticationKeyID -authenticationKeyIssuerID; do
+            count=0
+            for argument in "${export_arguments[@]}"; do
+              [[ "${argument}" != "${flag}" ]] || count=$((count + 1))
+            done
+            [[ "${count}" -eq 1 ]]
+          done
+
+          set +e
+          xcodebuild "${export_arguments[@]}" > "${raw_log}" 2>&1
+          export_status=$?
+          set -e
+          ASC_KEY_PATH="${key_path}" \
+            python3 "${GITHUB_WORKSPACE}/release-source/apps/ios/Tools/sanitize_aies_release_log.py" \
+              --input "${raw_log}" \
+              --output "${AIES_EVIDENCE_DIR}/export.log"
+          rm -f -- "${key_path}" "${raw_log}"
+          unset ASC_KEY_PATH ASC_KEY_ID ASC_ISSUER_ID
+          [[ ! -e "${key_path}" ]]
+          [[ ! -e "${raw_log}" ]]
+          echo "AIES_EXPORT_STATUS=${export_status}" >> "${GITHUB_ENV}"
+          python3 - "${AIES_EVIDENCE_DIR}/export-result.json" "${export_status}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({"xcodebuild_exit_status": int(sys.argv[2]), "source_build_performed": False, "archive_performed": False, "destination": "export", "app_store_connect_upload_performed": False}, indent=2) + "\n")
+          PY
+
+      - name: Prove credential cleanup before any artifact retention
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          [[ ! -e "${RUNNER_TEMP}/aies-export-boundary-auth-key.p8" ]]
+          [[ ! -e "${RUNNER_TEMP}/aies-export-boundary.raw.log" ]]
+          if [[ -f "${AIES_EVIDENCE_DIR}/export.log" ]]; then
+            if grep -Eq 'BEGIN (EC |RSA )?PRIVATE KEY|END (EC |RSA )?PRIVATE KEY' "${AIES_EVIDENCE_DIR}/export.log"; then
+              echo "Sanitized export log retained a private-key marker." >&2
+              exit 1
+            fi
+          fi
+          if [[ -f "${AIES_EVIDENCE_DIR}/credential-materialization.json" ]]; then
+            echo "AIES_KEY_MATERIALIZED_STATUS=materialized_ephemerally" >> "${GITHUB_ENV}"
+          fi
+          echo "AIES_CREDENTIAL_CLEANUP_STATUS=verified" >> "${GITHUB_ENV}"
+
+      - name: Verify exported IPA distribution state and binary identity
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          verify_status=1
+          if [[ "${AIES_EXPORT_STATUS:-not_run}" == "0" ]]; then
+            ipas=()
+            while IFS= read -r path; do
+              ipas+=("${path}")
+            done < <(find "${AIES_EXPORT_DIR}" -type f -name '*.ipa' | LC_ALL=C sort)
+            if [[ "${#ipas[@]}" -eq 1 ]]; then
+              ipa="${ipas[0]}"
+              cp "${ipa}" "${AIES_EVIDENCE_DIR}/OpenClaw-exported.ipa"
+              shasum -a 256 "${AIES_EVIDENCE_DIR}/OpenClaw-exported.ipa" > "${AIES_EVIDENCE_DIR}/OpenClaw-exported.ipa.sha256"
+              set +e
+              PYTHONDONTWRITEBYTECODE=1 python3 \
+                "${GITHUB_WORKSPACE}/workflow-control/.github/scripts/aies_export_signing_boundary.py" \
+                --archive "${AIES_ARCHIVE_PATH}" \
+                --ipa "${AIES_EVIDENCE_DIR}/OpenClaw-exported.ipa" \
+                --source-tools "${GITHUB_WORKSPACE}/release-source/apps/ios/Tools" \
+                --expected-main-bundle-id "${AIES_MAIN_BUNDLE_ID}" \
+                --expected-team-id "${AIES_TEAM_ID}" \
+                --expected-git-sha "${AIES_SOURCE_SHA}" \
+                --expected-archive-uuid "${AIES_ARCHIVE_UUID}" \
+                --output "${AIES_EVIDENCE_DIR}/archive-to-ipa-signing-boundary.json" \
+                > "${AIES_EVIDENCE_DIR}/ipa-verifier.stdout.log" \
+                2> "${AIES_EVIDENCE_DIR}/ipa-verifier.stderr.log"
+              verify_status=$?
+              set -e
+            fi
+          fi
+          echo "AIES_IPA_VERIFY_STATUS=${verify_status}" >> "${GITHUB_ENV}"
+          python3 - "${AIES_EVIDENCE_DIR}/ipa-verification-result.json" "${verify_status}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          pathlib.Path(sys.argv[1]).write_text(json.dumps({"distribution_verifier_exit_status": int(sys.argv[2])}, indent=2) + "\n")
+          PY
+
+      - name: Prove input archive and source remained immutable
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          if [[ -n "${AIES_ARCHIVE_PATH:-}" ]] && [[ -d "${AIES_ARCHIVE_PATH}" ]]; then
+            python3 - "${AIES_ARCHIVE_PATH}" "${AIES_EVIDENCE_DIR}/archive-tree-after.json" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import stat
+          import sys
+
+          root = pathlib.Path(sys.argv[1]).resolve()
+          output = pathlib.Path(sys.argv[2])
+          records = []
+          for path in sorted(root.rglob("*")):
+              relative = path.relative_to(root).as_posix()
+              mode = stat.S_IMODE(path.lstat().st_mode)
+              if path.is_symlink():
+                  records.append({"path": relative, "kind": "symlink", "target": os.readlink(path), "mode": mode})
+              elif path.is_file():
+                  records.append({"path": relative, "kind": "file", "sha256": hashlib.sha256(path.read_bytes()).hexdigest(), "bytes": path.stat().st_size, "mode": mode})
+              elif path.is_dir():
+                  records.append({"path": relative, "kind": "directory", "mode": mode})
+              else:
+                  raise SystemExit(f"unsupported archive entry: {path}")
+          canonical = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+          output.write_text(json.dumps({"root": str(root), "entry_count": len(records), "tree_sha256": hashlib.sha256(canonical).hexdigest(), "entries": records}, indent=2, sort_keys=True) + "\n")
+          PY
+            before="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree_sha256"])' "${AIES_EVIDENCE_DIR}/archive-tree-before.json")"
+            after="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tree_sha256"])' "${AIES_EVIDENCE_DIR}/archive-tree-after.json")"
+            [[ "${before}" == "${after}" ]]
+          fi
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}/release-source" status --porcelain=v2 --untracked-files=all)" ]]
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}/workflow-control" status --porcelain=v2 --untracked-files=all)" ]]
+          echo "AIES_CUSTODY_STATUS=verified" >> "${GITHUB_ENV}"
+
+      - name: Seal export-boundary evidence
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          cp "${RUNNER_TEMP}/environment.json" "${AIES_EVIDENCE_DIR}/environment.json"
+          cp "${RUNNER_TEMP}/environment-branch-policies.json" "${AIES_EVIDENCE_DIR}/environment-branch-policies.json"
+          python3 - \
+            "${AIES_EVIDENCE_DIR}" \
+            "${GITHUB_SHA}" \
+            "${AIES_EXPORT_STATUS:-not_run}" \
+            "${AIES_IPA_VERIFY_STATUS:-not_run}" \
+            "${AIES_CREDENTIAL_CLEANUP_STATUS:-not_run}" \
+            "${AIES_CUSTODY_STATUS:-not_run}" \
+            "${AIES_KEY_MATERIALIZED_STATUS:-not_run}" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1]).resolve()
+          workflow_sha, export_status, verify_status, cleanup_status, custody_status, key_status = sys.argv[2:]
+          if (
+              export_status == "0"
+              and verify_status == "0"
+              and cleanup_status == "verified"
+              and custody_status == "verified"
+              and key_status == "materialized_ephemerally"
+          ):
+              classification_input = "EXPORT_RESIGNS_CORRECTLY_ARCHIVE_VERIFIER_MISPLACED"
+          elif export_status == "0" and verify_status != "0":
+              classification_input = "EXPORT_SUCCEEDED_DISTRIBUTION_VERIFICATION_FAILED"
+          elif export_status == "0":
+              classification_input = "EXPORT_VERIFIED_BUT_SECURITY_OR_CUSTODY_GATE_FAILED"
+          else:
+              classification_input = "EXPORT_FAILED_REQUIRES_SANITIZED_LOG_CLASSIFICATION"
+          receipt = {
+              "schema": "aies.ios.export-signing-boundary.workflow.v1",
+              "workflow_control_sha": workflow_sha,
+              "source_sha": "a173c98d0d4e0f3c7159c4780ba797ff9efdf17e",
+              "source_run_id": 33145992424,
+              "archive_artifact_id": 9676279420,
+              "xcodebuild_export_status": export_status,
+              "distribution_verifier_status": verify_status,
+              "credential_cleanup_status": cleanup_status,
+              "archive_and_source_custody_status": custody_status,
+              "key_materialization_status": key_status,
+              "pre_seal_classification_input": classification_input,
+              "source_build_performed": False,
+              "archive_performed": False,
+              "app_store_connect_upload_performed": False,
+              "testflight_assignment_performed": False,
+          }
+          (root / "workflow-result.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+          security = {
+              "github_environment": "aies-testflight-internal",
+              "github_permissions": {"actions": "read", "contents": "read"},
+              "credential_aliases": ["ASC_KEY_ID", "ASC_ISSUER_ID", "ASC_PRIVATE_KEY_P8"],
+              "private_key_materialized_ephemerally": key_status == "materialized_ephemerally",
+              "private_key_deleted_before_artifact_upload": cleanup_status == "verified",
+              "apns_provider_credential_referenced_or_injected": False,
+              "source_build_performed": False,
+              "archive_performed": False,
+              "app_store_connect_upload_performed": False,
+              "external_tester_action_performed": False,
+              "app_review_action_performed": False,
+          }
+          (root / "security-boundary.json").write_text(json.dumps(security, indent=2, sort_keys=True) + "\n")
+
+          forbidden = (
+              "BEGIN PRIVATE KEY",
+              "END PRIVATE KEY",
+              "aies-export-boundary-auth-key.p8",
+          )
+          scanned = []
+          for path in sorted(root.rglob("*")):
+              if path.is_symlink():
+                  raise SystemExit(f"evidence contains symlink: {path}")
+              if not path.is_file() or path.name == "OpenClaw-exported.ipa":
+                  continue
+              data = path.read_bytes()
+              text = data.decode("utf-8", errors="ignore")
+              leaked = [marker for marker in forbidden if marker in text]
+              if leaked:
+                  raise SystemExit(f"sensitive path/material marker in {path.name}: {leaked}")
+              scanned.append({"path": path.relative_to(root).as_posix(), "bytes": len(data)})
+          (root / "sensitive-material-scan.json").write_text(json.dumps({"status": "passed", "files": scanned}, indent=2) + "\n")
+
+          sums = root / "SHA256SUMS"
+          records = []
+          for path in sorted(root.rglob("*")):
+              if path.is_file() and path != sums:
+                  records.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root).as_posix()}")
+          sums.write_text("\n".join(records) + "\n")
+          print(json.dumps(receipt, sort_keys=True))
+          PY
+          (cd "${AIES_EVIDENCE_DIR}" && shasum -a 256 -c SHA256SUMS)
+          sums_sha="$(shasum -a 256 "${AIES_EVIDENCE_DIR}/SHA256SUMS" | awk '{print $1}')"
+          printf 'status=verified\nsha256sums_sha256=%s\n' "${sums_sha}" > "${AIES_EVIDENCE_DIR}/EVIDENCE_SEALED"
+          echo "AIES_EVIDENCE_SEAL_STATUS=verified" >> "${GITHUB_ENV}"
+
+      - name: Upload local exported IPA diagnostic artifact
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-export-boundary-IPA-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-export-boundary/evidence/OpenClaw-exported.ipa
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload export-boundary evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-export-boundary-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-export-boundary/evidence
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Return exact export diagnostic result
+        if: always() && !cancelled()
+        run: |
+          set -euo pipefail
+          [[ "${AIES_EXPORT_STATUS:-not_run}" == "0" ]]
+          [[ "${AIES_IPA_VERIFY_STATUS:-not_run}" == "0" ]]
+          [[ "${AIES_CREDENTIAL_CLEANUP_STATUS:-not_run}" == "verified" ]]
+          [[ "${AIES_CUSTODY_STATUS:-not_run}" == "verified" ]]
+          [[ "${AIES_KEY_MATERIALIZED_STATUS:-not_run}" == "materialized_ephemerally" ]]
+          [[ "${AIES_EVIDENCE_SEAL_STATUS:-not_run}" == "verified" ]]
