@@ -223,8 +223,7 @@ extension SettingsProTab {
         await self.connectManual()
     }
 
-    func applyPendingGatewaySetupLinkIfNeeded() {
-        guard let link = self.appModel.consumePendingGatewaySetupLink() else { return }
+    func applyGatewaySetupLink(_ link: GatewayConnectDeepLink) {
         self.invalidateGatewaySetupAttempt()
         self.setupCode = ""
         self.setupStatusText = nil

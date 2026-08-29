@@ -32,7 +32,7 @@ struct RootTabs: View {
     @State private var didAutoOpenSettings: Bool = false
     @State private var didApplyInitialAppearance: Bool = false
     @State private var didApplyInitialChatSession: Bool = false
-    @State private var handledGatewaySetupRequestID: Int = 0
+    @State private var gatewaySetupRequest: GatewaySetupRequest?
 
     private enum AppTab: Hashable {
         case control
@@ -161,7 +161,9 @@ struct RootTabs: View {
                 .tabItem { Label("Agent", systemImage: "person.2.fill") }
                 .tag(AppTab.agent)
 
-            SettingsProTab()
+            SettingsProTab(
+                gatewaySetupRequest: self.gatewaySetupRequest,
+                onGatewaySetupRequestHandled: self.handleGatewaySetupRequest)
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(AppTab.settings)
         }
@@ -596,14 +598,22 @@ struct RootTabs: View {
 
     private func maybeOpenSettingsForGatewaySetup() {
         let requestID = self.appModel.gatewaySetupRequestID
-        guard requestID != 0, requestID != self.handledGatewaySetupRequestID else { return }
+        guard requestID != 0, requestID != self.gatewaySetupRequest?.id else { return }
         // The visible onboarding flow owns one-shot setup-link staging while presented.
         guard !self.showOnboarding else { return }
-        self.handledGatewaySetupRequestID = requestID
+        guard let link = self.appModel.consumePendingGatewaySetupLink() else { return }
         self.showOnboarding = false
         self.presentedSheet = nil
         self.didAutoOpenSettings = true
         self.selectedTab = .settings
+        // Root owns the one-shot model consumption. Only the selected Settings
+        // instance receives this immutable handoff, so a hidden view cannot win.
+        self.gatewaySetupRequest = GatewaySetupRequest(id: requestID, link: link)
+    }
+
+    private func handleGatewaySetupRequest(_ requestID: Int) {
+        guard self.gatewaySetupRequest?.id == requestID else { return }
+        self.gatewaySetupRequest = nil
     }
 
     private func applyInitialChatSessionIfNeeded() {

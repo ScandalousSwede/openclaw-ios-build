@@ -1,6 +1,11 @@
 import OpenClawKit
 import SwiftUI
 
+struct GatewaySetupRequest: Equatable {
+    let id: Int
+    let link: GatewayConnectDeepLink
+}
+
 struct SettingsProTab: View {
     @Environment(NodeAppModel.self) var appModel
     @Environment(VoiceWakeManager.self) var voiceWake
@@ -66,6 +71,16 @@ struct SettingsProTab: View {
     @State var isPreparingCrashDiagnosticExport = false
     @State var isTestingSystemVoice = false
     @State var isTestingElevenLabsVoice = false
+    let gatewaySetupRequest: GatewaySetupRequest?
+    let onGatewaySetupRequestHandled: ((Int) -> Void)?
+
+    init(
+        gatewaySetupRequest: GatewaySetupRequest? = nil,
+        onGatewaySetupRequestHandled: ((Int) -> Void)? = nil)
+    {
+        self.gatewaySetupRequest = gatewaySetupRequest
+        self.onGatewaySetupRequestHandled = onGatewaySetupRequestHandled
+    }
 
     var body: some View {
         NavigationStack {
@@ -90,7 +105,7 @@ struct SettingsProTab: View {
                 self.previousLocationModeRaw = self.locationModeRaw
                 self.syncSettingsState()
                 self.refreshNotificationSettings()
-                self.applyPendingGatewaySetupLinkIfNeeded()
+                self.applyGatewaySetupRequestIfNeeded()
             }
             .onChange(of: self.scenePhase) { _, phase in
                 if phase == .active {
@@ -124,8 +139,8 @@ struct SettingsProTab: View {
             .onChange(of: self.defaultShareInstruction) { _, newValue in
                 ShareToAgentSettings.saveDefaultInstruction(newValue)
             }
-            .onChange(of: self.appModel.gatewaySetupRequestID) { _, _ in
-                self.applyPendingGatewaySetupLinkIfNeeded()
+            .onChange(of: self.gatewaySetupRequest?.id) { _, _ in
+                self.applyGatewaySetupRequestIfNeeded()
             }
         }
         .onDisappear {
@@ -193,5 +208,11 @@ struct SettingsProTab: View {
         } message: {
             Text(self.scannerError ?? "")
         }
+    }
+
+    private func applyGatewaySetupRequestIfNeeded() {
+        guard let gatewaySetupRequest else { return }
+        self.applyGatewaySetupLink(gatewaySetupRequest.link)
+        self.onGatewaySetupRequestHandled?(gatewaySetupRequest.id)
     }
 }
