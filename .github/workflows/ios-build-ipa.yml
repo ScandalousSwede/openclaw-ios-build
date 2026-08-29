@@ -347,6 +347,7 @@ jobs:
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/openclawkit-resolved.json"
           swift build --package-path "${shared_package}" --force-resolved-versions
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
@@ -384,15 +385,29 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/AppCoverageTests \
+            -only-testing:OpenClawTests/DeepLinkParserTests \
+            -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests \
+            -only-testing:OpenClawTests/GatewayConnectionSecurityTests \
+            -only-testing:OpenClawTests/GatewayMobileSetupStateTests \
+            -only-testing:OpenClawTests/GatewaySetupDeliveryOwnershipTests \
             -only-testing:OpenClawTests/GatewayOperatorScopeTests \
             -only-testing:OpenClawTests/GatewayOnboardingResetTests \
+            -only-testing:OpenClawTests/GatewayStatusBuilderTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
+            -only-testing:OpenClawTests/NodeAppModelInvokeTests \
+            -only-testing:OpenClawTests/OnboardingStateStoreTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/QRScannerResultHandoffTests \
+            -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
+            -only-testing:OpenClawTests/TalkProStateTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
+            -only-testing:OpenClawTests/WatchSessionActivationGateTests \
             "${strict_package_args[@]}" \
             test \
             CODE_SIGNING_ALLOWED=NO \
@@ -899,6 +914,7 @@ jobs:
             --output "${RUNNER_TEMP}/aies-signed-package/evidence/openclawkit-resolved.json"
           swift build --package-path "${shared_package}" --force-resolved-versions
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
@@ -936,15 +952,29 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/AppCoverageTests \
+            -only-testing:OpenClawTests/DeepLinkParserTests \
+            -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests \
+            -only-testing:OpenClawTests/GatewayConnectionSecurityTests \
+            -only-testing:OpenClawTests/GatewayMobileSetupStateTests \
+            -only-testing:OpenClawTests/GatewaySetupDeliveryOwnershipTests \
             -only-testing:OpenClawTests/GatewayOperatorScopeTests \
             -only-testing:OpenClawTests/GatewayOnboardingResetTests \
+            -only-testing:OpenClawTests/GatewayStatusBuilderTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
+            -only-testing:OpenClawTests/NodeAppModelInvokeTests \
+            -only-testing:OpenClawTests/OnboardingStateStoreTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/QRScannerResultHandoffTests \
+            -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
+            -only-testing:OpenClawTests/TalkProStateTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
+            -only-testing:OpenClawTests/WatchSessionActivationGateTests \
             "${strict_package_args[@]}" \
             test \
             CODE_SIGNING_ALLOWED=NO \
