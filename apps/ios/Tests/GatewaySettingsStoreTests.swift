@@ -313,7 +313,10 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
         }
     }
 
-    @Test func lastGateway_migratesFromUserDefaults() {
+    // Like the continuity fixture above, this seeds the live host's legacy
+    // multi-key defaults contract. Keep the synchronous seed/migrate/assert
+    // transaction on MainActor so app startup cannot consume a partial seed.
+    @Test @MainActor func lastGateway_migratesFromUserDefaults() {
         withLastGatewaySnapshot {
             // Clear Keychain entry and plant legacy UserDefaults values.
             applyKeychain([lastGatewayKeychainEntry: nil])

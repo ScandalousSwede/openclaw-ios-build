@@ -152,6 +152,10 @@ class AIESOldIdentityContinuityTests(unittest.TestCase):
             "sameIdentityUpdateReadsHistoricalGatewayStateWithoutRewrite",
             ios_continuity_tests,
         )
+        self.assertIn(
+            "@Test @MainActor func lastGateway_migratesFromUserDefaults",
+            ios_continuity_tests,
+        )
         self.assertIn('"OpenClawPushTransport": "direct"', ios_continuity_tests)
         self.assertIn('"OpenClawPushDistribution": "local"', ios_continuity_tests)
         self.assertIn('"OpenClawPushAPNsEnvironment": "production"', ios_continuity_tests)
