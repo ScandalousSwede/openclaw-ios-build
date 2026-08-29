@@ -140,7 +140,7 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
             unsigned,
         )
         self.assertEqual(
-            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 3
+            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 4
         )
         self.assertIn("build_settings_topology_report", unsigned)
         self.assertIn('"ai.openclaw.client"', unsigned)
@@ -159,6 +159,29 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("environment:", unsigned)
         self.assertNotIn("-allowProvisioningUpdates", unsigned)
         self.assertNotIn("-authenticationKey", unsigned)
+
+        keychain_fixture = unsigned.split(
+            "      - name: Test default-group Keychain continuity in a credential-free simulator host\n",
+            maxsplit=1,
+        )[1].split("      - name: Archive iOS app\n", maxsplit=1)[0]
+        self.assertIn(
+            "-only-testing:OpenClawTests/GatewaySettingsStoreTests", keychain_fixture
+        )
+        self.assertIn(
+            "-only-testing:OpenClawTests/KeychainStoreTests", keychain_fixture
+        )
+        self.assertIn("CODE_SIGNING_ALLOWED=YES", keychain_fixture)
+        self.assertIn("CODE_SIGNING_REQUIRED=YES", keychain_fixture)
+        self.assertIn('CODE_SIGN_IDENTITY="-"', keychain_fixture)
+        self.assertIn("DEVELOPMENT_TEAM=J76B47MZ6V", keychain_fixture)
+        self.assertIn("Signature=adhoc", keychain_fixture)
+        self.assertIn("application-identifier", keychain_fixture)
+        self.assertIn("OpenClawTests.xctest", keychain_fixture)
+        self.assertIn("embedded.mobileprovision", keychain_fixture)
+        self.assertNotIn("Apple Development", keychain_fixture)
+        self.assertNotIn("secrets.", keychain_fixture)
+        self.assertNotIn("-allowProvisioningUpdates", keychain_fixture)
+        self.assertNotIn("PROVISIONING_PROFILE_SPECIFIER=\"OpenClaw", keychain_fixture)
 
 
 if __name__ == "__main__":

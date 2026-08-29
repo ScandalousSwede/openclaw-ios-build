@@ -199,11 +199,20 @@ private enum AIESAgendaTestError: Error, Sendable {
     }
 
     @Test func lastUpdatedCopyIncludesDateTimeAndDisplayZone() {
+        let instant = self.utc("2026-10-12T06:55:00Z")
+        let displayTimezone = TimeZone(identifier: "Europe/Stockholm")!
         let rendered = AIESAgendaTimeRendering.lastUpdated(
-            self.utc("2026-10-12T06:55:00Z"),
-            displayTimezone: TimeZone(identifier: "Europe/Stockholm")!)
+            instant,
+            displayTimezone: displayTimezone)
+        let zoneFormatter = DateFormatter()
+        zoneFormatter.calendar = Calendar(identifier: .gregorian)
+        zoneFormatter.locale = Locale(identifier: "en_US_POSIX")
+        zoneFormatter.timeZone = displayTimezone
+        zoneFormatter.dateFormat = "z"
+        let expectedZoneToken = zoneFormatter.string(from: instant)
         #expect(rendered.contains("2026-10-12"))
         #expect(rendered.contains("08:55"))
-        #expect(rendered.contains("CEST"))
+        #expect(displayTimezone.secondsFromGMT(for: instant) == 7_200)
+        #expect(rendered.hasSuffix(" \(expectedZoneToken)"))
     }
 }

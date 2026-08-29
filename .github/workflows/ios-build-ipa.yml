@@ -404,8 +404,6 @@ jobs:
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
-            -only-testing:OpenClawTests/GatewaySettingsStoreTests \
-            -only-testing:OpenClawTests/KeychainStoreTests \
             -only-testing:OpenClawTests/AIESAgendaStoreTests \
             -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
             -only-testing:OpenClawTests/AppCoverageTests \
@@ -421,6 +419,101 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
+
+      - name: Test default-group Keychain continuity in a credential-free simulator host
+        run: |
+          set -euo pipefail
+          simulator_udid="$({ xcrun simctl list devices available --json; } | python3 -c '
+          import json, sys
+          payload = json.load(sys.stdin)
+          devices = []
+          for runtime, entries in payload.get("devices", {}).items():
+              if ".iOS-" not in runtime:
+                  continue
+              devices.extend(
+                  entry for entry in entries
+                  if entry.get("isAvailable")
+                  and entry.get("udid")
+                  and str(entry.get("name", "")).startswith("iPhone")
+              )
+          if not devices:
+              raise SystemExit("No available iOS simulator")
+          print(devices[0]["udid"])
+          ' )"
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          derived_data="${RUNNER_TEMP}/aies-continuity-keychain-derived-data"
+          evidence_dir="${RUNNER_TEMP}/aies-unsigned-package/evidence/keychain-continuity"
+          mkdir -p "${evidence_dir}"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+
+          # Simulator execution uses the ad-hoc pseudo-identity, which has no
+          # Apple signing authority and consumes no certificate or profile.
+          # Code signing remains disabled for the distributable archive below.
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -derivedDataPath "${derived_data}" \
+            -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -parallel-testing-enabled NO \
+            -only-testing:OpenClawTests/GatewaySettingsStoreTests \
+            -only-testing:OpenClawTests/KeychainStoreTests \
+            "${strict_package_args[@]}" \
+            test \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="-" \
+            DEVELOPMENT_TEAM=J76B47MZ6V \
+            PROVISIONING_PROFILE_SPECIFIER=""
+
+          app_path="$(find "${derived_data}/Build/Products/Debug-iphonesimulator" \
+            -maxdepth 2 -type d -name OpenClaw.app -print -quit)"
+          [[ -n "${app_path}" && -d "${app_path}" ]]
+          test_bundle="$(find "${app_path}" -type d -name OpenClawTests.xctest -print -quit)"
+          [[ -n "${test_bundle}" && -d "${test_bundle}" ]]
+          [[ -z "$(find "${app_path}" -name embedded.mobileprovision -print -quit)" ]]
+          codesign -dvvv "${app_path}" \
+            2> "${evidence_dir}/simulator-adhoc-signature.txt"
+          codesign -dvvv "${test_bundle}" \
+            2> "${evidence_dir}/simulator-test-bundle-adhoc-signature.txt"
+          grep -Fq 'Signature=adhoc' "${evidence_dir}/simulator-adhoc-signature.txt"
+          grep -Fq 'Signature=adhoc' \
+            "${evidence_dir}/simulator-test-bundle-adhoc-signature.txt"
+          if grep -Eq '^Authority=' "${evidence_dir}/simulator-adhoc-signature.txt"; then
+            echo "Simulator continuity fixture unexpectedly used a signing authority." >&2
+            exit 1
+          fi
+          if grep -Eq '^Authority=' \
+            "${evidence_dir}/simulator-test-bundle-adhoc-signature.txt"; then
+            echo "Simulator continuity test bundle unexpectedly used a signing authority." >&2
+            exit 1
+          fi
+          codesign -d --entitlements :- "${app_path}" \
+            > "${evidence_dir}/simulator-adhoc-entitlements.plist" \
+            2> "${evidence_dir}/simulator-adhoc-entitlements.stderr"
+          python3 - "${evidence_dir}/simulator-adhoc-entitlements.plist" <<'PY'
+          import pathlib
+          import plistlib
+          import sys
+
+          entitlements = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
+          expected = "J76B47MZ6V.ai.openclaw.client"
+          if entitlements.get("application-identifier") != expected:
+              raise SystemExit(
+                  "simulator fixture application-identifier mismatch: "
+                  + repr(entitlements.get("application-identifier"))
+              )
+          if entitlements.get("com.apple.developer.team-identifier") != "J76B47MZ6V":
+              raise SystemExit("simulator fixture Team ID mismatch")
+          groups = entitlements.get("keychain-access-groups")
+          if groups not in (None, [expected]):
+              raise SystemExit("unexpected simulator Keychain access groups: " + repr(groups))
+          PY
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Archive iOS app
         run: |
