@@ -767,6 +767,16 @@ struct OpenClawChatOutboxIntegrationTests {
         let scopeResult = try await coordinator.processAvailableWork()
         #expect(scopeResult.status.deliveryGate == .operatorScopesUnavailable)
         #expect(await state.dispatchedIDs().isEmpty)
+
+        await state.setUnavailable(.operatorSessionUnavailable)
+        let operatorResult = try await coordinator.processAvailableWork()
+        #expect(operatorResult.status.deliveryGate == .operatorSessionUnavailable)
+        #expect(await state.dispatchedIDs().isEmpty)
+
+        await state.setUnavailable(.operatorRoleMissing)
+        let missingRoleResult = try await coordinator.processAvailableWork()
+        #expect(missingRoleResult.status.deliveryGate == .operatorRoleMissing)
+        #expect(await state.dispatchedIDs().isEmpty)
         try await fixture.close()
     }
 
@@ -783,6 +793,10 @@ struct OpenClawChatOutboxIntegrationTests {
             cancellableRawCommandID: "rejected-command"))
         let scopeGate = OpenClawChatView.outboxPresentation(for: OpenClawChatOutboxStatus(
             deliveryGate: .operatorScopesUnavailable))
+        let operatorGate = OpenClawChatView.outboxPresentation(for: OpenClawChatOutboxStatus(
+            deliveryGate: .operatorSessionUnavailable))
+        let missingRoleGate = OpenClawChatView.outboxPresentation(for: OpenClawChatOutboxStatus(
+            deliveryGate: .operatorRoleMissing))
         let firstOffline = OpenClawChatView.outboxPresentation(for: OpenClawChatOutboxStatus(
             hasVerifiedRouteSnapshot: false,
             deliveryGate: .offline))
@@ -793,6 +807,8 @@ struct OpenClawChatOutboxIntegrationTests {
         #expect(rejected?.message.contains("rejected") == true)
         #expect(scopeGate?.title == "Durable delivery unavailable")
         #expect(scopeGate?.message.contains("operator chat scopes") == true)
+        #expect(operatorGate?.message.contains("operator session") == true)
+        #expect(missingRoleGate?.message.contains("missing the operator role") == true)
         #expect(firstOffline?.title == "Offline queue not yet available")
         #expect(firstOffline?.message.contains("Connect once") == true)
     }

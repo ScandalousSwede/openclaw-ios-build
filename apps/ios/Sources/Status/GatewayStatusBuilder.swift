@@ -11,10 +11,50 @@ enum GatewayDisplayState: Equatable {
 enum GatewayStatusBuilder {
     @MainActor
     static func build(appModel: NodeAppModel) -> GatewayDisplayState {
+        if appModel.isAppleReviewDemoModeEnabled { return .connected }
+        return self.build(
+            nodeRoleState: appModel.nodeRoleState,
+            operatorRoleState: appModel.operatorRoleState,
+            lastGatewayProblem: appModel.lastGatewayProblem)
+    }
+
+    static func build(
+        nodeRoleState: GatewayNodeRoleState,
+        operatorRoleState: GatewayOperatorRoleState,
+        lastGatewayProblem: GatewayConnectionProblem?) -> GatewayDisplayState
+    {
+        if let lastGatewayProblem, lastGatewayProblem.pauseReconnect {
+            return .error
+        }
+        switch operatorRoleState {
+        case .missingRole, .scopeBlocked:
+            return .error
+        case .connecting:
+            return .connecting
+        case .offline, .online:
+            break
+        }
+        switch nodeRoleState {
+        case .connecting:
+            return .connecting
+        case .online where operatorRoleState == .online:
+            return .connected
+        case .offline, .online:
+            return .disconnected
+        }
+    }
+
+    /// Legacy text projection retained for source compatibility and focused mapping tests.
+    /// Product UI must use the role-aware `build(appModel:)` entry point above.
+    static func buildLegacy(
+        gatewayServerName: String?,
+        lastGatewayProblem: GatewayConnectionProblem?,
+        gatewayStatusText: String) -> GatewayDisplayState
+    {
         self.build(
-            gatewayServerName: appModel.gatewayServerName,
-            lastGatewayProblem: appModel.lastGatewayProblem,
-            gatewayStatusText: appModel.gatewayStatusText)
+            gatewayServerName: gatewayServerName,
+            lastGatewayProblem: lastGatewayProblem,
+            gatewayStatusText: gatewayStatusText)
     }
 
     static func build(

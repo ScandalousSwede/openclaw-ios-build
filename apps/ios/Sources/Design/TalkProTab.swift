@@ -299,9 +299,26 @@ struct TalkProTab: View {
         if self.state
             .prefersPermissionCopy { return "Gateway approval is required before this phone can capture voice." }
         if self.appModel.isAppleReviewDemoModeEnabled { return "Voice is disabled in Apple Review demo mode." }
+        switch self.appModel.operatorRoleState {
+        case .scopeBlocked:
+            return "Operator scopes are unavailable, so Talk configuration cannot be loaded."
+        case .missingRole, .offline, .connecting:
+            return "The operator session required for Talk is unavailable."
+        case .online:
+            break
+        }
         if !self.gatewayConnected { return "Connect to your gateway to start a voice conversation." }
         if !self.appModel.talkMode.gatewayTalkConfigLoaded {
-            return "Open Voice settings after the gateway loads Talk configuration."
+            switch self.appModel.talkMode.gatewayTalkConfigAvailabilityState {
+            case .missingOnServer:
+                return "The server has no Talk configuration."
+            case .scopeBlocked:
+                return "Operator scopes are unavailable, so Talk configuration cannot be loaded."
+            case .failed:
+                return "Talk configuration could not be loaded from the server."
+            case .notRequested, .loading, .loaded:
+                return "Open Voice settings after the gateway loads Talk configuration."
+            }
         }
         let subtitle = (self.appModel.talkMode.gatewayTalkVoiceModeSubtitle ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)

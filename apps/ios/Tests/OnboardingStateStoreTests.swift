@@ -23,6 +23,7 @@ import Testing
 
         let appModel = NodeAppModel()
         appModel.gatewayServerName = "gateway"
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
         #expect(!OnboardingStateStore.shouldPresentOnLaunch(
             appModel: appModel,
             defaults: defaults,
@@ -62,6 +63,23 @@ import Testing
             appModel: appModel,
             defaults: defaults,
             hasSavedGatewayConnection: false))
+    }
+
+    @Test @MainActor func incompleteDualRoleSetupOverridesSavedGatewayAndPriorCompletion() {
+        let testDefaults = self.makeDefaults()
+        let defaults = testDefaults.defaults
+        defer { self.reset(testDefaults) }
+
+        let appModel = NodeAppModel()
+        appModel.gatewayServerName = "gateway"
+        appModel._test_setGatewayRoleStates(node: .online, operator: .missingRole)
+        OnboardingStateStore.markCompleted(mode: .remoteDomain, defaults: defaults)
+        OnboardingStateStore.markIncomplete(defaults: defaults)
+
+        #expect(OnboardingStateStore.shouldPresentOnLaunch(
+            appModel: appModel,
+            defaults: defaults,
+            hasSavedGatewayConnection: true))
     }
 
     @Test func firstRunIntroDefaultsToVisibleThenPersists() {

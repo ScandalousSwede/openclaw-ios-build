@@ -91,14 +91,14 @@ struct CommandCenterTab: View {
                 HStack(spacing: 0) {
                     self.gatewayFact(
                         icon: "network",
-                        title: "Connection",
-                        value: self.gatewayConnected ? "Online" : "Offline",
+                        title: "Gateway/node",
+                        value: self.appModel.nodeRoleState.statusLabel,
                         color: self.gatewayStatusColor)
                     Divider().frame(height: 38)
                     self.gatewayFact(
-                        icon: "server.rack",
-                        title: "Address",
-                        value: self.gatewayAddressText,
+                        icon: "bubble.left.and.bubble.right",
+                        title: "Operator/chat",
+                        value: self.appModel.operatorRoleState.statusLabel,
                         color: OpenClawBrand.accent)
                     Divider().frame(height: 38)
                     self.gatewayFact(
@@ -269,8 +269,7 @@ struct CommandCenterTab: View {
     }
 
     private var gatewayAgentCountText: String {
-        guard self.gatewayConnected else { return "—" }
-        return "\(self.appModel.gatewayAgents.count)"
+        self.appModel.gatewayAgentCountText
     }
 
     private var defaultChatWorkItem: WorkItem {

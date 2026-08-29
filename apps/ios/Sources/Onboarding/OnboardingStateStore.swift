@@ -22,6 +22,7 @@ enum OnboardingStateStore {
     private static let firstRunIntroSeenDefaultsKey = "onboarding.first_run_intro_seen"
     private static let lastModeDefaultsKey = "onboarding.last_mode"
     private static let lastSuccessTimeDefaultsKey = "onboarding.last_success_time"
+    private static let mobileSetupBlockedDefaultsKey = "onboarding.mobile_setup_blocked"
 
     @MainActor
     static func shouldPresentOnLaunch(
@@ -30,15 +31,17 @@ enum OnboardingStateStore {
         hasSavedGatewayConnection: Bool? = nil)
         -> Bool
     {
-        if defaults.bool(forKey: self.completedDefaultsKey) { return false }
+        if defaults.bool(forKey: self.mobileSetupBlockedDefaultsKey) { return true }
+        if defaults.bool(forKey: self.completedDefaultsKey), appModel.mobileSetupComplete { return false }
         let hasSavedGatewayConnection =
             hasSavedGatewayConnection ?? (GatewaySettingsStore.loadLastGatewayConnection() != nil)
         if hasSavedGatewayConnection { return false }
-        return appModel.gatewayServerName == nil
+        return !appModel.mobileSetupComplete
     }
 
     static func markCompleted(mode: OnboardingConnectionMode? = nil, defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: self.completedDefaultsKey)
+        defaults.set(false, forKey: self.mobileSetupBlockedDefaultsKey)
         if let mode {
             defaults.set(mode.rawValue, forKey: self.lastModeDefaultsKey)
         }
@@ -55,10 +58,12 @@ enum OnboardingStateStore {
 
     static func markIncomplete(defaults: UserDefaults = .standard) {
         defaults.set(false, forKey: self.completedDefaultsKey)
+        defaults.set(true, forKey: self.mobileSetupBlockedDefaultsKey)
     }
 
     static func reset(defaults: UserDefaults = .standard) {
         defaults.set(false, forKey: self.completedDefaultsKey)
+        defaults.set(false, forKey: self.mobileSetupBlockedDefaultsKey)
         defaults.set(false, forKey: self.firstRunIntroSeenDefaultsKey)
     }
 

@@ -189,14 +189,15 @@ import UIKit
         #expect(appModel.gatewayServerName == "gateway.example.com")
         #expect(appModel.gatewayRemoteAddress == "127.0.0.1:53380")
         #expect(appModel.lastGatewayProblem == problem)
-        #expect(appModel.gatewayPairingPaused)
-        #expect(appModel.gatewayPairingRequestId == "req-admin")
+        #expect(!appModel.gatewayPairingPaused)
+        #expect(appModel.gatewayPairingRequestId == nil)
+        #expect(appModel.operatorRoleState == .scopeBlocked(missing: []))
 
         appModel._test_clearGatewayConnectionProblem()
 
         #expect(appModel.lastGatewayProblem == problem)
-        #expect(appModel.gatewayPairingPaused)
-        #expect(appModel.gatewayPairingRequestId == "req-admin")
+        #expect(!appModel.gatewayPairingPaused)
+        #expect(appModel.gatewayPairingRequestId == nil)
 
         appModel._test_clearOperatorGatewayConnectionProblemIfCurrent()
 
@@ -310,6 +311,42 @@ import UIKit
 
         #expect(!appModel._test_hasGatewayLoopTasks().node)
         #expect(!appModel._test_hasGatewayLoopTasks().operator)
+    }
+
+    @Test @MainActor func foregroundStaleConnectionRestartReappliesActiveGatewayConfig() async {
+        let appModel = NodeAppModel()
+        defer { appModel.disconnectGateway() }
+
+        let config = Self.makeGatewayConnectConfig()
+        appModel.applyGatewayConnectConfig(config)
+        await appModel._test_restartGatewaySessionsAfterForegroundStaleConnection()
+
+        #expect(appModel.gatewayStatusText == "Reconnecting…")
+        #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: config) == true)
+        #expect(appModel._test_hasGatewayLoopTasks().node)
+        #expect(appModel._test_hasGatewayLoopTasks().operator)
+        #expect(appModel.nodeRoleState == .connecting)
+        #expect(appModel.operatorRoleState == .connecting)
+    }
+
+    @Test @MainActor func staleForegroundCheckCannotReplaceAUserSelectedGateway() async {
+        let appModel = NodeAppModel()
+        defer { appModel.disconnectGateway() }
+
+        let first = Self.makeGatewayConnectConfig()
+        appModel.applyGatewayConnectConfig(first)
+        let firstGeneration = appModel._test_gatewayConfigurationGeneration()
+
+        let replacement = Self.makeGatewayConnectConfig(
+            url: URL(string: "wss://replacement.example.com")!,
+            stableID: "manual|replacement.example.com|443")
+        appModel.applyGatewayConnectConfig(replacement)
+        await appModel._test_restartGatewaySessionsAfterForegroundStaleConnection(
+            expectedConfig: first,
+            expectedConfigurationGeneration: firstGeneration)
+
+        #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: replacement) == true)
+        #expect(appModel.gatewayStatusText != "Reconnecting…")
     }
 
     @Test @MainActor func loadLastConnectionReadsSavedValues() {

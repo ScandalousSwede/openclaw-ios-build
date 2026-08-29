@@ -297,8 +297,8 @@ struct OnboardingWizardView: View {
             .onChange(of: self.appModel.gatewayStatusText) { _, newValue in
                 self.updateConnectionIssue(problem: self.appModel.lastGatewayProblem, statusText: newValue)
             }
-            .onChange(of: self.appModel.gatewayServerName) { _, newValue in
-                guard newValue != nil else { return }
+            .onChange(of: self.appModel.mobileSetupComplete) { _, isComplete in
+                guard isComplete else { return }
                 self.showQRScanner = false
                 self.statusLine = "Connected."
                 if !self.didMarkCompleted, let selectedMode {

@@ -296,8 +296,8 @@ struct RootTabs: View {
         content
             .onChange(of: self.canvasDebugStatusEnabled) { _, _ in self.updateCanvasDebugStatus() }
             .onChange(of: self.gatewayController.gateways.count) { _, _ in self.maybeShowQuickSetup() }
-            .onChange(of: self.appModel.gatewayServerName) { _, newValue in
-                if newValue != nil {
+            .onChange(of: self.appModel.mobileSetupComplete) { _, isComplete in
+                if isComplete {
                     self.onboardingComplete = true
                     self.hasConnectedOnce = true
                     OnboardingStateStore.markCompleted(mode: nil)
@@ -552,7 +552,7 @@ struct RootTabs: View {
         guard !self.didEvaluateOnboarding else { return }
         self.didEvaluateOnboarding = true
         let route = Self.startupPresentationRoute(
-            gatewayConnected: self.appModel.gatewayServerName != nil,
+            gatewayConnected: self.appModel.mobileSetupComplete,
             hasConnectedOnce: self.hasConnectedOnce,
             onboardingComplete: self.onboardingComplete,
             hasExistingGatewayConfig: self.hasExistingGatewayConfig(),
@@ -584,7 +584,7 @@ struct RootTabs: View {
         guard !self.didAutoOpenSettings else { return }
         guard !self.showOnboarding else { return }
         let route = Self.startupPresentationRoute(
-            gatewayConnected: self.appModel.gatewayServerName != nil,
+            gatewayConnected: self.appModel.mobileSetupComplete,
             hasConnectedOnce: self.hasConnectedOnce,
             onboardingComplete: self.onboardingComplete,
             hasExistingGatewayConfig: self.hasExistingGatewayConfig(),

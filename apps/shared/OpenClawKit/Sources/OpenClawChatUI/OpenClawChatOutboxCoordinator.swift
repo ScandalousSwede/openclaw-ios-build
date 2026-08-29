@@ -447,6 +447,8 @@ public struct OpenClawChatOutboxStatus: Equatable, Sendable {
         case gatewayIdentityUnavailable
         case gatewayMismatch
         case capabilityUnavailable
+        case operatorRoleMissing
+        case operatorSessionUnavailable
         case operatorScopesUnavailable
         case routingContractUnavailable
     }
@@ -509,6 +511,10 @@ enum OpenClawChatOutboxCoordinatorError: Error, LocalizedError, Equatable, Senda
                 "This gateway does not advertise durable chat routing."
             case .operatorScopesUnavailable:
                 "The authenticated connection is missing required chat scopes."
+            case .operatorRoleMissing:
+                "The paired device is missing the operator role required for Chat."
+            case .operatorSessionUnavailable:
+                "The operator session required for Chat is unavailable."
             case .routingContractUnavailable:
                 "The gateway did not provide a chat routing contract."
             default:
@@ -1068,6 +1074,8 @@ actor OpenClawChatOutboxCoordinator {
         case .gatewayIdentityUnavailable: .gatewayIdentityUnavailable
         case .gatewayMismatch: .gatewayMismatch
         case .routeUnavailable: .offline
+        case .operatorRoleMissing: .operatorRoleMissing
+        case .operatorSessionUnavailable: .operatorSessionUnavailable
         case .capabilityUnavailable: .capabilityUnavailable
         case .operatorScopesUnavailable: .operatorScopesUnavailable
         case .routingContractUnavailable: .routingContractUnavailable

@@ -403,6 +403,10 @@ public struct OpenClawChatView: View {
                 "The paired client Hello does not advertise durable chat routing. Delivery is disabled."
             case .operatorScopesUnavailable:
                 "The authenticated connection is missing required operator chat scopes. Delivery is disabled."
+            case .operatorRoleMissing:
+                "This paired device is missing the operator role required for Chat. Delivery is disabled."
+            case .operatorSessionUnavailable:
+                "The operator session required for Chat is unavailable. Delivery is disabled."
             case .routingContractUnavailable:
                 "The gateway did not provide a routing contract. Delivery is disabled."
             case .gatewayIdentityUnavailable, .gatewayMismatch:

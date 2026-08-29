@@ -19,6 +19,74 @@ struct ChatPreparationRetryState: Equatable {
     }
 }
 
+enum ChatConnectionPresentation {
+    static func blockingText(
+        deliveryGate: OpenClawChatOutboxStatus.DeliveryGate?,
+        nodeState: GatewayNodeRoleState,
+        operatorState: GatewayOperatorRoleState) -> String?
+    {
+        // Role issuance and granted-scope state are authoritative. A generic
+        // route/offline snapshot can lag behind them and must not hide the
+        // actionable reason Chat is unavailable.
+        switch operatorState {
+        case .missingRole:
+            return "Operator role missing"
+        case .scopeBlocked:
+            return "Operator scopes unavailable"
+        case .offline, .connecting, .online:
+            break
+        }
+        if let deliveryGate {
+            switch deliveryGate {
+            case .operatorRoleMissing:
+                return "Operator role missing"
+            case .operatorSessionUnavailable:
+                return "Operator session unavailable"
+            case .operatorScopesUnavailable:
+                return "Operator scopes unavailable"
+            case .routingContractUnavailable, .capabilityUnavailable, .unsupportedClient:
+                return "Routing contract unavailable"
+            case .gatewayIdentityUnavailable, .gatewayMismatch:
+                return "Gateway identity unavailable"
+            case .offline:
+                return "Gateway offline"
+            }
+        }
+        switch operatorState {
+        case .offline where nodeState == .online:
+            return "Operator session unavailable"
+        case .offline:
+            return "Gateway offline"
+        case .connecting:
+            return "Operator connecting"
+        case .online where nodeState != .online:
+            return "Gateway offline"
+        case .online:
+            return nil
+        case .missingRole:
+            return "Operator role missing"
+        case .scopeBlocked:
+            return "Operator scopes unavailable"
+        }
+    }
+
+    static func messagePlaceholder(
+        agentName: String,
+        blockingText: String?,
+        gatewayConnected: Bool,
+        canQueueOffline: Bool,
+        supportsDurableOutbox: Bool) -> String
+    {
+        if let blockingText {
+            return canQueueOffline ? "\(blockingText) — messages queue locally" : blockingText
+        }
+        if gatewayConnected { return "Message \(agentName)..." }
+        if canQueueOffline { return "Message \(agentName) (queues offline)" }
+        if supportsDurableOutbox { return "Connect once to enable offline queueing" }
+        return "Connect to a gateway"
+    }
+}
+
 struct ChatProTab: View {
     @Environment(NodeAppModel.self) private var appModel
     @Environment(\.colorScheme) private var colorScheme
@@ -187,9 +255,7 @@ struct ChatProTab: View {
             let currentSessionKey = self.appModel.chatSessionKey
             self.viewModel = OpenClawChatViewModel(
                 sessionKey: currentSessionKey,
-                transport: IOSGatewayChatTransport(
-                    gateway: self.appModel.operatorSession,
-                    stableGatewayID: stableGatewayID),
+                transport: self.appModel.makeOperatorChatTransport(stableGatewayID: stableGatewayID),
                 outboxDeliveryOwner: outboxDeliveryOwner,
                 onSessionChanged: { sessionKey in
                     self.appModel.focusChatSession(sessionKey)
@@ -224,21 +290,21 @@ struct ChatProTab: View {
 
     private var connectionPill: some View {
         HStack(spacing: 6) {
-            ProStatusDot(color: self.gatewayConnected ? OpenClawBrand.ok : .orange)
-            Text(self.gatewayConnected ? "Connected" : "Connecting")
+            ProStatusDot(color: self.chatDeliveryReady ? OpenClawBrand.ok : .orange)
+            Text(self.chatDeliveryReady ? "Connected" : (self.chatBlockingConditionText ?? "Connecting"))
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
         }
-        .foregroundStyle(self.gatewayConnected ? OpenClawBrand.ok : .orange)
+        .foregroundStyle(self.chatDeliveryReady ? OpenClawBrand.ok : .orange)
         .padding(.horizontal, 10)
         .frame(height: 30)
         .background {
             Capsule()
-                .fill((self.gatewayConnected ? OpenClawBrand.ok : Color.orange).opacity(0.11))
+                .fill((self.chatDeliveryReady ? OpenClawBrand.ok : Color.orange).opacity(0.11))
         }
         .overlay {
             Capsule()
-                .strokeBorder((self.gatewayConnected ? OpenClawBrand.ok : Color.orange).opacity(0.16), lineWidth: 1)
+                .strokeBorder((self.chatDeliveryReady ? OpenClawBrand.ok : Color.orange).opacity(0.16), lineWidth: 1)
         }
     }
 
@@ -249,17 +315,24 @@ struct ChatProTab: View {
         return self.appModel.isAppleReviewDemoModeEnabled || self.appModel.isOperatorGatewayConnected
     }
 
+    private var chatDeliveryReady: Bool {
+        self.gatewayConnected && self.chatBlockingConditionText == nil
+    }
+
     private var messagePlaceholder: String {
-        if self.gatewayConnected {
-            return "Message \(self.agentDisplayName)..."
-        }
-        if self.viewModel?.canQueueOffline == true {
-            return "Message \(self.agentDisplayName) (queues offline)"
-        }
-        if self.viewModel?.supportsDurableOutbox == true {
-            return "Connect once to enable offline queueing"
-        }
-        return "Connect to a gateway"
+        ChatConnectionPresentation.messagePlaceholder(
+            agentName: self.agentDisplayName,
+            blockingText: self.chatBlockingConditionText,
+            gatewayConnected: self.gatewayConnected,
+            canQueueOffline: self.viewModel?.canQueueOffline == true,
+            supportsDurableOutbox: self.viewModel?.supportsDurableOutbox == true)
+    }
+
+    private var chatBlockingConditionText: String? {
+        ChatConnectionPresentation.blockingText(
+            deliveryGate: self.viewModel?.outboxStatus.deliveryGate,
+            nodeState: self.appModel.nodeRoleState,
+            operatorState: self.appModel.operatorRoleState)
     }
 
     private var chatUserAccent: Color {

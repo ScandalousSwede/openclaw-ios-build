@@ -142,12 +142,32 @@ public struct GatewayConnectOptions: Sendable {
     }
 }
 
-public enum GatewayAuthSource: String, Sendable {
+public enum GatewayAuthSource: String, Sendable, Equatable {
     case deviceToken = "device-token"
     case sharedToken = "shared-token"
     case bootstrapToken = "bootstrap-token"
     case password
     case none
+
+    /// Resolves only caller-supplied credentials using the same precedence as
+    /// the wire-level connect payload: shared token, password, then one-shot
+    /// bootstrap token. Stored role credentials are selected separately.
+    public static func explicitCredentialSource(
+        token: String?,
+        bootstrapToken: String?,
+        password: String?) -> GatewayAuthSource
+    {
+        if token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return .sharedToken
+        }
+        if password?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return .password
+        }
+        if bootstrapToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return .bootstrapToken
+        }
+        return .none
+    }
 }
 
 /// Avoid ambiguity with the app's own AnyCodable type.
@@ -229,6 +249,11 @@ private struct SelectedConnectAuth {
     let suppressedDeviceTokenRetry: Bool
 }
 
+private enum ParsedBootstrapHandoffCredentials {
+    case credentials([GatewayBootstrapHandoffCredential])
+    case malformed
+}
+
 private enum GatewayConnectErrorCodes {
     static let authTokenMismatch = GatewayConnectAuthDetailCode.authTokenMismatch.rawValue
     static let authDeviceTokenMismatch = GatewayConnectAuthDetailCode.authDeviceTokenMismatch.rawValue
@@ -270,6 +295,7 @@ public actor GatewayChannelActor {
     private var lastTick: Date?
     private var tickIntervalMs: Double = 30000
     private var lastAuthSource: GatewayAuthSource = .none
+    private var bootstrapHandoffReceipt: GatewayBootstrapHandoffConnectionReceipt?
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     // Remote gateways (tailscale/wan) can take longer to deliver connect.challenge.
@@ -347,6 +373,15 @@ public actor GatewayChannelActor {
 
     public func authSource() -> GatewayAuthSource {
         self.lastAuthSource
+    }
+
+    func bootstrapHandoffConnectionReceipt(
+        ifCurrentConnectionGeneration expectedGeneration: UInt64) -> GatewayBootstrapHandoffConnectionReceipt?
+    {
+        guard self.isConnected(connectionGeneration: expectedGeneration),
+              self.bootstrapHandoffReceipt?.physicalConnectionGeneration == expectedGeneration
+        else { return nil }
+        return self.bootstrapHandoffReceipt
     }
 
     public func shutdown() async {
@@ -451,6 +486,7 @@ public actor GatewayChannelActor {
                 + "scheme=\(self.url.scheme ?? "unknown")"
         self.logger.info("\(connectStartMessage, privacy: .public)")
 
+        self.bootstrapHandoffReceipt = nil
         self.connectionGeneration &+= 1
         let connectionGeneration = self.connectionGeneration
         self.disconnectedConnectionGeneration = nil
@@ -681,9 +717,11 @@ public actor GatewayChannelActor {
             method: "connect",
             params: ProtoAnyCodable(params))
         let data = try self.encoder.encode(frame)
-        try await task.send(.data(data))
-        try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
+        var bootstrapRequestWasDispatched = false
         do {
+            try await task.send(.data(data))
+            bootstrapRequestWasDispatched = selectedAuth.authSource == .bootstrapToken
+            try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
             let response = try await self.waitForConnectResponse(
                 reqId: reqId,
                 task: task,
@@ -692,12 +730,22 @@ public actor GatewayChannelActor {
             let hello = try await self.handleConnectResponse(
                 response,
                 identity: identity,
-                role: role)
+                role: role,
+                connectionGeneration: connectionGeneration)
             try self.requireCurrentSocket(task, connectionGeneration: connectionGeneration)
             self.pendingDeviceTokenRetry = false
             self.deviceTokenRetryBudgetUsed = false
             return hello
         } catch {
+            if bootstrapRequestWasDispatched,
+               !self.shouldRetainBootstrapTokenAfterConnectError(error)
+            {
+                // Once a bootstrap request was physically dispatched, a lost or
+                // malformed response is ambiguous: replaying the one-shot could mint
+                // another role set. Only the gateway's explicit wait-then-retry
+                // pairing response authorizes reuse.
+                self.bootstrapToken = nil
+            }
             let shouldRetryWithDeviceToken = self.shouldRetryWithStoredDeviceToken(
                 error: error,
                 explicitGatewayToken: self.token?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
@@ -718,6 +766,14 @@ public actor GatewayChannelActor {
         }
     }
 
+    private func shouldRetainBootstrapTokenAfterConnectError(_ error: Error) -> Bool {
+        guard let authError = error as? GatewayConnectAuthError else { return false }
+        return authError.detail == .pairingRequired &&
+            authError.recommendedNextStep == .waitThenRetry &&
+            authError.retryableOverride == true &&
+            authError.pauseReconnectOverride == false
+    }
+
     private func selectConnectAuth(
         role: String,
         includeDeviceIdentity: Bool,
@@ -728,6 +784,10 @@ public actor GatewayChannelActor {
         let explicitBootstrapToken =
             self.bootstrapToken?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         let explicitPassword = self.password?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let explicitCredentialSource = GatewayAuthSource.explicitCredentialSource(
+            token: explicitToken,
+            bootstrapToken: explicitBootstrapToken,
+            password: explicitPassword)
         let storedEntry =
             (includeDeviceIdentity && deviceId != nil)
             ? DeviceAuthStore.loadToken(deviceId: deviceId!, role: role)
@@ -748,32 +808,33 @@ public actor GatewayChannelActor {
             includeDeviceIdentity && self.pendingDeviceTokenRetry &&
             !requestedScopesExceedStoredToken && storedToken != nil && explicitToken != nil &&
             self.isTrustedDeviceRetryEndpoint()
-        let authToken =
-            explicitToken ??
-            // A freshly scanned setup code should force the bootstrap pairing path instead of
+        let authToken = switch explicitCredentialSource {
+        case .sharedToken:
+            explicitToken
+        case .none:
+            // A freshly scanned setup code should force its explicit auth path instead of
             // silently reusing an older stored device token.
-            (includeDeviceIdentity && explicitPassword == nil && explicitBootstrapToken == nil
-                ? storedToken
-                : nil)
-        let authBootstrapToken =
-            authToken == nil && explicitPassword == nil ? explicitBootstrapToken : nil
+            includeDeviceIdentity ? storedToken : nil
+        case .password, .bootstrapToken, .deviceToken:
+            nil
+        }
+        let authBootstrapToken = explicitCredentialSource == .bootstrapToken
+            ? explicitBootstrapToken
+            : nil
+        let authPassword = explicitCredentialSource == .password ? explicitPassword : nil
         let authDeviceToken = shouldUseDeviceRetryToken ? storedToken : nil
-        let authSource: GatewayAuthSource = if authDeviceToken != nil || (explicitToken == nil && authToken != nil) {
+        let authSource: GatewayAuthSource = if authDeviceToken != nil ||
+            (explicitCredentialSource == .none && authToken != nil)
+        {
             .deviceToken
-        } else if authToken != nil {
-            .sharedToken
-        } else if authBootstrapToken != nil {
-            .bootstrapToken
-        } else if explicitPassword != nil {
-            .password
         } else {
-            .none
+            explicitCredentialSource
         }
         return SelectedConnectAuth(
             authToken: authToken,
             authBootstrapToken: authBootstrapToken,
             authDeviceToken: authDeviceToken,
-            authPassword: explicitPassword,
+            authPassword: authPassword,
             signatureToken: authToken ?? authBootstrapToken,
             storedToken: storedToken,
             storedScopes: storedEntry?.scopes,
@@ -869,10 +930,11 @@ public actor GatewayChannelActor {
         if scheme == "wss" {
             return true
         }
-        if let host = self.url.host, LoopbackHost.isLoopback(host) {
-            return true
-        }
-        return false
+        guard scheme == "ws", let host = self.url.host else { return false }
+        // QR setup explicitly permits plaintext WebSocket only for local-network
+        // endpoints. Persist the bounded handoff so the one-shot bootstrap token
+        // is never replayed on the first reconnect.
+        return LoopbackHost.isLocalNetworkHost(host)
     }
 
     private func filteredBootstrapHandoffScopes(role: String, scopes: [String]) -> [String]? {
@@ -914,40 +976,12 @@ public actor GatewayChannelActor {
         return requestedScopes
     }
 
-    private func persistBootstrapHandoffToken(
-        deviceId: String,
-        role: String,
-        token: String,
-        scopes: [String])
-    {
-        guard let filteredScopes = self.filteredBootstrapHandoffScopes(role: role, scopes: scopes) else {
-            return
-        }
-        _ = DeviceAuthStore.storeToken(
-            deviceId: deviceId,
-            role: role,
-            token: token,
-            scopes: filteredScopes)
-    }
-
     private func persistIssuedDeviceToken(
-        authSource: GatewayAuthSource,
         deviceId: String,
         role: String,
         token: String,
         scopes: [String])
     {
-        if authSource == .bootstrapToken {
-            guard self.shouldPersistBootstrapHandoffTokens() else {
-                return
-            }
-            self.persistBootstrapHandoffToken(
-                deviceId: deviceId,
-                role: role,
-                token: token,
-                scopes: scopes)
-            return
-        }
         _ = DeviceAuthStore.storeToken(
             deviceId: deviceId,
             role: role,
@@ -955,10 +989,129 @@ public actor GatewayChannelActor {
             scopes: scopes)
     }
 
+    private func parseBootstrapHandoffScopes(_ value: ProtoAnyCodable?) -> [String]? {
+        guard let value else { return [] }
+        guard let rawScopes = value.value as? [ProtoAnyCodable] else { return nil }
+        var scopes: [String] = []
+        scopes.reserveCapacity(rawScopes.count)
+        for rawScope in rawScopes {
+            guard let scope = rawScope.value as? String else { return nil }
+            let normalized = scope.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !normalized.isEmpty {
+                scopes.append(normalized)
+            }
+        }
+        return Array(Set(scopes)).sorted()
+    }
+
+    private func parseBootstrapHandoffCredential(
+        _ raw: [String: ProtoAnyCodable],
+        defaultRole: String?) -> GatewayBootstrapHandoffCredential?
+    {
+        let roleValue: String
+        if let rawRole = raw["role"] {
+            guard let role = rawRole.value as? String else { return nil }
+            roleValue = role
+        } else if let defaultRole {
+            roleValue = defaultRole
+        } else {
+            return nil
+        }
+        let normalizedRole = roleValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let role = GatewayBootstrapHandoffRole(rawValue: normalizedRole),
+              let scopes = self.parseBootstrapHandoffScopes(raw["scopes"])
+        else { return nil }
+
+        let token: String?
+        if let rawToken = raw["deviceToken"] {
+            guard let tokenValue = rawToken.value as? String else { return nil }
+            token = tokenValue.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        } else {
+            token = nil
+        }
+        return GatewayBootstrapHandoffCredential(role: role, token: token, scopes: scopes)
+    }
+
+    private func parseBootstrapHandoffCredentials(
+        auth: [String: ProtoAnyCodable],
+        primaryRole: String) -> ParsedBootstrapHandoffCredentials
+    {
+        var credentials: [GatewayBootstrapHandoffCredential] = []
+        let hasPrimaryCredentialFields = auth["deviceToken"] != nil || auth["role"] != nil || auth["scopes"] != nil
+        if hasPrimaryCredentialFields {
+            guard let primary = self.parseBootstrapHandoffCredential(auth, defaultRole: primaryRole) else {
+                return .malformed
+            }
+            credentials.append(primary)
+        }
+
+        if let rawAdditional = auth["deviceTokens"] {
+            guard let entries = rawAdditional.value as? [ProtoAnyCodable] else { return .malformed }
+            for entry in entries {
+                guard let rawEntry = entry.value as? [String: ProtoAnyCodable],
+                      let credential = self.parseBootstrapHandoffCredential(rawEntry, defaultRole: nil)
+                else { return .malformed }
+                credentials.append(credential)
+            }
+        }
+        return .credentials(credentials)
+    }
+
+    private func recordBootstrapHandoff(
+        auth: [String: ProtoAnyCodable],
+        identity: DeviceIdentity?,
+        primaryRole: String,
+        connectionGeneration: UInt64)
+    {
+        var plan: GatewayBootstrapHandoffPlan = switch self.parseBootstrapHandoffCredentials(
+            auth: auth,
+            primaryRole: primaryRole)
+        {
+        case let .credentials(credentials):
+            GatewayBootstrapHandoffValidator.validate(credentials)
+        case .malformed:
+            GatewayBootstrapHandoffValidator.malformedPlan()
+        }
+
+        if !self.shouldPersistBootstrapHandoffTokens() {
+            plan = GatewayBootstrapHandoffPlan(
+                issuedRoles: plan.issuedRoles,
+                issues: plan.issues + [.untrustedEndpoint],
+                writes: [])
+        }
+
+        var persistence = GatewayBootstrapHandoffPersistence.notAttempted
+        if plan.issues.isEmpty {
+            if let identity {
+                do {
+                    _ = try DeviceAuthStore.storeTokensAtomically(
+                        deviceId: identity.deviceId,
+                        writes: plan.writes)
+                    persistence = .succeeded
+                } catch {
+                    persistence = .failed
+                    self.logger.error("bootstrap handoff credential persistence failed")
+                }
+            } else {
+                persistence = .failed
+            }
+        }
+
+        self.bootstrapHandoffReceipt = GatewayBootstrapHandoffConnectionReceipt(
+            physicalConnectionGeneration: connectionGeneration,
+            issuedRoles: plan.issuedRoles,
+            issues: plan.issues,
+            persistence: persistence)
+        // A setup credential is one-shot. A later physical reconnect must use the
+        // freshly persisted node credential (or fail honestly), never replay it.
+        self.bootstrapToken = nil
+    }
+
     private func handleConnectResponse(
         _ res: ResponseFrame,
         identity: DeviceIdentity?,
-        role: String) async throws -> HelloOk
+        role: String,
+        connectionGeneration: UInt64) async throws -> HelloOk
     {
         if res.ok == false {
             let error = res.error
@@ -1007,36 +1160,22 @@ public actor GatewayChannelActor {
             self.tickIntervalMs = Double(tick)
         }
         let auth = ok.auth
-        if let identity {
+        if self.lastAuthSource == .bootstrapToken {
+            self.recordBootstrapHandoff(
+                auth: auth,
+                identity: identity,
+                primaryRole: role,
+                connectionGeneration: connectionGeneration)
+        } else if let identity {
             if let deviceToken = auth["deviceToken"]?.value as? String {
                 let authRole = auth["role"]?.value as? String ?? role
                 let scopes = (auth["scopes"]?.value as? [ProtoAnyCodable])?
                     .compactMap { $0.value as? String } ?? []
                 self.persistIssuedDeviceToken(
-                    authSource: self.lastAuthSource,
                     deviceId: identity.deviceId,
                     role: authRole,
                     token: deviceToken,
                     scopes: scopes)
-            }
-            if self.shouldPersistBootstrapHandoffTokens(),
-               let tokenEntries = auth["deviceTokens"]?.value as? [ProtoAnyCodable]
-            {
-                for entry in tokenEntries {
-                    guard let rawEntry = entry.value as? [String: ProtoAnyCodable],
-                          let deviceToken = rawEntry["deviceToken"]?.value as? String,
-                          let authRole = rawEntry["role"]?.value as? String
-                    else {
-                        continue
-                    }
-                    let scopes = (rawEntry["scopes"]?.value as? [ProtoAnyCodable])?
-                        .compactMap { $0.value as? String } ?? []
-                    self.persistBootstrapHandoffToken(
-                        deviceId: identity.deviceId,
-                        role: authRole,
-                        token: deviceToken,
-                        scopes: scopes)
-                }
             }
         }
         self.lastTick = Date()

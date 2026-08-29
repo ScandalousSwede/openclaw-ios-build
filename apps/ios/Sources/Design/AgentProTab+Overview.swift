@@ -9,7 +9,7 @@ extension AgentProTab {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Agents")
                         .font(.system(size: 28, weight: .bold))
-                    Text("\(self.sortedAgents.count) total")
+                    Text(self.appModel.gatewayAgentRosterSummaryText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -565,6 +565,7 @@ extension AgentProTab {
     }
 
     var emptyAgentsTitle: String {
+        if self.appModel.gatewayAgentRosterLoadState != .loaded { return "Agents unavailable" }
         if !self.gatewayConnected { return "Agents unavailable" }
         if !self.agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "No matches" }
         if self.agentRosterFilter != .all { return "No \(self.agentRosterFilter.title.lowercased()) agents" }
@@ -572,6 +573,9 @@ extension AgentProTab {
     }
 
     var emptyAgentsDetail: String {
+        if self.appModel.gatewayAgentRosterLoadState != .loaded {
+            return "agents.list has not succeeded, so no agent count is authoritative."
+        }
         if !self.gatewayConnected { return "Connect a gateway to load the live agent roster." }
         if !self.agentSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Try another search or clear the agent filters."

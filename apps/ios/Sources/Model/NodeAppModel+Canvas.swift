@@ -7,12 +7,18 @@ enum A2UIReadyState {
 }
 
 extension NodeAppModel {
-    func showA2UIOnConnectIfNeeded() async {
-        await MainActor.run {
-            // Keep the bundled home canvas as the default connected view.
-            // Agents can still explicitly present a remote or local canvas later.
-            self.screen.showDefaultCanvas()
+    func showA2UIOnConnectIfNeeded(
+        ifCurrentRoute expectedRoute: GatewayNodeSessionRoute? = nil,
+        shouldApply: @MainActor @Sendable () -> Bool = { true }) async
+    {
+        guard shouldApply() else { return }
+        if let expectedRoute {
+            guard await self.nodeGateway.isCurrentRoute(expectedRoute) else { return }
         }
+        guard shouldApply() else { return }
+        // Keep the bundled home canvas as the default connected view.
+        // Agents can still explicitly present a remote or local canvas later.
+        self.screen.showDefaultCanvas()
     }
 
     func ensureA2UIReadyWithCapabilityRefresh(timeoutMs: Int = 5000) async -> A2UIReadyState {

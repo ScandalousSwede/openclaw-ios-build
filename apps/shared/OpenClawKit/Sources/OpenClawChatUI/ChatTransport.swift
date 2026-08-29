@@ -22,6 +22,8 @@ public enum OpenClawChatTransportRouteLeaseUnavailableReason: String, Sendable, 
     case gatewayIdentityUnavailable = "gateway_identity_unavailable"
     case gatewayMismatch = "gateway_mismatch"
     case routeUnavailable = "route_unavailable"
+    case operatorRoleMissing = "operator_role_missing"
+    case operatorSessionUnavailable = "operator_session_unavailable"
     case capabilityUnavailable = "capability_unavailable"
     case operatorScopesUnavailable = "operator_scopes_unavailable"
     case routingContractUnavailable = "routing_contract_unavailable"

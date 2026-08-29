@@ -416,6 +416,19 @@ private func waitForIOSSessionMutation(
         }
     }
 
+    @Test func outboxLeaseReportsOperatorSessionUnavailableSeparatelyFromOffline() async {
+        let transport = IOSGatewayChatTransport(
+            gateway: GatewayNodeSession(),
+            stableGatewayID: "gateway-a",
+            routeAbsenceReason: { .operatorSessionUnavailable })
+        switch await transport.acquireOutboxRouteLease() {
+        case .unavailable(reason: .operatorSessionUnavailable):
+            break
+        default:
+            Issue.record("missing operator route must not be projected as generic offline")
+        }
+    }
+
     @Test func requestsFailFastWhenGatewayNotConnected() async {
         let gateway = GatewayNodeSession()
         let transport = IOSGatewayChatTransport(gateway: gateway)

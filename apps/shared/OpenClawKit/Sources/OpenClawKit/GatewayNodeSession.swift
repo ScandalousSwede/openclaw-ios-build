@@ -72,6 +72,11 @@ public actor GatewayNodeSession {
         let continuation: CheckedContinuation<SnapshotWaitResult, Never>
     }
 
+    private struct RouteBoundBootstrapHandoffReceipt {
+        let route: GatewayNodeSessionRoute
+        let receipt: GatewayBootstrapHandoffReceipt
+    }
+
     private let logger = Logger(subsystem: "ai.openclaw", category: "node.gateway")
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
@@ -91,6 +96,7 @@ public actor GatewayNodeSession {
     private var executingLifecycleCallbackIDs: Set<UUID> = []
     private var connectOptions: GatewayConnectOptions?
     private var onConnected: (@Sendable () async -> Void)?
+    private var onConnectedRoute: (@Sendable (GatewayNodeSessionRoute) async -> Void)?
     private var onDisconnected: (@Sendable (String) async -> Void)?
     private var onInvoke: (@Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse)?
     private var hasEverConnected = false
@@ -99,6 +105,7 @@ public actor GatewayNodeSession {
     private var serverCapabilities: Set<GatewayServerCapability>?
     private var serverCapabilityNames: Set<String>?
     private var authenticatedOperatorScopes: Set<String>?
+    private var routeBoundBootstrapHandoffReceipt: RouteBoundBootstrapHandoffReceipt?
     private var snapshotWaiters: [UUID: SnapshotWaiter] = [:]
     #if DEBUG
     private var testBeforePushAdmission: (@Sendable () async -> Void)?
@@ -235,6 +242,7 @@ public actor GatewayNodeSession {
         connectOptions: GatewayConnectOptions,
         sessionBox: WebSocketSessionBox?,
         onConnected: @escaping @Sendable () async -> Void,
+        onConnectedRoute: (@Sendable (GatewayNodeSessionRoute) async -> Void)? = nil,
         onDisconnected: @escaping @Sendable (String) async -> Void,
         onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse) async throws
     {
@@ -303,6 +311,7 @@ public actor GatewayNodeSession {
                 routeGeneration: self.admissionGeneration))
             self.connectOptions = connectOptions
             self.onConnected = onConnected
+            self.onConnectedRoute = onConnectedRoute
             self.onDisconnected = onDisconnected
             self.onInvoke = onInvoke
             self.activeURL = url
@@ -315,6 +324,7 @@ public actor GatewayNodeSession {
             installedChannelGeneration = self.channelGeneration
             self.connectOptions = connectOptions
             self.onConnected = onConnected
+            self.onConnectedRoute = onConnectedRoute
             self.onDisconnected = onDisconnected
             self.onInvoke = onInvoke
         }
@@ -390,6 +400,7 @@ public actor GatewayNodeSession {
         self.activeSessionIdentity = nil
         self.connectOptions = nil
         self.onConnected = nil
+        self.onConnectedRoute = nil
         self.onDisconnected = nil
         self.onInvoke = nil
         self.activeSocketGeneration = nil
@@ -400,6 +411,15 @@ public actor GatewayNodeSession {
         if !isLifecycleReentry {
             await self.waitForLifecycleCallbacksIfNeeded()
         }
+    }
+
+    /// Retires only the exact admitted route. A stale health or lifecycle task
+    /// cannot disconnect a successor connection installed in the same session.
+    @discardableResult
+    public func disconnect(ifCurrentRoute expectedRoute: GatewayNodeSessionRoute) async -> Bool {
+        guard self.isCurrentRoute(expectedRoute) else { return false }
+        await self.disconnect()
+        return true
     }
 
     public func currentCanvasHostUrl() -> String? {
@@ -434,6 +454,11 @@ public actor GatewayNodeSession {
             return "[\(host)]:\(port)"
         }
         return "\(host):\(port)"
+    }
+
+    public func currentRemoteAddress(ifCurrentRoute route: GatewayNodeSessionRoute) -> String? {
+        guard self.isCurrentRoute(route) else { return nil }
+        return self.currentRemoteAddress()
     }
 
     /// Captures the current route after both the session and physical socket have admitted it.
@@ -482,6 +507,30 @@ public actor GatewayNodeSession {
         return self.authenticatedOperatorScopes
     }
 
+    /// Returns setup-code issuance evidence only while its exact admitted route is current.
+    /// Stored credentials are deliberately not consulted, so a stale operator token cannot
+    /// make a fresh node-only issuance appear complete.
+    public func bootstrapHandoffReceipt(
+        ifCurrentRoute route: GatewayNodeSessionRoute) async -> GatewayBootstrapHandoffReceipt?
+    {
+        guard self.isCurrentRoute(route),
+              let channel = self.channel,
+              let bound = self.routeBoundBootstrapHandoffReceipt,
+              bound.route == route
+        else { return nil }
+
+        // The channel clears its receipt synchronously at the start of every real
+        // physical connection attempt. Requiring that connection-bound receipt here
+        // closes the small interval before the session receives the disconnect callback.
+        guard await channel.bootstrapHandoffConnectionReceipt(
+            ifCurrentConnectionGeneration: route.socketGeneration) != nil,
+            self.isCurrentRoute(route),
+            self.channel === channel,
+            self.routeBoundBootstrapHandoffReceipt?.route == route
+        else { return nil }
+        return bound.receipt
+    }
+
     public func sendEvent(event: String, payloadJSON: String?) async {
         guard let (channel, route) = self.activeRoute() else { return }
         let params: [String: AnyCodable] = [
@@ -497,6 +546,33 @@ public actor GatewayNodeSession {
             else { return }
         } catch {
             self.logger.error("node event failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Sends a node event only through the exact admitted route captured by the
+    /// caller. A replacement connection can never inherit the side effect.
+    @discardableResult
+    public func sendEvent(
+        event: String,
+        payloadJSON: String?,
+        ifCurrentRoute expectedRoute: GatewayNodeSessionRoute) async -> Bool
+    {
+        guard self.isCurrentRoute(expectedRoute), let channel = self.channel else {
+            return false
+        }
+        let params: [String: AnyCodable] = [
+            "event": AnyCodable(event),
+            "payloadJSON": AnyCodable(payloadJSON ?? NSNull()),
+        ]
+        do {
+            try await channel.send(
+                method: "node.event",
+                params: params,
+                ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+            return self.isCurrentRoute(expectedRoute) && self.channel === channel
+        } catch {
+            self.logger.error("node event failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -633,6 +709,30 @@ public actor GatewayNodeSession {
         switch push {
         case let .snapshot(ok):
             let admissionGeneration = self.admissionGeneration
+            guard let channel = self.channel else { return }
+            let route = GatewayNodeSessionRoute(
+                channelGeneration: channelGeneration,
+                admissionGeneration: admissionGeneration,
+                socketGeneration: socketGeneration)
+            let connectionReceipt = await channel.bootstrapHandoffConnectionReceipt(
+                ifCurrentConnectionGeneration: socketGeneration)
+            guard self.channelGeneration == channelGeneration,
+                  self.admissionGeneration == admissionGeneration,
+                  self.channel === channel,
+                  self.isCurrentRoute(route)
+            else { return }
+            if let connectionReceipt {
+                self.activeBootstrapToken = nil
+                self.routeBoundBootstrapHandoffReceipt = RouteBoundBootstrapHandoffReceipt(
+                    route: route,
+                    receipt: GatewayBootstrapHandoffReceipt(
+                        channelGeneration: route.channelGeneration,
+                        routeGeneration: route.admissionGeneration,
+                        physicalConnectionGeneration: route.socketGeneration,
+                        issuedRoles: connectionReceipt.issuedRoles,
+                        issues: connectionReceipt.issues,
+                        persistence: connectionReceipt.persistence))
+            }
             self.pluginSurfaceUrls = self.normalizePluginSurfaceUrls(ok.pluginsurfaceurls)
             self.serverCapabilities = ok.advertisedServerCapabilities
             self.serverCapabilityNames = ok.advertisedServerCapabilityNames
@@ -694,6 +794,7 @@ public actor GatewayNodeSession {
         self.serverCapabilities = nil
         self.serverCapabilityNames = nil
         self.authenticatedOperatorScopes = nil
+        self.routeBoundBootstrapHandoffReceipt = nil
         self.drainSnapshotWaiters(returning: .invalidated)
     }
 
@@ -789,6 +890,7 @@ public actor GatewayNodeSession {
         self.activeSessionIdentity = nil
         self.connectOptions = nil
         self.onConnected = nil
+        self.onConnectedRoute = nil
         self.onDisconnected = nil
         self.onInvoke = nil
         self.activeSocketGeneration = nil
@@ -819,8 +921,19 @@ public actor GatewayNodeSession {
             return
         }
         self.hasNotifiedConnected = true
-        guard let onConnected = self.onConnected else { return }
-        let callback = self.enqueueLifecycleCallback(final: onConnected)
+        guard let (_, route) = self.activeRoute(),
+              route.admissionGeneration == admissionGeneration
+        else { return }
+        let onConnected = self.onConnected
+        let onConnectedRoute = self.onConnectedRoute
+        guard onConnected != nil || onConnectedRoute != nil else { return }
+        let callback = self.enqueueLifecycleCallback {
+            if let onConnectedRoute {
+                await onConnectedRoute(route)
+            } else if let onConnected {
+                await onConnected()
+            }
+        }
         if !self.isExecutingLifecycleCallback() {
             await callback.task.value
         }
@@ -1001,7 +1114,7 @@ public actor GatewayNodeSession {
                 socketGeneration: socketGeneration))
     }
 
-    private func isCurrentRoute(_ route: GatewayNodeSessionRoute) -> Bool {
+    public func isCurrentRoute(_ route: GatewayNodeSessionRoute) -> Bool {
         route.channelGeneration == self.channelGeneration &&
             route.admissionGeneration == self.admissionGeneration &&
             route.socketGeneration == self.activeSocketGeneration

@@ -738,12 +738,34 @@ extension SettingsProTab {
 
     var gatewayTalkConfigDetail: String {
         if self.appModel.isAppleReviewDemoModeEnabled { return "Demo mode only" }
+        switch self.appModel.operatorRoleState {
+        case .scopeBlocked:
+            return "Operator scopes unavailable"
+        case .missingRole, .offline, .connecting:
+            return "Operator session unavailable"
+        case .online:
+            break
+        }
         return self.appModel.talkMode.gatewayTalkTransportLabel
     }
 
     var gatewayTalkConfigValue: String {
         if self.appModel.isAppleReviewDemoModeEnabled { return "demo" }
-        return self.appModel.talkMode.gatewayTalkConfigLoaded ? "loaded" : "missing"
+        switch self.appModel.operatorRoleState {
+        case .scopeBlocked:
+            return "scope blocked"
+        case .missingRole, .offline, .connecting:
+            return "operator unavailable"
+        case .online:
+            break
+        }
+        return switch self.appModel.talkMode.gatewayTalkConfigAvailabilityState {
+        case .loaded: "loaded"
+        case .missingOnServer: "not configured"
+        case .scopeBlocked: "scope blocked"
+        case .failed: "unavailable"
+        case .notRequested, .loading: "loading"
+        }
     }
 
     var gatewayTalkConfigColor: Color {

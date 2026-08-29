@@ -54,6 +54,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     private let gateway: GatewayNodeSession
     private let stableGatewayID: String?
     private let sessionMutationRouter: any IOSGatewaySessionMutationRouting
+    private let routeAbsenceReason: @Sendable () async -> OpenClawChatTransportRouteLeaseUnavailableReason
 
     private struct CreateSessionParams: Codable {
         var key: String
@@ -154,12 +155,15 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     init(
         gateway: GatewayNodeSession,
         stableGatewayID: String? = nil,
-        sessionMutationRouter: (any IOSGatewaySessionMutationRouting)? = nil)
+        sessionMutationRouter: (any IOSGatewaySessionMutationRouting)? = nil,
+        routeAbsenceReason: @escaping @Sendable () async
+            -> OpenClawChatTransportRouteLeaseUnavailableReason = { .routeUnavailable })
     {
         self.gateway = gateway
         let normalizedGatewayID = stableGatewayID?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.stableGatewayID = normalizedGatewayID?.isEmpty == false ? normalizedGatewayID : nil
         self.sessionMutationRouter = sessionMutationRouter ?? LiveIOSGatewaySessionMutationRouter(gateway: gateway)
+        self.routeAbsenceReason = routeAbsenceReason
     }
 
     func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
@@ -167,7 +171,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             return .unavailable(reason: .gatewayIdentityUnavailable)
         }
         guard let route = await self.gateway.currentRoute() else {
-            return .unavailable(reason: .routeUnavailable)
+            return .unavailable(reason: await self.routeAbsenceReason())
         }
         guard await self.gateway.currentGatewayID(ifCurrentRoute: route) == stableGatewayID else {
             return .unavailable(reason: .gatewayMismatch)

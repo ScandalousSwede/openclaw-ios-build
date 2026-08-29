@@ -3,6 +3,28 @@ import Testing
 @testable import OpenClaw
 
 @Suite struct GatewayStatusBuilderTests {
+    @Test func wholeAppIsHealthyOnlyWhenBothRolesAreOnline() {
+        #expect(GatewayStatusBuilder.build(
+            nodeRoleState: .online,
+            operatorRoleState: .online,
+            lastGatewayProblem: nil) == .connected)
+        #expect(GatewayStatusBuilder.build(
+            nodeRoleState: .online,
+            operatorRoleState: .offline,
+            lastGatewayProblem: nil) == .disconnected)
+    }
+
+    @Test func missingOrScopeBlockedOperatorRoleIsAnHonestError() {
+        #expect(GatewayStatusBuilder.build(
+            nodeRoleState: .online,
+            operatorRoleState: .missingRole,
+            lastGatewayProblem: nil) == .error)
+        #expect(GatewayStatusBuilder.build(
+            nodeRoleState: .online,
+            operatorRoleState: .scopeBlocked(missing: ["operator.read"]),
+            lastGatewayProblem: nil) == .error)
+    }
+
     @Test func pausedProblemKeepsErrorStatus() {
         let state = GatewayStatusBuilder.build(
             gatewayServerName: nil,

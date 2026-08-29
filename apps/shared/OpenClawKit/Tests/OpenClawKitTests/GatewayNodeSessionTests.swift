@@ -11,6 +11,18 @@ private extension NSLock {
     }
 }
 
+private actor GatewayRouteRecorder {
+    private var route: GatewayNodeSessionRoute?
+
+    func record(_ route: GatewayNodeSessionRoute) {
+        self.route = route
+    }
+
+    func value() -> GatewayNodeSessionRoute? {
+        self.route
+    }
+}
+
 private final class DoubleCallbackPingWebSocketTask: WebSocketTasking, @unchecked Sendable {
     private let callbacks: [Error?]
 
@@ -52,6 +64,7 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
     private let helloAuth: [String: Any]?
     private let helloCapabilities: [String]
     private let deliversReceiveFailureOnCancel: Bool
+    private let failsConnectResponseAfterRequest: Bool
     private let requestSendGate: GatewayAsyncGate?
     private var _state: URLSessionTask.State = .suspended
     private var connectRequestId: String?
@@ -65,11 +78,13 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         helloAuth: [String: Any]? = nil,
         helloCapabilities: [String] = [],
         deliversReceiveFailureOnCancel: Bool = true,
+        failsConnectResponseAfterRequest: Bool = false,
         requestSendGate: GatewayAsyncGate? = nil)
     {
         self.helloAuth = helloAuth
         self.helloCapabilities = helloCapabilities
         self.deliversReceiveFailureOnCancel = deliversReceiveFailureOnCancel
+        self.failsConnectResponseAfterRequest = failsConnectResponseAfterRequest
         self.requestSendGate = requestSendGate
     }
 
@@ -160,12 +175,18 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         for _ in 0..<50 {
             let id = self.lock.withLock { self.connectRequestId }
             if let id {
+                if self.failsConnectResponseAfterRequest {
+                    throw URLError(.networkConnectionLost)
+                }
                 return .data(Self.connectOkData(
                     id: id,
                     auth: self.helloAuth,
                     capabilities: self.helloCapabilities))
             }
             try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        if self.failsConnectResponseAfterRequest {
+            throw URLError(.networkConnectionLost)
         }
         return .data(Self.connectOkData(
             id: "connect",
@@ -319,6 +340,7 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
     private let helloAuth: [String: Any]?
     private let helloCapabilities: [String]
     private let deliversReceiveFailureOnCancel: Bool
+    private let failsConnectResponseAfterRequest: Bool
     private let requestSendGate: GatewayAsyncGate?
     private var tasks: [FakeGatewayWebSocketTask] = []
     private var makeCount = 0
@@ -327,11 +349,13 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
         helloAuth: [String: Any]? = nil,
         helloCapabilities: [String] = [],
         deliversReceiveFailureOnCancel: Bool = true,
+        failsConnectResponseAfterRequest: Bool = false,
         requestSendGate: GatewayAsyncGate? = nil)
     {
         self.helloAuth = helloAuth
         self.helloCapabilities = helloCapabilities
         self.deliversReceiveFailureOnCancel = deliversReceiveFailureOnCancel
+        self.failsConnectResponseAfterRequest = failsConnectResponseAfterRequest
         self.requestSendGate = requestSendGate
     }
 
@@ -358,6 +382,7 @@ private final class FakeGatewayWebSocketSession: WebSocketSessioning, @unchecked
                 helloAuth: self.helloAuth,
                 helloCapabilities: self.helloCapabilities,
                 deliversReceiveFailureOnCancel: self.deliversReceiveFailureOnCancel,
+                failsConnectResponseAfterRequest: self.failsConnectResponseAfterRequest,
                 requestSendGate: self.requestSendGate)
             self.tasks.append(task)
             return WebSocketTaskBox(task: task)
@@ -470,6 +495,38 @@ private func connectForGenerationTest(
         onConnected: onConnected,
         onDisconnected: onDisconnected,
         onInvoke: onInvoke)
+}
+
+private func bootstrapHandoffTestOptions() -> GatewayConnectOptions {
+    GatewayConnectOptions(
+        role: "node",
+        scopes: [],
+        caps: [],
+        commands: [],
+        permissions: [:],
+        clientId: "openclaw-ios-bootstrap-test",
+        clientMode: "node",
+        clientDisplayName: "iOS Bootstrap Test",
+        includeDeviceIdentity: true)
+}
+
+private func connectForBootstrapHandoffTest(
+    _ gateway: GatewayNodeSession,
+    session: FakeGatewayWebSocketSession,
+    endpoint: String = "wss://example.invalid") async throws
+{
+    try await gateway.connect(
+        url: URL(string: endpoint)!,
+        token: nil,
+        bootstrapToken: "fresh-bootstrap-token",
+        password: nil,
+        connectOptions: bootstrapHandoffTestOptions(),
+        sessionBox: WebSocketSessionBox(session: session),
+        onConnected: {},
+        onDisconnected: { _ in },
+        onInvoke: { request in
+            BridgeInvokeResponse(id: request.id, ok: true, payloadJSON: nil, error: nil)
+        })
 }
 
 @Suite(.serialized)
@@ -597,6 +654,80 @@ struct GatewayNodeSessionTests {
         #expect(auth["token"] == nil)
 
         await gateway.disconnect()
+    }
+
+    @Test
+    func explicitSharedTokenIsTheOnlyWireCredentialWhenEveryInputIsPresent() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        let options = GatewayConnectOptions(
+            role: "operator",
+            scopes: ["operator.read"],
+            caps: [],
+            commands: [],
+            permissions: [:],
+            clientId: "openclaw-ios-test",
+            clientMode: "ui",
+            clientDisplayName: "iOS Test",
+            includeDeviceIdentity: false)
+
+        try await gateway.connect(
+            url: URL(string: "ws://example.invalid")!,
+            token: "explicit-shared-token",
+            bootstrapToken: "unused-bootstrap-token",
+            password: "unused-password",
+            connectOptions: options,
+            sessionBox: WebSocketSessionBox(session: session),
+            onConnected: {},
+            onDisconnected: { _ in },
+            onInvoke: { req in
+                BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: nil, error: nil)
+            })
+
+        let auth = try #require(session.latestTask()?.latestConnectAuth())
+        #expect(auth["token"] as? String == "explicit-shared-token")
+        #expect(auth["password"] == nil)
+        #expect(auth["bootstrapToken"] == nil)
+        #expect(auth["deviceToken"] == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func routeAwareConnectedCallbackReceivesTheExactAdmittedRoute() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        let recorder = GatewayRouteRecorder()
+        let options = GatewayConnectOptions(
+            role: "node",
+            scopes: [],
+            caps: [],
+            commands: [],
+            permissions: [:],
+            clientId: "openclaw-ios-test",
+            clientMode: "node",
+            clientDisplayName: "iOS Test",
+            stableGatewayID: "route-owner",
+            includeDeviceIdentity: false)
+
+        try await gateway.connect(
+            url: URL(string: "ws://example.invalid")!,
+            token: "shared-token",
+            bootstrapToken: nil,
+            password: nil,
+            connectOptions: options,
+            sessionBox: WebSocketSessionBox(session: session),
+            onConnected: {},
+            onConnectedRoute: { route in await recorder.record(route) },
+            onDisconnected: { _ in },
+            onInvoke: { req in
+                BridgeInvokeResponse(id: req.id, ok: true, payloadJSON: nil, error: nil)
+            })
+
+        let callbackRoute = try #require(await recorder.value())
+        #expect(callbackRoute == await gateway.currentRoute(ifGatewayID: "route-owner"))
+        await gateway.disconnect()
+        #expect(await gateway.currentGatewayID(ifCurrentRoute: callbackRoute) == nil)
     }
 
     @Test
@@ -754,6 +885,49 @@ struct GatewayNodeSessionTests {
             // Expected: the ordinary operation retained its admitted socket lease.
         }
         #expect(secondTask.sentRequestCount(method: "sessions.list") == 0)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func routeBoundNodeEventAndLifecycleOperationsCannotCrossReplacement() async throws {
+        let sendGate = GatewayAsyncGate()
+        let firstSession = FakeGatewayWebSocketSession(
+            deliversReceiveFailureOnCancel: false,
+            requestSendGate: sendGate)
+        let secondSession = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+
+        try await connectForGenerationTest(
+            gateway,
+            session: firstSession,
+            endpoint: "ws://first.example.invalid")
+        let oldRoute = try #require(await gateway.currentRoute())
+        #expect(await gateway.currentRemoteAddress(ifCurrentRoute: oldRoute) == "first.example.invalid:80")
+
+        let staleEvent = Task {
+            await gateway.sendEvent(
+                event: "push.apns.register",
+                payloadJSON: "{}",
+                ifCurrentRoute: oldRoute)
+        }
+        try await waitUntil("route-bound node event suspended on first socket") {
+            await sendGate.hasStarted()
+        }
+
+        try await connectForGenerationTest(
+            gateway,
+            session: secondSession,
+            endpoint: "ws://second.example.invalid")
+        let replacementRoute = try #require(await gateway.currentRoute())
+        let secondTask = try #require(secondSession.latestTask())
+        await sendGate.release()
+
+        #expect(await staleEvent.value == false)
+        #expect(secondTask.sentRequestCount(method: "node.event") == 0)
+        #expect(await gateway.currentRemoteAddress(ifCurrentRoute: oldRoute) == nil)
+        #expect(await gateway.disconnect(ifCurrentRoute: oldRoute) == false)
+        #expect(await gateway.currentRoute() == replacementRoute)
 
         await gateway.disconnect()
     }
@@ -1449,10 +1623,7 @@ struct GatewayNodeSessionTests {
                     "deviceToken": "operator-device-token",
                     "role": "operator",
                     "scopes": [
-                        "node.exec",
-                        "operator.admin",
                         "operator.approvals",
-                        "operator.pairing",
                         "operator.read",
                         "operator.talk.secrets",
                         "operator.write",
@@ -1497,6 +1668,456 @@ struct GatewayNodeSessionTests {
             "operator.talk.secrets",
             "operator.write",
         ])
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.isReady)
+        #expect(receipt.validationSucceeded)
+        #expect(receipt.persistence == .succeeded)
+        #expect(receipt.issues.isEmpty)
+        #expect(receipt.issuedRoles == [
+            GatewayBootstrapHandoffRoleGrant(role: .node, scopes: []),
+            GatewayBootstrapHandoffRoleGrant(
+                role: .operatorRole,
+                scopes: [
+                    "operator.approvals",
+                    "operator.read",
+                    "operator.talk.secrets",
+                    "operator.write",
+                ]),
+        ])
+        let encodedReceipt = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+        #expect(!encodedReceipt.contains("node-device-token"))
+        #expect(!encodedReceipt.contains("operator-device-token"))
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func privateLANBootstrapPersistsCompleteMobileHandoffForReconnect() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let bootstrapSession = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "lan-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "lan-operator-token",
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+        try await connectForBootstrapHandoffTest(
+            gateway,
+            session: bootstrapSession,
+            endpoint: "ws://192.168.50.164:18889")
+        let route = try #require(await gateway.currentRoute())
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route)?.isReady == true)
+        await gateway.disconnect()
+
+        let reconnectSession = FakeGatewayWebSocketSession()
+        try await gateway.connect(
+            url: URL(string: "ws://192.168.50.164:18889")!,
+            token: nil,
+            bootstrapToken: nil,
+            password: nil,
+            connectOptions: bootstrapHandoffTestOptions(),
+            sessionBox: WebSocketSessionBox(session: reconnectSession),
+            onConnected: {},
+            onDisconnected: { _ in },
+            onInvoke: { request in
+                BridgeInvokeResponse(id: request.id, ok: true, payloadJSON: nil, error: nil)
+            })
+        let reconnectAuth = try #require(reconnectSession.latestTask()?.latestConnectAuth())
+        #expect(reconnectAuth["token"] as? String == "lan-node-token")
+        #expect(reconnectAuth["bootstrapToken"] == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func bootstrapApprovalsScopeIsOptionalButOvergrantsAreRejected() {
+        for operatorScopes in [
+            GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            GatewayBootstrapHandoffValidator.requiredOperatorScopes + ["operator.approvals"],
+        ] {
+            let plan = GatewayBootstrapHandoffValidator.validate([
+                GatewayBootstrapHandoffCredential(role: .node, token: "node-token", scopes: []),
+                GatewayBootstrapHandoffCredential(
+                    role: .operatorRole,
+                    token: "operator-token",
+                    scopes: operatorScopes),
+            ])
+            #expect(plan.issues.isEmpty)
+            #expect(plan.writes.count == 2)
+        }
+
+        let nodeOvergrant = GatewayBootstrapHandoffValidator.validate([
+            GatewayBootstrapHandoffCredential(role: .node, token: "node-token", scopes: ["node.exec"]),
+            GatewayBootstrapHandoffCredential(
+                role: .operatorRole,
+                token: "operator-token",
+                scopes: GatewayBootstrapHandoffValidator.requiredOperatorScopes),
+        ])
+        #expect(nodeOvergrant.issues == [.unexpectedNodeScopes])
+        #expect(nodeOvergrant.writes.isEmpty)
+
+        let operatorOvergrant = GatewayBootstrapHandoffValidator.validate([
+            GatewayBootstrapHandoffCredential(role: .node, token: "node-token", scopes: []),
+            GatewayBootstrapHandoffCredential(
+                role: .operatorRole,
+                token: "operator-token",
+                scopes: GatewayBootstrapHandoffValidator.requiredOperatorScopes + ["operator.admin"]),
+        ])
+        #expect(operatorOvergrant.issues == [.unexpectedOperatorScopes])
+        #expect(operatorOvergrant.writes.isEmpty)
+    }
+
+    @Test
+    func deviceAuthStoreSerializesConcurrentRoleUpdates() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let identity = DeviceIdentityStore.loadOrCreate()
+        await withTaskGroup(of: Void.self) { group in
+            for index in 0..<100 {
+                group.addTask {
+                    _ = DeviceAuthStore.storeToken(
+                        deviceId: identity.deviceId,
+                        role: "node",
+                        token: "node-\(index)")
+                }
+                group.addTask {
+                    _ = DeviceAuthStore.storeToken(
+                        deviceId: identity.deviceId,
+                        role: "operator",
+                        token: "operator-\(index)",
+                        scopes: GatewayBootstrapHandoffValidator.requiredOperatorScopes)
+                }
+            }
+        }
+
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "node") != nil)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator") != nil)
+    }
+
+    @Test
+    func freshNodeOnlyBootstrapDoesNotUseOrOverwriteStaleStoredOperator() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let identity = DeviceIdentityStore.loadOrCreate()
+        _ = DeviceAuthStore.storeToken(
+            deviceId: identity.deviceId,
+            role: "operator",
+            token: "stale-operator-token",
+            scopes: GatewayBootstrapHandoffValidator.requiredOperatorScopes)
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+        ])
+        let gateway = GatewayNodeSession()
+
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.issues == [.missingOperatorRole])
+        #expect(receipt.persistence == .notAttempted)
+        #expect(!receipt.isReady)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "node") == nil)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator")?.token ==
+            "stale-operator-token")
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func bootstrapOperatorEntryWithoutTokenIsReportedAndNothingIsPersisted() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let identity = DeviceIdentityStore.loadOrCreate()
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.issues == [.missingOperatorToken])
+        #expect(receipt.persistence == .notAttempted)
+        #expect(!receipt.isReady)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "node") == nil)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator") == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func malformedTrailingBootstrapEntryPreventsTheCompleteBatchWrite() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let identity = DeviceIdentityStore.loadOrCreate()
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [
+                [
+                    "deviceToken": "fresh-operator-token",
+                    "role": "operator",
+                    "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+                ],
+                [
+                    "deviceToken": 42,
+                    "role": "operator",
+                    "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+                ],
+            ],
+        ])
+        let gateway = GatewayNodeSession()
+
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.issues == [.malformedResponse])
+        #expect(receipt.persistence == .notAttempted)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "node") == nil)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator") == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test(arguments: GatewayBootstrapHandoffValidator.requiredOperatorScopes)
+    func bootstrapRequiresEveryMobileOperatorScope(_ missingScope: String) async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let grantedScopes = GatewayBootstrapHandoffValidator.requiredOperatorScopes
+            .filter { $0 != missingScope }
+        let expectedIssue: GatewayBootstrapHandoffIssue = switch missingScope {
+        case "operator.read": .missingOperatorRead
+        case "operator.write": .missingOperatorWrite
+        default: .missingOperatorTalkSecrets
+        }
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "fresh-operator-token",
+                "role": "operator",
+                "scopes": grantedScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.issues == [expectedIssue])
+        #expect(receipt.persistence == .notAttempted)
+        #expect(!receipt.isReady)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func bootstrapReceiptReportsAtomicPersistenceFailure() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let stateFile = tempDir.appendingPathComponent("not-a-state-directory")
+        try Data("occupied".utf8).write(to: stateFile)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", stateFile.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "fresh-operator-token",
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+
+        let route = try #require(await gateway.currentRoute())
+        let receipt = try #require(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: route))
+        #expect(receipt.issues.isEmpty)
+        #expect(receipt.validationSucceeded)
+        #expect(receipt.persistence == .failed)
+        #expect(!receipt.isReady)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func successfulBootstrapRetiresOneShotCredentialAndReceiptWithItsRoute() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "fresh-operator-token",
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+        try await connectForBootstrapHandoffTest(gateway, session: session)
+        let firstRoute = try #require(await gateway.currentRoute())
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute)?.isReady == true)
+        let firstTask = try #require(session.latestTask())
+
+        firstTask.emitReceiveFailure()
+        try await waitUntil("bootstrap channel reconnects with stored node credential") {
+            session.snapshotMakeCount() >= 2 && session.latestTask()?.latestConnectAuth() != nil
+        }
+        let replacementTask = try #require(session.latestTask())
+        let replacementAuth = try #require(replacementTask.latestConnectAuth())
+        #expect(replacementAuth["bootstrapToken"] == nil)
+        #expect(replacementAuth["token"] as? String == "fresh-node-token")
+        try await waitUntil("replacement route admitted") {
+            guard let route = await gateway.currentRoute() else { return false }
+            return route != firstRoute
+        }
+        let replacementRoute = try #require(await gateway.currentRoute())
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute) == nil)
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: replacementRoute) == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func ambiguousBootstrapResponseLossDoesNotReplayOneShotCredential() async throws {
+        let session = FakeGatewayWebSocketSession(failsConnectResponseAfterRequest: true)
+        let gateway = GatewayNodeSession()
+
+        do {
+            try await connectForBootstrapHandoffTest(gateway, session: session)
+            Issue.record("bootstrap response loss unexpectedly connected")
+        } catch {
+            // A physically dispatched request with no response is ambiguous.
+        }
+        let firstAuth = try #require(session.task(at: 0)?.latestConnectAuth())
+        #expect(firstAuth["bootstrapToken"] as? String == "fresh-bootstrap-token")
+
+        do {
+            try await connectForBootstrapHandoffTest(gateway, session: session)
+            Issue.record("credential-free retry unexpectedly connected")
+        } catch {
+            // Expected: explicit setup is required instead of replaying the one-shot.
+        }
+        let secondAuth = try #require(session.task(at: 1)?.latestConnectAuth())
+        #expect(secondAuth["bootstrapToken"] == nil)
+        #expect(secondAuth["token"] == nil)
 
         await gateway.disconnect()
     }

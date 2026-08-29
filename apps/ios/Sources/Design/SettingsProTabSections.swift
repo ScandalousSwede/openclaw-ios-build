@@ -46,7 +46,11 @@ extension SettingsProTab {
                     Divider()
                     self.gatewayDetailRow(label: "Server", value: self.gatewayServer)
                     Divider()
-                    self.gatewayDetailRow(label: "Agents", value: "\(self.appModel.gatewayAgents.count)")
+                    self.gatewayDetailRow(label: "Gateway/node", value: self.appModel.nodeRoleState.statusLabel)
+                    Divider()
+                    self.gatewayDetailRow(label: "Operator/chat", value: self.appModel.operatorRoleState.statusLabel)
+                    Divider()
+                    self.gatewayDetailRow(label: "Agents", value: self.appModel.gatewayAgentCountText)
                     Divider()
                     self.gatewayActions
                         .padding(14)
@@ -248,7 +252,11 @@ extension SettingsProTab {
                 Divider()
                 self.detailRow("Default Agent", value: self.appModel.activeAgentName)
                 Divider()
-                self.detailRow("Agents", value: "\(self.appModel.gatewayAgents.count)")
+                self.detailRow("Gateway/node", value: self.appModel.nodeRoleState.statusLabel)
+                Divider()
+                self.detailRow("Operator/chat", value: self.appModel.operatorRoleState.statusLabel)
+                Divider()
+                self.detailRow("Agents", value: self.appModel.gatewayAgentCountText)
             }
 
             ProCard(radius: SettingsLayout.cardRadius) {
