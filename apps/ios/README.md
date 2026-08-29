@@ -62,8 +62,8 @@ Prereqs:
 Release behavior:
 
 - Local development keeps using unique per-developer bundle IDs from `scripts/ios-configure-signing.sh`.
-- Beta release uses the registered App Store Connect `ai.openclaw.client.J76B47MZ6V*` bundle IDs through a temporary generated xcconfig in `apps/ios/build/BetaRelease.xcconfig`. Local development and shared repo builds keep the short `ai.openclaw.client*` defaults in `apps/ios/Signing.xcconfig`.
-- Beta release also switches the app to `OpenClawPushTransport=relay`, `OpenClawPushDistribution=official`, and `OpenClawPushAPNsEnvironment=production`.
+- The AIES continuity beta source uses the already-paired fork's short `ai.openclaw.client*` bundle family through a temporary generated xcconfig in `apps/ios/build/BetaRelease.xcconfig`, fixed to Team `J76B47MZ6V`. This requires a separate App Store Connect record from build 72's `ai.openclaw.client.J76B47MZ6V` identity. Local development and shared repo builds continue to use their existing signing overrides.
+- This AIES workflow preserves its existing direct gateway registration contract with `OpenClawPushTransport=direct`, `OpenClawPushDistribution=local`, and `OpenClawPushAPNsEnvironment=production`; changing the app identity does not change push behavior.
 - The beta flow does not modify `apps/ios/.local-signing.xcconfig` or `apps/ios/LocalSigning.xcconfig`.
 - `apps/ios/version.json` is the pinned iOS release version source.
 - `apps/ios/CHANGELOG.md` is the iOS-only changelog and release-note source.

@@ -37,6 +37,45 @@ describe("push APNs registration store", () => {
     expect(loaded).toEqual(saved);
   });
 
+  it("supersedes the old sandbox token for the same paired node", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseDir = await makeTempDir();
+      vi.setSystemTime(new Date("2026-08-28T00:00:00Z"));
+      await registerApnsToken({
+        nodeId: "preserved-paired-node",
+        token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        topic: "ai.openclaw.client",
+        environment: "sandbox",
+        baseDir,
+      });
+
+      vi.setSystemTime(new Date("2026-08-28T00:00:01Z"));
+      const production = await registerApnsToken({
+        nodeId: "preserved-paired-node",
+        token: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        topic: "ai.openclaw.client",
+        environment: "production",
+        baseDir,
+      });
+
+      await expect(
+        loadApnsRegistration("preserved-paired-node", baseDir),
+      ).resolves.toEqual(production);
+      await expect(
+        loadApnsRegistrations(["preserved-paired-node"], baseDir),
+      ).resolves.toEqual([{ nodeId: "preserved-paired-node", registration: production }]);
+      expect(production).toMatchObject({
+        nodeId: "preserved-paired-node",
+        token: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        topic: "ai.openclaw.client",
+        environment: "production",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stores relay-backed registrations without a raw token", async () => {
     const baseDir = await makeTempDir();
     const saved = await registerApnsRegistration({

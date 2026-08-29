@@ -96,6 +96,150 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
 }
 
 @Suite(.serialized) struct GatewaySettingsStoreTests {
+    @Test func sameIdentityUpdateReadsHistoricalGatewayStateWithoutRewrite() throws {
+        let instanceID = "continuity-node"
+        let stableGatewayID = "continuity-gateway"
+        let defaultsKeys = bootstrapDefaultsKeys + lastGatewayDefaultsKeys + [
+            "gateway.clientIdOverride.\(stableGatewayID)",
+            "gateway.selectedAgentId.\(stableGatewayID)",
+        ]
+        let credentialEntries = bootstrapKeychainEntries + [
+            lastGatewayKeychainEntry,
+            KeychainEntry(service: gatewayService, account: "gateway-token.\(instanceID)"),
+            KeychainEntry(service: gatewayService, account: "gateway-bootstrap-token.\(instanceID)"),
+            KeychainEntry(service: gatewayService, account: "gateway-password.\(instanceID)"),
+        ]
+        let defaultsSnapshot = snapshotDefaults(defaultsKeys)
+        let keychainSnapshot = snapshotKeychain(credentialEntries)
+        defer {
+            restoreDefaults(defaultsSnapshot)
+            restoreKeychain(keychainSnapshot)
+        }
+
+        // Seed the historical persistence contract directly rather than using
+        // current writers, then let current code perform its supported migration.
+        applyKeychain([
+            instanceIdEntry: instanceID,
+            preferredGatewayEntry: stableGatewayID,
+            lastGatewayEntry: "continuity-last-gateway",
+            lastGatewayKeychainEntry: nil,
+            KeychainEntry(service: gatewayService, account: "gateway-token.\(instanceID)"):
+                "paired-gateway-token",
+            KeychainEntry(service: gatewayService, account: "gateway-bootstrap-token.\(instanceID)"):
+                "paired-bootstrap-token",
+            KeychainEntry(service: gatewayService, account: "gateway-password.\(instanceID)"):
+                "paired-gateway-password",
+        ])
+        applyDefaults([
+            "node.instanceId": instanceID,
+            "gateway.preferredStableID": stableGatewayID,
+            "gateway.lastDiscoveredStableID": "continuity-last-gateway",
+            "gateway.last.kind": "manual",
+            "gateway.last.host": "gateway.continuity.invalid",
+            "gateway.last.port": 443,
+            "gateway.last.tls": true,
+            "gateway.last.stableID": stableGatewayID,
+            "gateway.clientIdOverride.\(stableGatewayID)": "preserved-client-id",
+            "gateway.selectedAgentId.\(stableGatewayID)": "preserved-agent",
+        ])
+
+        GatewaySettingsStore.bootstrapPersistence()
+
+        #expect(GatewaySettingsStore.currentInstanceID() == instanceID)
+        #expect(GatewaySettingsStore.loadStableInstanceID() == instanceID)
+        #expect(GatewaySettingsStore.loadPreferredGatewayStableID() == stableGatewayID)
+        #expect(GatewaySettingsStore.loadLastDiscoveredGatewayStableID() == "continuity-last-gateway")
+        #expect(GatewaySettingsStore.loadGatewayToken(instanceId: instanceID) == "paired-gateway-token")
+        #expect(
+            GatewaySettingsStore.loadGatewayBootstrapToken(instanceId: instanceID)
+                == "paired-bootstrap-token")
+        #expect(
+            GatewaySettingsStore.loadGatewayPassword(instanceId: instanceID)
+                == "paired-gateway-password")
+        #expect(
+            GatewaySettingsStore.loadLastGatewayConnection()
+                == .manual(
+                    host: "gateway.continuity.invalid",
+                    port: 443,
+                    useTLS: true,
+                    stableID: stableGatewayID))
+        #expect(
+            GatewaySettingsStore.loadGatewayClientIdOverride(stableID: stableGatewayID)
+                == "preserved-client-id")
+        #expect(
+            GatewaySettingsStore.loadGatewaySelectedAgentId(stableID: stableGatewayID)
+                == "preserved-agent")
+    }
+
+    @Test func productionDirectRegistrationUsesOldTopicAndKeepsPairing() async throws {
+        let instanceID = "continuity-node"
+        let gatewayTokenEntry = KeychainEntry(
+            service: gatewayService,
+            account: "gateway-token.\(instanceID)")
+        let bootstrapTokenEntry = KeychainEntry(
+            service: gatewayService,
+            account: "gateway-bootstrap-token.\(instanceID)")
+        let defaultsSnapshot = snapshotDefaults(["node.instanceId"])
+        let keychainSnapshot = snapshotKeychain([
+            instanceIdEntry,
+            gatewayTokenEntry,
+            bootstrapTokenEntry,
+        ])
+        defer {
+            restoreDefaults(defaultsSnapshot)
+            restoreKeychain(keychainSnapshot)
+        }
+
+        applyDefaults(["node.instanceId": instanceID])
+        applyKeychain([
+            instanceIdEntry: instanceID,
+            gatewayTokenEntry: "paired-gateway-token",
+            bootstrapTokenEntry: "paired-bootstrap-token",
+        ])
+
+        let tempDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let bundleURL = tempDirectory.appendingPathComponent("Continuity.bundle", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDirectory) }
+        try FileManager.default.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "ai.openclaw.client",
+            "CFBundleName": "OpenClaw Continuity Test",
+            "CFBundlePackageType": "BNDL",
+            "CFBundleShortVersionString": "2026.6.2",
+            "CFBundleVersion": "73",
+            "OpenClawPushTransport": "direct",
+            "OpenClawPushDistribution": "local",
+            "OpenClawPushAPNsEnvironment": "production",
+            "OpenClawPushRelayBaseURL": "",
+        ]
+        let data = try PropertyListSerialization.data(
+            fromPropertyList: info,
+            format: .xml,
+            options: 0)
+        try data.write(to: bundleURL.appendingPathComponent("Info.plist"), options: .atomic)
+        let bundle = try #require(Bundle(url: bundleURL))
+        let manager = PushRegistrationManager(buildConfig: PushBuildConfig(bundle: bundle))
+
+        let payload = try await manager.makeGatewayRegistrationPayload(
+            apnsTokenHex: "0123456789abcdef0123456789abcdef",
+            topic: "ai.openclaw.client",
+            gatewayIdentity: nil)
+        let payloadData = try #require(payload.data(using: .utf8))
+        let decoded = try #require(
+            JSONSerialization.jsonObject(with: payloadData) as? [String: Any])
+
+        #expect(decoded["transport"] as? String == "direct")
+        #expect(decoded["token"] as? String == "0123456789abcdef0123456789abcdef")
+        #expect(decoded["topic"] as? String == "ai.openclaw.client")
+        #expect(decoded["environment"] as? String == "production")
+        #expect(GatewaySettingsStore.loadStableInstanceID() == instanceID)
+        #expect(GatewaySettingsStore.loadGatewayToken(instanceId: instanceID) == "paired-gateway-token")
+        #expect(
+            GatewaySettingsStore.loadGatewayBootstrapToken(instanceId: instanceID)
+                == "paired-bootstrap-token")
+    }
+
     @Test func bootstrapCopiesDefaultsToKeychainWhenMissing() {
         withBootstrapSnapshots {
             applyDefaults([

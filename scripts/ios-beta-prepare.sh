@@ -27,6 +27,7 @@ TEAM_HELPER="${ROOT_DIR}/scripts/ios-team-id.sh"
 VERSION_HELPER="${ROOT_DIR}/scripts/ios-write-version-xcconfig.sh"
 IOS_VERSION_HELPER="${ROOT_DIR}/scripts/ios-version.ts"
 VERSION_SYNC_HELPER="${ROOT_DIR}/scripts/ios-sync-versioning.ts"
+AIES_CONTINUITY_TEAM_ID="J76B47MZ6V"
 
 BUILD_NUMBER=""
 TEAM_ID="${IOS_DEVELOPMENT_TEAM:-}"
@@ -135,6 +136,11 @@ if [[ ! "${TEAM_ID}" =~ ^[A-Z0-9]{10}$ ]]; then
   exit 1
 fi
 
+if [[ "${TEAM_ID}" != "${AIES_CONTINUITY_TEAM_ID}" ]]; then
+  echo "AIES old-identity continuity builds require Apple Team ${AIES_CONTINUITY_TEAM_ID}." >&2
+  exit 1
+fi
+
 if [[ -z "${TEAM_ID}" ]]; then
   echo "Could not resolve Apple Team ID. Set IOS_DEVELOPMENT_TEAM or sign into Xcode." >&2
   exit 1
@@ -191,11 +197,11 @@ DEBUG_INFORMATION_FORMAT = dwarf-with-dsym
 OPENCLAW_CODE_SIGN_STYLE = Automatic
 OPENCLAW_DEVELOPMENT_TEAM = ${TEAM_ID}
 OPENCLAW_IOS_SELECTED_TEAM = ${TEAM_ID}
-OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V
-OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.share
-OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.activitywidget
-OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp
-OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp.extension
+OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client
+OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.share
+OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.activitywidget
+OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.watchkitapp
+OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.watchkitapp.extension
 OPENCLAW_APP_PROFILE =
 OPENCLAW_SHARE_PROFILE =
 OPENCLAW_PUSH_TRANSPORT = ${PUSH_TRANSPORT}

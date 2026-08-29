@@ -17,15 +17,21 @@ variables:
 
 - `AIES_TESTFLIGHT_INTERNAL_ENABLED=true`
 - `AIES_INTERNAL_TESTER_GROUP` — the exact internal App Store Connect group Ethan belongs to
-- `APPLE_TEAM_ID`
+- `APPLE_TEAM_ID=J76B47MZ6V`
 - `ASC_KEY_ID`
 - `ASC_ISSUER_ID`
-- `APP_BUNDLE_ID=ai.openclaw.client.J76B47MZ6V`
-- `APP_STORE_CONNECT_APP_ID`
+- `APP_BUNDLE_ID=ai.openclaw.client`
+- `APP_STORE_CONNECT_APP_ID` — the numeric ID of the separately created old-identity app record
 
 Add one environment secret:
 
 - `ASC_PRIVATE_KEY_P8` — the App Store Connect API private key in PEM form
+
+The short bundle family is the continuity identity for the already-paired source build. Do not
+reuse build 72's `ai.openclaw.client.J76B47MZ6V` App Store Connect record: it remains a separate,
+side-by-side application identity. The five short explicit Bundle IDs and a new internal-only app
+record must exist before a protected run is authorized. Identifier availability is an Apple-side
+owner gate and is not established by this source configuration.
 
 The Argus APNs provider key is a server credential. It must not be stored in GitHub or reused as the
 App Store Connect build credential.

@@ -12,7 +12,7 @@ from unittest import mock
 
 import verify_aies_unsigned_archive as verifier
 
-MAIN_ID = "ai.openclaw.client.J76B47MZ6V"
+MAIN_ID = "ai.openclaw.client"
 MACHO_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 OTHER_MACHO_UUID = "11111111-2222-3333-4444-555555555555"
 BUNDLE_PATHS = {
@@ -121,7 +121,7 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
                 **payload[0],
                 "buildSettings": {
                     **payload[0]["buildSettings"],
-                    "PRODUCT_BUNDLE_IDENTIFIER": "ai.openclaw.client",
+                    "PRODUCT_BUNDLE_IDENTIFIER": "ai.openclaw.client.J76B47MZ6V",
                 },
             }
         )
@@ -135,7 +135,9 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
                 **payload[0],
                 "buildSettings": {
                     **payload[0]["buildSettings"],
-                    "OPENCLAW_SHARE_BUNDLE_ID": "ai.openclaw.client.share",
+                    "OPENCLAW_SHARE_BUNDLE_ID": (
+                        "ai.openclaw.client.J76B47MZ6V.share"
+                    ),
                 },
             }
         )
@@ -202,10 +204,10 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing buildSettings.*index 6"):
             verifier.build_settings_topology_report(payload, MAIN_ID)
 
-    def test_rejects_short_bundle_identifier(self) -> None:
+    def test_rejects_build_72_bundle_identifier(self) -> None:
         payload = self.build_settings_payload()
         payload[0]["buildSettings"]["PRODUCT_BUNDLE_IDENTIFIER"] = (
-            "ai.openclaw.client"
+            "ai.openclaw.client.J76B47MZ6V"
         )
         with self.assertRaisesRegex(ValueError, "rendered bundle identifier mismatch"):
             verifier.build_settings_topology_report(payload, MAIN_ID)
@@ -213,7 +215,7 @@ class AIESUnsignedBuildSettingsTests(unittest.TestCase):
     def test_rejects_mismatched_canonical_variable(self) -> None:
         payload = self.build_settings_payload()
         payload[1]["buildSettings"]["OPENCLAW_SHARE_BUNDLE_ID"] = (
-            "ai.openclaw.client.share"
+            "ai.openclaw.client.J76B47MZ6V.share"
         )
         with self.assertRaisesRegex(ValueError, "topology variable mismatch"):
             verifier.build_settings_topology_report(payload, MAIN_ID)

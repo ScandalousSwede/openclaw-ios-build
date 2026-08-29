@@ -132,6 +132,16 @@ private final class FakeGatewayWebSocketTask: WebSocketTasking, @unchecked Senda
         }
     }
 
+    func latestConnectDeviceID() -> String? {
+        self.lock.withLock {
+            guard let request = self.sentRequests.last(where: { $0["method"] as? String == "connect" }),
+                  let params = request["params"] as? [String: Any],
+                  let device = params["device"] as? [String: Any]
+            else { return nil }
+            return device["id"] as? String
+        }
+    }
+
     func sentRequestCount(method: String) -> Int {
         self.lock.withLock {
             self.sentRequests.filter { $0["method"] as? String == method }.count
@@ -559,6 +569,95 @@ struct GatewayNodeSessionTests {
         #expect(auth["bootstrapToken"] as? String == "fresh-bootstrap-token")
         #expect(auth["token"] == nil)
         #expect(auth["deviceToken"] == nil)
+
+        await gateway.disconnect()
+    }
+
+    @Test
+    func historicalIdentityAndRoleTokenReconnectWithoutPairingOrRewrite() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let identityDirectory = tempDir.appendingPathComponent("identity", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: identityDirectory,
+            withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        // These version-1 fixture bytes use the original iOS identity/auth
+        // schema introduced before the paired fork, not current store writers.
+        let expectedDeviceID = "56475aa75463474c0285df5dbf2bcab73da651358839e9b77481b2eab107708c"
+        let identityURL = identityDirectory.appendingPathComponent("device.json", isDirectory: false)
+        let authURL = identityDirectory.appendingPathComponent("device-auth.json", isDirectory: false)
+        let historicalIdentity = """
+            {
+              "createdAtMs": 1700000000000,
+              "deviceId": "\(expectedDeviceID)",
+              "privateKey": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+              "publicKey": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg="
+            }
+            """
+        let historicalAuth = """
+            {
+              "deviceId": "\(expectedDeviceID)",
+              "tokens": {
+                "node": {
+                  "role": "node",
+                  "scopes": [],
+                  "token": "preserved-paired-node-token",
+                  "updatedAtMs": 1700000000000
+                }
+              },
+              "version": 1
+            }
+            """
+        try Data(historicalIdentity.utf8).write(to: identityURL, options: .atomic)
+        try Data(historicalAuth.utf8).write(to: authURL, options: .atomic)
+        let identityBytes = try Data(contentsOf: identityURL)
+        let authBytes = try Data(contentsOf: authURL)
+
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        let options = GatewayConnectOptions(
+            role: "node",
+            scopes: [],
+            caps: [],
+            commands: [],
+            permissions: [:],
+            clientId: "openclaw-ios-continuity-test",
+            clientMode: "node",
+            clientDisplayName: "iOS Continuity Test",
+            includeDeviceIdentity: true)
+
+        try await gateway.connect(
+            url: URL(string: "wss://example.invalid")!,
+            token: nil,
+            bootstrapToken: nil,
+            password: nil,
+            connectOptions: options,
+            sessionBox: WebSocketSessionBox(session: session),
+            onConnected: {},
+            onDisconnected: { _ in },
+            onInvoke: { request in
+                BridgeInvokeResponse(id: request.id, ok: true, payloadJSON: nil, error: nil)
+            })
+
+        let task = try #require(session.latestTask())
+        let auth = try #require(task.latestConnectAuth())
+        #expect(auth["token"] as? String == "preserved-paired-node-token")
+        #expect(auth["bootstrapToken"] == nil)
+        #expect(auth["password"] == nil)
+        #expect(task.latestConnectDeviceID() == expectedDeviceID)
+        #expect(try Data(contentsOf: identityURL) == identityBytes)
+        #expect(try Data(contentsOf: authURL) == authBytes)
 
         await gateway.disconnect()
     }

@@ -720,6 +720,31 @@ describe("node exec events", () => {
     });
   });
 
+  it("keeps the authenticated pairing intact when APNs registration fails", async () => {
+    registerApnsRegistrationVi.mockRejectedValueOnce(new Error("synthetic registration failure"));
+    const ctx = buildCtx();
+
+    await handleNodeEvent(ctx, "preserved-paired-node", {
+      event: "push.apns.register",
+      payloadJSON: JSON.stringify({
+        transport: "direct",
+        token: "abcd1234abcd1234abcd1234abcd1234",
+        topic: "ai.openclaw.client",
+        environment: "production",
+      }),
+    });
+
+    expect(registerApnsRegistrationVi).toHaveBeenCalledWith({
+      nodeId: "preserved-paired-node",
+      transport: "direct",
+      token: "abcd1234abcd1234abcd1234abcd1234",
+      topic: "ai.openclaw.client",
+      environment: "production",
+    });
+    expect(updatePairedNodeMetadataMock).not.toHaveBeenCalled();
+    expect(updatePairedDeviceMetadataMock).not.toHaveBeenCalled();
+  });
+
   it("rejects relay registrations bound to a different gateway identity", async () => {
     const ctx = buildCtx();
     await handleNodeEvent(ctx, "node-relay", {

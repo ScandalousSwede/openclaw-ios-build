@@ -143,7 +143,14 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
             unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 3
         )
         self.assertIn("build_settings_topology_report", unsigned)
-        self.assertIn('"ai.openclaw.client.J76B47MZ6V"', unsigned)
+        self.assertIn('"ai.openclaw.client"', unsigned)
+        self.assertNotIn("ai.openclaw.client.J76B47MZ6V", unsigned)
+        self.assertIn(
+            "'OPENCLAW_DEVELOPMENT_TEAM = J76B47MZ6V'", unsigned
+        )
+        self.assertIn(
+            "'OPENCLAW_IOS_SELECTED_TEAM = J76B47MZ6V'", unsigned
+        )
         self.assertGreaterEqual(unsigned.count("CODE_SIGNING_ALLOWED=NO"), 3)
         self.assertGreaterEqual(unsigned.count("CODE_SIGNING_REQUIRED=NO"), 3)
         self.assertGreaterEqual(unsigned.count('CODE_SIGN_IDENTITY=""'), 3)

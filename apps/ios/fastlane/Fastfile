@@ -9,7 +9,8 @@ require "tmpdir"
 
 default_platform(:ios)
 
-BETA_APP_IDENTIFIER = "ai.openclaw.client.J76B47MZ6V"
+BETA_APP_IDENTIFIER = "ai.openclaw.client"
+AIES_CONTINUITY_TEAM_ID = "J76B47MZ6V"
 
 def load_env_file(path)
   return unless File.exist?(path)
@@ -402,6 +403,7 @@ def prepare_aies_internal_context!
   UI.user_error!("ASC_APP_ID must contain digits only.") unless app_store_id.match?(/\A\d+\z/)
   team_id = required_env!("IOS_DEVELOPMENT_TEAM")
   UI.user_error!("IOS_DEVELOPMENT_TEAM must be a 10-character Apple Team ID.") unless team_id.match?(/\A[A-Z0-9]{10}\z/)
+  UI.user_error!("AIES continuity lane requires Apple Team #{AIES_CONTINUITY_TEAM_ID}.") unless team_id == AIES_CONTINUITY_TEAM_ID
   required_env!("ASC_KEY_ID")
   required_env!("ASC_ISSUER_ID")
   key_path = required_env!("ASC_KEY_PATH")

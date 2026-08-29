@@ -18,7 +18,7 @@ from unittest import mock
 import verify_aies_internal_signing as verifier
 
 MAIN_ID = "ai.openclaw.client"
-TEAM_ID = "Y5PE65HELJ"
+TEAM_ID = "J76B47MZ6V"
 GIT_SHA = "a" * 40
 ARCHIVE_UUID = "12345678-1234-5678-1234-567812345678"
 MACHO_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -122,6 +122,13 @@ class AIESInternalSigningTests(unittest.TestCase):
                     for item in report["ipa"]["bundles"]
                 )
             )
+            self.assertTrue(
+                all(
+                    item["application_identifier"]
+                    == f"{TEAM_ID}.{item['bundle_id']}"
+                    for item in report["ipa"]["bundles"]
+                )
+            )
             self.assertNotIn("cms_signature_verified", str(report))
 
     def test_archive_only_report_verifies_five_bundles_and_dsyms(self) -> None:
@@ -177,7 +184,7 @@ class AIESInternalSigningTests(unittest.TestCase):
                 self.mock_signing(
                     ipa_get_task_allow=True,
                     ipa_provisioned_devices=["fixture-device"],
-                    ipa_leaf_common_name="Apple Development: Example (Y5PE65HELJ)",
+                    ipa_leaf_common_name="Apple Development: Example (J76B47MZ6V)",
                 ),
                 self.assertRaisesRegex(ValueError, "get-task-allow"),
             ):
@@ -197,7 +204,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             args = self.make_fixture(pathlib.Path(raw_temp))
             with (
                 self.mock_signing(
-                    ipa_leaf_common_name="Apple Development: Example (Y5PE65HELJ)"
+                    ipa_leaf_common_name="Apple Development: Example (J76B47MZ6V)"
                 ),
                 self.assertRaisesRegex(ValueError, "not signed by Apple Distribution"),
             ):
@@ -700,7 +707,7 @@ class AIESInternalSigningTests(unittest.TestCase):
                 pathlib.Path(f"{prefix}1").write_bytes(b"apple-intermediate")
             if command[0] == "codesign":
                 return (
-                    b"Authority=Apple Distribution: Example (Y5PE65HELJ)\n"
+                    b"Authority=Apple Distribution: Example (J76B47MZ6V)\n"
                     + f"TeamIdentifier={TEAM_ID}\nIdentifier={MAIN_ID}\n".encode()
                 )
             return b""
@@ -716,7 +723,7 @@ class AIESInternalSigningTests(unittest.TestCase):
         self.assertEqual(result["certificate_chain_count"], 2)
         self.assertEqual(result["leaf_certificate_sha256"], SIGNING_CERTIFICATE_SHA256)
         self.assertEqual(
-            result["leaf_common_name"], "Apple Distribution: Example (Y5PE65HELJ)"
+            result["leaf_common_name"], "Apple Distribution: Example (J76B47MZ6V)"
         )
         trust_command = next(command for command in commands if command[0] == "security")
         self.assertEqual(trust_command[:2], ["security", "verify-cert"])
@@ -1170,7 +1177,7 @@ class AIESInternalSigningTests(unittest.TestCase):
         ipa_child_aps: str | None = None,
         ipa_provisioned_devices: list[str] | None = None,
         ipa_provisions_all_devices: bool = False,
-        ipa_leaf_common_name: str = "Apple Distribution: Example (Y5PE65HELJ)",
+        ipa_leaf_common_name: str = "Apple Distribution: Example (J76B47MZ6V)",
         ipa_aux_leaf_common_name: str | None = None,
         ipa_aux_team_identifier: str | None = None,
         ipa_aux_code_identifier: str | None = None,
@@ -1273,7 +1280,7 @@ class AIESInternalSigningTests(unittest.TestCase):
             archive = ".xcarchive" in str(path)
             auxiliary = path.suffix == ".framework"
             leaf_common_name = (
-                "Apple Development: Example (Y5PE65HELJ)"
+                "Apple Development: Example (J76B47MZ6V)"
                 if archive
                 else (
                     ipa_aux_leaf_common_name

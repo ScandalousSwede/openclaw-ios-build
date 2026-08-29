@@ -139,6 +139,7 @@ jobs:
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_old_identity_continuity.py \
             test_aies_qualification_workflow_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
@@ -226,11 +227,13 @@ jobs:
             --push-mode direct
           beta_xcconfig="${AIES_BUILD_ROOT}/apps/ios/build/BetaRelease.xcconfig"
           [[ -f "${beta_xcconfig}" && ! -L "${beta_xcconfig}" ]]
-          grep -Fqx 'OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V' "${beta_xcconfig}"
-          grep -Fqx 'OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.share' "${beta_xcconfig}"
-          grep -Fqx 'OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.activitywidget' "${beta_xcconfig}"
-          grep -Fqx 'OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp' "${beta_xcconfig}"
-          grep -Fqx 'OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.J76B47MZ6V.watchkitapp.extension' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_APP_BUNDLE_ID = ai.openclaw.client' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_SHARE_BUNDLE_ID = ai.openclaw.client.share' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_ACTIVITY_WIDGET_BUNDLE_ID = ai.openclaw.client.activitywidget' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_WATCH_APP_BUNDLE_ID = ai.openclaw.client.watchkitapp' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_WATCH_EXTENSION_BUNDLE_ID = ai.openclaw.client.watchkitapp.extension' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_DEVELOPMENT_TEAM = J76B47MZ6V' "${beta_xcconfig}"
+          grep -Fqx 'OPENCLAW_IOS_SELECTED_TEAM = J76B47MZ6V' "${beta_xcconfig}"
           beta_xcconfig_sha256="$(shasum -a 256 "${beta_xcconfig}" | awk '{print $1}')"
           python3 apps/ios/Tools/prepare_aies_package_build_root.py verify \
             --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
@@ -272,6 +275,7 @@ jobs:
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_old_identity_continuity.py \
             test_aies_qualification_workflow_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
@@ -282,6 +286,14 @@ jobs:
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
             test_verify_aies_internal_signing.py
+
+      - name: Test APNs continuity for the preserved paired node
+        run: |
+          set -euo pipefail
+          cd "${AIES_BUILD_ROOT}"
+          node scripts/run-vitest.mjs \
+            src/infra/push-apns.store.test.ts \
+            src/gateway/server-node-events.test.ts
 
       - name: Verify canonical unsigned AIES build settings
         run: |
@@ -318,7 +330,7 @@ jobs:
           output = pathlib.Path(sys.argv[2])
           report = build_settings_topology_report(
               json.loads(source.read_text(encoding="utf-8")),
-              "ai.openclaw.client.J76B47MZ6V",
+              "ai.openclaw.client",
           )
           output.write_text(
               json.dumps(report, indent=2, sort_keys=True) + "\n",
@@ -347,7 +359,9 @@ jobs:
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/openclawkit-resolved.json"
           swift build --package-path "${shared_package}" --force-resolved-versions
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter DeviceIdentityStoreTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayTLSPinningTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
@@ -383,12 +397,19 @@ jobs:
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -parallel-testing-enabled NO \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
             -only-testing:OpenClawTests/GatewayOperatorScopeTests \
             -only-testing:OpenClawTests/GatewayOnboardingResetTests \
             -only-testing:OpenClawTests/IOSGatewayChatTransportTests \
             -only-testing:OpenClawTests/LiveActivityManagerTests \
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
+            -only-testing:OpenClawTests/GatewaySettingsStoreTests \
+            -only-testing:OpenClawTests/KeychainStoreTests \
+            -only-testing:OpenClawTests/AIESAgendaStoreTests \
+            -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
+            -only-testing:OpenClawTests/AppCoverageTests \
+            -only-testing:OpenClawTests/NodeAppModelInvokeTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
@@ -537,7 +558,7 @@ jobs:
             --archive /tmp/OpenClaw.xcarchive \
             --ipa /tmp/OpenClaw.ipa \
             --archive-zip /tmp/OpenClaw.xcarchive.zip \
-            --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+            --expected-main-bundle-id ai.openclaw.client \
             --output "${evidence_root}/OpenClaw-unsigned-archive.json"
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
             --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
@@ -780,12 +801,12 @@ jobs:
             echo "Protected environment is not explicitly enabled." >&2
             exit 1
           }
-          [[ "${APP_BUNDLE_ID_VALUE}" == "ai.openclaw.client.J76B47MZ6V" ]] || {
-            echo "APP_BUNDLE_ID does not match the isolated AIES app." >&2
+          [[ "${APP_BUNDLE_ID_VALUE}" == "ai.openclaw.client" ]] || {
+            echo "APP_BUNDLE_ID does not match the paired-fork continuity app." >&2
             exit 1
           }
-          [[ "${APPLE_TEAM_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
-            echo "APPLE_TEAM_ID is missing or malformed." >&2
+          [[ "${APPLE_TEAM_ID_VALUE}" == "J76B47MZ6V" ]] || {
+            echo "APPLE_TEAM_ID does not match the paired-fork continuity team." >&2
             exit 1
           }
           [[ "${ASC_KEY_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
@@ -849,6 +870,7 @@ jobs:
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_old_identity_continuity.py \
             test_aies_qualification_workflow_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
@@ -1110,7 +1132,7 @@ jobs:
               (
                   item
                   for item in archive_signing.get("archive", {}).get("bundles", [])
-                  if item.get("bundle_id") == "ai.openclaw.client.J76B47MZ6V"
+                  if item.get("bundle_id") == "ai.openclaw.client"
               ),
               None,
           )
@@ -1118,7 +1140,7 @@ jobs:
               (
                   item
                   for item in export_signing.get("archive", {}).get("bundles", [])
-                  if item.get("bundle_id") == "ai.openclaw.client.J76B47MZ6V"
+                  if item.get("bundle_id") == "ai.openclaw.client"
               ),
               None,
           )
@@ -1167,7 +1189,7 @@ jobs:
                   "verifier_replayed_against_current_artifacts"
               ) is not True
               or archive_integrity.get("expected_main_bundle_id")
-              != "ai.openclaw.client.J76B47MZ6V"
+              != "ai.openclaw.client"
               or archive_integrity.get("expected_team_id") != "J76B47MZ6V"
               or not isinstance(export_archive_integrity, dict)
               or export_archive_integrity.get("status")
@@ -1176,7 +1198,7 @@ jobs:
                   "verifier_replayed_against_current_artifacts"
               ) is not True
               or export_archive_integrity.get("expected_main_bundle_id")
-              != "ai.openclaw.client.J76B47MZ6V"
+              != "ai.openclaw.client"
               or export_archive_integrity.get("expected_team_id") != "J76B47MZ6V"
           ):
               failures.append({
