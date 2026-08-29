@@ -1,0 +1,646 @@
+{
+  "schema_version": 1,
+  "report_date": "2026-08-29",
+  "status": "IMPLEMENTATION_COMPLETE_CREDENTIAL_FREE_QUALIFICATION_PENDING",
+  "base": {
+    "repository": "ScandalousSwede/openclaw-ios-build",
+    "branch": "aies/ios-rc1-testflight",
+    "sha": "35ac541decf677497687a9fddf2196c7bd5be044",
+    "tree": "7e1b338d33b1a62a0a5ac2f63b23a6cf59810bfa"
+  },
+  "upstream": {
+    "repository": "openclaw/openclaw",
+    "stable_release": "v2026.7.1-2",
+    "stable_commit": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c",
+    "automatic_import_horizon": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c",
+    "beta_source_inspected_for_import": false,
+    "post_stable_source_imported": false,
+    "merge_or_rebase_used": false,
+    "wholesale_cherry_pick_used": false,
+    "method": "bounded semantic ports into the current AIES architecture"
+  },
+  "limits": {
+    "implementation_packages_authorized": 3,
+    "implementation_packages_used": 3,
+    "optional_stable_fixes_authorized": 6,
+    "optional_stable_fixes_selected": 5
+  },
+  "physical_contract": {
+    "issue": 108888,
+    "url": "https://github.com/openclaw/openclaw/issues/108888",
+    "title": "iOS node paired via local-discovery approval is permanently unusable (node-only device), surfaced as misleading \"Credential save failed\"",
+    "use": "regression contract only; no issue branch source imported",
+    "observed_state": {
+      "node_gateway": "connected",
+      "operator_gateway": "never attempted or unavailable",
+      "trust_prompt": "fingerprint acquisition reached but actionable trust alert absent",
+      "chat": "connecting or disconnected",
+      "agents": "reported zero without a successful agents.list",
+      "talk_configuration": "not loaded"
+    }
+  },
+  "packages": [
+    {
+      "id": "A",
+      "name": "pairing_tls_trust_route_and_setup_ownership",
+      "mandatory": true,
+      "resulting_commits": [
+        "73eb4e8fdc",
+        "dc81c4a017",
+        "ad50a951ca"
+      ],
+      "rollback": "revert Package-A commits in reverse order",
+      "upstream_items": [98429, 99572, 100317, 101235, 100328]
+    },
+    {
+      "id": "B",
+      "name": "dual_role_pairing_and_honest_connection_state",
+      "mandatory": true,
+      "resulting_commits": [
+        "575855468c",
+        "dd50585dcf"
+      ],
+      "rollback": "revert Package-B commits in reverse order",
+      "upstream_items": [98066, 92552],
+      "contract_issue": 108888
+    },
+    {
+      "id": "C",
+      "name": "bounded_stable_ios_reliability_delta",
+      "mandatory": false,
+      "resulting_commits": [
+        "5e26d997df"
+      ],
+      "rollback": "revert the Package-C commit",
+      "upstream_items": [100732]
+    }
+  ],
+  "qualification_support": {
+    "commit": "b1b8f54fdac0faa969f348b7059354ec8035dd9c",
+    "short_commit": "b1b8f54fda",
+    "title": "test(ios): qualify reliability sync surfaces",
+    "paths": [
+      ".github/workflows/ios-build-ipa.yml"
+    ],
+    "purpose": "select all touched reliability-sync tests in the existing credential-free iOS lane",
+    "implementation_package": false,
+    "upstream_semantic_port": false,
+    "rollback": "revert b1b8f54fda without reverting Packages A, B, or C"
+  },
+  "items": [
+    {
+      "pr": 98429,
+      "url": "https://github.com/openclaw/openclaw/pull/98429",
+      "title": "fix(ios): classify TLS fingerprint timeouts",
+      "stable_merge_commit": "0c7bac34ae6822aadbb62d9be10030b57452ca2e",
+      "source_commits": [
+        "f2a72a02ef295a2c60990b49086c9264974e8703"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Sources/Gateway/GatewayConnectionController.swift",
+        "apps/ios/Sources/Gateway/GatewayTrustPromptAlert.swift",
+        "apps/ios/Tests/GatewayConnectionSecurityTests.swift",
+        "apps/ios/Tests/RootTabsSourceGuardTests.swift",
+        "apps/ios/Tests/SwiftUIRenderSmokeTests.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Gateway/GatewayConnectionController.swift",
+        "apps/ios/Sources/Gateway/GatewayTrustPromptAlert.swift",
+        "apps/ios/Tests/GatewayConnectionSecurityTests.swift",
+        "apps/ios/Tests/SwiftUIRenderSmokeTests.swift"
+      ],
+      "defect_corrected": "fingerprint timeout/error state could fail to retain an actionable typed trust continuation",
+      "current_aies_analogue": "AIES certificate pin acquisition, pin persistence, rotation handling, typed trust prompt, and exact setup-attempt owner",
+      "current_behavior": "base did not reliably present the actionable trust continuation after fingerprint acquisition",
+      "upstream_behavior": "classifies fingerprint timeouts and exposes an explicit trust decision",
+      "physical_relevance": "REQUIRED_PHYSICAL_FIX",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "MEDIUM",
+      "collision_analysis": "AIES pin and gateway-identity fencing is stronger and must remain authoritative",
+      "action": "port timeout/error semantics and typed prompt ownership while preserving fail-closed pin verification",
+      "tests": [
+        "TLS fingerprint timeout classification",
+        "accepted/rejected/rotated fingerprint",
+        "trust prompt render and source guards",
+        "stale setup-attempt rejection"
+      ],
+      "resulting_commits": ["73eb4e8fdc"],
+      "rollback": "revert 73eb4e8fdc with Package A"
+    },
+    {
+      "pr": 99572,
+      "url": "https://github.com/openclaw/openclaw/pull/99572",
+      "title": "fix(ios): defer QR pairing after scanner dismissal",
+      "stable_merge_commit": "a320f775f0f3f058b612da8b1fbc2adaebca097d",
+      "source_commits": [
+        "5d9a2aaaca07d1206177cb4ab495706d3b7a0d79",
+        "3ec7a1a178cad7420c14d750bdd6c63a356c4525",
+        "15422c886c555b955cd6fdc573287f228ac17920",
+        "b66b22c55ab27ba89847081551915277676cc70e"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Onboarding/QRScannerView.swift",
+        "apps/ios/Sources/Onboarding/OnboardingWizardView.swift",
+        "apps/ios/Sources/Design/SettingsProTab.swift",
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Sources/RootTabs.swift",
+        "apps/ios/Tests/QRScannerResultHandoffTests.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Onboarding/QRScannerView.swift",
+        "apps/ios/Sources/Onboarding/OnboardingWizardView.swift",
+        "apps/ios/Sources/Design/SettingsProTab.swift",
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Sources/RootTabs.swift",
+        "apps/ios/Tests/QRScannerResultHandoffTests.swift"
+      ],
+      "defect_corrected": "trust and pairing presentation could start before scanner sheet/capture teardown completed",
+      "current_aies_analogue": "two setup presentation owners plus setup-attempt generation and trust continuation",
+      "current_behavior": "base could process a scanner result during dismissal",
+      "upstream_behavior": "one typed result owns the scan and is processed after scanner dismissal settles",
+      "physical_relevance": "REQUIRED_PHYSICAL_FIX",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "MEDIUM",
+      "collision_analysis": "AIES must retain explicit onboarding/Settings ownership and setup-attempt fencing",
+      "action": "port typed first-result-wins handoff, capture stop, dismissal, bounded settling, and cancellation only",
+      "tests": [
+        "scanner starts after presentation and stops before dismissal",
+        "one-shot queued delivery",
+        "cancel and stale-scan rejection",
+        "onboarding and Settings ownership"
+      ],
+      "resulting_commits": ["dc81c4a017"],
+      "rollback": "revert dc81c4a017 with Package A",
+      "excluded_feature_churn": "server, Watch, APNs, localization, and branch synchronization content outside the scanner/trust defect"
+    },
+    {
+      "pr": 100317,
+      "url": "https://github.com/openclaw/openclaw/pull/100317",
+      "title": "fix(pairing): advertise reachable Tailnet routes",
+      "stable_merge_commit": "862de9f1a1c2ecc0ae87bc7e14fe2af275fafcac",
+      "source_commits": [
+        "b06e4bc3f4c6e30e4a2be685353014aadc8982b3",
+        "dbd0b8f295d3e49ce8c229991ea8510d32b43fa0"
+      ],
+      "upstream_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/DeepLinks.swift",
+        "apps/ios/Sources/Gateway/GatewayConnectionController.swift",
+        "apps/ios/Sources/Onboarding/OnboardingWizardView.swift",
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Tests/GatewayConnectionSecurityTests.swift"
+      ],
+      "aies_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/DeepLinks.swift",
+        "apps/ios/Sources/Gateway/GatewayConnectionController.swift",
+        "apps/ios/Tests/GatewayConnectionSecurityTests.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/DeepLinksSecurityTests.swift"
+      ],
+      "defect_corrected": "single-endpoint setup could miss a reachable Tailnet Serve route or let a stale probe win",
+      "current_aies_analogue": "secure setup parser, endpoint candidate probe, private-LAN policy, and exact setup-attempt ownership",
+      "current_behavior": "base did not expose a complete bounded ordered candidate contract across all setup input forms",
+      "upstream_behavior": "setup advertises ordered reachable routes and iOS cancels stale probes",
+      "physical_relevance": "REQUIRED_PHYSICAL_FIX",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "MEDIUM",
+      "collision_analysis": "live gateway route producers are already modern; only schema-compatible client behavior is required",
+      "action": "port client parsing and bounded ordered WSS selection; exclude server, CLI, plugin, and Control UI source",
+      "tests": [
+        "implicit WSS 443",
+        "explicit WSS 443",
+        "ordered Tailnet fallback",
+        "unpadded Base64URL and raw JSON",
+        "bounded endpoints and remote insecure ws rejection",
+        "stale probe fencing"
+      ],
+      "resulting_commits": ["73eb4e8fdc"],
+      "rollback": "revert 73eb4e8fdc with Package A"
+    },
+    {
+      "pr": 101235,
+      "url": "https://github.com/openclaw/openclaw/pull/101235",
+      "title": "fix ios qr scanner lifecycle",
+      "stable_merge_commit": "632efa2d7343f44408c3e25b1de20e7de889534e",
+      "source_commits": [
+        "0ae1e35ccb58299963ad809ec3fd2cb50e9c12f7",
+        "892977020477ce43c553add34da4bd9574235802"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Onboarding/QRScannerView.swift",
+        "apps/ios/Tests/RootTabsSourceGuardTests.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Onboarding/QRScannerView.swift",
+        "apps/ios/Tests/QRScannerResultHandoffTests.swift"
+      ],
+      "defect_corrected": "VisionKit activation and teardown could overlap UIKit presentation lifecycle",
+      "current_aies_analogue": "AIES scanner container and typed result handoff",
+      "current_behavior": "base scanner lifecycle was not explicitly presentation ordered",
+      "upstream_behavior": "capture starts after presentation and stops during disappearance/dismantle",
+      "physical_relevance": "USEFUL_RELIABILITY_IMPROVEMENT",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "LOW",
+      "action": "integrate lifecycle semantics into Package-A scanner handoff",
+      "tests": [
+        "VisionKit lifecycle source guard",
+        "stop before result",
+        "duplicate producer rejection",
+        "cancellation"
+      ],
+      "resulting_commits": ["dc81c4a017"],
+      "rollback": "revert dc81c4a017 with Package A"
+    },
+    {
+      "pr": 100328,
+      "url": "https://github.com/openclaw/openclaw/pull/100328",
+      "title": "fix(ios): own gateway setup deep-link delivery",
+      "stable_merge_commit": "9ba14b80ab9b970ea4ba98dc551f3deb1f9cd1d8",
+      "source_commits": [
+        "999ab7e210d902e9e3209685a2f35237fc9846a3"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Design/SettingsProTab.swift",
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Sources/RootTabs.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/DeepLinks.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/RootTabs.swift",
+        "apps/ios/Sources/Design/SettingsProTab.swift",
+        "apps/ios/Sources/Design/SettingsProTabActions.swift",
+        "apps/ios/Tests/GatewaySetupDeliveryOwnershipTests.swift"
+      ],
+      "defect_corrected": "a hidden Settings view and visible onboarding could race to consume one pending setup link",
+      "current_aies_analogue": "model-level setup request plus visible onboarding and RootTabs/Settings presentation",
+      "current_behavior": "base allowed multiple view owners to consume model state directly",
+      "upstream_behavior": "one visible presentation owner consumes and hands off an immutable request",
+      "physical_relevance": "REQUIRED_PHYSICAL_FIX",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "MEDIUM",
+      "collision_analysis": "visible onboarding must retain priority in AIES",
+      "action": "RootTabs owns Settings delivery; onboarding retains priority; Settings receives and acknowledges immutable setup requests",
+      "tests": [
+        "single RootTabs consumer source guard",
+        "immutable Settings handoff and acknowledgement",
+        "onboarding ownership retained"
+      ],
+      "resulting_commits": ["ad50a951ca"],
+      "rollback": "revert Package-A setup ownership follow-up"
+    },
+    {
+      "pr": 98066,
+      "url": "https://github.com/openclaw/openclaw/pull/98066",
+      "title": "fix: keep iOS LAN QR pairing authenticated after bootstrap",
+      "stable_merge_commit": "155c2f4e7eb051b73f0a4bd38f674b4113be370a",
+      "source_commits": [
+        "a3e609836b49a448cb9aa20970b9c3462ee44014"
+      ],
+      "upstream_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayChannel.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/GatewayNodeSessionTests.swift"
+      ],
+      "aies_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayChannel.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayNodeSession.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/DeviceAuthStore.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayBootstrapHandoff.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/GatewayNodeSessionTests.swift"
+      ],
+      "defect_corrected": "bootstrap auth could be consumed before reconnect credentials were validated and persisted",
+      "current_aies_analogue": "role-scoped token store, stable gateway owner, route generation, dual-session bootstrap",
+      "current_behavior": "base had no atomic dual-role mobile setup receipt",
+      "upstream_behavior": "persists authenticated bootstrap handoff tokens for LAN reconnect",
+      "physical_relevance": "USEFUL_RELIABILITY_AND_SECURITY_IMPROVEMENT",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "HIGH_BUT_BOUNDED",
+      "collision_analysis": "AIES requires a stronger two-role and exact-owner persistence boundary",
+      "action": "validate and persist node/operator issuance together; partial role issuance is an honest setup failure; diagnostics redact tokens",
+      "tests": [
+        "complete dual-role issuance",
+        "node-only and missing operator token",
+        "missing required scopes",
+        "unexpected overgrant",
+        "persistence failure",
+        "LAN reconnect auth",
+        "route retirement"
+      ],
+      "resulting_commits": ["575855468c"],
+      "rollback": "revert Package B"
+    },
+    {
+      "pr": 92552,
+      "url": "https://github.com/openclaw/openclaw/pull/92552",
+      "title": "fix(ios): force stale foreground gateway reconnects",
+      "stable_merge_commit": "e58310b000bdd811d113cbe71bdce7c8bdeeb80a",
+      "source_commits": [
+        "75e220a720f69594da8ae2b2e4f80ea4c5e72560"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Model/NodeAppModel.swift",
+        "apps/ios/Tests/GatewayConnectionControllerTests.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Model/NodeAppModel.swift",
+        "apps/ios/Tests/GatewayConnectionControllerTests.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayNodeSession.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/GatewayNodeSessionTests.swift"
+      ],
+      "defect_corrected": "foreground recovery could trust stale connection state or let retired work affect a replacement route",
+      "current_aies_analogue": "separate node/operator loops, route generation, stable gateway identity, durable outbox",
+      "current_behavior": "base recovery was not consistently exact-route owned",
+      "upstream_behavior": "forces reconnect when foreground health is stale",
+      "physical_relevance": "USEFUL_RELIABILITY_IMPROVEMENT",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "HIGH",
+      "collision_analysis": "route-unbound reconnects would violate AIES S1/S3 ownership fencing",
+      "action": "port reconnect intent with exact captured route and stable-owner guards for health, disconnect, callbacks, and deferred work",
+      "tests": [
+        "forced foreground reconnect",
+        "user-selected replacement protection",
+        "route-bound event and lifecycle operations",
+        "operator reconnect",
+        "route-generation outbox guard"
+      ],
+      "resulting_commits": [
+        "575855468c",
+        "dd50585dcf"
+      ],
+      "rollback": "revert Package B in reverse order"
+    },
+    {
+      "pr": 100732,
+      "url": "https://github.com/openclaw/openclaw/pull/100732",
+      "title": "fix(ios): harden Apple Watch pairing activation",
+      "stable_merge_commit": "8d1668c441a98e3b319c405ca8c2d81c9f19d6db",
+      "source_commits": [
+        "c760161160f43f95c5d8d347e038dd38ba5ced91"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Services/WatchConnectivityTransport.swift",
+        "apps/ios/Sources/Services/WatchSessionActivationGate.swift",
+        "apps/ios/WatchApp/Sources/WatchConnectivityReceiver.swift",
+        "apps/ios/Tests/WatchSessionActivationGateTests.swift",
+        "apps/ios/project.yml"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Services/WatchConnectivityTransport.swift",
+        "apps/ios/Sources/Services/WatchSessionActivationGate.swift",
+        "apps/ios/WatchExtension/Sources/WatchConnectivityReceiver.swift",
+        "apps/ios/Tests/WatchSessionActivationGateTests.swift",
+        "apps/ios/project.yml",
+        "apps/ios/PackageAuthority/aggregate-package-graph.json",
+        ".github/workflows/ios-build-ipa.yml"
+      ],
+      "defect_corrected": "fixed-count activation polling could exhaust before WCSession activation and expose premature status",
+      "current_aies_analogue": "phone Watch transport and Watch extension receiver",
+      "current_behavior": "base used eight 100 ms scheduler-count polls",
+      "upstream_behavior": "delegate-completed bounded activation wait with concurrent callers and retry",
+      "physical_relevance": "USEFUL_RELIABILITY_IMPROVEMENT",
+      "classification": "PORT_REQUIRED",
+      "collision_risk": "LOW_FOR_ACTIVATION",
+      "collision_analysis": "persistent reply/outbox behavior is excluded and separately deferred",
+      "action": "port activation gate, delegate lifecycle, and status truthfulness only",
+      "tests": [
+        "concurrent waiter coalescing",
+        "timeout and retry",
+        "error fan-out",
+        "deactivation reset",
+        "late-generation fencing",
+        "phone/watch source guard and project inclusion"
+      ],
+      "resulting_commits": ["5e26d997df"],
+      "qualification_support_commits": ["b1b8f54fda"],
+      "rollback": "revert Package C"
+    },
+    {
+      "pr": 100370,
+      "url": "https://github.com/openclaw/openclaw/pull/100370",
+      "title": "fix(ios): avoid inactive Voice Wake audio startup",
+      "stable_merge_commit": "444d54c5389aa51d6d03481d340c91dc3d277b99",
+      "source_commits": [
+        "3b98711fe1daefbc116c0fa73e0ee0bc4c1413b1",
+        "4dddf96269a8cfb489c1dd4a2b557b256c0aa681",
+        "33f9d08f5b24df038189e616e900e29ec611cdef"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Voice/VoiceWakeManager.swift",
+        "apps/ios/Sources/OpenClawApp.swift",
+        "apps/ios/Sources/Model/NodeAppModel.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Voice/VoiceWakeManager.swift",
+        "apps/ios/Sources/OpenClawApp.swift",
+        "apps/ios/Sources/Model/NodeAppModel.swift"
+      ],
+      "defect_corrected": "inactive scene could start voice-wake audio",
+      "current_aies_analogue": "background/external-capture/Talk/PTT voice-wake suspension and active-scene reconciliation",
+      "current_behavior": "AIES already prevents inactive audio startup through stronger lifecycle ownership",
+      "upstream_behavior": "guards voice-wake audio startup by active scene state",
+      "physical_relevance": "USEFUL_RELIABILITY_ALREADY_PRESENT",
+      "classification": "ALREADY_PRESENT",
+      "collision_risk": "HIGH_IF_COPIED",
+      "action": "retain AIES TTS-D1 and Talk/PTT audio ownership; no import",
+      "tests": ["existing voice-wake, Talk/PTT, and audio-session reliability tests"],
+      "resulting_commits": [],
+      "deferral_reason": "none; invariant already present"
+    },
+    {
+      "pr": 100277,
+      "url": "https://github.com/openclaw/openclaw/pull/100277",
+      "title": "fix(ios): restore in-flight runs after reconnect",
+      "stable_merge_commit": "443c582949e3ec6dfc197ea1d33913a7cd7448f3",
+      "source_commits": [
+        "7c4dbf88d8071090177cb4be1f02261dd5bc6560",
+        "31cf8b9416c10797dce7e3055cad634add04c0d4"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Chat/IOSGatewayChatTransport.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/ChatViewModel+HistoryReconciliation.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/ChatViewModel.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Chat/IOSGatewayChatTransport.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/OpenClawChatOutboxCoordinator.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/OpenClawChatOutboxStorage.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/ChatViewModel.swift"
+      ],
+      "defect_corrected": "in-flight UI runs were not restored from canonical history after reconnect",
+      "current_aies_analogue": "S2 canonical history reconciliation and S3 durable typed outbox",
+      "current_behavior": "AIES already restores and reconciles under session/run/gateway/route identity",
+      "upstream_behavior": "reconstructs in-flight runs from gateway history",
+      "physical_relevance": "USEFUL_RELIABILITY_SUPERSEDED",
+      "classification": "SUPERSEDED_BY_AIES",
+      "collision_risk": "HIGH",
+      "collision_analysis": "a second reconciliation owner can duplicate or replay durable sends",
+      "action": "no import; retain S2/S3 semantics and tests",
+      "tests": ["existing chat identity, canonical history, ambiguous delivery, and route-generation suites"],
+      "resulting_commits": []
+    },
+    {
+      "pr": 98117,
+      "url": "https://github.com/openclaw/openclaw/pull/98117",
+      "title": "fix(ios): avoid transient duplicate final replies",
+      "stable_merge_commit": "5a5913a98b031e4364be68a1796f39fe62fd1d09",
+      "source_commits": [
+        "1ee22120be3b794a9c13094c4a04d766cfbac840",
+        "71be307332388f17806a8ed4a9169f75985cf200",
+        "526f0aba3127211f0422a59cd59a0c485b0adcc6"
+      ],
+      "upstream_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/ChatViewModel.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatViewModelTests.swift"
+      ],
+      "aies_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawChatUI/ChatViewModel.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatViewModelTests.swift",
+        "apps/shared/OpenClawKit/Tests/OpenClawKitTests/OpenClawChatOutboxIntegrationTests.swift"
+      ],
+      "defect_corrected": "final reply reconciliation could transiently duplicate an assistant message",
+      "current_aies_analogue": "session/run/gateway/durable-owner scoped reconciliation plus foreign-final rejection",
+      "current_behavior": "AIES already applies stronger identity/integrity fencing",
+      "upstream_behavior": "scopes final-message reconciliation",
+      "physical_relevance": "USEFUL_RELIABILITY_SUPERSEDED",
+      "classification": "SUPERSEDED_BY_AIES",
+      "collision_risk": "HIGH",
+      "action": "no import; retain exact raw-run, foreign-final, and durable-owner assertions",
+      "tests": ["exactRawRunSpeaksAndForeignFinalIsIgnored and existing Chat/S3 reliability suites"],
+      "resulting_commits": []
+    },
+    {
+      "pr": 98385,
+      "url": "https://github.com/openclaw/openclaw/pull/98385",
+      "title": "fix: show actionable mobile protocol mismatch recovery",
+      "stable_merge_commit": "ad59492d3ca9261a941721c864b2bc2278b63957",
+      "source_commits": [
+        "5223dcbf5626cd7cc51eb1eeb926bde9a532940d",
+        "027ba354a6b754c56a189805cf9eb3f904b96601",
+        "6f5929da48c0477e904a20c659e1fd10f1dc5d12"
+      ],
+      "upstream_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayConnectionProblem.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayErrors.swift",
+        "apps/ios/Sources/Onboarding/OnboardingWizardView.swift",
+        "apps/ios/Sources/RootTabs.swift"
+      ],
+      "aies_paths": [
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayConnectionProblem.swift",
+        "apps/ios/Sources/Gateway/GatewayConnectionIssue.swift",
+        "apps/ios/Sources/Gateway/GatewayProblemView.swift",
+        "apps/ios/Sources/Gateway/GatewayQuickSetupSheet.swift"
+      ],
+      "defect_corrected": "protocol mismatch lacked actionable mobile recovery",
+      "current_aies_analogue": "structured connection problem mapping and exact pairing/TLS owner",
+      "current_behavior": "no protocol-mismatch failure is part of the current physical regression contract",
+      "upstream_behavior": "presents upgrade/retry recovery actions",
+      "physical_relevance": "USEFUL_RELIABILITY_NO_CURRENT_REQUIREMENT",
+      "classification": "DEFER_NO_CURRENT_REQUIREMENT",
+      "collision_risk": "MEDIUM",
+      "action": "defer until an exact protocol mismatch is reproduced or required",
+      "tests": [],
+      "resulting_commits": [],
+      "deferral_reason": "avoid widening the newly changed setup recovery UI without a regression contract"
+    },
+    {
+      "pr": 100372,
+      "url": "https://github.com/openclaw/openclaw/pull/100372",
+      "title": "fix(ios): persist queued Watch replies",
+      "stable_merge_commit": "70f2bef6b4cf04792f5f15fc12a9fafafa5771cc",
+      "source_commits": [
+        "725615af2bca87291eecf4cee29b432fa81a29ed",
+        "ff74edbb40b5ffccd223b9563045d3a07adfe67f"
+      ],
+      "upstream_paths": [
+        "apps/ios/Sources/Model/NodeAppModel.swift",
+        "apps/ios/Sources/Model/WatchReplyCoordinator.swift",
+        "apps/ios/Sources/Services/WatchMessagingService.swift",
+        "apps/ios/Sources/Services/WatchMessagingPayloadCodec.swift",
+        "apps/ios/WatchApp/Sources/WatchConnectivityReceiver.swift",
+        "apps/ios/WatchApp/Sources/WatchInboxStore.swift"
+      ],
+      "aies_paths": [
+        "apps/ios/Sources/Model/NodeAppModel.swift",
+        "apps/ios/Sources/Services/WatchConnectivityTransport.swift",
+        "apps/ios/WatchExtension/Sources/WatchConnectivityReceiver.swift",
+        "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayNodeSession.swift"
+      ],
+      "defect_corrected": "queued Watch replies are lost across process lifecycle or upgrades",
+      "current_aies_analogue": "in-memory Watch reply path plus exact-route node session and S1/S3 durable delivery invariants",
+      "current_behavior": "Watch replies are not a fully persistent, gateway-bound durable outbox",
+      "upstream_behavior": "persists queued Watch replies and preserves pre-upgrade replies",
+      "physical_relevance": "USEFUL_RELIABILITY_NO_CURRENT_REQUIREMENT",
+      "classification": "DEFER_NO_CURRENT_REQUIREMENT",
+      "collision_risk": "HIGH",
+      "collision_analysis": "direct import can duplicate, reorder, or cross stable gateways because immediate/queued ambiguity, route generation, persistent identity, and migration must be designed together",
+      "action": "defer; Package C ports Watch activation only and does not claim reply persistence",
+      "tests": [],
+      "resulting_commits": [],
+      "deferral_reason": "requires a separately qualified Watch durable-outbox package bound to stable gateway and route generation",
+      "future_contract": [
+        "persistent reply identity",
+        "stable-gateway binding",
+        "route-generation fencing",
+        "exactly-once ambiguity handling",
+        "immediate/queued ordering",
+        "pre-upgrade migration"
+      ]
+    }
+  ],
+  "classification_totals": {
+    "PORT_REQUIRED": 8,
+    "ALREADY_PRESENT": 1,
+    "SUPERSEDED_BY_AIES": 2,
+    "DEFER_NO_CURRENT_REQUIREMENT": 2,
+    "REJECT_COLLIDES_WITH_AIES": 0
+  },
+  "ported_prs": [98429, 99572, 100317, 101235, 100328, 98066, 92552, 100732],
+  "already_present_prs": [100370],
+  "superseded_prs": [100277, 98117],
+  "deferred_prs": [98385, 100372],
+  "rejected_prs": [],
+  "feature_churn": {
+    "imported": false,
+    "excluded": [
+      "server, CLI, device-pair plugin, and Control UI changes",
+      "broad localization refresh",
+      "new Watch reply persistence feature",
+      "unrelated agent/dashboard/provider features",
+      "beta or main-only source"
+    ]
+  },
+  "qualification": {
+    "status": "PENDING_FINAL_CANDIDATE_CREDENTIAL_FREE_CI_SEAL",
+    "completed_local_gates": {
+      "release_tooling": {
+        "passed": 184,
+        "total": 184,
+        "result": "PASS"
+      }
+    },
+    "pending_mac_os_ci": true,
+    "required": [
+      "package and conformance tests",
+      "release tooling tests",
+      "Shared reliability tests",
+      "iOS reliability tests",
+      "Talk durable-outbox suite",
+      "Chat durable-outbox suite",
+      "setup and deep-link parser tests",
+      "TLS security and trust-prompt tests",
+      "QR scanner lifecycle tests",
+      "node/operator pairing and reconnect tests",
+      "APNs fake registration tests",
+      "Watch activation/relay tests",
+      "two deterministic XcodeGen passes",
+      "unsigned five-target archive",
+      "bundle topology, UUID/dSYM, package provenance, and evidence seal"
+    ],
+    "claims_excluded_until_seal": [
+      "promotion",
+      "signing",
+      "upload",
+      "Apple mutation",
+      "gateway mutation",
+      "physical acceptance"
+    ]
+  }
+}
