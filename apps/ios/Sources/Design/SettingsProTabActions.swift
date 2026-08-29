@@ -207,20 +207,25 @@ extension SettingsProTab {
     }
 
     func applySetupCodeAndConnect() async {
+        let attemptID = self.beginGatewaySetupAttempt()
+        defer { self.finishGatewaySetupAttempt(attemptID) }
         self.setupStatusText = nil
-        guard await self.applySetupCode() else { return }
+        guard await self.applySetupCode(attemptID: attemptID) else { return }
+        guard self.setupAttemptID == attemptID else { return }
         let host = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = self.resolvedManualPort(host: host) else {
             self.setupStatusText = "Failed: invalid port"
             return
         }
         guard await self.preflightGateway(host: host, port: port, useTLS: self.manualGatewayTLS) else { return }
+        guard self.setupAttemptID == attemptID else { return }
         self.setupStatusText = "Setup code applied. Connecting..."
         await self.connectManual()
     }
 
     func applyPendingGatewaySetupLinkIfNeeded() {
         guard let link = self.appModel.consumePendingGatewaySetupLink() else { return }
+        self.invalidateGatewaySetupAttempt()
         self.setupCode = ""
         self.setupStatusText = nil
         self.stagedGatewaySetupLink = link
@@ -229,7 +234,7 @@ extension SettingsProTab {
     }
 
     @discardableResult
-    func applySetupCode() async -> Bool {
+    func applySetupCode(attemptID: UUID) async -> Bool {
         let raw = self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines)
         let stagedLink = self.stagedGatewaySetupLink
         guard !raw.isEmpty || stagedLink != nil else {
@@ -245,19 +250,18 @@ extension SettingsProTab {
             return false
         }
 
-        guard let link = raw.isEmpty ? stagedLink : GatewayConnectDeepLink.fromSetupInput(raw) else {
+        guard let parsedLink = raw.isEmpty ? stagedLink : GatewayConnectDeepLink.fromSetupInput(raw) else {
             self.setupStatusText = "Setup code not recognized or uses an insecure ws:// gateway URL."
             return false
         }
+        let link = await self.gatewayController.selectReachableSetupLink(parsedLink)
+        guard self.setupAttemptID == attemptID else { return false }
         self.stagedGatewaySetupLink = nil
-        return await self.applyGatewayLink(link)
+        return await self.applyGatewayLink(link, attemptID: attemptID)
     }
 
-    func applyGatewayLink(_ link: GatewayConnectDeepLink) async -> Bool {
-        self.manualGatewayHost = link.host
-        self.manualGatewayPort = link.port
-        self.manualGatewayPortText = String(link.port)
-        self.manualGatewayTLS = link.tls
+    func applyGatewayLink(_ link: GatewayConnectDeepLink, attemptID: UUID) async -> Bool {
+        guard self.setupAttemptID == attemptID else { return false }
         let instanceId = GatewaySettingsStore.currentInstanceID()
         let setupAuth = GatewayConnectionController.ManualAuthOverride.setupAuth(from: link)
         if setupAuth.hasBootstrapToken {
@@ -269,7 +273,12 @@ extension SettingsProTab {
                 self.setupStatusText = "Could not securely clear queued messages. Setup was not applied."
                 return false
             }
+            guard self.setupAttemptID == attemptID else { return false }
         }
+        self.manualGatewayHost = link.host
+        self.manualGatewayPort = link.port
+        self.manualGatewayPortText = String(link.port)
+        self.manualGatewayTLS = link.tls
         if !instanceId.isEmpty {
             GatewaySettingsStore.saveGatewayBootstrapToken(setupAuth.bootstrapToken, instanceId: instanceId)
         }
@@ -290,7 +299,9 @@ extension SettingsProTab {
     }
 
     func openGatewayQRScanner() {
+        self.invalidateGatewaySetupAttempt()
         self.appModel.disconnectGateway()
+        self.scannerScanID = self.scannerResultHandoff.beginScan()
         self.connectingGatewayID = nil
         self.setupStatusText = "Opening QR scanner..."
         self.showQRScanner = true
@@ -298,11 +309,33 @@ extension SettingsProTab {
 
     func handleScannedGatewayLink(_ link: GatewayConnectDeepLink) {
         self.showQRScanner = false
+        let attemptID = self.beginGatewaySetupAttempt()
         self.setupCode = ""
         Task {
-            guard await self.applyGatewayLink(link) else { return }
-            self.setupStatusText = "QR loaded. Connecting to \(link.host):\(link.port)..."
-            await self.connectAfterScannedGatewayLink()
+            defer { self.finishGatewaySetupAttempt(attemptID) }
+            let selectedLink = await self.gatewayController.selectReachableSetupLink(link)
+            guard self.setupAttemptID == attemptID else { return }
+            guard await self.applyGatewayLink(selectedLink, attemptID: attemptID) else { return }
+            guard self.setupAttemptID == attemptID else { return }
+            self.setupStatusText = "QR loaded. Connecting to \(selectedLink.host):\(selectedLink.port)..."
+            await self.connectAfterScannedGatewayLink(attemptID: attemptID)
+        }
+    }
+
+    func queueScannedResult(_ result: QRScannerResult, scanID: UInt64) {
+        guard self.scannerResultHandoff.queue(result, scanID: scanID) else { return }
+        self.setupStatusText = "QR loaded. Closing scanner..."
+        self.showQRScanner = false
+    }
+
+    func processQueuedScannerResult() {
+        _ = self.scannerResultHandoff.processAfterDismissal { result in
+            switch result {
+            case let .gatewayLink(link):
+                self.handleScannedGatewayLink(link)
+            case let .setupCode(code):
+                self.handleScannedSetupCode(code)
+            }
         }
     }
 
@@ -315,14 +348,32 @@ extension SettingsProTab {
         self.appModel.enterAppleReviewDemoMode()
     }
 
-    func connectAfterScannedGatewayLink() async {
+    func connectAfterScannedGatewayLink(attemptID: UUID) async {
         let host = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let port = self.resolvedManualPort(host: host) else {
             self.setupStatusText = "Failed: invalid port"
             return
         }
         guard await self.preflightGateway(host: host, port: port, useTLS: self.manualGatewayTLS) else { return }
+        guard self.setupAttemptID == attemptID else { return }
         await self.connectManual()
+    }
+
+    func beginGatewaySetupAttempt() -> UUID {
+        self.gatewayController.clearPendingTrustPrompt()
+        let id = UUID()
+        self.setupAttemptID = id
+        return id
+    }
+
+    func finishGatewaySetupAttempt(_ id: UUID) {
+        guard self.setupAttemptID == id else { return }
+        self.setupAttemptID = nil
+    }
+
+    func invalidateGatewaySetupAttempt() {
+        self.setupAttemptID = nil
+        self.gatewayController.clearPendingTrustPrompt()
     }
 
     func connectManual() async {

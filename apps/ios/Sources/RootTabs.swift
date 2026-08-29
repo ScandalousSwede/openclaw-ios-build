@@ -369,7 +369,7 @@ struct RootTabs: View {
                     .environment(self.gatewayController)
                     .preferredColorScheme(self.appearancePreference.colorScheme)
             }
-            .gatewayTrustPromptAlert()
+            .gatewayTrustPromptAlert(isEnabled: !self.showOnboarding)
             .deepLinkAgentPromptAlert()
             .execApprovalPromptDialog()
     }
@@ -597,6 +597,8 @@ struct RootTabs: View {
     private func maybeOpenSettingsForGatewaySetup() {
         let requestID = self.appModel.gatewaySetupRequestID
         guard requestID != 0, requestID != self.handledGatewaySetupRequestID else { return }
+        // The visible onboarding flow owns one-shot setup-link staging while presented.
+        guard !self.showOnboarding else { return }
         self.handledGatewaySetupRequestID = requestID
         self.showOnboarding = false
         self.presentedSheet = nil

@@ -44,8 +44,11 @@ struct SettingsProTab: View {
     @State var gatewayPassword = ""
     @State var manualGatewayPortText = ""
     @State var setupStatusText: String?
+    @State var setupAttemptID: UUID?
     @State var stagedGatewaySetupLink: GatewayConnectDeepLink?
     @State var pendingManualAuthOverride: GatewayConnectionController.ManualAuthOverride?
+    @State var scannerResultHandoff = QRScannerResultHandoff()
+    @State var scannerScanID: UInt64 = 0
     @State var defaultShareInstruction = ""
     @State var showGatewayProblemDetails = false
     @State var showQRScanner = false
@@ -125,6 +128,10 @@ struct SettingsProTab: View {
                 self.applyPendingGatewaySetupLinkIfNeeded()
             }
         }
+        .onDisappear {
+            self.invalidateGatewaySetupAttempt()
+            self.scannerResultHandoff.cancel()
+        }
         .sheet(isPresented: self.$showGatewayProblemDetails) {
             if let gatewayProblem = self.appModel.lastGatewayProblem {
                 GatewayProblemDetailsSheet(
@@ -135,33 +142,39 @@ struct SettingsProTab: View {
                     })
             }
         }
-        .sheet(isPresented: self.$showQRScanner) {
-            NavigationStack {
-                QRScannerView(
-                    onGatewayLink: { link in
-                        self.handleScannedGatewayLink(link)
-                    },
-                    onSetupCode: { code in
-                        self.handleScannedSetupCode(code)
-                    },
-                    onError: { error in
-                        self.showQRScanner = false
-                        self.setupStatusText = "Scanner error: \(error)"
-                        self.scannerError = error
-                    },
-                    onDismiss: {
-                        self.showQRScanner = false
-                    })
-                    .ignoresSafeArea()
-                    .navigationTitle("Scan QR Code")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .topBarLeading) {
-                            Button("Cancel") { self.showQRScanner = false }
+        .sheet(
+            isPresented: self.$showQRScanner,
+            onDismiss: { self.processQueuedScannerResult() },
+            content: {
+                let scanID = self.scannerScanID
+                NavigationStack {
+                    QRScannerView(
+                        onResult: { result in
+                            self.queueScannedResult(result, scanID: scanID)
+                        },
+                        onError: { error in
+                            guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
+                            self.showQRScanner = false
+                            self.setupStatusText = "Scanner error: \(error)"
+                            self.scannerError = error
+                        },
+                        onDismiss: {
+                            guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
+                            self.showQRScanner = false
+                        })
+                        .ignoresSafeArea()
+                        .navigationTitle("Scan QR Code")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                Button("Cancel") {
+                                    self.scannerResultHandoff.cancel()
+                                    self.showQRScanner = false
+                                }
+                            }
                         }
-                    }
-            }
-        }
+                }
+            })
         .alert("Reset Onboarding?", isPresented: self.$showResetOnboardingAlert) {
             Button("Reset", role: .destructive) {
                 Task { await self.resetOnboarding() }

@@ -74,6 +74,10 @@ struct OnboardingWizardView: View {
     @State private var pendingManualAuthOverride: GatewayConnectionController.ManualAuthOverride?
     @State private var setupCode: String = ""
     @State private var setupCodeStatus: String?
+    @State private var stagedGatewaySetupLink: GatewayConnectDeepLink?
+    @State private var setupAttemptID: UUID?
+    @State private var scannerResultHandoff = QRScannerResultHandoff()
+    @State private var scannerScanID: UInt64 = 0
     private static let pairingAutoResumeTicker = Timer.publish(every: 2.0, on: .main, in: .common).autoconnect()
 
     let allowSkip: Bool
@@ -168,21 +172,24 @@ struct OnboardingWizardView: View {
         } message: {
             Text(self.scannerError ?? "")
         }
-        .sheet(isPresented: self.$showQRScanner) {
+        .sheet(
+            isPresented: self.$showQRScanner,
+            onDismiss: { self.processQueuedScannerResult() },
+            content: {
+                let scanID = self.scannerScanID
                 NavigationStack {
                     QRScannerView(
-                        onGatewayLink: { link in
-                            self.handleScannedLink(link)
-                        },
-                        onSetupCode: { code in
-                            self.handleScannedSetupCode(code)
+                        onResult: { result in
+                            self.queueScannedResult(result, scanID: scanID)
                         },
                         onError: { error in
+                            guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
                             self.showQRScanner = false
                             self.statusLine = "Scanner error: \(error)"
                             self.scannerError = error
                         },
                         onDismiss: {
+                            guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
                             self.showQRScanner = false
                         })
                         .ignoresSafeArea()
@@ -190,7 +197,10 @@ struct OnboardingWizardView: View {
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .topBarLeading) {
-                                Button("Cancel") { self.showQRScanner = false }
+                                Button("Cancel") {
+                                    self.scannerResultHandoff.cancel()
+                                    self.showQRScanner = false
+                                }
                             }
                             ToolbarItem(placement: .topBarTrailing) {
                                 PhotosPicker(selection: self.$selectedPhoto, matching: .images) {
@@ -204,25 +214,28 @@ struct OnboardingWizardView: View {
                     self.selectedPhoto = nil
                     Task {
                         guard let data = try? await item.loadTransferable(type: Data.self) else {
+                            guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
                             self.showQRScanner = false
                             self.scannerError = "Could not load the selected image."
                             return
                         }
+                        guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
                         if let message = self.detectQRCode(from: data) {
                             if let link = GatewayConnectDeepLink.fromSetupInput(message) {
-                                self.handleScannedLink(link)
+                                self.queueScannedResult(.gatewayLink(link), scanID: scanID)
                                 return
                             }
                             if AppleReviewDemoMode.isSetupCode(message) {
-                                self.handleScannedSetupCode(message)
+                                self.queueScannedResult(.setupCode(message), scanID: scanID)
                                 return
                             }
                         }
+                        guard self.scannerResultHandoff.isActive(scanID: scanID) else { return }
                         self.showQRScanner = false
                         self.scannerError = "No valid QR code found in the selected image."
                     }
                 }
-            }
+            })
             .sheet(isPresented: self.$showGatewayProblemDetails) {
                 if let currentProblem = self.currentProblem {
                     GatewayProblemDetailsSheet(
@@ -235,10 +248,13 @@ struct OnboardingWizardView: View {
             }
             .onAppear {
                 self.initializeState()
+                self.applyPendingGatewaySetupLinkIfNeeded()
             }
             .onDisappear {
                 self.discoveryRestartTask?.cancel()
                 self.discoveryRestartTask = nil
+                self.invalidateGatewaySetupAttempt()
+                self.scannerResultHandoff.cancel()
             }
             .onChange(of: self.discoveryDomain) { _, _ in
                 self.scheduleDiscoveryRestart()
@@ -266,6 +282,14 @@ struct OnboardingWizardView: View {
             }
             .onChange(of: self.gatewayPassword) { _, newValue in
                 self.saveGatewayCredentials(token: self.gatewayToken, password: newValue)
+            }
+            .onChange(of: self.setupCode) { _, newValue in
+                if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.stagedGatewaySetupLink = nil
+                }
+            }
+            .onChange(of: self.appModel.gatewaySetupRequestID) { _, _ in
+                self.applyPendingGatewaySetupLinkIfNeeded()
             }
             .onChange(of: self.appModel.lastGatewayProblem) { _, newValue in
                 self.updateConnectionIssue(problem: newValue, statusText: self.appModel.gatewayStatusText)
@@ -300,8 +324,7 @@ struct OnboardingWizardView: View {
         OnboardingWelcomeStep(
             statusLine: self.statusLine,
             onScanQRCode: {
-                self.statusLine = "Opening QR scanner…"
-                self.showQRScanner = true
+                self.openQRScannerFromOnboarding()
             },
             onManualSetup: {
                 self.step = .mode
@@ -634,11 +657,12 @@ extension OnboardingWizardView {
                         Text("Applying...")
                     }
                 } else {
-                    Text("Apply Setup Code")
+                    Text(self.stagedGatewaySetupLink == nil ? "Apply Setup Code" : "Apply Setup Link")
                 }
             }
             .disabled(
-                self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                (self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && self.stagedGatewaySetupLink == nil)
                     || self.connectingGatewayID != nil)
 
             if let setupCodeStatus, !setupCodeStatus.isEmpty {
@@ -692,9 +716,11 @@ extension OnboardingWizardView {
     }
 
     private func applySetupCodeAndConnect() async {
+        let attemptID = self.beginGatewaySetupAttempt()
         self.setupCodeStatus = nil
         let raw = self.setupCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else {
+        let stagedLink = self.stagedGatewaySetupLink
+        guard !raw.isEmpty || stagedLink != nil else {
             self.setupCodeStatus = "Paste a setup code to continue."
             return
         }
@@ -706,17 +732,20 @@ extension OnboardingWizardView {
             return
         }
 
-        guard let link = GatewayConnectDeepLink.fromSetupInput(raw) else {
+        guard let parsedLink = raw.isEmpty ? stagedLink : GatewayConnectDeepLink.fromSetupInput(raw) else {
             self.setupCodeStatus = "Setup code not recognized or uses an insecure ws:// gateway URL."
             return
         }
+        let link = await self.gatewayController.selectReachableSetupLink(parsedLink)
+        guard self.setupAttemptID == attemptID else { return }
 
         self.connectingGatewayID = "setup-code"
-        guard await self.applyGatewayLink(link) else {
+        guard await self.applyGatewayLink(link, attemptID: attemptID) else {
             self.connectingGatewayID = nil
             return
         }
         self.setupCode = ""
+        self.stagedGatewaySetupLink = nil
         self.setupCodeStatus = "Setup code applied. Connecting..."
         self.connectMessage = "Connecting via setup code..."
         self.statusLine = "Setup code loaded. Connecting to \(link.host):\(link.port)..."
@@ -724,22 +753,22 @@ extension OnboardingWizardView {
         await self.connectManual()
     }
 
-    private func handleScannedLink(_ link: GatewayConnectDeepLink) {
+    private func handleScannedLink(_ parsedLink: GatewayConnectDeepLink) {
+        let attemptID = self.beginGatewaySetupAttempt()
         Task {
-            guard await self.applyGatewayLink(link) else { return }
+            let link = await self.gatewayController.selectReachableSetupLink(parsedLink)
+            guard self.setupAttemptID == attemptID else { return }
+            guard await self.applyGatewayLink(link, attemptID: attemptID) else { return }
+            guard self.setupAttemptID == attemptID else { return }
             self.setupCodeStatus = nil
-            self.showQRScanner = false
             self.connectMessage = "Connecting via QR code..."
             self.statusLine = "QR loaded. Connecting to \(link.host):\(link.port)..."
             await self.connectManual()
         }
     }
 
-    private func applyGatewayLink(_ link: GatewayConnectDeepLink) async -> Bool {
-        self.manualHost = link.host
-        self.manualPort = link.port
-        self.manualPortText = String(link.port)
-        self.manualTLS = link.tls
+    private func applyGatewayLink(_ link: GatewayConnectDeepLink, attemptID: UUID) async -> Bool {
+        guard self.setupAttemptID == attemptID else { return false }
         let setupAuth = GatewayConnectionController.ManualAuthOverride.setupAuth(from: link)
         if setupAuth.hasBootstrapToken {
             do {
@@ -750,7 +779,12 @@ extension OnboardingWizardView {
                 self.setupCodeStatus = "Could not securely clear queued messages. Setup was not applied."
                 return false
             }
+            guard self.setupAttemptID == attemptID else { return false }
         }
+        self.manualHost = link.host
+        self.manualPort = link.port
+        self.manualPortText = String(link.port)
+        self.manualTLS = link.tls
         self.saveGatewayBootstrapToken(setupAuth.bootstrapToken)
         if setupAuth.shouldApplyTokenField {
             self.gatewayToken = setupAuth.token
@@ -778,13 +812,60 @@ extension OnboardingWizardView {
 
     private func openQRScannerFromOnboarding() {
         // Stop active reconnect loops before scanning new credentials.
+        self.invalidateGatewaySetupAttempt()
         self.appModel.disconnectGateway()
+        self.scannerScanID = self.scannerResultHandoff.beginScan()
         self.connectingGatewayID = nil
         self.connectMessage = nil
         self.issue = .none
         self.pairingRequestId = nil
         self.statusLine = "Opening QR scanner…"
         self.showQRScanner = true
+    }
+
+    private func applyPendingGatewaySetupLinkIfNeeded() {
+        guard let link = self.appModel.consumePendingGatewaySetupLink() else { return }
+        self.invalidateGatewaySetupAttempt()
+        self.showQRScanner = false
+        self.scannerResultHandoff.cancel()
+        self.stagedGatewaySetupLink = link
+        if self.selectedMode == nil {
+            self.selectedMode = link.tls ? .remoteDomain : .homeNetwork
+        }
+        self.setupCode = ""
+        self.setupCodeStatus = "Setup link loaded for \(link.host):\(link.port). Tap Apply Setup Link to continue."
+        self.connectMessage = nil
+        self.statusLine = self.setupCodeStatus ?? ""
+        self.step = .connect
+    }
+
+    private func queueScannedResult(_ result: QRScannerResult, scanID: UInt64) {
+        guard self.scannerResultHandoff.queue(result, scanID: scanID) else { return }
+        self.statusLine = "QR loaded. Closing scanner..."
+        self.showQRScanner = false
+    }
+
+    private func processQueuedScannerResult() {
+        _ = self.scannerResultHandoff.processAfterDismissal { result in
+            switch result {
+            case let .gatewayLink(link):
+                self.handleScannedLink(link)
+            case let .setupCode(code):
+                self.handleScannedSetupCode(code)
+            }
+        }
+    }
+
+    private func beginGatewaySetupAttempt() -> UUID {
+        self.gatewayController.clearPendingTrustPrompt()
+        let id = UUID()
+        self.setupAttemptID = id
+        return id
+    }
+
+    private func invalidateGatewaySetupAttempt() {
+        self.setupAttemptID = nil
+        self.gatewayController.clearPendingTrustPrompt()
     }
 
     private func resumeAfterPairingApproval() {
@@ -885,6 +966,7 @@ extension OnboardingWizardView {
 
     private func navigateBack() {
         guard let target = self.step.previous else { return }
+        self.invalidateGatewaySetupAttempt()
         self.connectingGatewayID = nil
         self.connectMessage = nil
         self.step = target
