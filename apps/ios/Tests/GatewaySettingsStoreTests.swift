@@ -96,7 +96,10 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
 }
 
 @Suite(.serialized) struct GatewaySettingsStoreTests {
-    @Test func sameIdentityUpdateReadsHistoricalGatewayStateWithoutRewrite() throws {
+    // The test bundle is hosted by the live app. Keep this synthetic migration
+    // transaction on MainActor so the host's MainActor gateway lifecycle cannot
+    // observe a partially seeded set of legacy UserDefaults keys.
+    @Test @MainActor func sameIdentityUpdateReadsHistoricalGatewayStateWithoutRewrite() throws {
         let instanceID = "continuity-node"
         let stableGatewayID = "continuity-gateway"
         let defaultsKeys = bootstrapDefaultsKeys + lastGatewayDefaultsKeys + [

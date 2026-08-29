@@ -147,6 +147,11 @@ class AIESOldIdentityContinuityTests(unittest.TestCase):
             "productionDirectRegistrationUsesOldTopicAndKeepsPairing",
             ios_continuity_tests,
         )
+        self.assertIn(
+            "@Test @MainActor func "
+            "sameIdentityUpdateReadsHistoricalGatewayStateWithoutRewrite",
+            ios_continuity_tests,
+        )
         self.assertIn('"OpenClawPushTransport": "direct"', ios_continuity_tests)
         self.assertIn('"OpenClawPushDistribution": "local"', ios_continuity_tests)
         self.assertIn('"OpenClawPushAPNsEnvironment": "production"', ios_continuity_tests)
