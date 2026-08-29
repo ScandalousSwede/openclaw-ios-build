@@ -137,6 +137,21 @@ import Testing
             ownerGeneration: 12,
             blockedGeneration: 11,
             missingScopes: []) == .monitor)
+        #expect(NodeAppModel.operatorLoopPostConnectDecision(
+            ownerIsCurrent: true,
+            ownerGeneration: 12,
+            blockedGeneration: nil,
+            missingScopes: ["operator.write"]) == .stopScopeBlocked)
+        #expect(NodeAppModel.operatorLoopPostConnectDecision(
+            ownerIsCurrent: true,
+            ownerGeneration: 12,
+            blockedGeneration: nil,
+            missingScopes: nil) == .retryRouteAdmission)
+        #expect(NodeAppModel.operatorLoopPostConnectDecision(
+            ownerIsCurrent: false,
+            ownerGeneration: 12,
+            blockedGeneration: nil,
+            missingScopes: ["operator.write"]) == .stopStaleOwner)
     }
 
     @Test @MainActor func scopeBlockPreservesHealthyNodeAndStopsOperatorGeneration() {
@@ -262,6 +277,61 @@ import Testing
         #expect(model.contains("shouldContinue: shouldContinue"))
         #expect(canvas.contains("ifCurrentRoute expectedRoute: GatewayNodeSessionRoute?"))
         #expect(canvas.contains("self.nodeGateway.isCurrentRoute(expectedRoute)"))
+    }
+
+    @Test func healthScopeAndAPNsSideEffectsRemainBoundToTheirOwningRoutes() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Model/NodeAppModel.swift"),
+            encoding: .utf8)
+
+        // Health failure may retire only the routes captured when monitoring began.
+        #expect(model.contains("operatorRoute: GatewayNodeSessionRoute,"))
+        #expect(model.contains(
+            "guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else { return }"))
+        #expect(model.contains(
+            "nodeDisconnected = await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)"))
+        #expect(model.contains(
+            "self.operatorGateway.currentRoute(\n                      ifGatewayID: expectedGatewayID)"))
+        #expect(model.contains("self.nodeGateway.currentRoute(ifGatewayID: expectedGatewayID)"))
+        let admittedOperatorGatewayGuard =
+            "self.operatorGateway.currentGatewayID(\n"
+                + "                                ifCurrentRoute: admittedRoute) == stableID"
+        #expect(model.contains(admittedOperatorGatewayGuard))
+        #expect(model.contains("self.nodeGateway.currentRoute(ifGatewayID: stableID)"))
+
+        // A canceled or route-losing operator loop cannot disconnect or scope-block
+        // the successor that replaced its own admitted route.
+        #expect(model.contains("guard !Task.isCancelled,"))
+        #expect(model.contains("case .retryRouteAdmission:"))
+        #expect(model.contains(
+            "_ = await self.operatorGateway.disconnect(ifCurrentRoute: admittedRoute)"))
+        #expect(model.contains(
+            "await self.operatorGateway.disconnect(ifCurrentRoute: admittedRoute)"))
+        let canceledScopeBlockGuard =
+            "else { continue operatorReconnectLoop }\n"
+                + "                        guard !Task.isCancelled else { break operatorReconnectLoop }"
+        #expect(model.contains(canceledScopeBlockGuard))
+        #expect(model.contains("self.applyOperatorScopeBlock(missing: admittedScopes)"))
+
+        // APNs registration is coalesced by its exact route pair and repeatedly
+        // fenced by the captured configuration generation and stable gateway ID.
+        #expect(model.contains("private struct APNsRegistrationAttempt: Equatable"))
+        #expect(model.contains("let configurationGeneration = self.gatewayConfigurationGeneration"))
+        #expect(model.contains(
+            "self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID"))
+        #expect(model.contains(
+            "self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID"))
+        #expect(model.contains(
+            "self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID"))
+        #expect(model.contains(
+            "guard !self.apnsRegistrationsInFlight.contains(attempt) else { return }"))
+        #expect(model.contains("ifCurrentRoute: nodeRoute"))
+        #expect(model.contains(
+            "[token, topic, expectedGatewayID, \"direct\"].joined(separator: \"|\")"))
+        #expect(!model.contains("apnsLastRegisteredTokenHex"))
     }
 
     private static func makeConfig(

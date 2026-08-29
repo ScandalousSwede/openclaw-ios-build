@@ -18,6 +18,15 @@ private struct GatewayRelayIdentityResponse: Decodable {
     let publicKey: String
 }
 
+private struct APNsRegistrationAttempt: Equatable {
+    let token: String
+    let topic: String
+    let configurationGeneration: UInt64
+    let usesRelayTransport: Bool
+    let nodeRoute: GatewayNodeSessionRoute
+    let operatorRoute: GatewayNodeSessionRoute?
+}
+
 /// Ensures notification requests return promptly even if the system prompt blocks.
 private final class NotificationInvokeLatch<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
@@ -338,7 +347,8 @@ final class NodeAppModel {
     private var shareDeliveryChannel: String?
     private var shareDeliveryTo: String?
     private var apnsDeviceTokenHex: String?
-    private var apnsLastRegisteredTokenHex: String?
+    private var apnsLastRegisteredKey: String?
+    @ObservationIgnored private var apnsRegistrationsInFlight: [APNsRegistrationAttempt] = []
     @ObservationIgnored private let pushRegistrationManager = PushRegistrationManager()
     var gatewaySession: GatewayNodeSession {
         self.nodeGateway
@@ -1030,7 +1040,7 @@ final class NodeAppModel {
                                     guard self.foregroundGatewayResumeCheckID == resumeCheckID else { return }
                                     self.foregroundGatewayResumeCheckID = nil
                                     self.foregroundGatewayResumeCheckInFlight = false
-                                    self.startGatewayHealthMonitor()
+                                    self.startGatewayHealthMonitorForCurrentRoutes()
                                 }
                                 return
                             }
@@ -1059,7 +1069,7 @@ final class NodeAppModel {
                 }
             }
             if shouldStartGatewayHealthMonitor {
-                self.startGatewayHealthMonitor()
+                self.startGatewayHealthMonitorForCurrentRoutes()
             }
         @unknown default:
             self.isBackgrounded = false
@@ -1613,8 +1623,8 @@ final class NodeAppModel {
     }
 
     private func startGatewayHealthMonitor(
-        operatorRoute: GatewayNodeSessionRoute? = nil,
-        nodeRoute: GatewayNodeSessionRoute? = nil,
+        operatorRoute: GatewayNodeSessionRoute,
+        nodeRoute: GatewayNodeSessionRoute?,
         shouldContinue: @escaping @MainActor @Sendable () -> Bool = { true })
     {
         guard shouldContinue() else { return }
@@ -1625,19 +1635,11 @@ final class NodeAppModel {
                 guard await shouldContinue() else { return true }
                 if await MainActor.run(body: { self.isGatewayHealthMonitorDisabled() }) { return true }
                 do {
-                    let data: Data
-                    if let operatorRoute {
-                        data = try await self.operatorGateway.request(
-                            method: "health",
-                            paramsJSON: nil,
-                            timeoutSeconds: 6,
-                            ifCurrentRoute: operatorRoute)
-                    } else {
-                        data = try await self.operatorGateway.request(
-                            method: "health",
-                            paramsJSON: nil,
-                            timeoutSeconds: 6)
-                    }
+                    let data = try await self.operatorGateway.request(
+                        method: "health",
+                        paramsJSON: nil,
+                        timeoutSeconds: 6,
+                        ifCurrentRoute: operatorRoute)
                     guard await shouldContinue() else { return true }
                     guard let decoded = try? JSONDecoder().decode(OpenClawGatewayHealthOK.self, from: data) else {
                         return false
@@ -1645,9 +1647,7 @@ final class NodeAppModel {
                     return decoded.ok ?? false
                 } catch {
                     guard await shouldContinue() else { return true }
-                    if let operatorRoute,
-                       !(await self.operatorGateway.isCurrentRoute(operatorRoute))
-                    {
+                    if !(await self.operatorGateway.isCurrentRoute(operatorRoute)) {
                         return true
                     }
                     if let gatewayError = error as? GatewayResponseError {
@@ -1663,23 +1663,44 @@ final class NodeAppModel {
             onFailure: { [weak self] _ in
                 guard let self else { return }
                 guard await shouldContinue() else { return }
-                if let operatorRoute {
-                    guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else { return }
-                } else {
-                    await self.operatorGateway.disconnect()
-                }
+                guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else { return }
+                let nodeDisconnected: Bool
                 if let nodeRoute {
-                    _ = await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)
+                    nodeDisconnected = await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)
+                } else {
+                    nodeDisconnected = false
                 }
                 guard await shouldContinue() else { return }
                 await MainActor.run {
                     guard shouldContinue(), !self.isAppleReviewDemoModeEnabled else { return }
                     self.setOperatorConnected(false)
-                    self.gatewayConnected = false
+                    if nodeDisconnected {
+                        self.gatewayConnected = false
+                    }
                     self.gatewayStatusText = "Reconnecting…"
                     self.talkMode.updateGatewayConnected(false)
                 }
             })
+    }
+
+    private func startGatewayHealthMonitorForCurrentRoutes() {
+        self.gatewayHealthMonitor.stop()
+        Task { @MainActor [weak self] in
+            guard let self, self.operatorConnected else { return }
+            guard let expectedGatewayID = self.activeGatewayConnectConfig?.effectiveStableID,
+                  let operatorRoute = await self.operatorGateway.currentRoute(
+                      ifGatewayID: expectedGatewayID)
+            else { return }
+            let nodeRoute = await self.nodeGateway.currentRoute(ifGatewayID: expectedGatewayID)
+            guard await self.operatorGateway.isCurrentRoute(operatorRoute) else { return }
+            if let nodeRoute {
+                guard await self.nodeGateway.isCurrentRoute(nodeRoute) else { return }
+            }
+            guard self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID else { return }
+            self.startGatewayHealthMonitor(
+                operatorRoute: operatorRoute,
+                nodeRoute: nodeRoute)
+        }
     }
 
     private func stopGatewayHealthMonitor() {
@@ -2929,7 +2950,7 @@ extension NodeAppModel {
         self.selectedAgentId = GatewaySettingsStore.loadGatewaySelectedAgentId(stableID: stableID)
         self.focusedChatSessionKey = nil
         self.homeCanvasRevision &+= 1
-        self.apnsLastRegisteredTokenHex = nil
+        self.apnsLastRegisteredKey = nil
     }
 
     private func clearGatewayConnectionProblem() {
@@ -3316,13 +3337,6 @@ extension NodeAppModel {
             persistence: receipt.persistence)
     }
 
-    private func missingRequiredOperatorScopesForCurrentRoute() async -> [String]? {
-        guard let route = await self.operatorGateway.currentRoute(),
-              let granted = await self.operatorGateway.operatorScopes(ifCurrentRoute: route)
-        else { return nil }
-        return Self.requiredMobileOperatorScopes.filter { !granted.contains($0) }
-    }
-
     private func missingRequiredOperatorScopes(
         ifCurrentRoute route: GatewayNodeSessionRoute) async -> [String]?
     {
@@ -3461,14 +3475,10 @@ extension NodeAppModel {
                                 // classify the absent route as retryable admission loss.
                                 return
                             }
-                            guard await self.isCurrentGatewayConnectionOwner(loopOwner) else { return }
-                            guard missingScopes.isEmpty else {
-                                await MainActor.run {
-                                    guard self.isCurrentGatewayConnectionOwner(loopOwner) else { return }
-                                    self.applyOperatorScopeBlock(missing: missingScopes)
-                                }
-                                return
-                            }
+                            guard await self.isCurrentGatewayConnectionOwner(loopOwner),
+                                  await self.operatorGateway.isCurrentRoute(admittedRoute),
+                                  missingScopes.isEmpty
+                            else { return }
                             let shouldUseConnection = await MainActor.run {
                                 guard self.isCurrentGatewayConnectionOwner(loopOwner),
                                       !self.isAppleReviewDemoModeEnabled
@@ -3518,7 +3528,10 @@ extension NodeAppModel {
                             await self.startVoiceWakeSync(
                                 ifCurrentRoute: admittedRoute,
                                 shouldContinue: shouldContinue)
-                            let nodeRoute = await self.nodeGateway.currentRoute()
+                            guard await self.operatorGateway.currentGatewayID(
+                                ifCurrentRoute: admittedRoute) == stableID
+                            else { return }
+                            let nodeRoute = await self.nodeGateway.currentRoute(ifGatewayID: stableID)
                             await MainActor.run {
                                 guard shouldContinue() else { return }
                                 self.startGatewayHealthMonitor(
@@ -3556,8 +3569,16 @@ extension NodeAppModel {
                                     message: "INVALID_REQUEST: operator session cannot invoke node commands"))
                         })
 
+                    guard !Task.isCancelled,
+                          self.isCurrentGatewayConnectionOwner(loopOwner)
+                    else { break operatorReconnectLoop }
                     attempt = 0
-                    let admittedScopes = await self.missingRequiredOperatorScopesForCurrentRoute()
+                    let admittedRoute = await self.operatorGateway.currentRoute()
+                    let admittedScopes: [String]? = if let admittedRoute {
+                        await self.missingRequiredOperatorScopes(ifCurrentRoute: admittedRoute)
+                    } else {
+                        nil
+                    }
                     let postConnectDecision = Self.operatorLoopPostConnectDecision(
                         ownerIsCurrent: self.isCurrentGatewayConnectionOwner(loopOwner),
                         ownerGeneration: loopOwner.generation,
@@ -3567,16 +3588,31 @@ extension NodeAppModel {
                     case .monitor:
                         try? await Task.sleep(nanoseconds: 1_000_000_000)
                     case .retryRouteAdmission:
-                        await self.operatorGateway.disconnect()
+                        if let admittedRoute {
+                            _ = await self.operatorGateway.disconnect(ifCurrentRoute: admittedRoute)
+                        }
                         continue
                     case .stopScopeBlocked:
-                        await self.operatorGateway.disconnect()
+                        guard let admittedRoute,
+                              let admittedScopes,
+                              !admittedScopes.isEmpty,
+                              await self.operatorGateway.disconnect(ifCurrentRoute: admittedRoute)
+                        else { continue operatorReconnectLoop }
+                        guard !Task.isCancelled else { break operatorReconnectLoop }
+                        await MainActor.run {
+                            guard !Task.isCancelled,
+                                  self.isCurrentGatewayConnectionOwner(loopOwner)
+                            else { return }
+                            self.applyOperatorScopeBlock(missing: admittedScopes)
+                        }
                         break operatorReconnectLoop
                     case .stopStaleOwner:
                         break operatorReconnectLoop
                     }
                 } catch {
-                    guard self.isCurrentGatewayConnectionOwner(loopOwner) else { break }
+                    guard !Task.isCancelled,
+                          self.isCurrentGatewayConnectionOwner(loopOwner)
+                    else { break }
                     attempt += 1
                     GatewayDiagnostics.log("operator gateway connect error: \(error.localizedDescription)")
                     let problem: GatewayConnectionProblem? = await MainActor.run {
@@ -4243,9 +4279,7 @@ extension NodeAppModel {
         if let nodeRoute {
             guard await self.nodeGateway.isCurrentRoute(nodeRoute) else { return }
         }
-        await self.flushQueuedWatchRepliesIfConnected(
-            nodeRoute: nodeRoute,
-            shouldContinue: shouldContinue)
+        await self.flushQueuedWatchRepliesIfConnected()
         guard shouldContinue() else { return }
         if let nodeRoute {
             guard await self.nodeGateway.isCurrentRoute(nodeRoute) else { return }
@@ -4389,46 +4423,13 @@ extension NodeAppModel {
         }
     }
 
-    private func flushQueuedWatchRepliesIfConnected(
-        nodeRoute: GatewayNodeSessionRoute? = nil,
-        shouldContinue: @escaping @MainActor @Sendable () -> Bool = { true }) async
-    {
-        guard shouldContinue() else { return }
-        let events = await self.watchReplyCoordinator.drainIfConnected(self.isGatewayConnected())
-        guard shouldContinue() else {
-            for event in events.reversed() {
-                self.watchReplyCoordinator.requeueFront(event)
-            }
-            return
-        }
-        for (index, event) in events.enumerated() {
-            guard shouldContinue() else {
-                for pending in events[index...].reversed() {
-                    self.watchReplyCoordinator.requeueFront(pending)
-                }
-                return
-            }
-            await self.forwardWatchReplyToAgent(
-                event,
-                nodeRoute: nodeRoute,
-                shouldContinue: shouldContinue)
-            guard shouldContinue() else {
-                if index + 1 < events.count {
-                    for pending in events[(index + 1)...].reversed() {
-                        self.watchReplyCoordinator.requeueFront(pending)
-                    }
-                }
-                return
-            }
+    private func flushQueuedWatchRepliesIfConnected() async {
+        for event in await self.watchReplyCoordinator.drainIfConnected(self.isGatewayConnected()) {
+            await self.forwardWatchReplyToAgent(event)
         }
     }
 
-    private func forwardWatchReplyToAgent(
-        _ event: WatchQuickReplyEvent,
-        nodeRoute: GatewayNodeSessionRoute? = nil,
-        shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
-    {
-        guard shouldContinue() else { return }
+    private func forwardWatchReplyToAgent(_ event: WatchQuickReplyEvent) async {
         let sessionKey = event.sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveSessionKey = (sessionKey?.isEmpty == false) ? sessionKey : self.mainSessionKey
         let message = Self.makeWatchReplyAgentMessage(event)
@@ -4442,11 +4443,7 @@ extension NodeAppModel {
             timeoutSeconds: nil,
             key: event.replyId)
         do {
-            try await self.sendAgentRequest(link: link, nodeRoute: nodeRoute)
-            // Once the route-bound send returns success, never requeue: doing so
-            // could duplicate an already-dispatched reply. A superseded owner only
-            // suppresses its stale UI mutation below.
-            guard shouldContinue() else { return }
+            try await self.sendAgentRequest(link: link)
             let forwardedMessage =
                 "watch reply forwarded replyId=\(event.replyId) "
                     + "action=\(event.actionId)"
@@ -5030,51 +5027,105 @@ extension NodeAppModel {
         }
         let usesRelayTransport = await self.pushRegistrationManager.usesRelayTransport
         guard shouldContinue() else { return }
-        if !usesRelayTransport, token == self.apnsLastRegisteredTokenHex {
-            return
-        }
         guard let topic = Bundle.main.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
               !topic.isEmpty
         else {
             return
         }
+        let configurationGeneration = self.gatewayConfigurationGeneration
+        guard let expectedGatewayID = self.activeGatewayConnectConfig?.effectiveStableID else { return }
+        let nodeRoute: GatewayNodeSessionRoute
+        if let expectedNodeRoute {
+            nodeRoute = expectedNodeRoute
+        } else {
+            guard let currentNodeRoute = await self.nodeGateway.currentRoute() else { return }
+            nodeRoute = currentNodeRoute
+        }
+        guard await self.nodeGateway.isCurrentRoute(nodeRoute),
+              await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID,
+              self.gatewayConfigurationGeneration == configurationGeneration,
+              self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+              shouldContinue()
+        else { return }
+
+        let operatorRoute: GatewayNodeSessionRoute?
+        if usesRelayTransport {
+            guard self.operatorConnected else { return }
+            if let expectedOperatorRoute {
+                operatorRoute = expectedOperatorRoute
+            } else {
+                guard let currentOperatorRoute = await self.operatorGateway.currentRoute() else { return }
+                operatorRoute = currentOperatorRoute
+            }
+            guard let operatorRoute,
+                  await self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID
+            else { return }
+        } else {
+            operatorRoute = nil
+        }
+
+        let directRegistrationKey = [token, topic, expectedGatewayID, "direct"].joined(separator: "|")
+        if !usesRelayTransport, self.apnsLastRegisteredKey == directRegistrationKey { return }
+        let attempt = APNsRegistrationAttempt(
+            token: token,
+            topic: topic,
+            configurationGeneration: configurationGeneration,
+            usesRelayTransport: usesRelayTransport,
+            nodeRoute: nodeRoute,
+            operatorRoute: operatorRoute)
+        guard !self.apnsRegistrationsInFlight.contains(attempt) else { return }
+        self.apnsRegistrationsInFlight.append(attempt)
+        defer {
+            self.apnsRegistrationsInFlight.removeAll { $0 == attempt }
+        }
 
         do {
-            let nodeRoute: GatewayNodeSessionRoute
-            if let expectedNodeRoute {
-                nodeRoute = expectedNodeRoute
-            } else {
-                guard let currentNodeRoute = await self.nodeGateway.currentRoute() else { return }
-                nodeRoute = currentNodeRoute
-            }
-            guard await self.nodeGateway.isCurrentRoute(nodeRoute), shouldContinue() else { return }
             let gatewayIdentity: PushRelayGatewayIdentity?
-            if usesRelayTransport {
-                guard self.operatorConnected else { return }
-                let operatorRoute: GatewayNodeSessionRoute
-                if let expectedOperatorRoute {
-                    operatorRoute = expectedOperatorRoute
-                } else {
-                    guard let currentOperatorRoute = await self.operatorGateway.currentRoute() else { return }
-                    operatorRoute = currentOperatorRoute
-                }
+            if let operatorRoute {
                 gatewayIdentity = try await self.fetchPushRelayGatewayIdentity(
                     ifCurrentRoute: operatorRoute)
-                guard shouldContinue() else { return }
             } else {
                 gatewayIdentity = nil
             }
+            let operatorRouteStillCurrent = if let operatorRoute {
+                await self.operatorGateway.isCurrentRoute(operatorRoute)
+            } else {
+                true
+            }
+            guard await self.nodeGateway.isCurrentRoute(nodeRoute),
+                  operatorRouteStillCurrent,
+                  self.gatewayConfigurationGeneration == configurationGeneration,
+                  self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  shouldContinue()
+            else { return }
             let payloadJSON = try await self.pushRegistrationManager.makeGatewayRegistrationPayload(
                 apnsTokenHex: token,
                 topic: topic,
                 gatewayIdentity: gatewayIdentity)
-            guard shouldContinue() else { return }
+            let operatorRouteStillCurrentAfterPayload = if let operatorRoute {
+                await self.operatorGateway.isCurrentRoute(operatorRoute)
+            } else {
+                true
+            }
+            guard await self.nodeGateway.isCurrentRoute(nodeRoute),
+                  operatorRouteStillCurrentAfterPayload,
+                  self.gatewayConfigurationGeneration == configurationGeneration,
+                  self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  shouldContinue()
+            else { return }
             let published = await self.nodeGateway.sendEvent(
                 event: "push.apns.register",
                 payloadJSON: payloadJSON,
                 ifCurrentRoute: nodeRoute)
-            guard published, shouldContinue() else { return }
-            self.apnsLastRegisteredTokenHex = token
+            guard published,
+                  await self.nodeGateway.isCurrentRoute(nodeRoute),
+                  self.gatewayConfigurationGeneration == configurationGeneration,
+                  self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  shouldContinue()
+            else { return }
+            if !usesRelayTransport {
+                self.apnsLastRegisteredKey = directRegistrationKey
+            }
         } catch {
             self.pushWakeLogger.error(
                 "APNs registration publish failed: \(error.localizedDescription, privacy: .public)")
@@ -5879,10 +5930,7 @@ extension NodeAppModel {
         await self.submitAgentDeepLink(link, messageCharCount: message.count)
     }
 
-    private func sendAgentRequest(
-        link: AgentDeepLink,
-        nodeRoute: GatewayNodeSessionRoute? = nil) async throws
-    {
+    private func sendAgentRequest(link: AgentDeepLink) async throws {
         if link.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw NSError(domain: "DeepLink", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "invalid agent message",
@@ -5895,15 +5943,7 @@ extension NodeAppModel {
                 NSLocalizedDescriptionKey: "Failed to encode agent request payload as UTF-8",
             ])
         }
-        if let nodeRoute {
-            let sent = await self.nodeGateway.sendEvent(
-                event: "agent.request",
-                payloadJSON: json,
-                ifCurrentRoute: nodeRoute)
-            guard sent else { throw CancellationError() }
-        } else {
-            await self.nodeGateway.sendEvent(event: "agent.request", payloadJSON: json)
-        }
+        await self.nodeGateway.sendEvent(event: "agent.request", payloadJSON: json)
     }
 
     private func isGatewayConnected() async -> Bool {
