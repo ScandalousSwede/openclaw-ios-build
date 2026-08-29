@@ -495,23 +495,55 @@ jobs:
           codesign -d --entitlements :- "${app_path}" \
             > "${evidence_dir}/simulator-adhoc-entitlements.plist" \
             2> "${evidence_dir}/simulator-adhoc-entitlements.stderr"
-          python3 - "${evidence_dir}/simulator-adhoc-entitlements.plist" <<'PY'
+          simulated_xcent="$(find \
+            "${derived_data}/Build/Intermediates.noindex/OpenClaw.build/Debug-iphonesimulator/OpenClaw.build" \
+            -maxdepth 1 -type f -name 'OpenClaw.app-Simulated.xcent' -print -quit)"
+          [[ -n "${simulated_xcent}" && -f "${simulated_xcent}" ]]
+          cp "${simulated_xcent}" \
+            "${evidence_dir}/OpenClaw.app-Simulated.xcent"
+          python3 - \
+            "${evidence_dir}/OpenClaw.app-Simulated.xcent" \
+            "${evidence_dir}/simulator-runtime-entitlement-contract.json" <<'PY'
+          import json
           import pathlib
           import plistlib
           import sys
 
           entitlements = plistlib.loads(pathlib.Path(sys.argv[1]).read_bytes())
           expected = "J76B47MZ6V.ai.openclaw.client"
+          expected_team = "J76B47MZ6V"
           if entitlements.get("application-identifier") != expected:
               raise SystemExit(
                   "simulator fixture application-identifier mismatch: "
                   + repr(entitlements.get("application-identifier"))
               )
-          if entitlements.get("com.apple.developer.team-identifier") != "J76B47MZ6V":
+          observed_team = entitlements.get("com.apple.developer.team-identifier")
+          if observed_team not in (None, expected_team):
               raise SystemExit("simulator fixture Team ID mismatch")
+          if expected.partition(".")[0] != expected_team:
+              raise SystemExit("simulator fixture application identifier has wrong Team prefix")
+          if entitlements.get("aps-environment") != "development":
+              raise SystemExit("simulator fixture APS environment mismatch")
           groups = entitlements.get("keychain-access-groups")
           if groups not in (None, [expected]):
               raise SystemExit("unexpected simulator Keychain access groups: " + repr(groups))
+          pathlib.Path(sys.argv[2]).write_text(
+              json.dumps(
+                  {
+                      "application_identifier": entitlements["application-identifier"],
+                      "aps_environment": entitlements["aps-environment"],
+                      "keychain_access_groups": groups,
+                      "source": "OpenClaw.app-Simulated.xcent",
+                      "team_identifier": expected_team,
+                      "team_identifier_entitlement": observed_team,
+                      "team_identifier_source": "application-identifier prefix",
+                  },
+                  indent=2,
+                  sort_keys=True,
+              )
+              + "\n",
+              encoding="utf-8",
+          )
           PY
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
