@@ -81,6 +81,35 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertIn("aies-testflight-internal", release)
         self.assertIn("AIES_TESTFLIGHT_INTERNAL_ENABLED", release)
 
+    def test_release_workflow_verifies_exact_elevenlabskit_patch_and_tests(self) -> None:
+        workflow = RELEASE.read_text(encoding="utf-8")
+        step = workflow.split(
+            "      - name: Verify immutable ElevenLabsKit observability patch\n",
+            maxsplit=1,
+        )[1].split(
+            "      - name: Install pinned credential-free release tooling\n",
+            maxsplit=1,
+        )[0]
+
+        self.assertIn("https://github.com/ScandalousSwede/ElevenLabsKit.git", step)
+        self.assertIn("0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b", step)
+        self.assertIn("3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6", step)
+        self.assertIn("1e292346683ea174d98d1a88763c0f26e966c0af", step)
+        self.assertIn("801732d37b8555d4bbbae500d611f7477eac3439", step)
+        self.assertIn('git -C "${dependency_root}" diff --exit-code', step)
+        self.assertIn('swift test --package-path "${dependency_root}"', step)
+        self.assertIn("elevenlabskit-observability.patch", step)
+        self.assertIn("source-checkout.json", step)
+        self.assertIn("swift-test.log", step)
+        self.assertIn("test-result.json", step)
+        self.assertIn("SHA256SUMS", step)
+        self.assertNotIn("secrets.", step)
+        self.assertNotIn("--branch", step)
+        self.assertEqual(
+            workflow.count("Retain ElevenLabsKit observability patch evidence"), 1
+        )
+        self.assertIn("if: always() && !cancelled()", workflow)
+
     def test_package_talk_outputs_share_one_temporary_custody_root(self) -> None:
         workflow = QUALIFICATION.read_text(encoding="utf-8")
         self.assertIn(

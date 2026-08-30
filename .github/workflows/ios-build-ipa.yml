@@ -90,6 +90,118 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify immutable ElevenLabsKit observability patch
+        run: |
+          set -euo pipefail
+          original_revision="0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b"
+          original_tree="3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6"
+          patch_revision="1e292346683ea174d98d1a88763c0f26e966c0af"
+          patch_tree="801732d37b8555d4bbbae500d611f7477eac3439"
+          dependency_root="${RUNNER_TEMP}/elevenlabskit-observability"
+          evidence_root="${RUNNER_TEMP}/elevenlabskit-observability-evidence"
+          mkdir -p "${evidence_root}"
+          printf '%s\n' \
+            "original_revision=${original_revision}" \
+            "original_tree=${original_tree}" \
+            "patch_revision=${patch_revision}" \
+            "patch_tree=${patch_tree}" \
+            > "${evidence_root}/authority.txt"
+          git init --quiet "${dependency_root}"
+          git -C "${dependency_root}" remote add origin \
+            https://github.com/ScandalousSwede/ElevenLabsKit.git
+          git -C "${dependency_root}" fetch --quiet --depth=2 origin "${patch_revision}"
+          git -C "${dependency_root}" checkout --quiet --detach FETCH_HEAD
+          [[ "$(git -C "${dependency_root}" rev-parse HEAD)" == "${patch_revision}" ]]
+          [[ "$(git -C "${dependency_root}" rev-parse 'HEAD^{tree}')" == "${patch_tree}" ]]
+          [[ "$(git -C "${dependency_root}" show -s --format=%P HEAD)" == "${original_revision}" ]]
+          [[ "$(git -C "${dependency_root}" rev-parse "${original_revision}^{tree}")" == "${original_tree}" ]]
+          git -C "${dependency_root}" diff --exit-code "${original_revision}" -- Package.swift
+          git -C "${dependency_root}" diff --binary \
+            --output="${evidence_root}/elevenlabskit-observability.patch" \
+            "${original_revision}" "${patch_revision}"
+          python3 - "${dependency_root}" "${evidence_root}/source-checkout.json" <<'PY'
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          output = pathlib.Path(sys.argv[2])
+          expected = [
+              "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
+              "Sources/ElevenLabsKit/PlaybackObservation.swift",
+              "Sources/ElevenLabsKit/StreamingAudioPlayback.swift",
+              "Sources/ElevenLabsKit/StreamingAudioPlayer.swift",
+              "Tests/ElevenLabsKitTests/PlaybackObservationTests.swift",
+              "Tests/ElevenLabsKitTests/StreamingAudioPlaybackTests.swift",
+          ]
+          observed = subprocess.run(
+              ["git", "diff", "--name-only", "HEAD^", "HEAD"],
+              cwd=root,
+              capture_output=True,
+              check=True,
+              text=True,
+          ).stdout.splitlines()
+          if observed != expected:
+              raise SystemExit(
+                  "ElevenLabsKit patch paths differ: "
+                  + json.dumps({"expected": expected, "observed": observed}, sort_keys=True)
+              )
+          report = {
+              "schema": "aies.ios.package-source-patch-checkout.v1",
+              "status": "verified",
+              "original_revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+              "original_tree": "3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6",
+              "patch_revision": "1e292346683ea174d98d1a88763c0f26e966c0af",
+              "patch_tree": "801732d37b8555d4bbbae500d611f7477eac3439",
+              "changed_paths": observed,
+          }
+          output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+          print(json.dumps(report, indent=2, sort_keys=True))
+          PY
+          set +e
+          swift test --package-path "${dependency_root}" 2>&1 | \
+            tee "${evidence_root}/swift-test.log"
+          swift_test_status="${PIPESTATUS[0]}"
+          set -e
+          [[ -z "$(git -C "${dependency_root}" status --porcelain=v2 --untracked-files=all)" ]]
+          python3 - "${evidence_root}/test-result.json" "${swift_test_status}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output = pathlib.Path(sys.argv[1])
+          status = int(sys.argv[2])
+          output.write_text(json.dumps({
+              "schema": "aies.ios.package-source-patch-test.v1",
+              "exit_status": status,
+              "status": "passed" if status == 0 else "failed",
+          }, indent=2, sort_keys=True) + "\n")
+          PY
+          (
+            cd "${evidence_root}"
+            shasum -a 256 \
+              authority.txt \
+              elevenlabskit-observability.patch \
+              source-checkout.json \
+              swift-test.log \
+              test-result.json \
+              > SHA256SUMS
+            cat source-checkout.json
+            cat test-result.json
+            cat SHA256SUMS
+          )
+          exit "${swift_test_status}"
+
+      - name: Retain ElevenLabsKit observability patch evidence
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ElevenLabsKit-observability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/elevenlabskit-observability-evidence
+          retention-days: 90
+          if-no-files-found: error
+
       - name: Install pinned credential-free release tooling
         run: |
           set -euo pipefail
@@ -280,6 +392,7 @@ jobs:
             test_run_aies_swift_qualification.py \
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
+            test_embed_runtime_symbolication_manifest.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
@@ -388,6 +501,8 @@ jobs:
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -parallel-testing-enabled NO \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/AIESAPNsDiagnosticsTests \
+            -only-testing:OpenClawTests/AIESDiagnosticRunContinuityTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
             -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
@@ -875,6 +990,7 @@ jobs:
             test_run_aies_swift_qualification.py \
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
+            test_embed_runtime_symbolication_manifest.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
@@ -958,6 +1074,8 @@ jobs:
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -parallel-testing-enabled NO \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
+            -only-testing:OpenClawTests/AIESAPNsDiagnosticsTests \
+            -only-testing:OpenClawTests/AIESDiagnosticRunContinuityTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
             -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \

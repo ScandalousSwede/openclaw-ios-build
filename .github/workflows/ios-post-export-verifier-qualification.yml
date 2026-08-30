@@ -157,6 +157,7 @@ jobs:
             test_run_aies_swift_qualification.py \
             test_sanitize_aies_release_log.py \
             test_verify_aies_unsigned_archive.py \
+            test_embed_runtime_symbolication_manifest.py \
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
