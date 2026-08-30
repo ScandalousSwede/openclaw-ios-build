@@ -92,7 +92,25 @@
     "purpose": "select all touched reliability-sync tests in the existing credential-free iOS lane",
     "implementation_package": false,
     "upstream_semantic_port": false,
-    "rollback": "revert b1b8f54fda without reverting Packages A, B, or C"
+    "rollback": "revert a6a665b2fb and b1b8f54fda without reverting Packages A, B, or C",
+    "additional_commits": [
+      {
+        "commit": "a6a665b2fb304bb2bfa3e2842779b3323018d890",
+        "short_commit": "a6a665b2fb",
+        "title": "test(ios): isolate credential-free keychain fixtures",
+        "paths": [
+          ".github/workflows/ios-build-ipa.yml",
+          "apps/ios/Tests/GatewayMobileSetupStateTests.swift",
+          "apps/ios/Tests/OnboardingStateStoreTests.swift",
+          "apps/ios/Tools/test_credential_free_keychain_contract.py",
+          "apps/shared/OpenClawKit/Sources/OpenClawKit/GatewayTLSPinning.swift",
+          "apps/shared/OpenClawKit/Sources/OpenClawKit/GenericPasswordKeychainStore.swift"
+        ],
+        "purpose": "supply deterministic credential-free persistence only to unsigned simulator tests while retaining the real Security.framework archive/release implementation",
+        "implementation_package": false,
+        "upstream_semantic_port": false
+      }
+    ]
   },
   "items": [
     {
@@ -623,8 +641,8 @@
     "status": "PENDING_FINAL_CANDIDATE_CREDENTIAL_FREE_CI_SEAL",
     "completed_local_gates": {
       "release_tooling": {
-        "passed": 184,
-        "total": 184,
+        "passed": 187,
+        "total": 187,
         "result": "PASS"
       }
     },
