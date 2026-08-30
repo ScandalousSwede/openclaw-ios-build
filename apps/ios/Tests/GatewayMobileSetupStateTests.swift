@@ -75,6 +75,11 @@ import Testing
             usedBootstrapToken: true,
             validationPending: false,
             currentRouteState: nil) == .notRequired)
+        #expect(NodeAppModel.mobileSetupHandoffValidationDecision(
+            usedBootstrapToken: true,
+            validationPending: true,
+            routeIsCurrent: false,
+            currentRouteState: nil) == .staleRoute)
     }
 
     @Test func explicitAuthPrecedenceMatchesWireSelectionAndHandoffAdmission() {
@@ -187,6 +192,14 @@ import Testing
             deliveryGate: .operatorSessionUnavailable,
             nodeState: .online,
             operatorState: .scopeBlocked(missing: ["operator.write"])) == "Operator scopes unavailable")
+        #expect(ChatConnectionPresentation.blockingText(
+            deliveryGate: .routingContractUnavailable,
+            nodeState: .online,
+            operatorState: .offline) == "Operator session unavailable")
+        #expect(ChatConnectionPresentation.blockingText(
+            deliveryGate: .capabilityUnavailable,
+            nodeState: .online,
+            operatorState: .connecting) == "Operator connecting")
         #expect(ChatConnectionPresentation.messagePlaceholder(
             agentName: "Main",
             blockingText: "Routing contract unavailable",
@@ -248,6 +261,9 @@ import Testing
         let canvas = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Model/NodeAppModel+Canvas.swift"),
             encoding: .utf8)
+        let chatTransport = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Chat/IOSGatewayChatTransport.swift"),
+            encoding: .utf8)
 
         #expect(model.contains("bootstrapHandoffOwner"))
         #expect(model.contains("mobileSetupHandoffValidationDecision"))
@@ -269,6 +285,8 @@ import Testing
         #expect(talk.contains("operator session required for Talk is unavailable"))
         #expect(talk.contains("server has no Talk configuration"))
         #expect(model.contains("onConnectedRoute: { [weak self] admittedRoute in"))
+        #expect(model.contains("case .staleRoute:"))
+        #expect(model.contains("bootstrapHandoffRouteState(ifCurrentRoute: route)"))
         #expect(model.contains("self.gatewayOwnerCheck(loopOwner)"))
         #expect(model.contains("self.gatewayOwnerCheck(owner)"))
         #expect(model.contains("ifCurrentRoute: admittedRoute"))
@@ -277,6 +295,12 @@ import Testing
         #expect(model.contains("shouldContinue: shouldContinue"))
         #expect(canvas.contains("ifCurrentRoute expectedRoute: GatewayNodeSessionRoute?"))
         #expect(canvas.contains("self.nodeGateway.isCurrentRoute(expectedRoute)"))
+        #expect(chatTransport.contains(
+            "guard let currentGatewayID = await self.gateway.currentGatewayID(ifCurrentRoute: route)"))
+        #expect(chatTransport.contains(
+            "guard let supportsRoutingContract = await self.gateway.supportsServerCapability("))
+        #expect(chatTransport.contains(
+            "guard await self.gateway.isCurrentRoute(route) else"))
     }
 
     @Test func healthScopeAndAPNsSideEffectsRemainBoundToTheirOwningRoutes() throws {
@@ -296,6 +320,8 @@ import Testing
         #expect(model.contains(
             "self.operatorGateway.currentRoute(\n                      ifGatewayID: expectedGatewayID)"))
         #expect(model.contains("self.nodeGateway.currentRoute(ifGatewayID: expectedGatewayID)"))
+        #expect(model.contains("ifCurrentRoute: probedOperatorRoute"))
+        #expect(model.contains("self.operatorGateway.isCurrentRoute(probedOperatorRoute)"))
         let admittedOperatorGatewayGuard =
             "self.operatorGateway.currentGatewayID(\n"
                 + "                                ifCurrentRoute: admittedRoute) == stableID"
@@ -332,6 +358,13 @@ import Testing
         #expect(model.contains(
             "[token, topic, expectedGatewayID, \"direct\"].joined(separator: \"|\")"))
         #expect(!model.contains("apnsLastRegisteredTokenHex"))
+
+        // A runtime operator authorization ceiling is surfaced and retires only
+        // its exact route. Optional voice-wake sync cannot disable health checks.
+        #expect(model.contains("self.applyOperatorScopeBlock(missing: [])"))
+        #expect(model.contains("disconnect(ifCurrentRoute: operatorRoute)"))
+        #expect(!model.contains("gatewayHealthMonitorDisabled"))
+        #expect(!model.contains("setGatewayHealthMonitorDisabled"))
     }
 
     private static func makeConfig(

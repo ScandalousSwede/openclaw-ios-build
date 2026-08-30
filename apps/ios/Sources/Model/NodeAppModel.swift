@@ -109,6 +109,7 @@ enum GatewayMobileSetupHandoffState: Equatable {
 
 enum GatewayMobileSetupHandoffValidationDecision: Equatable {
     case notRequired
+    case staleRoute
     case ready
     case rejected(GatewayMobileSetupHandoffState)
 }
@@ -306,7 +307,6 @@ final class NodeAppModel {
     @ObservationIgnored private var cameraHUDDismissTask: Task<Void, Never>?
     @ObservationIgnored private lazy var capabilityRouter: NodeCapabilityRouter = self.buildCapabilityRouter()
     private let gatewayHealthMonitor = GatewayHealthMonitor()
-    private var gatewayHealthMonitorDisabled = false
     private let notificationCenter: NotificationCentering
     let voiceWake = VoiceWakeManager()
     let talkMode: TalkModeManager
@@ -1026,16 +1026,44 @@ final class NodeAppModel {
                     shouldStartGatewayHealthMonitor = false
                     self.foregroundGatewayResumeCheckInFlight = true
                     self.foregroundGatewayResumeCheckID = resumeCheckID
+                    let expectedGatewayID = expectedConfig.effectiveStableID
                     Task { [weak self] in
                         guard let self else { return }
                         let operatorWasConnected = await MainActor.run { self.operatorConnected }
-                        if operatorWasConnected {
+                        let probedOperatorRoute = if operatorWasConnected {
+                            await self.operatorGateway.currentRoute(ifGatewayID: expectedGatewayID)
+                        } else {
+                            nil
+                        }
+                        if let probedOperatorRoute {
                             // Prefer keeping the connection if it's healthy; reconnect only when needed.
                             let healthy = await (try? self.operatorGateway.request(
                                 method: "health",
                                 paramsJSON: nil,
-                                timeoutSeconds: Self.foregroundResumeHealthTimeoutSeconds)) != nil
+                                timeoutSeconds: Self.foregroundResumeHealthTimeoutSeconds,
+                                ifCurrentRoute: probedOperatorRoute)) != nil
                             if healthy {
+                                guard await self.operatorGateway.isCurrentRoute(probedOperatorRoute) else {
+                                    await MainActor.run {
+                                        guard self.foregroundGatewayResumeCheckID == resumeCheckID else { return }
+                                        self.foregroundGatewayResumeCheckID = nil
+                                        self.foregroundGatewayResumeCheckInFlight = false
+                                        self.startGatewayHealthMonitorForCurrentRoutes()
+                                    }
+                                    return
+                                }
+                                await MainActor.run {
+                                    guard self.foregroundGatewayResumeCheckID == resumeCheckID else { return }
+                                    self.foregroundGatewayResumeCheckID = nil
+                                    self.foregroundGatewayResumeCheckInFlight = false
+                                    self.startGatewayHealthMonitorForCurrentRoutes()
+                                }
+                                return
+                            }
+                            // Route A may retire while its health request is suspended. A
+                            // replacement route B under the same config owns recovery and
+                            // must not be torn down by A's stale failure.
+                            guard await self.operatorGateway.isCurrentRoute(probedOperatorRoute) else {
                                 await MainActor.run {
                                     guard self.foregroundGatewayResumeCheckID == resumeCheckID else { return }
                                     self.foregroundGatewayResumeCheckID = nil
@@ -1064,7 +1092,8 @@ final class NodeAppModel {
                         guard shouldRestart else { return }
                         await self.restartGatewaySessionsAfterForegroundStaleConnection(
                             expectedConfig: expectedConfig,
-                            expectedConfigurationGeneration: expectedConfigurationGeneration)
+                            expectedConfigurationGeneration: expectedConfigurationGeneration,
+                            expectedOperatorRoute: probedOperatorRoute)
                     }
                 }
             }
@@ -1566,11 +1595,9 @@ final class NodeAppModel {
                 guard await self.operatorGateway.isCurrentRoute(expectedRoute) else { return }
             }
 
-            if !self.isGatewayHealthMonitorDisabled() {
-                await self.refreshWakeWordsFromGateway(
-                    ifCurrentRoute: expectedRoute,
-                    shouldApply: shouldContinue)
-            }
+            await self.refreshWakeWordsFromGateway(
+                ifCurrentRoute: expectedRoute,
+                shouldApply: shouldContinue)
             guard shouldContinue() else { return }
 
             let stream = await self.operatorGateway.subscribeServerEvents(bufferingNewest: 200)
@@ -1628,12 +1655,10 @@ final class NodeAppModel {
         shouldContinue: @escaping @MainActor @Sendable () -> Bool = { true })
     {
         guard shouldContinue() else { return }
-        self.gatewayHealthMonitorDisabled = false
         self.gatewayHealthMonitor.start(
             check: { [weak self] in
                 guard let self else { return false }
                 guard await shouldContinue() else { return true }
-                if await MainActor.run(body: { self.isGatewayHealthMonitorDisabled() }) { return true }
                 do {
                     let data = try await self.operatorGateway.request(
                         method: "health",
@@ -1653,7 +1678,15 @@ final class NodeAppModel {
                     if let gatewayError = error as? GatewayResponseError {
                         let lower = gatewayError.message.lowercased()
                         if lower.contains("unauthorized role") || lower.contains("missing scope") {
-                            await self.setGatewayHealthMonitorDisabled(true)
+                            guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else {
+                                return true
+                            }
+                            await MainActor.run {
+                                guard shouldContinue() else { return }
+                                self.gatewayHealthMonitor.stop()
+                                self.setOperatorConnected(false)
+                                self.applyOperatorScopeBlock(missing: [])
+                            }
                             return true
                         }
                     }
@@ -2847,11 +2880,18 @@ extension NodeAppModel {
 
     private func restartGatewaySessionsAfterForegroundStaleConnection(
         expectedConfig: GatewayConnectConfig,
-        expectedConfigurationGeneration: UInt64) async
+        expectedConfigurationGeneration: UInt64,
+        expectedOperatorRoute: GatewayNodeSessionRoute?) async
     {
         guard self.gatewayConfigurationGeneration == expectedConfigurationGeneration,
               self.activeGatewayConnectConfig?.hasSameConnectionInputs(as: expectedConfig) == true
         else { return }
+        if let expectedOperatorRoute {
+            guard await self.operatorGateway.isCurrentRoute(expectedOperatorRoute) else { return }
+        } else if await self.operatorGateway.currentRoute(ifGatewayID: expectedConfig.effectiveStableID) != nil {
+            // The probe saw no route, but a successor has since been admitted.
+            return
+        }
         await self.resetGatewaySessionsForForcedReconnect()
         guard self.gatewayConfigurationGeneration == expectedConfigurationGeneration,
               self.activeGatewayConnectConfig?.hasSameConnectionInputs(as: expectedConfig) == true
@@ -3250,9 +3290,11 @@ extension NodeAppModel {
     nonisolated static func mobileSetupHandoffValidationDecision(
         usedBootstrapToken: Bool,
         validationPending: Bool,
+        routeIsCurrent: Bool = true,
         currentRouteState: GatewayMobileSetupHandoffState?) -> GatewayMobileSetupHandoffValidationDecision
     {
         guard usedBootstrapToken, validationPending else { return .notRequired }
+        guard routeIsCurrent else { return .staleRoute }
         guard let currentRouteState else { return .rejected(.invalid) }
         return currentRouteState == .ready ? .ready : .rejected(currentRouteState)
     }
@@ -3320,7 +3362,11 @@ extension NodeAppModel {
 
     private func applyOperatorScopeBlock(missing: [String]) {
         let missing = Array(Set(missing)).sorted()
-        let message = "The operator role is missing required scopes: \(missing.joined(separator: ", ")). Pair again using a setup code."
+        let message = if missing.isEmpty {
+            "The gateway rejected the operator role or its required scopes. Pair again using a setup code."
+        } else {
+            "The operator role is missing required scopes: \(missing.joined(separator: ", ")). Pair again using a setup code."
+        }
         let problem = GatewayConnectionProblem(
             kind: .pairingScopeUpgradeRequired,
             owner: .gateway,
@@ -3345,15 +3391,22 @@ extension NodeAppModel {
 
     private func validateBootstrapHandoff(
         ifCurrentRoute route: GatewayNodeSessionRoute,
-        ownedBy owner: GatewayConnectionOwner) async -> GatewayMobileSetupHandoffState?
+        ownedBy owner: GatewayConnectionOwner) async -> GatewayMobileSetupHandoffValidationDecision
     {
-        guard self.isCurrentGatewayConnectionOwner(owner),
-              let receipt = await self.nodeGateway.bootstrapHandoffReceipt(ifCurrentRoute: route),
-              self.isCurrentGatewayConnectionOwner(owner)
-        else { return nil }
-        return Self.mobileSetupHandoffState(
-            issues: receipt.issues,
-            persistence: receipt.persistence)
+        guard self.isCurrentGatewayConnectionOwner(owner) else { return .staleRoute }
+        let routeState = await self.nodeGateway.bootstrapHandoffRouteState(ifCurrentRoute: route)
+        guard self.isCurrentGatewayConnectionOwner(owner) else { return .staleRoute }
+        switch routeState {
+        case .retired:
+            return .staleRoute
+        case .missing:
+            return .rejected(.invalid)
+        case let .receipt(receipt):
+            let state = Self.mobileSetupHandoffState(
+                issues: receipt.issues,
+                persistence: receipt.persistence)
+            return state == .ready ? .ready : .rejected(state)
+        }
     }
 
     private func missingRequiredOperatorScopes(
@@ -3763,21 +3816,19 @@ extension NodeAppModel {
                             let bootstrapHandoffMustBeValidated = await MainActor.run {
                                 self.isCurrentBootstrapHandoffOwner(owner)
                             }
-                            let handoffState = if usedBootstrapToken && bootstrapHandoffMustBeValidated {
+                            let handoffDecision = if usedBootstrapToken && bootstrapHandoffMustBeValidated {
                                 await self.validateBootstrapHandoff(
                                     ifCurrentRoute: admittedRoute,
                                     ownedBy: owner)
                             } else {
-                                nil
+                                GatewayMobileSetupHandoffValidationDecision.notRequired
                             }
                             guard await self.isCurrentGatewayConnectionOwner(owner) else { return }
-                            switch Self.mobileSetupHandoffValidationDecision(
-                                usedBootstrapToken: usedBootstrapToken,
-                                validationPending: bootstrapHandoffMustBeValidated,
-                                currentRouteState: handoffState)
-                            {
+                            switch handoffDecision {
                             case .notRequired:
                                 break
+                            case .staleRoute:
+                                return
                             case .ready:
                                 guard await self.handleSuccessfulBootstrapGatewayOnboarding(
                                     url: url,
@@ -5824,23 +5875,8 @@ extension NodeAppModel {
             VoiceWakePreferences.saveTriggerWords(triggers)
         } catch {
             guard shouldApply() else { return }
-            if let gatewayError = error as? GatewayResponseError {
-                let lower = gatewayError.message.lowercased()
-                if lower.contains("unauthorized role") || lower.contains("missing scope") {
-                    self.setGatewayHealthMonitorDisabled(true)
-                    return
-                }
-            }
             // Best-effort only.
         }
-    }
-
-    private func isGatewayHealthMonitorDisabled() -> Bool {
-        self.gatewayHealthMonitorDisabled
-    }
-
-    private func setGatewayHealthMonitorDisabled(_ disabled: Bool) {
-        self.gatewayHealthMonitorDisabled = disabled
     }
 
     func sendVoiceTranscript(text: String, sessionKey: String?) async throws {
@@ -6214,7 +6250,8 @@ extension NodeAppModel {
         guard let expectedConfig = self.activeGatewayConnectConfig else { return }
         await self.restartGatewaySessionsAfterForegroundStaleConnection(
             expectedConfig: expectedConfig,
-            expectedConfigurationGeneration: self.gatewayConfigurationGeneration)
+            expectedConfigurationGeneration: self.gatewayConfigurationGeneration,
+            expectedOperatorRoute: nil)
     }
 
     func _test_gatewayConfigurationGeneration() -> UInt64 {
@@ -6227,7 +6264,8 @@ extension NodeAppModel {
     {
         await self.restartGatewaySessionsAfterForegroundStaleConnection(
             expectedConfig: expectedConfig,
-            expectedConfigurationGeneration: expectedConfigurationGeneration)
+            expectedConfigurationGeneration: expectedConfigurationGeneration,
+            expectedOperatorRoute: nil)
     }
 
     func _test_applyPendingForegroundNodeActions(

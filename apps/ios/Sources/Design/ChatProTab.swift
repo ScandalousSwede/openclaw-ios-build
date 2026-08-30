@@ -25,15 +25,23 @@ enum ChatConnectionPresentation {
         nodeState: GatewayNodeRoleState,
         operatorState: GatewayOperatorRoleState) -> String?
     {
-        // Role issuance and granted-scope state are authoritative. A generic
-        // route/offline snapshot can lag behind them and must not hide the
-        // actionable reason Chat is unavailable.
+        // Role issuance and granted-scope state are authoritative. Current
+        // operator availability also precedes route-gate snapshots, because a
+        // retained gate from a retired route must not hide the live state.
         switch operatorState {
         case .missingRole:
             return "Operator role missing"
         case .scopeBlocked:
             return "Operator scopes unavailable"
-        case .offline, .connecting, .online:
+        case .offline where nodeState == .online:
+            return "Operator session unavailable"
+        case .offline:
+            return "Gateway offline"
+        case .connecting:
+            return "Operator connecting"
+        case .online where nodeState != .online:
+            return "Gateway offline"
+        case .online:
             break
         }
         if let deliveryGate {
@@ -52,22 +60,7 @@ enum ChatConnectionPresentation {
                 return "Gateway offline"
             }
         }
-        switch operatorState {
-        case .offline where nodeState == .online:
-            return "Operator session unavailable"
-        case .offline:
-            return "Gateway offline"
-        case .connecting:
-            return "Operator connecting"
-        case .online where nodeState != .online:
-            return "Gateway offline"
-        case .online:
-            return nil
-        case .missingRole:
-            return "Operator role missing"
-        case .scopeBlocked:
-            return "Operator scopes unavailable"
-        }
+        return nil
     }
 
     static func messagePlaceholder(

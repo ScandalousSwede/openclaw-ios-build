@@ -173,24 +173,36 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         guard let route = await self.gateway.currentRoute() else {
             return .unavailable(reason: await self.routeAbsenceReason())
         }
-        guard await self.gateway.currentGatewayID(ifCurrentRoute: route) == stableGatewayID else {
+        guard let currentGatewayID = await self.gateway.currentGatewayID(ifCurrentRoute: route) else {
+            return .unavailable(reason: .routeUnavailable)
+        }
+        guard currentGatewayID == stableGatewayID else {
             return .unavailable(reason: .gatewayMismatch)
         }
-        guard await self.gateway.supportsServerCapability(
+        guard let supportsRoutingContract = await self.gateway.supportsServerCapability(
             .chatSendRoutingContract,
-            ifCurrentRoute: route) == true
-        else { return .unavailable(reason: .capabilityUnavailable) }
-        guard let serverCapabilities = await self.gateway.serverCapabilities(ifCurrentRoute: route) else {
+            ifCurrentRoute: route)
+        else { return .unavailable(reason: .routeUnavailable) }
+        guard supportsRoutingContract else {
             return .unavailable(reason: .capabilityUnavailable)
         }
-        guard let operatorScopes = await self.gateway.operatorScopes(ifCurrentRoute: route),
-              Self.requiredOperatorScopes.isSubset(of: operatorScopes)
-        else { return .unavailable(reason: .operatorScopesUnavailable) }
+        guard let serverCapabilities = await self.gateway.serverCapabilities(ifCurrentRoute: route) else {
+            return .unavailable(reason: .routeUnavailable)
+        }
+        guard let operatorScopes = await self.gateway.operatorScopes(ifCurrentRoute: route) else {
+            return .unavailable(reason: .routeUnavailable)
+        }
+        guard Self.requiredOperatorScopes.isSubset(of: operatorScopes) else {
+            return .unavailable(reason: .operatorScopesUnavailable)
+        }
 
         let routingContract: String
         do {
             routingContract = try await self.sessionRoutingContract(ifCurrentRoute: route)
         } catch {
+            guard await self.gateway.isCurrentRoute(route) else {
+                return .unavailable(reason: .routeUnavailable)
+            }
             return .unavailable(reason: .routingContractUnavailable)
         }
         guard await self.gateway.currentGatewayID(ifCurrentRoute: route) == stableGatewayID,

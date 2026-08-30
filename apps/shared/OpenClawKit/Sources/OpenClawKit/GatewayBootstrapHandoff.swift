@@ -71,6 +71,15 @@ public struct GatewayBootstrapHandoffReceipt: Codable, Sendable, Equatable {
     }
 }
 
+/// An atomic view of bootstrap evidence for one exact admitted route.
+/// `missing` is meaningful only while the requested route is still current;
+/// a retired route must never be converted into a failed setup receipt.
+public enum GatewayBootstrapHandoffRouteState: Sendable, Equatable {
+    case retired
+    case missing
+    case receipt(GatewayBootstrapHandoffReceipt)
+}
+
 struct GatewayBootstrapHandoffCredential: Sendable {
     let role: GatewayBootstrapHandoffRole
     let token: String?

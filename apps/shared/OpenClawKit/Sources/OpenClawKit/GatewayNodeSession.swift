@@ -513,22 +513,32 @@ public actor GatewayNodeSession {
     public func bootstrapHandoffReceipt(
         ifCurrentRoute route: GatewayNodeSessionRoute) async -> GatewayBootstrapHandoffReceipt?
     {
-        guard self.isCurrentRoute(route),
-              let channel = self.channel,
-              let bound = self.routeBoundBootstrapHandoffReceipt,
+        switch await self.bootstrapHandoffRouteState(ifCurrentRoute: route) {
+        case let .receipt(receipt): receipt
+        case .retired, .missing: nil
+        }
+    }
+
+    /// Distinguishes a current route with missing issuance evidence from a route
+    /// that retired while its admission callback was awaiting validation.
+    public func bootstrapHandoffRouteState(
+        ifCurrentRoute route: GatewayNodeSessionRoute) async -> GatewayBootstrapHandoffRouteState
+    {
+        guard self.isCurrentRoute(route), let channel = self.channel else { return .retired }
+        guard let bound = self.routeBoundBootstrapHandoffReceipt,
               bound.route == route
-        else { return nil }
+        else { return .missing }
 
         // The channel clears its receipt synchronously at the start of every real
-        // physical connection attempt. Requiring that connection-bound receipt here
-        // closes the small interval before the session receives the disconnect callback.
-        guard await channel.bootstrapHandoffConnectionReceipt(
-            ifCurrentConnectionGeneration: route.socketGeneration) != nil,
-            self.isCurrentRoute(route),
-            self.channel === channel,
-            self.routeBoundBootstrapHandoffReceipt?.route == route
-        else { return nil }
-        return bound.receipt
+        // physical connection attempt. Recheck every owner after the actor hop so
+        // route retirement is never reported as a malformed current receipt.
+        let connectionReceipt = await channel.bootstrapHandoffConnectionReceipt(
+            ifCurrentConnectionGeneration: route.socketGeneration)
+        guard self.isCurrentRoute(route), self.channel === channel else { return .retired }
+        guard connectionReceipt != nil,
+              self.routeBoundBootstrapHandoffReceipt?.route == route
+        else { return .missing }
+        return .receipt(bound.receipt)
     }
 
     public func sendEvent(event: String, payloadJSON: String?) async {

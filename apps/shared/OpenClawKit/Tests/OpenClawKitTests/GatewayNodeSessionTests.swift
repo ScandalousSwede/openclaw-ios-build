@@ -2074,6 +2074,13 @@ struct GatewayNodeSessionTests {
         try await connectForBootstrapHandoffTest(gateway, session: session)
         let firstRoute = try #require(await gateway.currentRoute())
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute)?.isReady == true)
+        if case let .receipt(receipt) = await gateway.bootstrapHandoffRouteState(
+            ifCurrentRoute: firstRoute)
+        {
+            #expect(receipt.isReady)
+        } else {
+            Issue.record("current bootstrap route must expose its exact issuance receipt")
+        }
         let firstTask = try #require(session.latestTask())
 
         firstTask.emitReceiveFailure()
@@ -2091,6 +2098,8 @@ struct GatewayNodeSessionTests {
         let replacementRoute = try #require(await gateway.currentRoute())
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute) == nil)
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: replacementRoute) == nil)
+        #expect(await gateway.bootstrapHandoffRouteState(ifCurrentRoute: firstRoute) == .retired)
+        #expect(await gateway.bootstrapHandoffRouteState(ifCurrentRoute: replacementRoute) == .missing)
 
         await gateway.disconnect()
     }
