@@ -270,6 +270,7 @@ private enum GatewayConnectErrorCodes {
 
 public actor GatewayChannelActor {
     private let logger = Logger(subsystem: "ai.openclaw", category: "gateway")
+    private let diagnosticConnectionRole: OpenClawDiagnosticConnectionRole
     private var task: WebSocketTaskBox?
     private struct PendingRequest {
         let connectionGeneration: UInt64
@@ -328,6 +329,7 @@ public actor GatewayChannelActor {
         session: WebSocketSessionBox? = nil,
         pushHandler: (@Sendable (GatewayPush) async -> Void)? = nil,
         connectOptions: GatewayConnectOptions? = nil,
+        diagnosticConnectionRole: OpenClawDiagnosticConnectionRole = .unknown,
         disconnectHandler: (@Sendable (String) async -> Void)? = nil)
     {
         self.url = url
@@ -335,6 +337,7 @@ public actor GatewayChannelActor {
         self.bootstrapToken = bootstrapToken
         self.password = password
         self.session = session?.session ?? URLSession(configuration: .default)
+        self.diagnosticConnectionRole = diagnosticConnectionRole
         if let pushHandler {
             self.pushHandler = { push, _ in await pushHandler(push) }
         } else {
@@ -366,6 +369,7 @@ public actor GatewayChannelActor {
         generationAwareBootstrapHandoffHandler:
             (@Sendable (GatewayBootstrapHandoffConnectionReceipt, UInt64) async -> Void)? = nil,
         connectOptions: GatewayConnectOptions? = nil,
+        diagnosticConnectionRole: OpenClawDiagnosticConnectionRole = .unknown,
         generationAwareDisconnectHandler: (@Sendable (String, UInt64) async -> Void)? = nil)
     {
         self.url = url
@@ -373,6 +377,7 @@ public actor GatewayChannelActor {
         self.bootstrapToken = bootstrapToken
         self.password = password
         self.session = session?.session ?? URLSession(configuration: .default)
+        self.diagnosticConnectionRole = diagnosticConnectionRole
         self.pushHandler = generationAwarePushHandler
         self.snapshotAdmissionHandler = generationAwareSnapshotAdmissionHandler
         self.bootstrapHandoffHandler = generationAwareBootstrapHandoffHandler
@@ -402,6 +407,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "shutdown",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: self.connectionGeneration))
         }
         self.connected = false
@@ -505,6 +511,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: "connecting",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration))
         self.task?.cancel(with: .goingAway, reason: nil)
         let connectTask = self.session.makeWebSocketTask(url: self.url)
@@ -574,6 +581,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: "connected",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration))
         self.reconnectPausedForAuthFailure = false
         self.backoffMs = 500
@@ -1224,6 +1232,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "stale_callback_ignored",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: connectionGeneration))
             return
         }
@@ -1240,6 +1249,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "stale_callback_ignored",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: connectionGeneration))
             return
         }
@@ -1278,6 +1288,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "stale_callback_ignored",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: connectionGeneration))
             return
         }
@@ -1310,6 +1321,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: "disconnected",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration))
         self.tickTask?.cancel()
         self.tickTask = nil
@@ -1365,6 +1377,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "stale_callback_ignored",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: connectionGeneration))
             return
         }
@@ -1388,6 +1401,7 @@ public actor GatewayChannelActor {
                 OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                     kind: .socket,
                     state: "request_completed",
+                    connectionRole: self.diagnosticConnectionRole,
                     socketGeneration: connectionGeneration,
                     operationIdentifier: id))
                 pending.continuation.resume(returning: .res(res))
@@ -1508,6 +1522,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .reconnect,
             state: "scheduled",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration))
         self.logger.info(
             "gateway.trace event=reconnect_scheduled delay_ms=\(Int(delay * 1000), privacy: .public)")
@@ -1708,6 +1723,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "request_admitted",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: connectionGeneration,
                 operationIdentifier: payload.id))
             Task { [weak self] in
@@ -1895,6 +1911,7 @@ public actor GatewayChannelActor {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .socket,
                 state: "request_failed",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: pending.connectionGeneration,
                 operationIdentifier: id))
             pending.continuation.resume(throwing: error)
@@ -1913,6 +1930,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: "request_timed_out",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration,
             operationIdentifier: id))
         let err = NSError(
@@ -1930,6 +1948,7 @@ public actor GatewayChannelActor {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: "request_cancelled",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration,
             operationIdentifier: id))
         pending.continuation.resume(throwing: CancellationError())

@@ -34,6 +34,11 @@ actor PushRegistrationManager {
         self.buildConfig.transport == .relay
     }
 
+    /// Sanitized build-time classification used only by local diagnostics.
+    var diagnosticAPNsEnvironment: String {
+        self.buildConfig.apnsEnvironment.rawValue
+    }
+
     init(buildConfig: PushBuildConfig = .current) {
         self.buildConfig = buildConfig
         self.relayClient = buildConfig.relayBaseURL.map { PushRelayClient(baseURL: $0) }

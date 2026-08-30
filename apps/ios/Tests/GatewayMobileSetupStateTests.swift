@@ -388,7 +388,9 @@ import Testing
         #expect(model.contains(
             "self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID"))
         #expect(model.contains(
-            "guard !self.apnsRegistrationsInFlight.contains(attempt) else { return }"))
+            "guard !self.apnsRegistrationsInFlight.contains(attempt) else {"))
+        #expect(model.contains(".localDuplicateSuppressed"))
+        #expect(model.contains("publication_already_in_flight"))
         #expect(model.contains("ifCurrentRoute: nodeRoute"))
         #expect(model.contains(
             "[token, topic, expectedGatewayID, \"direct\"].joined(separator: \"|\")"))

@@ -275,9 +275,9 @@ final class NodeAppModel {
     @ObservationIgnored private var queuedAgentDeepLinkPromptTask: Task<Void, Never>?
 
     /// Primary "node" connection: used for device capabilities and node.invoke requests.
-    private let nodeGateway = GatewayNodeSession()
+    private let nodeGateway = GatewayNodeSession(connectionRole: .node)
     // Secondary "operator" connection: used for chat/talk/config/voicewake requests.
-    private let operatorGateway = GatewayNodeSession()
+    private let operatorGateway = GatewayNodeSession(connectionRole: .operator)
     @ObservationIgnored private var chatOutboxDatabase: OpenClawChatOutboxDatabase?
     @ObservationIgnored private var chatOutboxDeliveryOwner: OpenClawChatOutboxDeliveryOwner?
     private var chatOutboxDeliveryStableGatewayID: String?
@@ -346,6 +346,7 @@ final class NodeAppModel {
     private var shareDeliveryChannel: String?
     private var shareDeliveryTo: String?
     private var apnsDeviceTokenHex: String?
+    private var apnsRegistrationAttemptID: String?
     private var apnsLastRegisteredKey: String?
     @ObservationIgnored private var apnsRegistrationsInFlight: [APNsRegistrationAttempt] = []
     @ObservationIgnored private let pushRegistrationManager = PushRegistrationManager()
@@ -2205,6 +2206,7 @@ final class NodeAppModel {
             // Refresh APNs registration immediately after the first permission grant so the
             // gateway can receive a push registration without requiring an app relaunch.
             await MainActor.run {
+                AIESAPNsDiagnostics.recordOSRegistrationRequested(source: "node_permission_grant")
                 UIApplication.shared.registerForRemoteNotifications()
             }
         }
@@ -5238,10 +5240,24 @@ extension NodeAppModel {
             "Location wake post-check wakeId=\(wakeId, privacy: .public) connected=\(connected, privacy: .public)")
     }
 
-    func updateAPNsDeviceToken(_ tokenData: Data) {
+    func updateAPNsDeviceToken(
+        _ tokenData: Data,
+        registrationAttemptID: String? = nil)
+    {
         let tokenHex = tokenData.map { String(format: "%02x", $0) }.joined()
         let trimmed = tokenHex.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        let resolvedAttemptID = registrationAttemptID ?? UUID().uuidString
+        if let previousAttemptID = self.apnsRegistrationAttemptID,
+           previousAttemptID != resolvedAttemptID
+        {
+            AIESAPNsDiagnostics.recordPublication(
+                .superseded,
+                resultClass: "new_os_token_received",
+                context: AIESAPNsPublicationDiagnosticContext(
+                    registrationAttemptID: previousAttemptID))
+        }
+        self.apnsRegistrationAttemptID = resolvedAttemptID
         self.apnsDeviceTokenHex = trimmed
         Task { [weak self] in
             await self?.registerAPNsTokenIfNeeded()
@@ -5261,6 +5277,7 @@ extension NodeAppModel {
             return
         }
         let usesRelayTransport = await self.pushRegistrationManager.usesRelayTransport
+        let apnsEnvironment = await self.pushRegistrationManager.diagnosticAPNsEnvironment
         guard shouldContinue() else { return }
         guard let topic = Bundle.main.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
               !topic.isEmpty
@@ -5268,6 +5285,8 @@ extension NodeAppModel {
             return
         }
         let configurationGeneration = self.gatewayConfigurationGeneration
+        let registrationAttemptID = self.apnsRegistrationAttemptID ?? UUID().uuidString
+        let deviceIdentity = GatewaySettingsStore.currentInstanceID()
         guard let expectedGatewayID = self.activeGatewayConnectConfig?.effectiveStableID else { return }
         let nodeRoute: GatewayNodeSessionRoute
         if let expectedNodeRoute {
@@ -5300,7 +5319,23 @@ extension NodeAppModel {
         }
 
         let directRegistrationKey = [token, topic, expectedGatewayID, "direct"].joined(separator: "|")
-        if !usesRelayTransport, self.apnsLastRegisteredKey == directRegistrationKey { return }
+        let nodeDiagnosticContext = AIESAPNsPublicationDiagnosticContext(
+            registrationAttemptID: registrationAttemptID,
+            configurationGeneration: configurationGeneration,
+            route: nodeRoute,
+            nodeRoute: nodeRoute,
+            operatorRoute: operatorRoute,
+            connectionRole: .node,
+            deviceIdentity: deviceIdentity,
+            topic: topic,
+            environment: apnsEnvironment)
+        if !usesRelayTransport, self.apnsLastRegisteredKey == directRegistrationKey {
+            AIESAPNsDiagnostics.recordPublication(
+                .localDuplicateSuppressed,
+                resultClass: "local_direct_registration_match",
+                context: nodeDiagnosticContext)
+            return
+        }
         let attempt = APNsRegistrationAttempt(
             token: token,
             topic: topic,
@@ -5308,10 +5343,38 @@ extension NodeAppModel {
             usesRelayTransport: usesRelayTransport,
             nodeRoute: nodeRoute,
             operatorRoute: operatorRoute)
-        guard !self.apnsRegistrationsInFlight.contains(attempt) else { return }
+        guard !self.apnsRegistrationsInFlight.contains(attempt) else {
+            AIESAPNsDiagnostics.recordPublication(
+                .localDuplicateSuppressed,
+                resultClass: "publication_already_in_flight",
+                context: nodeDiagnosticContext)
+            return
+        }
         self.apnsRegistrationsInFlight.append(attempt)
         defer {
             self.apnsRegistrationsInFlight.removeAll { $0 == attempt }
+        }
+
+        AIESAPNsDiagnostics.recordPublication(
+            .admitted,
+            resultClass: usesRelayTransport ? "relay" : "direct",
+            context: nodeDiagnosticContext)
+        if let operatorRoute {
+            let operatorDiagnosticContext = AIESAPNsPublicationDiagnosticContext(
+                registrationAttemptID: registrationAttemptID,
+                configurationGeneration: configurationGeneration,
+                route: operatorRoute,
+                nodeRoute: nodeRoute,
+                operatorRoute: operatorRoute,
+                connectionRole: .operator,
+                deviceIdentity: deviceIdentity,
+                topic: topic,
+                environment: apnsEnvironment)
+            AIESAPNsDiagnostics.recordPublication(
+                .admitted,
+                providerStage: "relay_identity_route",
+                resultClass: "route_bound",
+                context: operatorDiagnosticContext)
         }
 
         do {
@@ -5332,7 +5395,13 @@ extension NodeAppModel {
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
                   shouldContinue()
-            else { return }
+            else {
+                AIESAPNsDiagnostics.recordPublication(
+                    .cancelled,
+                    resultClass: "route_or_configuration_changed_before_payload",
+                    context: nodeDiagnosticContext)
+                return
+            }
             let payloadJSON = try await self.pushRegistrationManager.makeGatewayRegistrationPayload(
                 apnsTokenHex: token,
                 topic: topic,
@@ -5347,21 +5416,53 @@ extension NodeAppModel {
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
                   shouldContinue()
-            else { return }
+            else {
+                AIESAPNsDiagnostics.recordPublication(
+                    .cancelled,
+                    resultClass: "route_or_configuration_changed_after_payload",
+                    context: nodeDiagnosticContext)
+                return
+            }
+            AIESAPNsDiagnostics.recordPublication(
+                .attempted,
+                resultClass: "node_event_transport",
+                context: nodeDiagnosticContext)
             let published = await self.nodeGateway.sendEvent(
                 event: "push.apns.register",
                 payloadJSON: payloadJSON,
                 ifCurrentRoute: nodeRoute)
-            guard published,
-                  await self.nodeGateway.isCurrentRoute(nodeRoute),
+            guard published else {
+                AIESAPNsDiagnostics.recordPublication(
+                    .failed,
+                    resultClass: "transport_or_route_unavailable",
+                    context: nodeDiagnosticContext)
+                return
+            }
+            // node.event is one-way. Preserve the attempt classification after a
+            // successful write; no gateway acceptance can be inferred without an ack.
+            AIESAPNsDiagnostics.recordPublication(
+                .attempted,
+                providerStage: "transport_write_result",
+                resultClass: "transport_write_accepted_unacknowledged",
+                context: nodeDiagnosticContext)
+            guard await self.nodeGateway.isCurrentRoute(nodeRoute),
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
                   shouldContinue()
-            else { return }
+            else {
+                AIESAPNsDiagnostics.recordPublication(
+                    .cancelled,
+                    resultClass: "route_or_configuration_changed_after_transport_write",
+                    context: nodeDiagnosticContext)
+                return
+            }
             if !usesRelayTransport {
                 self.apnsLastRegisteredKey = directRegistrationKey
             }
         } catch {
+            AIESAPNsDiagnostics.recordPublicationFailure(
+                error,
+                context: nodeDiagnosticContext)
             self.pushWakeLogger.error(
                 "APNs registration publish failed: \(error.localizedDescription, privacy: .public)")
         }

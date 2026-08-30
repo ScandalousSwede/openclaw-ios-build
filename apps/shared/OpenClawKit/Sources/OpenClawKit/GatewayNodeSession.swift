@@ -18,6 +18,11 @@ public struct GatewayNodeSessionRoute: Sendable, Equatable {
     fileprivate let channelGeneration: UInt64
     fileprivate let admissionGeneration: UInt64
     fileprivate let socketGeneration: UInt64
+
+    /// Sanitized generation metadata for diagnostics that must remain bound to
+    /// the exact admitted route without exposing mutable session internals.
+    public var diagnosticRouteGeneration: UInt64 { self.admissionGeneration }
+    public var diagnosticSocketGeneration: UInt64 { self.socketGeneration }
 }
 
 /// Immutable evidence captured in the actor turn that admits a physical route.
@@ -95,6 +100,7 @@ public actor GatewayNodeSession {
     }
 
     private let logger = Logger(subsystem: "ai.openclaw", category: "node.gateway")
+    private let diagnosticConnectionRole: OpenClawDiagnosticConnectionRole
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
     private static let defaultInvokeTimeoutMs = 30000
@@ -216,7 +222,9 @@ public actor GatewayNodeSession {
         let pluginSurfaceUrls: [String: AnyCodable]?
     }
 
-    public init() {}
+    public init(connectionRole: OpenClawDiagnosticConnectionRole = .unknown) {
+        self.diagnosticConnectionRole = connectionRole
+    }
 
     private func connectOptionsKey(_ options: GatewayConnectOptions) -> String {
         func sorted(_ values: [String]) -> String {
@@ -312,6 +320,7 @@ public actor GatewayNodeSession {
                 OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                     kind: .route,
                     state: "retired",
+                    connectionRole: self.diagnosticConnectionRole,
                     socketGeneration: activeSocketGeneration,
                     routeGeneration: self.admissionGeneration))
             }
@@ -364,6 +373,7 @@ public actor GatewayNodeSession {
                         socketGeneration: socketGeneration)
                 },
                 connectOptions: connectOptions,
+                diagnosticConnectionRole: self.diagnosticConnectionRole,
                 generationAwareDisconnectHandler: { [weak self] reason, socketGeneration in
                     await self?.handleChannelDisconnected(
                         reason,
@@ -374,6 +384,7 @@ public actor GatewayNodeSession {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .route,
                 state: "installed",
+                connectionRole: self.diagnosticConnectionRole,
                 routeGeneration: self.admissionGeneration))
             self.connectOptions = connectOptions
             self.onConnected = onConnected
@@ -455,6 +466,7 @@ public actor GatewayNodeSession {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .route,
                 state: "retired",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: activeSocketGeneration,
                 routeGeneration: self.admissionGeneration))
         }
@@ -769,6 +781,7 @@ public actor GatewayNodeSession {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .route,
                 state: "admitted",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: socketGeneration,
                 routeGeneration: self.admissionGeneration))
         }
@@ -826,6 +839,7 @@ public actor GatewayNodeSession {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
                 kind: .route,
                 state: "admitted",
+                connectionRole: self.diagnosticConnectionRole,
                 socketGeneration: socketGeneration,
                 routeGeneration: self.admissionGeneration))
         }
@@ -870,6 +884,7 @@ public actor GatewayNodeSession {
             state: Self.diagnosticHelloState(
                 supportsRoutingGuard: supportsRoutingGuard,
                 hasRequiredOperatorScopes: hasOperatorRead && hasOperatorWrite),
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: socketGeneration,
             routeGeneration: admissionGeneration,
             sequence: ok._protocol,
@@ -966,6 +981,7 @@ public actor GatewayNodeSession {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .route,
             state: "retired",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: socketGeneration,
             routeGeneration: self.admissionGeneration))
         self.admissionGeneration &+= 1
@@ -1029,11 +1045,13 @@ public actor GatewayNodeSession {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .route,
             state: "retired",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: waiter.socketGeneration,
             routeGeneration: waiter.admissionGeneration))
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .reconnect,
             state: "snapshot_timeout",
+            connectionRole: self.diagnosticConnectionRole,
             socketGeneration: waiter.socketGeneration,
             routeGeneration: waiter.admissionGeneration))
         self.channelGeneration &+= 1

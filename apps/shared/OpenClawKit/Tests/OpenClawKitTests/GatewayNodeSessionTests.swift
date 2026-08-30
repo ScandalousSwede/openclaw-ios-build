@@ -1461,7 +1461,7 @@ struct GatewayNodeSessionTests {
                 GatewayServerCapability.chatSendRoutingContract.rawValue,
                 "future-capability",
             ])
-        let gateway = GatewayNodeSession()
+        let gateway = GatewayNodeSession(connectionRole: .operator)
         let options = generationTestOptions(
             scopes: ["operator.talk.secrets", "operator.write", "operator.read"],
             stableGatewayID: "gateway-a")
@@ -1496,6 +1496,7 @@ struct GatewayNodeSessionTests {
             .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
             .first { $0.state == "hello_s3_ready" })
         #expect(helloDiagnostic.kind == .route)
+        #expect(helloDiagnostic.connectionRole == .operator)
         #expect(helloDiagnostic.socketGeneration != nil)
         #expect(helloDiagnostic.routeGeneration != nil)
         #expect(helloDiagnostic.sequence == 2)
@@ -1506,6 +1507,62 @@ struct GatewayNodeSessionTests {
             .chatSendRoutingContract,
             ifCurrentRoute: route) == nil)
         #expect(await gateway.operatorScopes(ifCurrentRoute: route) == nil)
+    }
+
+    @Test
+    func nodeAndOperatorDiagnosticsKeepIndependentImmutableRolesAcrossReplacement() async throws {
+        let diagnostics = DiagnosticLineProbe()
+        OpenClawDiagnosticRecorder.installSink { diagnostics.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        let firstNodeSession = FakeGatewayWebSocketSession(deliversReceiveFailureOnCancel: false)
+        let replacementNodeSession = FakeGatewayWebSocketSession()
+        let operatorSession = FakeGatewayWebSocketSession()
+        let nodeGateway = GatewayNodeSession(connectionRole: .node)
+        let operatorGateway = GatewayNodeSession(connectionRole: .operator)
+
+        try await connectForGenerationTest(
+            nodeGateway,
+            session: firstNodeSession,
+            endpoint: "ws://node-first.example.invalid")
+        try await connectForGenerationTest(
+            operatorGateway,
+            session: operatorSession,
+            endpoint: "ws://operator.example.invalid")
+        let operatorRoute = try #require(await operatorGateway.currentRoute())
+        let oldNodeTask = try #require(firstNodeSession.latestTask())
+
+        try await connectForGenerationTest(
+            nodeGateway,
+            session: replacementNodeSession,
+            endpoint: "ws://node-replacement.example.invalid")
+        oldNodeTask.emitReceiveFailure()
+        try await waitUntil("stale node callback is diagnosed") {
+            diagnostics.snapshot()
+                .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+                .contains { $0.state == "stale_callback_ignored" }
+        }
+
+        #expect(await operatorGateway.currentRoute() == operatorRoute)
+        let events = diagnostics.snapshot().compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+        let routeAndSocketEvents = events.filter { $0.kind == .route || $0.kind == .socket }
+        #expect(!routeAndSocketEvents.isEmpty)
+        #expect(routeAndSocketEvents.allSatisfy {
+            $0.connectionRole == .node || $0.connectionRole == .operator
+        })
+        #expect(routeAndSocketEvents.contains { $0.connectionRole == .node })
+        #expect(routeAndSocketEvents.contains { $0.connectionRole == .operator })
+        #expect(events.filter { $0.state == "stale_callback_ignored" }
+            .allSatisfy { $0.connectionRole == .node })
+        let encodedDiagnostics = String(
+            decoding: try JSONEncoder().encode(routeAndSocketEvents),
+            as: UTF8.self)
+        #expect(!encodedDiagnostics.contains("token"))
+        #expect(!encodedDiagnostics.contains("operator.read"))
+        #expect(!encodedDiagnostics.contains("operator.write"))
+
+        await operatorGateway.disconnect()
+        await nodeGateway.disconnect()
     }
 
     @Test

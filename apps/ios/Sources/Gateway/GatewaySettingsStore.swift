@@ -485,6 +485,9 @@ enum GatewayDiagnostics {
         queue.setSpecific(key: GatewayDiagnostics.queueMarker, value: 1)
         return queue
     }()
+    private static let flushRequestQueue = DispatchQueue(
+        label: "ai.openclaw.gateway.diagnostics.flush",
+        qos: .utility)
     static let logFileName = "openclaw-gateway-aies-v1.log"
     static let evidenceRecordMarker = "evidence-v1 "
     private static let maxLogBytes: Int64 = 512 * 1024
@@ -569,6 +572,7 @@ enum GatewayDiagnostics {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .appLifecycle,
             state: "diagnostics_started"))
+        AIESDiagnosticRunContinuity.startLive()
     }
 
     static func log(_ message: String) {
@@ -639,6 +643,15 @@ enum GatewayDiagnostics {
         let completed = DispatchSemaphore(value: 0)
         self.queue.async { completed.signal() }
         return completed.wait(timeout: .now() + max(0, timeout)) == .success ? .completed : .timedOut
+    }
+
+    /// Requests a bounded durability barrier without blocking the audio/parser
+    /// callback that emitted the record. Playback behavior must not depend on
+    /// diagnostic file I/O latency.
+    static func requestFlush(timeout: TimeInterval = 0.1) {
+        self.flushRequestQueue.async {
+            _ = self.flush(timeout: timeout)
+        }
     }
 
     static func reset() {

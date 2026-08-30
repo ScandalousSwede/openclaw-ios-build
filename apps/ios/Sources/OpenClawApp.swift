@@ -13,6 +13,11 @@ private struct PendingWatchPromptAction {
     var sessionKey: String?
 }
 
+private struct PendingAPNsDeviceToken {
+    let data: Data
+    let registrationAttemptID: String
+}
+
 private typealias PendingExecApprovalPrompt = ExecApprovalNotificationPrompt
 
 @MainActor
@@ -26,7 +31,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
     private let backgroundWakeLogger = Logger(subsystem: "ai.openclaw.ios", category: "BackgroundWake")
     private static let wakeRefreshTaskIdentifier = "ai.openclaw.ios.bgrefresh"
     private var backgroundWakeTask: Task<Bool, Never>?
-    private var pendingAPNsDeviceToken: Data?
+    private var pendingAPNsDeviceToken: PendingAPNsDeviceToken?
     private var pendingWatchPromptActions: [PendingWatchPromptAction] = []
     private var pendingExecApprovalPrompts: [PendingExecApprovalPrompt] = []
     private var pendingExecApprovalRequestedPushIDs: [String] = []
@@ -38,7 +43,9 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
             if let token = self.pendingAPNsDeviceToken {
                 self.pendingAPNsDeviceToken = nil
                 Task { @MainActor in
-                    model.updateAPNsDeviceToken(token)
+                    model.updateAPNsDeviceToken(
+                        token.data,
+                        registrationAttemptID: token.registrationAttemptID)
                 }
             }
             if !self.pendingWatchPromptActions.isEmpty {
@@ -112,22 +119,29 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         let notificationCenter = UNUserNotificationCenter.current()
         notificationCenter.delegate = self
         ExecApprovalNotificationBridge.registerCategory(center: notificationCenter)
+        AIESAPNsDiagnostics.recordOSRegistrationRequested(source: "application_launch")
         application.registerForRemoteNotifications()
         return true
     }
 
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        let registrationAttemptID = AIESAPNsDiagnostics.recordOSTokenReceived()
         if let appModel = self.resolvedAppModel() {
             Task { @MainActor in
-                appModel.updateAPNsDeviceToken(deviceToken)
+                appModel.updateAPNsDeviceToken(
+                    deviceToken,
+                    registrationAttemptID: registrationAttemptID)
             }
             return
         }
 
-        self.pendingAPNsDeviceToken = deviceToken
+        self.pendingAPNsDeviceToken = PendingAPNsDeviceToken(
+            data: deviceToken,
+            registrationAttemptID: registrationAttemptID)
     }
 
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: any Error) {
+        AIESAPNsDiagnostics.recordOSRegistrationFailed()
         self.logger.error("APNs registration failed: \(error.localizedDescription, privacy: .public)")
     }
 
@@ -180,9 +194,16 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .appLifecycle,
             state: "scene_\(String(describing: phase))"))
-        if phase == .background {
+        if phase == .active {
+            AIESDiagnosticRunContinuity.observeRunningBoundary()
+        } else if phase == .background {
+            AIESDiagnosticRunContinuity.observeBackgroundBoundary()
             self.scheduleBackgroundWakeRefresh(afterSeconds: 120, reason: "scene_background")
         }
+    }
+
+    func applicationWillTerminate(_ application: UIApplication) {
+        AIESDiagnosticRunContinuity.observeOrderlyClose()
     }
 
     private func registerBackgroundWakeRefreshTask() {
@@ -524,6 +545,7 @@ enum WatchPromptNotificationBridge {
                 // Refresh APNs registration immediately after the first permission grant so the
                 // gateway can receive a push registration without requiring an app relaunch.
                 await MainActor.run {
+                    AIESAPNsDiagnostics.recordOSRegistrationRequested(source: "watch_permission_grant")
                     UIApplication.shared.registerForRemoteNotifications()
                 }
             }

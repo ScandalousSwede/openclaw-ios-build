@@ -11,17 +11,37 @@ struct OpenClawDiagnosticEventTests {
             state: "received",
             processIdentifier: 4242,
             launchIdentifier: "launch-epoch-one",
+            processInstanceIdentifier: "process-instance-one",
+            launchInstanceIdentifier: "launch-instance-one",
+            priorProcessInstanceID: "0123456789abcdef",
+            priorLaunchInstanceID: "fedcba9876543210",
+            connectionRole: .operator,
             socketGeneration: 7,
             routeGeneration: 9,
+            nodeRouteGeneration: 14,
+            operatorRouteGeneration: 15,
+            configurationGeneration: 10,
             activityGeneration: 11,
+            playbackGeneration: 12,
+            cancellationGeneration: 13,
             sessionIdentifier: "private-session-key",
             runIdentifier: "run-ok",
             messageIdentifier: "private message body\n",
             eventIdentifier: String(repeating: "x", count: 129),
             operationIdentifier: "sk_live_credential",
             operationGeneration: 17,
+            diagnosticAttemptID: "diagnostic-attempt-one",
+            registrationAttemptID: "registration-attempt-one",
             sequence: 42,
             stream: "assistant",
+            provider: "elevenlabs",
+            providerStage: "provider_response_received",
+            codec: "pcm",
+            playbackPath: "pcm",
+            resultClass: "success",
+            deviceIdentityIdentifier: "private-device-identity",
+            topic: "ai.openclaw.client",
+            environment: "production",
             byteCount: 8192,
             sampleRate: 44100,
             durationMilliseconds: 321,
@@ -33,9 +53,21 @@ struct OpenClawDiagnosticEventTests {
         #expect(event.processID == 4242)
         #expect(event.launchID?.count == 16)
         #expect(event.launchID != "launch-epoch-one")
+        #expect(event.processInstanceID?.count == 16)
+        #expect(event.processInstanceID != "process-instance-one")
+        #expect(event.launchInstanceID?.count == 16)
+        #expect(event.launchInstanceID != "launch-instance-one")
+        #expect(event.priorProcessInstanceID == "0123456789abcdef")
+        #expect(event.priorLaunchInstanceID == "fedcba9876543210")
+        #expect(event.connectionRole == .operator)
         #expect(event.socketGeneration == 7)
         #expect(event.routeGeneration == 9)
+        #expect(event.nodeRouteGeneration == 14)
+        #expect(event.operatorRouteGeneration == 15)
+        #expect(event.configurationGeneration == 10)
         #expect(event.activityGeneration == 11)
+        #expect(event.playbackGeneration == 12)
+        #expect(event.cancellationGeneration == 13)
         #expect(event.sessionHash?.count == 16)
         #expect(event.sessionHash != "private-session-key")
         #expect(event.runID?.count == 16)
@@ -46,8 +78,19 @@ struct OpenClawDiagnosticEventTests {
         #expect(event.operationID?.count == 16)
         #expect(event.operationID != "sk_live_credential")
         #expect(event.operationGeneration == 17)
+        #expect(event.diagnosticAttemptID?.count == 16)
+        #expect(event.registrationAttemptID?.count == 16)
         #expect(event.sequence == 42)
         #expect(event.stream == "assistant")
+        #expect(event.provider == "elevenlabs")
+        #expect(event.providerStage == "provider_response_received")
+        #expect(event.codec == "pcm")
+        #expect(event.playbackPath == "pcm")
+        #expect(event.resultClass == "success")
+        #expect(event.deviceIdentityHash?.count == 16)
+        #expect(event.deviceIdentityHash != "private-device-identity")
+        #expect(event.topic == "ai.openclaw.client")
+        #expect(event.environment == "production")
         #expect(event.byteCount == 8192)
         #expect(event.sampleRate == 44100)
         #expect(event.durationMilliseconds == 321)
@@ -85,6 +128,36 @@ struct OpenClawDiagnosticEventTests {
         #expect(OpenClawDiagnosticRecorder.decodeRecord("private transcript") == nil)
     }
 
+    @Test func audioSessionRestoreBreadcrumbStageRoundTripsAsTypedMetadata() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_audio_session_restore_started",
+            providerStage: "tts_audio_session_restore_started",
+            observedAt: Date(timeIntervalSince1970: 0))
+        let encoded = try JSONEncoder().encode(event)
+        let decoded = try JSONDecoder().decode(OpenClawDiagnosticEvent.self, from: encoded)
+
+        #expect(decoded.providerStage == "tts_audio_session_restore_started")
+        #expect(decoded.state == "tts_audio_session_restore_started")
+    }
+
+    @Test func v2RouteAndSocketRecordsRequireAnExplicitRoleField() throws {
+        for kind in [OpenClawDiagnosticEvent.Kind.route, .socket] {
+            let event = OpenClawDiagnosticEvent(
+                kind: kind,
+                state: "connected",
+                connectionRole: .unknown,
+                observedAt: Date(timeIntervalSince1970: 0))
+            var object = try #require(
+                JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+            #expect(object["connection_role"] as? String == "unknown")
+            object.removeValue(forKey: "connection_role")
+            let data = try JSONSerialization.data(withJSONObject: object)
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + data.base64EncodedString()) == nil)
+        }
+    }
+
     @Test func decoderRejectsInjectedOrMalformedMetadata() throws {
         let valid = OpenClawDiagnosticEvent(
             kind: .chat,
@@ -100,6 +173,23 @@ struct OpenClawDiagnosticEventTests {
             ["run_id": "Bearer sk-private-credential"],
             ["session_hash": "private-session"],
             ["launch_id": "unhashed-launch-identifier"],
+            ["process_instance_id": "unhashed-process-identifier"],
+            ["launch_instance_id": "unhashed-launch-identifier"],
+            ["prior_process_instance_id": "unhashed-prior-identifier"],
+            ["prior_launch_instance_id": "unhashed-prior-identifier"],
+            ["connection_role": "administrator"],
+            ["diagnostic_attempt_id": "private-attempt"],
+            ["registration_attempt_id": "private-attempt"],
+            ["device_identity_hash": "private-device"],
+            ["provider": "sklivecredential"],
+            ["provider_stage": "sklivecredential"],
+            ["codec": "sklivecredential"],
+            ["playback_path": "sklivecredential"],
+            ["result_class": "sklivecredential"],
+            ["topic": "sklivecredential"],
+            ["environment": "sklivecredential"],
+            ["provider_stage": "provider result contained a secret"],
+            ["topic": "bad topic"],
             ["process_id": -1],
             ["byte_count": -1],
             ["sample_rate": 0],
@@ -132,6 +222,27 @@ struct OpenClawDiagnosticEventTests {
         #expect(captured.withLock { $0.isEmpty })
     }
 
+    @Test func initializerDropsSafeCharacterSecretsFromClosedV2Metadata() {
+        let event = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_request_admitted",
+            provider: "sklivecredential",
+            providerStage: "sklivecredential",
+            codec: "sklivecredential",
+            playbackPath: "sklivecredential",
+            resultClass: "sklivecredential",
+            topic: "sklivecredential",
+            environment: "sklivecredential")
+
+        #expect(event.provider == nil)
+        #expect(event.providerStage == nil)
+        #expect(event.codec == nil)
+        #expect(event.playbackPath == nil)
+        #expect(event.resultClass == nil)
+        #expect(event.topic == nil)
+        #expect(event.environment == nil)
+    }
+
     @Test func newEventsCarryStablePerProcessLaunchMetadata() {
         let first = OpenClawDiagnosticEvent(kind: .appLifecycle, state: "first")
         let second = OpenClawDiagnosticEvent(kind: .tts, state: "second")
@@ -140,6 +251,10 @@ struct OpenClawDiagnosticEventTests {
         #expect(second.processID == first.processID)
         #expect(first.launchID?.count == 16)
         #expect(second.launchID == first.launchID)
+        #expect(first.processInstanceID == OpenClawDiagnosticEvent.currentProcessInstanceID)
+        #expect(second.processInstanceID == first.processInstanceID)
+        #expect(first.launchInstanceID == OpenClawDiagnosticEvent.currentLaunchInstanceID)
+        #expect(second.launchInstanceID == first.launchInstanceID)
     }
 
     @Test func decoderRetainsLegacyV1RecordsWithoutNewMetadata() throws {
@@ -154,6 +269,8 @@ struct OpenClawDiagnosticEventTests {
         for key in [
             "process_id",
             "launch_id",
+            "process_instance_id",
+            "launch_instance_id",
             "operation_generation",
             "byte_count",
             "sample_rate",
@@ -171,5 +288,75 @@ struct OpenClawDiagnosticEventTests {
         #expect(decoded.socketGeneration == 3)
         #expect(decoded.processID == nil)
         #expect(decoded.launchID == nil)
+        #expect(decoded.processInstanceID == nil)
+        #expect(decoded.launchInstanceID == nil)
+
+        var injectedV1 = object
+        injectedV1["connection_role"] = "node"
+        let injectedData = try JSONSerialization.data(withJSONObject: injectedV1)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + injectedData.base64EncodedString()) == nil)
+    }
+
+    @Test func decoderRetainsEveryLegacyV1OptionalField() throws {
+        let current = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "provider_result",
+            processIdentifier: 4242,
+            launchIdentifier: "legacy-launch",
+            socketGeneration: 3,
+            routeGeneration: 5,
+            activityGeneration: 7,
+            sessionIdentifier: "session",
+            runIdentifier: "run",
+            messageIdentifier: "message",
+            eventIdentifier: "event",
+            operationIdentifier: "operation",
+            operationGeneration: 11,
+            sequence: 13,
+            stream: "pcm",
+            byteCount: 1024,
+            sampleRate: 44100,
+            durationMilliseconds: 250,
+            observedAt: Date(timeIntervalSince1970: 0))
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        object["schema"] = "argus.openclaw-ios.diagnostic-event.v1"
+        for key in [
+            "process_instance_id",
+            "launch_instance_id",
+            "connection_role",
+            "configuration_generation",
+            "playback_generation",
+            "cancellation_generation",
+        ] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try #require(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + data.base64EncodedString()))
+
+        #expect(decoded.processID == 4242)
+        #expect(decoded.launchID?.count == 16)
+        #expect(decoded.operationGeneration == 11)
+        #expect(decoded.byteCount == 1024)
+        #expect(decoded.sampleRate == 44100)
+        #expect(decoded.durationMilliseconds == 250)
+    }
+
+    @Test func decoderRejectsAPNsKindForgedIntoLegacyV1Schema() throws {
+        let current = OpenClawDiagnosticEvent(
+            kind: .apns,
+            state: "os_registration_requested",
+            observedAt: Date(timeIntervalSince1970: 0))
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        object["schema"] = "argus.openclaw-ios.diagnostic-event.v1"
+        for key in ["process_instance_id", "launch_instance_id"] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + data.base64EncodedString()) == nil)
     }
 }
