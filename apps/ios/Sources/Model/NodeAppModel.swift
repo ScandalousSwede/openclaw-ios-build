@@ -1029,7 +1029,7 @@ final class NodeAppModel {
                     Task { [weak self] in
                         guard let self else { return }
                         let operatorWasConnected = await MainActor.run { self.operatorConnected }
-                        let probedOperatorRoute = if operatorWasConnected {
+                        let probedOperatorRoute: GatewayNodeSessionRoute? = if operatorWasConnected {
                             await self.operatorGateway.currentRoute(ifGatewayID: expectedGatewayID)
                         } else {
                             nil

@@ -13,7 +13,7 @@ extension NodeAppModel {
     {
         guard shouldApply() else { return }
         if let expectedRoute {
-            guard await self.nodeGateway.isCurrentRoute(expectedRoute) else { return }
+            guard await self.gatewaySession.isCurrentRoute(expectedRoute) else { return }
         }
         guard shouldApply() else { return }
         // Keep the bundled home canvas as the default connected view.
