@@ -329,7 +329,7 @@ import Testing
         #expect(model.contains("nodeRoute: admittedRoute"))
         #expect(model.contains("shouldContinue: shouldContinue"))
         #expect(canvas.contains("ifCurrentRoute expectedRoute: GatewayNodeSessionRoute?"))
-        #expect(canvas.contains("self.nodeGateway.isCurrentRoute(expectedRoute)"))
+        #expect(canvas.contains("self.gatewaySession.isCurrentRoute(expectedRoute)"))
         #expect(chatTransport.contains(
             "guard let currentGatewayID = await self.gateway.currentGatewayID(ifCurrentRoute: route)"))
         #expect(chatTransport.contains(

@@ -50,6 +50,7 @@ import Testing
 
         let appModel = NodeAppModel()
         appModel.gatewayServerName = nil
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
 
         OnboardingStateStore.markCompleted(mode: .remoteDomain, defaults: defaults)
         #expect(OnboardingStateStore.lastMode(defaults: defaults) == .remoteDomain)

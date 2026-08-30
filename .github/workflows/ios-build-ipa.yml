@@ -140,6 +140,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
+            test_credential_free_keychain_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -273,6 +274,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
+            test_credential_free_keychain_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -384,6 +386,7 @@ jobs:
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -parallel-testing-enabled NO \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
@@ -410,6 +413,7 @@ jobs:
             -only-testing:OpenClawTests/WatchSessionActivationGateTests \
             "${strict_package_args[@]}" \
             test \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) AIES_CREDENTIAL_FREE_TEST_KEYCHAIN' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -865,6 +869,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
+            test_credential_free_keychain_contract.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -951,6 +956,7 @@ jobs:
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -parallel-testing-enabled NO \
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
@@ -977,6 +983,7 @@ jobs:
             -only-testing:OpenClawTests/WatchSessionActivationGateTests \
             "${strict_package_args[@]}" \
             test \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) AIES_CREDENTIAL_FREE_TEST_KEYCHAIN' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
