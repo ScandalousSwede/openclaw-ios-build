@@ -263,10 +263,34 @@ private actor SuspendedGatewayAutoConnectPreparation {
 
     @Test @MainActor func autoconnectRequiresStoredPinForDiscoveredGateways() async {
         let stableID = "test|\(UUID().uuidString)"
-        defer { clearTLSFingerprint(stableID: stableID) }
+        let defaults = UserDefaults.standard
+        let mutatedKeys = [
+            "gateway.autoconnect",
+            "gateway.manual.enabled",
+            "gateway.last.host",
+            "gateway.last.port",
+            "gateway.last.tls",
+            "gateway.last.stableID",
+            "gateway.last.kind",
+            "gateway.preferredStableID",
+            "gateway.lastDiscoveredStableID",
+        ]
+        var savedDefaults: [String: Any?] = [:]
+        for key in mutatedKeys {
+            savedDefaults.updateValue(defaults.object(forKey: key), forKey: key)
+        }
+        defer {
+            clearTLSFingerprint(stableID: stableID)
+            for (key, value) in savedDefaults {
+                if let value {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+        }
         clearTLSFingerprint(stableID: stableID)
 
-        let defaults = UserDefaults.standard
         defaults.set(true, forKey: "gateway.autoconnect")
         defaults.set(false, forKey: "gateway.manual.enabled")
         defaults.removeObject(forKey: "gateway.last.host")
@@ -865,6 +889,7 @@ private actor SuspendedGatewayAutoConnectPreparation {
         let probeHosts = OSAllocatedUnfairLock(initialState: [String]())
         let defaults = UserDefaults.standard
         let manualKeys = [
+            "gateway.autoconnect",
             "gateway.manual.enabled",
             "gateway.manual.host",
             "gateway.manual.port",
@@ -894,6 +919,7 @@ private actor SuspendedGatewayAutoConnectPreparation {
         }
         clearTLSFingerprint(stableID: firstStableID)
         clearTLSFingerprint(stableID: secondStableID)
+        defaults.set(false, forKey: "gateway.autoconnect")
         defaults.set(true, forKey: "gateway.manual.enabled")
         defaults.set("existing.example.com", forKey: "gateway.manual.host")
         defaults.set(8443, forKey: "gateway.manual.port")
@@ -963,10 +989,18 @@ private actor SuspendedGatewayAutoConnectPreparation {
         let secondStableID = "manual|\(secondHost.lowercased())|\(port)"
         let preparation = SuspendedGatewayBootstrapPreparation()
         let probeCount = OSAllocatedUnfairLock(initialState: 0)
+        let defaults = UserDefaults.standard
+        let savedAutoConnect = defaults.object(forKey: "gateway.autoconnect")
         defer {
             clearTLSFingerprint(stableID: firstStableID)
             clearTLSFingerprint(stableID: secondStableID)
+            if let savedAutoConnect {
+                defaults.set(savedAutoConnect, forKey: "gateway.autoconnect")
+            } else {
+                defaults.removeObject(forKey: "gateway.autoconnect")
+            }
         }
+        defaults.set(false, forKey: "gateway.autoconnect")
         GatewayTLSStore.saveFingerprint("stored-fingerprint", stableID: firstStableID)
         clearTLSFingerprint(stableID: secondStableID)
 
@@ -1002,6 +1036,7 @@ private actor SuspendedGatewayAutoConnectPreparation {
         #expect(probeCount.withLock { $0 } == 0)
         #expect(controller.pendingTrustPrompt == nil)
         #expect(!controller._test_didAutoConnect())
+        #expect(appModel.activeGatewayConnectConfig == nil)
         #expect(appModel.gatewayStatusText == "Finishing the accepted gateway setup…")
 
         await preparation.release()
