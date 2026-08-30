@@ -72,8 +72,10 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Scope: `.github/workflows/ios-build-ipa.yml` only; selects the new parser, TLS, scanner, setup ownership, dual-role, route-fencing, APNs, and Watch activation coverage in the existing credential-free lane.
 - `a6a665b2fb` — `test(ios): isolate credential-free keychain fixtures`
 - Scope: adds a compile-time-only, lock-serialized credential store to the two explicitly unsigned simulator test invocations, retains the real Security.framework implementation for every archive/release build, serializes iOS test execution, corrects two stale test preconditions, and adds a workflow boundary test to all release-tooling lists.
+- `4cf4919d3b` — `test(ios): isolate autoconnect security fixtures`
+- Scope: snapshots and restores every process-global gateway default mutated by the stored-pin auto-connect test, disables unrelated constructor auto-connect in the two bootstrap-commit fixtures, and directly asserts that no gateway config is published while a trusted commit is suspended.
 - This is qualification/tooling support, not a fourth implementation package and not an upstream product semantic port.
-- Rollback: revert `a6a665b2fb` and `b1b8f54fda`; product/package commits remain independently reviewable.
+- Rollback: revert `4cf4919d3b`, `a6a665b2fb`, and `b1b8f54fda`; product/package commits remain independently reviewable.
 
 ## Inspected upstream items
 
@@ -318,6 +320,6 @@ No beta/prerelease commit was imported. The `2026.9.1-beta.1` line was not used 
 
 ## Qualification binding
 
-All three packages and the credential-free qualification selection now have exact commits. The local release-tooling gate passed `187/187`. Four exact-source macOS CI attempts identified and corrected three compile-only integration defects and then an unsigned simulator Keychain precondition; none reached signing, export, upload, Apple access, or a substantive product-invariant failure. The next exact-candidate run must still seal complete macOS Swift/Xcode execution, deterministic XcodeGen verification, and the unsigned five-target archive. That gate includes package/conformance, Shared and iOS reliability, Talk and Chat durable outbox suites, parser/TLS/scanner/pairing/reconnect/APNs/Watch tests, two deterministic XcodeGen passes, and an unsigned five-target archive with UUID/dSYM/package provenance evidence.
+All three packages and the credential-free qualification selection now have exact commits. The local release-tooling gate passed `187/187`. Five exact-source macOS CI attempts identified and corrected three compile-only integration defects, an unsigned simulator Keychain precondition, and one leaked process-global auto-connect fixture; none reached signing, export, upload, Apple access, or a substantive product-invariant failure. In the fifth run, Shared S0-S3 passed and 315/316 iOS tests passed; direct fencing evidence showed the replacement admission remained blocked, while only the unrelated constructor auto-connect latch was contaminated. The next exact-candidate run must still seal complete macOS Swift/Xcode execution, deterministic XcodeGen verification, and the unsigned five-target archive. That gate includes package/conformance, Shared and iOS reliability, Talk and Chat durable outbox suites, parser/TLS/scanner/pairing/reconnect/APNs/Watch tests, two deterministic XcodeGen passes, and an unsigned five-target archive with UUID/dSYM/package provenance evidence.
 
 Until that seal is attached, this report records the source-selection decision and implementation mapping; it does not claim promotion, signing, upload, Apple mutation, gateway mutation, or physical acceptance.

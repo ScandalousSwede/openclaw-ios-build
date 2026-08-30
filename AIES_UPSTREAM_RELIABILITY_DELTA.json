@@ -92,7 +92,7 @@
     "purpose": "select all touched reliability-sync tests in the existing credential-free iOS lane",
     "implementation_package": false,
     "upstream_semantic_port": false,
-    "rollback": "revert a6a665b2fb and b1b8f54fda without reverting Packages A, B, or C",
+    "rollback": "revert 4cf4919d3b, a6a665b2fb, and b1b8f54fda without reverting Packages A, B, or C",
     "additional_commits": [
       {
         "commit": "a6a665b2fb304bb2bfa3e2842779b3323018d890",
@@ -107,6 +107,17 @@
           "apps/shared/OpenClawKit/Sources/OpenClawKit/GenericPasswordKeychainStore.swift"
         ],
         "purpose": "supply deterministic credential-free persistence only to unsigned simulator tests while retaining the real Security.framework archive/release implementation",
+        "implementation_package": false,
+        "upstream_semantic_port": false
+      },
+      {
+        "commit": "4cf4919d3bdf25153de185f4bf35e2e1714dba40",
+        "short_commit": "4cf4919d3b",
+        "title": "test(ios): isolate autoconnect security fixtures",
+        "paths": [
+          "apps/ios/Tests/GatewayConnectionSecurityTests.swift"
+        ],
+        "purpose": "remove process-global auto-connect leakage while retaining and strengthening trusted bootstrap commit fencing assertions",
         "implementation_package": false,
         "upstream_semantic_port": false
       }
