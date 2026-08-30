@@ -27,7 +27,8 @@ struct AIESDiagnosticRunContinuityTests {
                 priorProcessInstanceID: "1111111111111111",
                 priorLaunchInstanceID: "2222222222222222",
                 markerWriteSucceeded: true))
-            #expect(try Data(contentsOf: markerURL).count <= AIESDiagnosticRunContinuity.maximumMarkerBytes)
+            let markerData = try Data(contentsOf: markerURL)
+            #expect(markerData.count <= AIESDiagnosticRunContinuity.maximumMarkerBytes)
         }
     }
 
