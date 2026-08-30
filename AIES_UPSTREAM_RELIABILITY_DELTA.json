@@ -64,7 +64,8 @@
         "83c06a7bd4",
         "43b567b6af",
         "9081ef9ccf",
-        "e80a15a832"
+        "e80a15a832",
+        "620ea65ac8"
       ],
       "rollback": "revert Package-B commits in reverse order",
       "upstream_items": [98066, 92552],
@@ -373,7 +374,8 @@
         "83c06a7bd4",
         "43b567b6af",
         "9081ef9ccf",
-        "e80a15a832"
+        "e80a15a832",
+        "620ea65ac8"
       ],
       "rollback": "revert Package B in reverse order"
     },
