@@ -8,6 +8,35 @@ enum GatewayOnboardingReset {
         instanceId: String,
         defaults: UserDefaults = .standard) async throws
     {
+        try await self.prepareForBootstrapPairing(
+            appModel: appModel,
+            instanceId: instanceId,
+            defaults: defaults,
+            clearTLSFingerprints: true)
+    }
+
+    /// Runs only after a user has accepted and persisted the destination TLS pin.
+    /// Existing pins, including the newly accepted one, remain scoped by stable ID.
+    @MainActor
+    static func prepareForTrustedBootstrapPairing(
+        appModel: NodeAppModel,
+        instanceId: String,
+        defaults: UserDefaults = .standard) async throws
+    {
+        try await self.prepareForBootstrapPairing(
+            appModel: appModel,
+            instanceId: instanceId,
+            defaults: defaults,
+            clearTLSFingerprints: false)
+    }
+
+    @MainActor
+    private static func prepareForBootstrapPairing(
+        appModel: NodeAppModel,
+        instanceId: String,
+        defaults: UserDefaults,
+        clearTLSFingerprints: Bool) async throws
+    {
         try await self.retireRoutesThenPurge(
             retireRoutes: {
                 await appModel.disconnectGatewayAndAwaitRouteRetirement()
@@ -28,7 +57,9 @@ enum GatewayOnboardingReset {
         GatewaySettingsStore.clearLastGatewayConnection(defaults: defaults)
         GatewaySettingsStore.clearPreferredGatewayStableID(defaults: defaults)
         GatewaySettingsStore.clearLastDiscoveredGatewayStableID(defaults: defaults)
-        GatewayTLSStore.clearAllFingerprints()
+        if clearTLSFingerprints {
+            GatewayTLSStore.clearAllFingerprints()
+        }
         defaults.set(false, forKey: "gateway.autoconnect")
     }
 

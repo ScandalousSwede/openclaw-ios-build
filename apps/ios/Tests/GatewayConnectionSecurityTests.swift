@@ -24,10 +24,61 @@ private actor SuspendedGatewayTLSProbe {
     }
 }
 
+private actor SuspendedGatewayBootstrapPreparation {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var callCount = 0
+
+    func run() async {
+        self.callCount += 1
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func release() {
+        self.continuation?.resume()
+        self.continuation = nil
+    }
+}
+
+private actor SuspendedGatewayAutoConnectPreparation {
+    private var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private(set) var callCount = 0
+    private(set) var completedCount = 0
+
+    func run() async {
+        self.callCount += 1
+        let call = self.callCount
+        await withCheckedContinuation { continuation in
+            self.continuations[call] = continuation
+        }
+        self.completedCount += 1
+    }
+
+    func release(_ call: Int) {
+        self.continuations.removeValue(forKey: call)?.resume()
+    }
+}
+
 @Suite(.serialized) struct GatewayConnectionSecurityTests {
     @MainActor
     private func makeController() -> GatewayConnectionController {
         GatewayConnectionController(appModel: NodeAppModel(), startDiscovery: false)
+    }
+
+    @Test func bootstrapManualInputRetainsTheTypedSetupResultInsteadOfLegacyFields() {
+        let pending = GatewayConnectionController.ManualAuthOverride.explicit(
+            token: nil,
+            bootstrapToken: "fresh-bootstrap",
+            password: nil)
+        let resolved = GatewayConnectionController.ManualAuthOverride.currentManualInput(
+            token: "legacy-token",
+            pendingOverride: pending,
+            password: "legacy-password")
+
+        #expect(resolved?.token == nil)
+        #expect(resolved?.bootstrapToken == "fresh-bootstrap")
+        #expect(resolved?.password == nil)
     }
 
     private func makeDiscoveredGateway(
@@ -71,6 +122,99 @@ private actor SuspendedGatewayTLSProbe {
                 throw NSError(domain: "GatewayConnectionSecurityTests", code: 1, userInfo: [
                     NSLocalizedDescriptionKey:
                         "Timed out waiting for TLS probe call \(expected) after \(startedAt.duration(to: now))",
+                ])
+            }
+            await Task.yield()
+            let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
+            try await clock.sleep(until: nextPoll, tolerance: .zero)
+        }
+    }
+
+    private func waitForPreparationCallCount(
+        _ expected: Int,
+        preparation: SuspendedGatewayBootstrapPreparation,
+        timeout: Duration = .seconds(3)) async throws
+    {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let deadline = startedAt.advanced(by: timeout)
+        while await preparation.callCount < expected {
+            try Task.checkCancellation()
+            let now = clock.now
+            guard now < deadline else {
+                throw NSError(domain: "GatewayConnectionSecurityTests", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Timed out waiting for bootstrap preparation call \(expected) after \(startedAt.duration(to: now))",
+                ])
+            }
+            await Task.yield()
+            let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
+            try await clock.sleep(until: nextPoll, tolerance: .zero)
+        }
+    }
+
+    private func waitForAutoConnectPreparationCallCount(
+        _ expected: Int,
+        preparation: SuspendedGatewayAutoConnectPreparation,
+        timeout: Duration = .seconds(3)) async throws
+    {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let deadline = startedAt.advanced(by: timeout)
+        while await preparation.callCount < expected {
+            try Task.checkCancellation()
+            let now = clock.now
+            guard now < deadline else {
+                throw NSError(domain: "GatewayConnectionSecurityTests", code: 3, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Timed out waiting for auto-connect preparation call \(expected) after \(startedAt.duration(to: now))",
+                ])
+            }
+            await Task.yield()
+            let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
+            try await clock.sleep(until: nextPoll, tolerance: .zero)
+        }
+    }
+
+    @MainActor
+    private func waitForActiveGateway(
+        _ stableID: String,
+        appModel: NodeAppModel,
+        timeout: Duration = .seconds(3)) async throws
+    {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let deadline = startedAt.advanced(by: timeout)
+        while appModel.activeGatewayConnectConfig?.stableID != stableID {
+            try Task.checkCancellation()
+            let now = clock.now
+            guard now < deadline else {
+                throw NSError(domain: "GatewayConnectionSecurityTests", code: 4, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Timed out waiting for active gateway \(stableID) after \(startedAt.duration(to: now))",
+                ])
+            }
+            await Task.yield()
+            let nextPoll = min(clock.now.advanced(by: .milliseconds(1)), deadline)
+            try await clock.sleep(until: nextPoll, tolerance: .zero)
+        }
+    }
+
+    private func waitForAutoConnectPreparationCompletionCount(
+        _ expected: Int,
+        preparation: SuspendedGatewayAutoConnectPreparation,
+        timeout: Duration = .seconds(3)) async throws
+    {
+        let clock = ContinuousClock()
+        let startedAt = clock.now
+        let deadline = startedAt.advanced(by: timeout)
+        while await preparation.completedCount < expected {
+            try Task.checkCancellation()
+            let now = clock.now
+            guard now < deadline else {
+                throw NSError(domain: "GatewayConnectionSecurityTests", code: 5, userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Timed out waiting for auto-connect completion \(expected) after \(startedAt.duration(to: now))",
                 ])
             }
             await Task.yield()
@@ -421,6 +565,7 @@ private actor SuspendedGatewayTLSProbe {
         let port = 18789
         let stableID = "manual|\(host.lowercased())|\(port)"
         let persistenceCalls = OSAllocatedUnfairLock(initialState: [(String, String)]())
+        let preparationCalls = OSAllocatedUnfairLock(initialState: 0)
         defer { clearTLSFingerprint(stableID: stableID) }
         clearTLSFingerprint(stableID: stableID)
 
@@ -433,20 +578,438 @@ private actor SuspendedGatewayTLSProbe {
             persistTLSFingerprint: { fingerprint, persistedStableID in
                 persistenceCalls.withLock { $0.append((fingerprint, persistedStableID)) }
                 return false
+            },
+            prepareBootstrapReplacement: {
+                preparationCalls.withLock { $0 += 1 }
             })
 
-        await controller.connectManual(host: host, port: port, useTLS: true)
+        await controller.connectManual(
+            host: host,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "one-shot", password: nil))
         let prompt = try #require(controller.pendingTrustPrompt)
         await controller.acceptPendingTrustPrompt(prompt)
 
         #expect(persistenceCalls.withLock { $0.count } == 1)
         #expect(persistenceCalls.withLock { $0.first?.0 } == "fail-closed-fingerprint")
         #expect(persistenceCalls.withLock { $0.first?.1 } == stableID)
+        #expect(preparationCalls.withLock { $0 } == 0)
         #expect(controller.pendingTrustPrompt == prompt)
         #expect(GatewayTLSStore.loadFingerprint(stableID: stableID) == nil)
         #expect(controller._test_didAutoConnect() == false)
         #expect(appModel.activeGatewayConnectConfig == nil)
         #expect(appModel.gatewayStatusText == "Could not save gateway certificate")
+    }
+
+    @Test @MainActor func acceptedTrustPersistsPinBeforeDestructiveBootstrapReplacement() async throws {
+        let host = "gateway-\(UUID().uuidString).example.com"
+        let port = 443
+        let stableID = "manual|\(host.lowercased())|\(port)"
+        let order = OSAllocatedUnfairLock(initialState: [String]())
+        defer { clearTLSFingerprint(stableID: stableID) }
+        clearTLSFingerprint(stableID: stableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint("accepted-fingerprint") },
+            persistTLSFingerprint: { _, _ in
+                order.withLock { $0.append("persist-pin") }
+                return true
+            },
+            prepareBootstrapReplacement: {
+                order.withLock { $0.append("prepare-bootstrap") }
+            })
+
+        await controller.connectManual(
+            host: host,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "one-shot", password: nil))
+        let prompt = try #require(controller.pendingTrustPrompt)
+        #expect(order.withLock { $0 }.isEmpty)
+
+        await controller.acceptPendingTrustPrompt(prompt)
+
+        #expect(order.withLock { $0 } == ["persist-pin", "prepare-bootstrap"])
+        #expect(controller.pendingTrustPrompt == nil)
+        #expect(appModel.activeGatewayConnectConfig?.bootstrapToken == "one-shot")
+        #expect(appModel.activeGatewayConnectConfig?.tls?.expectedFingerprint == "accepted-fingerprint")
+    }
+
+    @Test @MainActor func duplicateTrustAcceptanceClaimsThePromptExactlyOnce() async throws {
+        let host = "duplicate-accept-\(UUID().uuidString).example.com"
+        let port = 443
+        let stableID = "manual|\(host.lowercased())|\(port)"
+        let preparation = SuspendedGatewayBootstrapPreparation()
+        let persistenceCalls = OSAllocatedUnfairLock(initialState: 0)
+        defer { clearTLSFingerprint(stableID: stableID) }
+        clearTLSFingerprint(stableID: stableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint("accepted-fingerprint") },
+            persistTLSFingerprint: { _, _ in
+                persistenceCalls.withLock { $0 += 1 }
+                return true
+            },
+            prepareBootstrapReplacement: {
+                await preparation.run()
+            })
+
+        await controller.connectManual(
+            host: host,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "one-shot", password: nil))
+        let prompt = try #require(controller.pendingTrustPrompt)
+
+        let firstAccept = Task { @MainActor in
+            await controller.acceptPendingTrustPrompt(prompt)
+        }
+        try await self.waitForPreparationCallCount(1, preparation: preparation)
+        await controller.acceptPendingTrustPrompt(prompt)
+
+        #expect(persistenceCalls.withLock { $0 } == 1)
+        #expect(await preparation.callCount == 1)
+        #expect(controller.pendingTrustPrompt == prompt)
+
+        await preparation.release()
+        await firstAccept.value
+
+        #expect(persistenceCalls.withLock { $0 } == 1)
+        #expect(await preparation.callCount == 1)
+        #expect(controller.pendingTrustPrompt == nil)
+        #expect(appModel.activeGatewayConnectConfig?.stableID == stableID)
+    }
+
+    @Test @MainActor func failedFingerprintPersistenceCanBeRetriedOnTheSamePrompt() async throws {
+        let host = "persist-retry-\(UUID().uuidString).example.com"
+        let port = 443
+        let stableID = "manual|\(host.lowercased())|\(port)"
+        let persistenceCalls = OSAllocatedUnfairLock(initialState: 0)
+        let preparationCalls = OSAllocatedUnfairLock(initialState: 0)
+        defer { clearTLSFingerprint(stableID: stableID) }
+        clearTLSFingerprint(stableID: stableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint("retry-fingerprint") },
+            persistTLSFingerprint: { _, _ in
+                persistenceCalls.withLock {
+                    $0 += 1
+                    return $0 == 2
+                }
+            },
+            prepareBootstrapReplacement: {
+                preparationCalls.withLock { $0 += 1 }
+            })
+
+        await controller.connectManual(
+            host: host,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "one-shot", password: nil))
+        let prompt = try #require(controller.pendingTrustPrompt)
+
+        await controller.acceptPendingTrustPrompt(prompt)
+        #expect(controller.pendingTrustPrompt == prompt)
+        #expect(persistenceCalls.withLock { $0 } == 1)
+        #expect(preparationCalls.withLock { $0 } == 0)
+
+        await controller.acceptPendingTrustPrompt(prompt)
+        #expect(controller.pendingTrustPrompt == nil)
+        #expect(persistenceCalls.withLock { $0 } == 2)
+        #expect(preparationCalls.withLock { $0 } == 1)
+        #expect(appModel.activeGatewayConnectConfig?.stableID == stableID)
+    }
+
+    @Test @MainActor func acceptedTrustOwnsConfigApplicationWhileOptionPreparationSuspends() async throws {
+        let firstHost = "accepted-options-\(UUID().uuidString).example.com"
+        let secondHost = "blocked-options-\(UUID().uuidString).example.com"
+        let port = 443
+        let firstStableID = "manual|\(firstHost.lowercased())|\(port)"
+        let secondStableID = "manual|\(secondHost.lowercased())|\(port)"
+        let autoConnectPreparation = SuspendedGatewayAutoConnectPreparation()
+        defer {
+            clearTLSFingerprint(stableID: firstStableID)
+            clearTLSFingerprint(stableID: secondStableID)
+        }
+        clearTLSFingerprint(stableID: firstStableID)
+        clearTLSFingerprint(stableID: secondStableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint("accepted-fingerprint") },
+            persistTLSFingerprint: { _, _ in true },
+            prepareBootstrapReplacement: {},
+            prepareAutoConnect: {
+                await autoConnectPreparation.run()
+            })
+
+        await controller.connectManual(
+            host: firstHost,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "first-bootstrap", password: nil))
+        let prompt = try #require(controller.pendingTrustPrompt)
+        let accepted = Task { @MainActor in
+            await controller.acceptPendingTrustPrompt(prompt)
+        }
+        try await self.waitForAutoConnectPreparationCallCount(1, preparation: autoConnectPreparation)
+
+        controller.refreshActiveGatewayRegistrationFromSettings()
+        await Task.yield()
+        await controller.connectManual(
+            host: secondHost,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "second-bootstrap", password: nil))
+
+        #expect(await autoConnectPreparation.callCount == 1)
+        #expect(appModel.activeGatewayConnectConfig == nil)
+        #expect(appModel.gatewayStatusText == "Finishing the accepted gateway setup…")
+
+        await autoConnectPreparation.release(1)
+        await accepted.value
+
+        #expect(appModel.activeGatewayConnectConfig?.stableID == firstStableID)
+        #expect(appModel.activeGatewayConnectConfig?.stableID != secondStableID)
+        #expect(appModel.activeGatewayConnectConfig?.bootstrapToken == "first-bootstrap")
+    }
+
+    @Test @MainActor func supersededConfigTaskCannotOverwriteNewerManualAdmission() async throws {
+        let firstHost = "stale-config-\(UUID().uuidString).example.com"
+        let secondHost = "current-config-\(UUID().uuidString).example.com"
+        let port = 443
+        let firstStableID = "manual|\(firstHost.lowercased())|\(port)"
+        let secondStableID = "manual|\(secondHost.lowercased())|\(port)"
+        let autoConnectPreparation = SuspendedGatewayAutoConnectPreparation()
+        defer {
+            clearTLSFingerprint(stableID: firstStableID)
+            clearTLSFingerprint(stableID: secondStableID)
+        }
+        GatewayTLSStore.saveFingerprint("first-pin", stableID: firstStableID)
+        GatewayTLSStore.saveFingerprint("second-pin", stableID: secondStableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            prepareAutoConnect: {
+                await autoConnectPreparation.run()
+            })
+
+        await controller.connectManual(host: firstHost, port: port, useTLS: true)
+        try await self.waitForAutoConnectPreparationCallCount(1, preparation: autoConnectPreparation)
+        await controller.connectManual(host: secondHost, port: port, useTLS: true)
+        try await self.waitForAutoConnectPreparationCallCount(2, preparation: autoConnectPreparation)
+
+        await autoConnectPreparation.release(2)
+        try await self.waitForActiveGateway(secondStableID, appModel: appModel)
+        await autoConnectPreparation.release(1)
+        try await self.waitForAutoConnectPreparationCompletionCount(2, preparation: autoConnectPreparation)
+
+        #expect(appModel.activeGatewayConnectConfig?.stableID == secondStableID)
+        #expect(appModel.activeGatewayConnectConfig?.stableID != firstStableID)
+    }
+
+    @Test @MainActor func refreshBeforeFirstConfigPublicationDoesNotCancelTheConnect() async throws {
+        let host = "refresh-before-publish-\(UUID().uuidString).example.com"
+        let port = 443
+        let stableID = "manual|\(host.lowercased())|\(port)"
+        let autoConnectPreparation = SuspendedGatewayAutoConnectPreparation()
+        defer { clearTLSFingerprint(stableID: stableID) }
+        GatewayTLSStore.saveFingerprint("stored-pin", stableID: stableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            prepareAutoConnect: {
+                await autoConnectPreparation.run()
+            })
+
+        await controller.connectManual(host: host, port: port, useTLS: true)
+        try await self.waitForAutoConnectPreparationCallCount(1, preparation: autoConnectPreparation)
+        #expect(appModel.activeGatewayConnectConfig == nil)
+
+        controller.refreshActiveGatewayRegistrationFromSettings()
+        await Task.yield()
+        await autoConnectPreparation.release(1)
+        try await self.waitForActiveGateway(stableID, appModel: appModel)
+
+        #expect(appModel.activeGatewayConnectConfig?.stableID == stableID)
+        #expect(await autoConnectPreparation.callCount == 1)
+    }
+
+    @Test @MainActor func acceptedTrustCommitCannotBeSupersededWhileBootstrapReplacementSuspends() async throws {
+        let firstHost = "first-\(UUID().uuidString).example.com"
+        let secondHost = "second-\(UUID().uuidString).example.com"
+        let port = 443
+        let firstStableID = "manual|\(firstHost.lowercased())|\(port)"
+        let secondStableID = "manual|\(secondHost.lowercased())|\(port)"
+        let preparation = SuspendedGatewayBootstrapPreparation()
+        let probeHosts = OSAllocatedUnfairLock(initialState: [String]())
+        let defaults = UserDefaults.standard
+        let manualKeys = [
+            "gateway.manual.enabled",
+            "gateway.manual.host",
+            "gateway.manual.port",
+            "gateway.manual.tls",
+        ]
+        var savedDefaults: [String: Any?] = [:]
+        for key in manualKeys {
+            savedDefaults.updateValue(defaults.object(forKey: key), forKey: key)
+        }
+        let instanceID = GatewaySettingsStore.currentInstanceID()
+        let savedToken = GatewaySettingsStore.loadGatewayToken(instanceId: instanceID)
+        let savedPassword = GatewaySettingsStore.loadGatewayPassword(instanceId: instanceID)
+        let savedBootstrap = GatewaySettingsStore.loadGatewayBootstrapToken(instanceId: instanceID)
+        defer {
+            clearTLSFingerprint(stableID: firstStableID)
+            clearTLSFingerprint(stableID: secondStableID)
+            for (key, value) in savedDefaults {
+                if let value {
+                    defaults.set(value, forKey: key)
+                } else {
+                    defaults.removeObject(forKey: key)
+                }
+            }
+            GatewaySettingsStore.saveGatewayToken(savedToken ?? "", instanceId: instanceID)
+            GatewaySettingsStore.saveGatewayPassword(savedPassword ?? "", instanceId: instanceID)
+            GatewaySettingsStore.saveGatewayBootstrapToken(savedBootstrap ?? "", instanceId: instanceID)
+        }
+        clearTLSFingerprint(stableID: firstStableID)
+        clearTLSFingerprint(stableID: secondStableID)
+        defaults.set(true, forKey: "gateway.manual.enabled")
+        defaults.set("existing.example.com", forKey: "gateway.manual.host")
+        defaults.set(8443, forKey: "gateway.manual.port")
+        defaults.set(true, forKey: "gateway.manual.tls")
+        GatewaySettingsStore.saveGatewayToken("existing-token", instanceId: instanceID)
+        GatewaySettingsStore.saveGatewayPassword("existing-password", instanceId: instanceID)
+        GatewaySettingsStore.saveGatewayBootstrapToken("existing-bootstrap", instanceId: instanceID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { host, _, _, _ in
+                probeHosts.withLock { $0.append(host) }
+                return true
+            },
+            tlsFingerprintProbe: { _ in .fingerprint("accepted-fingerprint") },
+            persistTLSFingerprint: { _, _ in true },
+            prepareBootstrapReplacement: {
+                await preparation.run()
+            })
+
+        await controller.connectManual(
+            host: firstHost,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "first-bootstrap", password: nil))
+        let firstPrompt = try #require(controller.pendingTrustPrompt)
+
+        let accepted = Task { @MainActor in
+            await controller.acceptPendingTrustPrompt(firstPrompt)
+        }
+        try await self.waitForPreparationCallCount(1, preparation: preparation)
+
+        await controller.connectManual(
+            host: secondHost,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "second-bootstrap", password: nil))
+
+        #expect(controller.pendingTrustPrompt == firstPrompt)
+        #expect(probeHosts.withLock { $0 } == [firstHost])
+        #expect(await preparation.callCount == 1)
+        #expect(appModel.gatewayStatusText == "Finishing the accepted gateway setup…")
+        #expect(defaults.string(forKey: "gateway.manual.host") == "existing.example.com")
+        #expect(defaults.integer(forKey: "gateway.manual.port") == 8443)
+        #expect(GatewaySettingsStore.loadGatewayToken(instanceId: instanceID) == "existing-token")
+        #expect(GatewaySettingsStore.loadGatewayPassword(instanceId: instanceID) == "existing-password")
+        #expect(GatewaySettingsStore.loadGatewayBootstrapToken(instanceId: instanceID) == "existing-bootstrap")
+
+        await preparation.release()
+        await accepted.value
+
+        #expect(controller.pendingTrustPrompt == nil)
+        #expect(controller._test_didAutoConnect())
+        #expect(appModel.activeGatewayConnectConfig?.stableID != secondStableID)
+        #expect(appModel.activeGatewayConnectConfig?.bootstrapToken != "second-bootstrap")
+        #expect(defaults.string(forKey: "gateway.manual.host") == firstHost)
+        #expect(defaults.integer(forKey: "gateway.manual.port") == port)
+    }
+
+    @Test @MainActor func storedPinBootstrapCommitCannotBeSupersededWhileReplacementSuspends() async throws {
+        let firstHost = "trusted-\(UUID().uuidString).example.com"
+        let secondHost = "replacement-\(UUID().uuidString).example.com"
+        let port = 443
+        let firstStableID = "manual|\(firstHost.lowercased())|\(port)"
+        let secondStableID = "manual|\(secondHost.lowercased())|\(port)"
+        let preparation = SuspendedGatewayBootstrapPreparation()
+        let probeCount = OSAllocatedUnfairLock(initialState: 0)
+        defer {
+            clearTLSFingerprint(stableID: firstStableID)
+            clearTLSFingerprint(stableID: secondStableID)
+        }
+        GatewayTLSStore.saveFingerprint("stored-fingerprint", stableID: firstStableID)
+        clearTLSFingerprint(stableID: secondStableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in
+                probeCount.withLock { $0 += 1 }
+                return true
+            },
+            tlsFingerprintProbe: { _ in .fingerprint("replacement-fingerprint") },
+            prepareBootstrapReplacement: {
+                await preparation.run()
+            })
+
+        let accepted = Task { @MainActor in
+            await controller.connectManual(
+                host: firstHost,
+                port: port,
+                useTLS: true,
+                authOverride: .explicit(token: nil, bootstrapToken: "first-bootstrap", password: nil))
+        }
+        try await self.waitForPreparationCallCount(1, preparation: preparation)
+
+        await controller.connectManual(
+            host: secondHost,
+            port: port,
+            useTLS: true,
+            authOverride: .explicit(token: nil, bootstrapToken: "second-bootstrap", password: nil))
+
+        #expect(await preparation.callCount == 1)
+        #expect(probeCount.withLock { $0 } == 0)
+        #expect(controller.pendingTrustPrompt == nil)
+        #expect(!controller._test_didAutoConnect())
+        #expect(appModel.gatewayStatusText == "Finishing the accepted gateway setup…")
+
+        await preparation.release()
+        await accepted.value
+
+        #expect(controller._test_didAutoConnect())
+        #expect(appModel.activeGatewayConnectConfig?.stableID != secondStableID)
+        #expect(appModel.activeGatewayConnectConfig?.bootstrapToken != "second-bootstrap")
     }
 
     @Test @MainActor func clearAllTLSFingerprints_removesStoredPins() async {

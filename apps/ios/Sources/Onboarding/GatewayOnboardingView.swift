@@ -202,28 +202,31 @@ private struct ManualEntryStep: View {
             return
         }
 
-        let defaults = UserDefaults.standard
-        defaults.set(true, forKey: "gateway.manual.enabled")
-        defaults.set(host, forKey: "gateway.manual.host")
-        defaults.set(self.manualPortValue() ?? 0, forKey: "gateway.manual.port")
-        defaults.set(self.manualUseTLS, forKey: "gateway.manual.tls")
-
-        let instanceId = GatewaySettingsStore.currentInstanceID()
-        if !instanceId.isEmpty {
-            let trimmedToken = self.manualToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            let trimmedPassword = self.manualPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedToken.isEmpty {
-                GatewaySettingsStore.saveGatewayToken(trimmedToken, instanceId: instanceId)
-            }
-            GatewaySettingsStore.saveGatewayPassword(trimmedPassword, instanceId: instanceId)
-        }
-
-        self.connectingGatewayID = "manual"
-        defer { self.connectingGatewayID = nil }
         let authOverride = GatewayConnectionController.ManualAuthOverride.currentManualInput(
             token: self.manualToken,
             pendingOverride: self.pendingManualAuthOverride,
             password: self.manualPassword)
+        let isBootstrapSetup = authOverride?.bootstrapToken?.isEmpty == false
+        if !isBootstrapSetup {
+            let defaults = UserDefaults.standard
+            defaults.set(true, forKey: "gateway.manual.enabled")
+            defaults.set(host, forKey: "gateway.manual.host")
+            defaults.set(self.manualPortValue() ?? 0, forKey: "gateway.manual.port")
+            defaults.set(self.manualUseTLS, forKey: "gateway.manual.tls")
+
+            let instanceId = GatewaySettingsStore.currentInstanceID()
+            if !instanceId.isEmpty {
+                let trimmedToken = self.manualToken.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedPassword = self.manualPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedToken.isEmpty {
+                    GatewaySettingsStore.saveGatewayToken(trimmedToken, instanceId: instanceId)
+                }
+                GatewaySettingsStore.saveGatewayPassword(trimmedPassword, instanceId: instanceId)
+            }
+        }
+
+        self.connectingGatewayID = "manual"
+        defer { self.connectingGatewayID = nil }
         self.pendingManualAuthOverride = nil
         await self.gatewayController.connectManual(
             host: host,
@@ -246,6 +249,7 @@ private struct ManualEntryStep: View {
         self.manualUseTLS = true
         self.manualToken = ""
         self.manualPassword = ""
+        self.pendingManualAuthOverride = nil
     }
 
     private func applySetupCode() async {
@@ -280,17 +284,7 @@ private struct ManualEntryStep: View {
         }
 
         let trimmedInstanceId = GatewaySettingsStore.currentInstanceID()
-        if !trimmedInstanceId.isEmpty {
-            if setupAuth.hasBootstrapToken {
-                do {
-                    try await GatewayOnboardingReset.prepareForBootstrapPairing(
-                        appModel: self.appModel,
-                        instanceId: trimmedInstanceId)
-                } catch {
-                    self.setupStatusText = "Could not securely clear queued messages. Setup was not applied."
-                    return
-                }
-            }
+        if !trimmedInstanceId.isEmpty, !setupAuth.hasBootstrapToken {
             GatewaySettingsStore.saveGatewayBootstrapToken(setupAuth.bootstrapToken, instanceId: trimmedInstanceId)
         }
         self.pendingManualAuthOverride = setupAuth.manualAuthOverride

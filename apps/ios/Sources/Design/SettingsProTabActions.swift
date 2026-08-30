@@ -212,12 +212,18 @@ extension SettingsProTab {
         self.setupStatusText = nil
         guard await self.applySetupCode(attemptID: attemptID) else { return }
         guard self.setupAttemptID == attemptID else { return }
-        let host = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let port = self.resolvedManualPort(host: host) else {
+        let pendingLink = self.pendingManualSetupLink
+        let host = (pendingLink?.host ?? self.manualGatewayHost)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = pendingLink?.port ?? self.resolvedManualPort(host: host) else {
             self.setupStatusText = "Failed: invalid port"
             return
         }
-        guard await self.preflightGateway(host: host, port: port, useTLS: self.manualGatewayTLS) else { return }
+        guard await self.preflightGateway(
+            host: host,
+            port: port,
+            useTLS: pendingLink?.tls ?? self.manualGatewayTLS)
+        else { return }
         guard self.setupAttemptID == attemptID else { return }
         self.setupStatusText = "Setup code applied. Connecting..."
         await self.connectManual()
@@ -264,32 +270,26 @@ extension SettingsProTab {
         let instanceId = GatewaySettingsStore.currentInstanceID()
         let setupAuth = GatewayConnectionController.ManualAuthOverride.setupAuth(from: link)
         if setupAuth.hasBootstrapToken {
-            do {
-                try await GatewayOnboardingReset.prepareForBootstrapPairing(
-                    appModel: self.appModel,
-                    instanceId: instanceId)
-            } catch {
-                self.setupStatusText = "Could not securely clear queued messages. Setup was not applied."
-                return false
-            }
-            guard self.setupAttemptID == attemptID else { return false }
+            self.pendingManualSetupLink = link
+        } else {
+            self.pendingManualSetupLink = nil
+            self.manualGatewayHost = link.host
+            self.manualGatewayPort = link.port
+            self.manualGatewayPortText = String(link.port)
+            self.manualGatewayTLS = link.tls
         }
-        self.manualGatewayHost = link.host
-        self.manualGatewayPort = link.port
-        self.manualGatewayPortText = String(link.port)
-        self.manualGatewayTLS = link.tls
-        if !instanceId.isEmpty {
+        if !instanceId.isEmpty, !setupAuth.hasBootstrapToken {
             GatewaySettingsStore.saveGatewayBootstrapToken(setupAuth.bootstrapToken, instanceId: instanceId)
         }
         if setupAuth.shouldApplyTokenField {
             self.gatewayToken = setupAuth.token
-            if !instanceId.isEmpty {
+            if !instanceId.isEmpty, !setupAuth.hasBootstrapToken {
                 GatewaySettingsStore.saveGatewayToken(setupAuth.token, instanceId: instanceId)
             }
         }
         if setupAuth.shouldApplyPasswordField {
             self.gatewayPassword = setupAuth.password
-            if !instanceId.isEmpty {
+            if !instanceId.isEmpty, !setupAuth.hasBootstrapToken {
                 GatewaySettingsStore.saveGatewayPassword(setupAuth.password, instanceId: instanceId)
             }
         }
@@ -309,6 +309,7 @@ extension SettingsProTab {
         self.showQRScanner = false
         let attemptID = self.beginGatewaySetupAttempt()
         self.setupCode = ""
+        self.stagedGatewaySetupLink = nil
         Task {
             defer { self.finishGatewaySetupAttempt(attemptID) }
             let selectedLink = await self.gatewayController.selectReachableSetupLink(link)
@@ -342,23 +343,33 @@ extension SettingsProTab {
         self.showQRScanner = false
         self.setupCode = ""
         self.stagedGatewaySetupLink = nil
+        self.pendingManualSetupLink = nil
+        self.pendingManualAuthOverride = nil
         self.setupStatusText = "Apple Review demo mode enabled."
         self.appModel.enterAppleReviewDemoMode()
     }
 
     func connectAfterScannedGatewayLink(attemptID: UUID) async {
-        let host = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let port = self.resolvedManualPort(host: host) else {
+        let pendingLink = self.pendingManualSetupLink
+        let host = (pendingLink?.host ?? self.manualGatewayHost)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = pendingLink?.port ?? self.resolvedManualPort(host: host) else {
             self.setupStatusText = "Failed: invalid port"
             return
         }
-        guard await self.preflightGateway(host: host, port: port, useTLS: self.manualGatewayTLS) else { return }
+        guard await self.preflightGateway(
+            host: host,
+            port: port,
+            useTLS: pendingLink?.tls ?? self.manualGatewayTLS)
+        else { return }
         guard self.setupAttemptID == attemptID else { return }
         await self.connectManual()
     }
 
     func beginGatewaySetupAttempt() -> UUID {
         self.gatewayController.clearPendingTrustPrompt()
+        self.pendingManualSetupLink = nil
+        self.pendingManualAuthOverride = nil
         let id = UUID()
         self.setupAttemptID = id
         return id
@@ -367,35 +378,46 @@ extension SettingsProTab {
     func finishGatewaySetupAttempt(_ id: UUID) {
         guard self.setupAttemptID == id else { return }
         self.setupAttemptID = nil
+        self.pendingManualSetupLink = nil
+        self.pendingManualAuthOverride = nil
     }
 
     func invalidateGatewaySetupAttempt() {
         self.setupAttemptID = nil
+        self.stagedGatewaySetupLink = nil
+        self.pendingManualSetupLink = nil
+        self.pendingManualAuthOverride = nil
         self.gatewayController.clearPendingTrustPrompt()
     }
 
     func connectManual() async {
-        let host = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pendingLink = self.pendingManualSetupLink
+        let host = (pendingLink?.host ?? self.manualGatewayHost)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty else {
             self.setupStatusText = "Failed: host required"
             return
         }
-        guard self.manualPortIsValid else {
+        let port = pendingLink?.port ?? self.manualGatewayPort
+        guard (1...65535).contains(port) else {
             self.setupStatusText = "Failed: invalid port"
             return
         }
         self.connectingGatewayID = "manual"
-        self.manualGatewayEnabled = true
+        if pendingLink == nil {
+            self.manualGatewayEnabled = true
+        }
         defer { self.connectingGatewayID = nil }
         let authOverride = GatewayConnectionController.ManualAuthOverride.currentManualInput(
             token: self.gatewayToken,
             pendingOverride: self.pendingManualAuthOverride,
             password: self.gatewayPassword)
         self.pendingManualAuthOverride = nil
+        self.pendingManualSetupLink = nil
         await self.gatewayController.connectManual(
             host: host,
-            port: self.manualGatewayPort,
-            useTLS: self.manualGatewayTLS,
+            port: port,
+            useTLS: pendingLink?.tls ?? self.manualGatewayTLS,
             authOverride: authOverride)
     }
 
@@ -429,6 +451,8 @@ extension SettingsProTab {
         defer { self.suppressCredentialPersist = false }
         self.gatewayToken = ""
         self.gatewayPassword = ""
+        self.pendingManualSetupLink = nil
+        self.pendingManualAuthOverride = nil
         self.onboardingComplete = false
         self.hasConnectedOnce = false
         self.manualGatewayEnabled = false

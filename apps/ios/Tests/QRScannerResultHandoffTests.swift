@@ -77,6 +77,9 @@ struct QRScannerResultHandoffTests {
         let onboardingSource = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Onboarding/OnboardingWizardView.swift"),
             encoding: .utf8)
+        let gatewayOnboardingSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Onboarding/GatewayOnboardingView.swift"),
+            encoding: .utf8)
         let onboardingOpenStart = try #require(onboardingSource.range(of: "private func openQRScannerFromOnboarding()"))
         let onboardingOpenEnd = try #require(
             onboardingSource.range(
@@ -95,6 +98,55 @@ struct QRScannerResultHandoffTests {
                 range: onboardingInvalidateStart.upperBound..<onboardingSource.endIndex))
         #expect(!onboardingSource[onboardingInvalidateStart.lowerBound..<onboardingInvalidateEnd.lowerBound]
             .contains("disconnectGateway()"))
+        let onboardingInvalidateBody =
+            onboardingSource[onboardingInvalidateStart.lowerBound..<onboardingInvalidateEnd.lowerBound]
+        #expect(onboardingInvalidateBody.contains("self.pendingManualAuthOverride = nil"))
+        #expect(onboardingInvalidateBody.contains("self.stagedGatewaySetupLink = nil"))
+
+        let onboardingBeginStart = try #require(
+            onboardingSource.range(of: "private func beginGatewaySetupAttempt()"))
+        let onboardingBeginEnd = try #require(
+            onboardingSource.range(
+                of: "private func invalidateGatewaySetupAttempt()",
+                range: onboardingBeginStart.upperBound..<onboardingSource.endIndex))
+        #expect(onboardingSource[onboardingBeginStart.lowerBound..<onboardingBeginEnd.lowerBound]
+            .contains("self.pendingManualAuthOverride = nil"))
+
+        #expect(gatewayOnboardingSource.contains("self.pendingManualAuthOverride = nil"))
+
+        // Bootstrap credentials and outbox reset remain staged until the
+        // controller has persisted an accepted TLS fingerprint.
+        #expect(!settingsSource.contains("GatewayOnboardingReset.prepareForBootstrapPairing"))
+        #expect(!onboardingSource.contains("GatewayOnboardingReset.prepareForBootstrapPairing"))
+        #expect(settingsSource.contains("if setupAuth.hasBootstrapToken"))
+        #expect(settingsSource.contains("self.pendingManualSetupLink = link"))
+        #expect(settingsSource.contains("let pendingLink = self.pendingManualSetupLink"))
+        #expect(gatewayOnboardingSource.contains("let isBootstrapSetup ="))
+        #expect(gatewayOnboardingSource.contains("if !isBootstrapSetup"))
+
+        let controllerSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Gateway/GatewayConnectionController.swift"),
+            encoding: .utf8)
+        let acceptStart = try #require(controllerSource.range(of: "func acceptPendingTrustPrompt"))
+        let acceptEnd = try #require(
+            controllerSource.range(
+                of: "func declinePendingTrustPrompt",
+                range: acceptStart.upperBound..<controllerSource.endIndex))
+        let acceptBody = controllerSource[acceptStart.lowerBound..<acceptEnd.lowerBound]
+        let persist = try #require(acceptBody.range(of: "persistTLSFingerprint"))
+        let prepare = try #require(acceptBody.range(of: "prepareBootstrapReplacementIfNeeded"))
+        let applyConfig = try #require(acceptBody.range(of: "await self.applyAutoConnectConfig"))
+        #expect(persist.lowerBound < prepare.lowerBound)
+        #expect(prepare.lowerBound < applyConfig.lowerBound)
+        #expect(controllerSource.contains("if pendingOverride.bootstrapToken?.isEmpty == false"))
+        #expect(controllerSource.contains("return pendingOverride"))
+        #expect(controllerSource.contains("self.ownsConnectionAdmission(admissionGeneration)"))
+
+        let resetSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Onboarding/GatewayOnboardingReset.swift"),
+            encoding: .utf8)
+        #expect(resetSource.contains("prepareForTrustedBootstrapPairing"))
+        #expect(resetSource.contains("clearTLSFingerprints: false"))
     }
 
     @Test func queuedResultIsDeliveredOnceAfterDismissal() async throws {

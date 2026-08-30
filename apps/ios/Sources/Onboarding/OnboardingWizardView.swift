@@ -770,22 +770,13 @@ extension OnboardingWizardView {
     private func applyGatewayLink(_ link: GatewayConnectDeepLink, attemptID: UUID) async -> Bool {
         guard self.setupAttemptID == attemptID else { return false }
         let setupAuth = GatewayConnectionController.ManualAuthOverride.setupAuth(from: link)
-        if setupAuth.hasBootstrapToken {
-            do {
-                try await GatewayOnboardingReset.prepareForBootstrapPairing(
-                    appModel: self.appModel,
-                    instanceId: GatewaySettingsStore.currentInstanceID())
-            } catch {
-                self.setupCodeStatus = "Could not securely clear queued messages. Setup was not applied."
-                return false
-            }
-            guard self.setupAttemptID == attemptID else { return false }
-        }
         self.manualHost = link.host
         self.manualPort = link.port
         self.manualPortText = String(link.port)
         self.manualTLS = link.tls
-        self.saveGatewayBootstrapToken(setupAuth.bootstrapToken)
+        if !setupAuth.hasBootstrapToken {
+            self.saveGatewayBootstrapToken(setupAuth.bootstrapToken)
+        }
         if setupAuth.shouldApplyTokenField {
             self.gatewayToken = setupAuth.token
         }
@@ -793,7 +784,9 @@ extension OnboardingWizardView {
             self.gatewayPassword = setupAuth.password
         }
         self.pendingManualAuthOverride = setupAuth.manualAuthOverride
-        self.saveGatewayCredentials(token: self.gatewayToken, password: self.gatewayPassword)
+        if !setupAuth.hasBootstrapToken {
+            self.saveGatewayCredentials(token: self.gatewayToken, password: self.gatewayPassword)
+        }
         if self.selectedMode == nil {
             self.selectedMode = link.tls ? .remoteDomain : .homeNetwork
         }
@@ -856,6 +849,7 @@ extension OnboardingWizardView {
 
     private func beginGatewaySetupAttempt() -> UUID {
         self.gatewayController.clearPendingTrustPrompt()
+        self.pendingManualAuthOverride = nil
         let id = UUID()
         self.setupAttemptID = id
         return id
@@ -863,6 +857,8 @@ extension OnboardingWizardView {
 
     private func invalidateGatewaySetupAttempt() {
         self.setupAttemptID = nil
+        self.pendingManualAuthOverride = nil
+        self.stagedGatewaySetupLink = nil
         self.gatewayController.clearPendingTrustPrompt()
     }
 
