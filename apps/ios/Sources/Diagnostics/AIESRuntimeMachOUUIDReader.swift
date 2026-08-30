@@ -244,7 +244,7 @@ enum AIESRuntimeMachOUUIDReader {
 
     private static func magic(in bytes: UnsafeRawBufferPointer, at offset: Int) -> Magic? {
         guard offset >= 0, offset <= bytes.count - 4 else { return nil }
-        switch (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]) {
+        return switch (bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]) {
         case (0xFE, 0xED, 0xFA, 0xCE): .thin(.big, is64Bit: false)
         case (0xCE, 0xFA, 0xED, 0xFE): .thin(.little, is64Bit: false)
         case (0xFE, 0xED, 0xFA, 0xCF): .thin(.big, is64Bit: true)
@@ -314,7 +314,7 @@ enum AIESRuntimeMachOUUIDReader {
 
     private static func architecture(cpuType: UInt32, cpuSubtype: UInt32) -> String {
         let subtype = cpuSubtype & 0x00FF_FFFF
-        switch (cpuType, subtype) {
+        return switch (cpuType, subtype) {
         case (0x0100_000C, 2): "arm64e"
         case (0x0100_000C, _): "arm64"
         case (0x0200_000C, _): "arm64_32"
