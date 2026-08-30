@@ -158,6 +158,23 @@ struct OpenClawDiagnosticEventTests {
         }
     }
 
+    @Test func v2RecordsRequireProcessAndLaunchInstanceIdentity() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "received",
+            observedAt: Date(timeIntervalSince1970: 0))
+        let validObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(event)) as? [String: Any])
+
+        for requiredKey in ["process_instance_id", "launch_instance_id"] {
+            var object = validObject
+            object.removeValue(forKey: requiredKey)
+            let data = try JSONSerialization.data(withJSONObject: object)
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + data.base64EncodedString()) == nil)
+        }
+    }
+
     @Test func decoderRejectsInjectedOrMalformedMetadata() throws {
         let valid = OpenClawDiagnosticEvent(
             kind: .chat,

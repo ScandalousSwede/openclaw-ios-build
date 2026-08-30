@@ -237,6 +237,9 @@ struct AIESAPNsDiagnosticsTests {
         let talk = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Voice/TalkModeManager.swift"),
             encoding: .utf8)
+        let share = try String(
+            contentsOf: iosRoot.appendingPathComponent("ShareExtension/ShareViewController.swift"),
+            encoding: .utf8)
 
         for stage in [
             "gateway_publication_admitted",
@@ -264,6 +267,7 @@ struct AIESAPNsDiagnosticsTests {
         #expect(model.contains("GatewaySettingsStore.currentInstanceID()"))
         #expect(model.contains("GatewayNodeSession(connectionRole: .node)"))
         #expect(model.contains("GatewayNodeSession(connectionRole: .operator)"))
+        #expect(share.contains("GatewayNodeSession(connectionRole: .node)"))
         #expect(!talk.contains("connectionRole: .unknown"))
         for state in ["tts_route_prepared", "tts_route_changed"] {
             let stateRange = try #require(talk.range(of: "state: \"\(state)\""))

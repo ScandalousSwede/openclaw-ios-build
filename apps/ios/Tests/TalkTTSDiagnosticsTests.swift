@@ -182,6 +182,31 @@ private final class TestTTSLifecycleObservationRecorder {
     }
 }
 
+private final class TestCrossLayerTTSObservationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func record(_ observation: TalkTTSLifecycleObservation) {
+        self.append("lifecycle:\(observation.stage.rawValue)")
+    }
+
+    func record(_ observation: StreamingPlaybackObservation) {
+        self.append("playback:\(observation.stage.rawValue):\(observation.path.rawValue)")
+    }
+
+    func stages() -> [String] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.values
+    }
+
+    private func append(_ value: String) {
+        self.lock.lock()
+        self.values.append(value)
+        self.lock.unlock()
+    }
+}
+
 @MainActor
 private final class ObservedTestPCMPlayer: PCMStreamingAudioPlaying {
     private(set) var usedObserverOverload = false
@@ -378,6 +403,56 @@ private final class ObservedTestMP3Player: StreamingAudioPlaying {
         observer.record(StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .mp3))
         observer.record(StreamingPlaybackObservation(stage: .playbackCompleted, path: .mp3))
         return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func stop() -> Double? { nil }
+}
+
+@MainActor
+private final class FirstChunkBeforePlayerCreationMP3Player: StreamingAudioPlaying {
+    private(set) var receivedBytes = 0
+
+    func play(stream: AsyncThrowingStream<Data, Error>) async -> StreamingPlaybackResult {
+        do {
+            for try await chunk in stream { self.receivedBytes += chunk.count }
+        } catch {
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func play(
+        stream: AsyncThrowingStream<Data, Error>,
+        observer: StreamingPlaybackObserver) async -> StreamingPlaybackResult
+    {
+        var createdPlayer = false
+        do {
+            for try await chunk in stream {
+                self.receivedBytes += chunk.count
+                guard !createdPlayer, !chunk.isEmpty else { continue }
+                createdPlayer = true
+                observer.record(StreamingPlaybackObservation(
+                    stage: .playerInstanceCreated,
+                    path: .mp3))
+                observer.record(StreamingPlaybackObservation(
+                    stage: .playbackSubmissionStarted,
+                    path: .mp3))
+                observer.record(StreamingPlaybackObservation(
+                    stage: .playbackSubmissionAccepted,
+                    path: .mp3))
+            }
+        } catch {
+            observer.record(StreamingPlaybackObservation(
+                stage: .playbackFailed,
+                path: .mp3))
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        if createdPlayer {
+            observer.record(StreamingPlaybackObservation(
+                stage: .playbackCompleted,
+                path: .mp3))
+        }
+        return StreamingPlaybackResult(finished: createdPlayer, interruptedAt: nil)
     }
 
     func stop() -> Double? { nil }
@@ -840,6 +915,37 @@ private final class TestGenerationState {
         ])
         #expect(!recorder.observations().contains { $0.stage == .decoderCreated })
         #expect(!recorder.observations().contains { $0.stage == .firstRenderCallbackObserved })
+    }
+
+    @Test func firstProviderChunkPrecedesMP3PlayerCreationObservation() async throws {
+        let mp3 = FirstChunkBeforePlayerCreationMP3Player()
+        let recorder = TestCrossLayerTTSObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: mp3,
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            playbackObserver: StreamingPlaybackObserver { recorder.record($0) },
+            lifecycleObserver: { recorder.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "mp3_44100_128"),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(mp3.receivedBytes == 4)
+        let stages = recorder.stages()
+        let responseIndex = try #require(
+            stages.firstIndex(of: "lifecycle:provider_response_received"))
+        let firstChunkIndex = try #require(
+            stages.firstIndex(of: "lifecycle:stream_first_chunk_received"))
+        let playerIndex = try #require(
+            stages.firstIndex(of: "playback:player_instance_created:mp3"))
+        #expect(responseIndex < firstChunkIndex)
+        #expect(firstChunkIndex < playerIndex)
     }
 
     @Test func genericProviderStreamDoesNotClaimPayloadValidation() async {

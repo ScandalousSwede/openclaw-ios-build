@@ -170,7 +170,7 @@ final class ShareViewController: UIViewController {
                 userInfo: [NSLocalizedDescriptionKey: "Invalid saved gateway URL."])
         }
 
-        let gateway = GatewayNodeSession()
+        let gateway = GatewayNodeSession(connectionRole: .node)
         defer {
             Task { await gateway.disconnect() }
         }

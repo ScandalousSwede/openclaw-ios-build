@@ -51,7 +51,7 @@ final class MacNodeModeCoordinator {
     private var tlsSessionCache = MacNodeGatewayTLSSessionCache()
 
     private init() {
-        let session = GatewayNodeSession()
+        let session = GatewayNodeSession(connectionRole: .node)
         self.session = session
         self.runtime = MacNodeRuntime(
             canvasSurfaceUrl: { await session.currentCanvasHostUrl() },

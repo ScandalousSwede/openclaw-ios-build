@@ -4,6 +4,16 @@ import Testing
 @testable import OpenClaw
 
 struct MacNodeModeCoordinatorTests {
+    @Test func `node-mode gateway binds node diagnostic role at creation`() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/OpenClaw/NodeMode/MacNodeModeCoordinator.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        #expect(source.contains("GatewayNodeSession(connectionRole: .node)"))
+    }
+
     @Test func `remote mode does not advertise browser proxy`() {
         let caps = MacNodeModeCoordinator.resolvedCaps(
             browserControlEnabled: true,

@@ -443,6 +443,11 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
             return false
         }
         if self.schema == Self.schemaName,
+           (self.processInstanceID == nil || self.launchInstanceID == nil)
+        {
+            return false
+        }
+        if self.schema == Self.schemaName,
            [Kind.route, .socket].contains(self.kind),
            self.connectionRole == nil
         {
