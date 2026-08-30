@@ -39,8 +39,6 @@ enum ChatConnectionPresentation {
             return "Gateway offline"
         case .connecting:
             return "Operator connecting"
-        case .online where nodeState != .online:
-            return "Gateway offline"
         case .online:
             break
         }
@@ -302,10 +300,8 @@ struct ChatProTab: View {
     }
 
     private var gatewayConnected: Bool {
-        guard GatewayStatusBuilder.build(appModel: self.appModel) == .connected else {
-            return false
-        }
-        return self.appModel.isAppleReviewDemoModeEnabled || self.appModel.isOperatorGatewayConnected
+        self.appModel.isAppleReviewDemoModeEnabled ||
+            (self.appModel.operatorRoleState == .online && self.appModel.isOperatorGatewayConnected)
     }
 
     private var chatDeliveryReady: Bool {

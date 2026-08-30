@@ -313,7 +313,7 @@ import UIKit
         #expect(!appModel._test_hasGatewayLoopTasks().operator)
     }
 
-    @Test @MainActor func foregroundStaleConnectionRestartReappliesActiveGatewayConfig() async {
+    @Test @MainActor func foregroundProbeDoesNotResetUntilAnExactRouteIsAdmitted() async {
         let appModel = NodeAppModel()
         defer { appModel.disconnectGateway() }
 
@@ -321,7 +321,7 @@ import UIKit
         appModel.applyGatewayConnectConfig(config)
         await appModel._test_restartGatewaySessionsAfterForegroundStaleConnection()
 
-        #expect(appModel.gatewayStatusText == "Reconnecting…")
+        #expect(appModel.gatewayStatusText != "Reconnecting…")
         #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: config) == true)
         #expect(appModel._test_hasGatewayLoopTasks().node)
         #expect(appModel._test_hasGatewayLoopTasks().operator)
@@ -347,6 +347,55 @@ import UIKit
 
         #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: replacement) == true)
         #expect(appModel.gatewayStatusText != "Reconnecting…")
+    }
+
+    @Test @MainActor func foregroundRecoveryRechecksGenerationAfterExactOperatorRetirement() async {
+        let appModel = NodeAppModel()
+        defer { appModel.disconnectGateway() }
+
+        let first = Self.makeGatewayConnectConfig()
+        appModel.applyGatewayConnectConfig(first)
+        let firstGeneration = appModel._test_gatewayConfigurationGeneration()
+        let replacement = Self.makeGatewayConnectConfig(
+            url: URL(string: "wss://replacement-after-retire.example.com")!,
+            stableID: "manual|replacement-after-retire.example.com|443")
+
+        await appModel._test_restartGatewaySessionsAfterForegroundStaleConnection(
+            expectedConfig: first,
+            expectedConfigurationGeneration: firstGeneration,
+            operatorRetire: {
+                // Models actor reentrancy after route A has been detached but
+                // before exact disconnect returns to the stale recovery owner.
+                appModel.applyGatewayConnectConfig(replacement)
+                return true
+            },
+            nodeRetire: { true })
+
+        #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: replacement) == true)
+        #expect(appModel._test_gatewayConfigurationGeneration() > firstGeneration)
+        #expect(appModel._test_hasGatewayLoopTasks().node)
+        #expect(appModel._test_hasGatewayLoopTasks().operator)
+    }
+
+    @Test @MainActor func foregroundRecoveryRestoresLoopsWhenNodeRouteRetirementLosesRace() async {
+        let appModel = NodeAppModel()
+        defer { appModel.disconnectGateway() }
+
+        let config = Self.makeGatewayConnectConfig()
+        appModel.applyGatewayConnectConfig(config)
+        let firstGeneration = appModel._test_gatewayConfigurationGeneration()
+
+        await appModel._test_restartGatewaySessionsAfterForegroundStaleConnection(
+            expectedConfig: config,
+            expectedConfigurationGeneration: firstGeneration,
+            operatorRetire: { true },
+            nodeRetire: { false })
+
+        #expect(appModel.activeGatewayConnectConfig?.hasSameConnectionInputs(as: config) == true)
+        #expect(appModel._test_gatewayConfigurationGeneration() > firstGeneration)
+        #expect(appModel._test_hasGatewayLoopTasks().node)
+        #expect(appModel._test_hasGatewayLoopTasks().operator)
+        #expect(appModel.screen.errorText?.contains("route changed") == true)
     }
 
     @Test @MainActor func loadLastConnectionReadsSavedValues() {

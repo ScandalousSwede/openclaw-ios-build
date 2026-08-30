@@ -23,6 +23,30 @@ private actor GatewayRouteRecorder {
     }
 }
 
+private actor GatewayAdmissionRecorder {
+    private var admissions: [GatewayNodeSessionAdmission] = []
+
+    func record(_ admission: GatewayNodeSessionAdmission) {
+        self.admissions.append(admission)
+    }
+
+    func values() -> [GatewayNodeSessionAdmission] {
+        self.admissions
+    }
+}
+
+private actor GatewayBootstrapOutcomeRecorder {
+    private var receipts: [GatewayBootstrapHandoffConnectionReceipt] = []
+
+    func record(_ receipt: GatewayBootstrapHandoffConnectionReceipt) {
+        self.receipts.append(receipt)
+    }
+
+    func values() -> [GatewayBootstrapHandoffConnectionReceipt] {
+        self.receipts
+    }
+}
+
 private final class DoubleCallbackPingWebSocketTask: WebSocketTasking, @unchecked Sendable {
     private let callbacks: [Error?]
 
@@ -434,7 +458,7 @@ private final class DiagnosticLineProbe: @unchecked Sendable {
 }
 
 private actor GatewayAsyncGate {
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuations: [CheckedContinuation<Void, Never>] = []
     private var released = false
     private var started = false
 
@@ -442,7 +466,7 @@ private actor GatewayAsyncGate {
         self.started = true
         if self.released { return }
         await withCheckedContinuation { continuation in
-            self.continuation = continuation
+            self.continuations.append(continuation)
         }
     }
 
@@ -452,8 +476,11 @@ private actor GatewayAsyncGate {
 
     func release() {
         self.released = true
-        self.continuation?.resume()
-        self.continuation = nil
+        let pending = self.continuations
+        self.continuations.removeAll()
+        for continuation in pending {
+            continuation.resume()
+        }
     }
 }
 
@@ -479,12 +506,18 @@ private func connectForGenerationTest(
     session: FakeGatewayWebSocketSession,
     endpoint: String,
     options: GatewayConnectOptions = generationTestOptions(),
+    forceReconnect: Bool = false,
+    admissionRecorder: GatewayAdmissionRecorder? = nil,
     onConnected: @escaping @Sendable () async -> Void = {},
     onDisconnected: @escaping @Sendable (String) async -> Void = { _ in },
     onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse = { request in
         BridgeInvokeResponse(id: request.id, ok: true, payloadJSON: nil, error: nil)
     }) async throws
 {
+    let onConnectedAdmission: (@Sendable (GatewayNodeSessionAdmission) async -> Void)? =
+        admissionRecorder.map { recorder in
+            { admission in await recorder.record(admission) }
+        }
     try await gateway.connect(
         url: URL(string: endpoint)!,
         token: nil,
@@ -492,7 +525,9 @@ private func connectForGenerationTest(
         password: nil,
         connectOptions: options,
         sessionBox: WebSocketSessionBox(session: session),
+        forceReconnect: forceReconnect,
         onConnected: onConnected,
+        onConnectedAdmission: onConnectedAdmission,
         onDisconnected: onDisconnected,
         onInvoke: onInvoke)
 }
@@ -513,16 +548,25 @@ private func bootstrapHandoffTestOptions() -> GatewayConnectOptions {
 private func connectForBootstrapHandoffTest(
     _ gateway: GatewayNodeSession,
     session: FakeGatewayWebSocketSession,
-    endpoint: String = "wss://example.invalid") async throws
+    endpoint: String = "wss://example.invalid",
+    bootstrapToken: String? = "fresh-bootstrap-token",
+    admissionRecorder: GatewayAdmissionRecorder? = nil,
+    outcomeRecorder: GatewayBootstrapOutcomeRecorder? = nil) async throws
 {
     try await gateway.connect(
         url: URL(string: endpoint)!,
         token: nil,
-        bootstrapToken: "fresh-bootstrap-token",
+        bootstrapToken: bootstrapToken,
         password: nil,
         connectOptions: bootstrapHandoffTestOptions(),
         sessionBox: WebSocketSessionBox(session: session),
         onConnected: {},
+        onConnectedAdmission: { admission in
+            await admissionRecorder?.record(admission)
+        },
+        onBootstrapHandoffOutcome: { receipt in
+            await outcomeRecorder?.record(receipt)
+        },
         onDisconnected: { _ in },
         onInvoke: { request in
             BridgeInvokeResponse(id: request.id, ok: true, payloadJSON: nil, error: nil)
@@ -1480,6 +1524,34 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
+    func forcedSameConfigReconnectReplacesThePhysicalSessionAndReadmits() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession()
+        let admissions = GatewayAdmissionRecorder()
+        let endpoint = "ws://example.invalid"
+
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: endpoint,
+            admissionRecorder: admissions)
+        let firstRoute = try #require(await gateway.currentRoute())
+
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: endpoint,
+            forceReconnect: true,
+            admissionRecorder: admissions)
+        let replacementRoute = try #require(await gateway.currentRoute())
+
+        #expect(replacementRoute != firstRoute)
+        #expect(session.snapshotMakeCount() == 2)
+        #expect(await admissions.values().map(\.route) == [firstRoute, replacementRoute])
+        await gateway.disconnect()
+    }
+
+    @Test
     func trackedRequestReturnsResponseFromExactRoute() async throws {
         let session = FakeGatewayWebSocketSession()
         let gateway = GatewayNodeSession()
@@ -2071,16 +2143,16 @@ struct GatewayNodeSessionTests {
             ]],
         ])
         let gateway = GatewayNodeSession()
-        try await connectForBootstrapHandoffTest(gateway, session: session)
+        let admissionRecorder = GatewayAdmissionRecorder()
+        try await connectForBootstrapHandoffTest(
+            gateway,
+            session: session,
+            admissionRecorder: admissionRecorder)
         let firstRoute = try #require(await gateway.currentRoute())
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute)?.isReady == true)
-        if case let .receipt(receipt) = await gateway.bootstrapHandoffRouteState(
-            ifCurrentRoute: firstRoute)
-        {
-            #expect(receipt.isReady)
-        } else {
-            Issue.record("current bootstrap route must expose its exact issuance receipt")
-        }
+        let firstAdmission = try #require(await admissionRecorder.values().first)
+        #expect(firstAdmission.route == firstRoute)
+        #expect(firstAdmission.bootstrapHandoffReceipt?.isReady == true)
         let firstTask = try #require(session.latestTask())
 
         firstTask.emitReceiveFailure()
@@ -2098,11 +2170,230 @@ struct GatewayNodeSessionTests {
         let replacementRoute = try #require(await gateway.currentRoute())
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: firstRoute) == nil)
         #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: replacementRoute) == nil)
-        #expect(await gateway.bootstrapHandoffRouteState(ifCurrentRoute: firstRoute) == .retired)
-        #expect(await gateway.bootstrapHandoffRouteState(ifCurrentRoute: replacementRoute) == .missing)
+        try await waitUntil("replacement admission callback is delivered") {
+            await admissionRecorder.values().count == 2
+        }
+        let admissions = await admissionRecorder.values()
+        #expect(admissions[0].bootstrapHandoffReceipt?.isReady == true)
+        #expect(admissions[1].route == replacementRoute)
+        #expect(admissions[1].bootstrapHandoffReceipt == nil)
 
         await gateway.disconnect()
     }
+
+    #if DEBUG
+    @Test
+    func bootstrapReceiptSurvivesSocketFailureBeforeFirstSnapshotAdmission() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "fresh-operator-token",
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+        let snapshotGate = GatewayAsyncGate()
+        let admissionRecorder = GatewayAdmissionRecorder()
+        await gateway._test_setBeforePushAdmission {
+            await snapshotGate.wait()
+        }
+
+        let connect = Task {
+            try? await connectForBootstrapHandoffTest(
+                gateway,
+                session: session,
+                admissionRecorder: admissionRecorder)
+        }
+        try await waitUntil("first bootstrap snapshot reaches admission boundary") {
+            await snapshotGate.hasStarted()
+        }
+        let firstTask = try #require(session.latestTask())
+        firstTask.emitReceiveFailure()
+        try await waitUntil("bootstrap channel reconnects before snapshot admission") {
+            session.snapshotMakeCount() >= 2 && session.latestTask()?.latestConnectAuth() != nil
+        }
+        let replacementTask = try #require(session.latestTask())
+        let replacementAuth = try #require(replacementTask.latestConnectAuth())
+        #expect(replacementAuth["bootstrapToken"] == nil)
+        #expect(replacementAuth["token"] as? String == "fresh-node-token")
+
+        await snapshotGate.release()
+        await connect.value
+        try await waitUntil("surviving route consumes immutable bootstrap receipt") {
+            await admissionRecorder.values().count == 1
+        }
+        let admission = try #require(await admissionRecorder.values().first)
+        #expect(admission.bootstrapHandoffReceipt?.isReady == true)
+        #expect(await gateway.currentRoute() == admission.route)
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: admission.route)?.isReady == true)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        #expect(await admissionRecorder.values().count == 1)
+
+        await gateway._test_setBeforePushAdmission(nil)
+        await gateway.disconnect()
+    }
+
+    @Test
+    func readyBootstrapReceiptSurvivesSnapshotTimeoutWithoutCredentialReplay() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+            "deviceTokens": [[
+                "deviceToken": "fresh-operator-token",
+                "role": "operator",
+                "scopes": GatewayBootstrapHandoffValidator.requiredOperatorScopes,
+            ]],
+        ])
+        let gateway = GatewayNodeSession()
+        let snapshotGate = GatewayAsyncGate()
+        let outcomes = GatewayBootstrapOutcomeRecorder()
+        await gateway._test_setBeforePushAdmission {
+            await snapshotGate.wait()
+        }
+
+        let firstConnect = Task { () -> Int? in
+            do {
+                try await connectForBootstrapHandoffTest(
+                    gateway,
+                    session: session,
+                    outcomeRecorder: outcomes)
+                return nil
+            } catch {
+                return (error as NSError).code
+            }
+        }
+        try await waitUntil("ready receipt precedes blocked snapshot") {
+            let gateStarted = await snapshotGate.hasStarted()
+            let outcomeCount = await outcomes.values().count
+            return gateStarted && outcomeCount == 1
+        }
+        let firstReceipt = try #require(await outcomes.values().first)
+        #expect(firstReceipt.isReady)
+        let firstErrorCode = try #require(await firstConnect.value)
+        #expect(firstErrorCode == 13)
+        #expect(session.snapshotMakeCount() == 1)
+        #expect(session.task(at: 0)?.latestConnectAuth()?["bootstrapToken"] as? String ==
+            "fresh-bootstrap-token")
+
+        await snapshotGate.release()
+        let admissions = GatewayAdmissionRecorder()
+        try await connectForBootstrapHandoffTest(
+            gateway,
+            session: session,
+            admissionRecorder: admissions,
+            outcomeRecorder: outcomes)
+
+        #expect(session.snapshotMakeCount() == 2)
+        let replacementAuth = try #require(session.task(at: 1)?.latestConnectAuth())
+        #expect(replacementAuth["bootstrapToken"] == nil)
+        #expect(replacementAuth["token"] as? String == "fresh-node-token")
+        let admission = try #require(await admissions.values().first)
+        #expect(admission.bootstrapHandoffReceipt?.isReady == true)
+        #expect(await gateway.bootstrapHandoffReceipt(ifCurrentRoute: admission.route)?.isReady == true)
+        #expect(await outcomes.values().count == 1)
+
+        await gateway._test_setBeforePushAdmission(nil)
+        await gateway.disconnect()
+    }
+
+    @Test
+    func rejectedBootstrapOutcomeSurvivesFailureBeforeSnapshotAdmission() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let previousStateDir = ProcessInfo.processInfo.environment["OPENCLAW_STATE_DIR"]
+        setenv("OPENCLAW_STATE_DIR", tempDir.path, 1)
+        defer {
+            if let previousStateDir {
+                setenv("OPENCLAW_STATE_DIR", previousStateDir, 1)
+            } else {
+                unsetenv("OPENCLAW_STATE_DIR")
+            }
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let identity = DeviceIdentityStore.loadOrCreate()
+        let session = FakeGatewayWebSocketSession(helloAuth: [
+            "deviceToken": "fresh-node-token",
+            "role": "node",
+            "scopes": [],
+        ])
+        let gateway = GatewayNodeSession()
+        let snapshotGate = GatewayAsyncGate()
+        let outcomes = GatewayBootstrapOutcomeRecorder()
+        await gateway._test_setBeforePushAdmission {
+            await snapshotGate.wait()
+        }
+
+        let connect = Task {
+            try? await connectForBootstrapHandoffTest(
+                gateway,
+                session: session,
+                outcomeRecorder: outcomes)
+        }
+        try await waitUntil("node-only outcome precedes snapshot admission") {
+            let gateStarted = await snapshotGate.hasStarted()
+            let outcomeCount = await outcomes.values().count
+            return gateStarted && outcomeCount == 1
+        }
+        let receipt = try #require(await outcomes.values().first)
+        #expect(receipt.issues == [.missingOperatorRole])
+        #expect(receipt.persistence == .notAttempted)
+        #expect(!receipt.isReady)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "node") == nil)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator") == nil)
+
+        let firstTask = try #require(session.latestTask())
+        firstTask.emitReceiveFailure()
+        try await waitUntil("node-only reconnect does not replay bootstrap") {
+            session.snapshotMakeCount() >= 2 && session.latestTask()?.latestConnectAuth() != nil
+        }
+        let replacementAuth = try #require(session.latestTask()?.latestConnectAuth())
+        #expect(replacementAuth["bootstrapToken"] == nil)
+        #expect(replacementAuth["token"] == nil)
+
+        await snapshotGate.release()
+        await connect.value
+        try await Task.sleep(nanoseconds: 20_000_000)
+        #expect(await outcomes.values().count == 1)
+        #expect(await gateway.currentRoute() == nil)
+
+        await gateway._test_setBeforePushAdmission(nil)
+        await gateway.disconnect()
+    }
+    #endif
 
     @Test
     func ambiguousBootstrapResponseLossDoesNotReplayOneShotCredential() async throws {

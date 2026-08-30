@@ -182,15 +182,23 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         guard let supportsRoutingContract = await self.gateway.supportsServerCapability(
             .chatSendRoutingContract,
             ifCurrentRoute: route)
-        else { return .unavailable(reason: .routeUnavailable) }
+        else {
+            let reason: OpenClawChatTransportRouteLeaseUnavailableReason =
+                await self.gateway.isCurrentRoute(route) ? .capabilityUnavailable : .routeUnavailable
+            return .unavailable(reason: reason)
+        }
         guard supportsRoutingContract else {
             return .unavailable(reason: .capabilityUnavailable)
         }
         guard let serverCapabilities = await self.gateway.serverCapabilities(ifCurrentRoute: route) else {
-            return .unavailable(reason: .routeUnavailable)
+            let reason: OpenClawChatTransportRouteLeaseUnavailableReason =
+                await self.gateway.isCurrentRoute(route) ? .capabilityUnavailable : .routeUnavailable
+            return .unavailable(reason: reason)
         }
         guard let operatorScopes = await self.gateway.operatorScopes(ifCurrentRoute: route) else {
-            return .unavailable(reason: .routeUnavailable)
+            let reason: OpenClawChatTransportRouteLeaseUnavailableReason =
+                await self.gateway.isCurrentRoute(route) ? .operatorScopesUnavailable : .routeUnavailable
+            return .unavailable(reason: reason)
         }
         guard Self.requiredOperatorScopes.isSubset(of: operatorScopes) else {
             return .unavailable(reason: .operatorScopesUnavailable)

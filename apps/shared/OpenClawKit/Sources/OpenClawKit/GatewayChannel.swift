@@ -313,6 +313,10 @@ public actor GatewayChannelActor {
     private var reconnectPausedForAuthFailure = false
     private let defaultRequestTimeoutMs: Double = 15000
     private let pushHandler: (@Sendable (GatewayPush, UInt64) async -> Void)?
+    private let snapshotAdmissionHandler:
+        (@Sendable (HelloOk, UInt64) async -> Void)?
+    private let bootstrapHandoffHandler:
+        (@Sendable (GatewayBootstrapHandoffConnectionReceipt, UInt64) async -> Void)?
     private let connectOptions: GatewayConnectOptions?
     private let disconnectHandler: (@Sendable (String, UInt64) async -> Void)?
 
@@ -336,6 +340,8 @@ public actor GatewayChannelActor {
         } else {
             self.pushHandler = nil
         }
+        self.snapshotAdmissionHandler = nil
+        self.bootstrapHandoffHandler = nil
         self.connectOptions = connectOptions
         if let disconnectHandler {
             self.disconnectHandler = { reason, _ in await disconnectHandler(reason) }
@@ -355,6 +361,10 @@ public actor GatewayChannelActor {
         password: String? = nil,
         session: WebSocketSessionBox? = nil,
         generationAwarePushHandler: (@Sendable (GatewayPush, UInt64) async -> Void)?,
+        generationAwareSnapshotAdmissionHandler:
+            (@Sendable (HelloOk, UInt64) async -> Void)? = nil,
+        generationAwareBootstrapHandoffHandler:
+            (@Sendable (GatewayBootstrapHandoffConnectionReceipt, UInt64) async -> Void)? = nil,
         connectOptions: GatewayConnectOptions? = nil,
         generationAwareDisconnectHandler: (@Sendable (String, UInt64) async -> Void)? = nil)
     {
@@ -364,6 +374,8 @@ public actor GatewayChannelActor {
         self.password = password
         self.session = session?.session ?? URLSession(configuration: .default)
         self.pushHandler = generationAwarePushHandler
+        self.snapshotAdmissionHandler = generationAwareSnapshotAdmissionHandler
+        self.bootstrapHandoffHandler = generationAwareBootstrapHandoffHandler
         self.connectOptions = connectOptions
         self.disconnectHandler = generationAwareDisconnectHandler
         Task { [weak self] in
@@ -546,6 +558,18 @@ public actor GatewayChannelActor {
               self.disconnectedConnectionGeneration != connectionGeneration,
               self.shouldReconnect
         else { throw CancellationError() }
+        if let handoffReceipt = self.bootstrapHandoffReceipt,
+           handoffReceipt.physicalConnectionGeneration == connectionGeneration
+        {
+            // Persisted, token-free bootstrap issuance must cross the actor
+            // boundary before listen() can report an immediate socket failure.
+            // The route owner can attach it to the first surviving snapshot.
+            await self.bootstrapHandoffHandler?(handoffReceipt, connectionGeneration)
+            guard self.ownsSocket(connectTask, connectionGeneration: connectionGeneration),
+                  self.disconnectedConnectionGeneration != connectionGeneration,
+                  self.shouldReconnect
+            else { throw CancellationError() }
+        }
         self.connected = true
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
@@ -558,11 +582,19 @@ public actor GatewayChannelActor {
         self.startTickWatchdog(connectionGeneration: connectionGeneration)
         self.startKeepalive(connectionGeneration: connectionGeneration)
         // The channel must be admitted and listening before an onConnected callback
-        // can issue a route-bound request through the snapshot.
+        // can issue a route-bound request through the snapshot. Bootstrap evidence
+        // was acknowledged independently before listen() began.
         Task { [weak self] in
-            await self?.deliverPushIfCurrent(
-                .snapshot(connectHello),
-                connectionGeneration: connectionGeneration)
+            guard let self else { return }
+            if self.snapshotAdmissionHandler != nil {
+                await self.deliverSnapshotAdmissionIfCurrent(
+                    connectHello,
+                    connectionGeneration: connectionGeneration)
+            } else {
+                await self.deliverPushIfCurrent(
+                    .snapshot(connectHello),
+                    connectionGeneration: connectionGeneration)
+            }
         }
 
         let waiters = self.connectWaiters
@@ -1196,6 +1228,22 @@ public actor GatewayChannelActor {
             return
         }
         await self.pushHandler?(push, connectionGeneration)
+    }
+
+    private func deliverSnapshotAdmissionIfCurrent(
+        _ hello: HelloOk,
+        connectionGeneration: UInt64) async
+    {
+        guard self.connectionGeneration == connectionGeneration,
+              self.disconnectedConnectionGeneration != connectionGeneration
+        else {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .socket,
+                state: "stale_callback_ignored",
+                socketGeneration: connectionGeneration))
+            return
+        }
+        await self.snapshotAdmissionHandler?(hello, connectionGeneration)
     }
 
     private func listen(task: WebSocketTaskBox, connectionGeneration: UInt64) {

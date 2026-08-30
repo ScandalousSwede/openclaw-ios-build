@@ -71,26 +71,25 @@ public struct GatewayBootstrapHandoffReceipt: Codable, Sendable, Equatable {
     }
 }
 
-/// An atomic view of bootstrap evidence for one exact admitted route.
-/// `missing` is meaningful only while the requested route is still current;
-/// a retired route must never be converted into a failed setup receipt.
-public enum GatewayBootstrapHandoffRouteState: Sendable, Equatable {
-    case retired
-    case missing
-    case receipt(GatewayBootstrapHandoffReceipt)
-}
-
 struct GatewayBootstrapHandoffCredential: Sendable {
     let role: GatewayBootstrapHandoffRole
     let token: String?
     let scopes: [String]
 }
 
-struct GatewayBootstrapHandoffConnectionReceipt: Sendable, Equatable {
-    let physicalConnectionGeneration: UInt64
-    let issuedRoles: [GatewayBootstrapHandoffRoleGrant]
-    let issues: [GatewayBootstrapHandoffIssue]
-    let persistence: GatewayBootstrapHandoffPersistence
+/// Token-free bootstrap issuance evidence captured by `GatewayChannelActor` in
+/// the same actor turn that completes the physical connection. It travels with
+/// the initial snapshot so route owners never have to re-query mutable channel
+/// state to decide whether the one-shot handoff succeeded.
+public struct GatewayBootstrapHandoffConnectionReceipt: Sendable, Equatable {
+    public let physicalConnectionGeneration: UInt64
+    public let issuedRoles: [GatewayBootstrapHandoffRoleGrant]
+    public let issues: [GatewayBootstrapHandoffIssue]
+    public let persistence: GatewayBootstrapHandoffPersistence
+
+    public var isReady: Bool {
+        self.issues.isEmpty && self.persistence == .succeeded
+    }
 }
 
 struct GatewayBootstrapHandoffPlan: Sendable {

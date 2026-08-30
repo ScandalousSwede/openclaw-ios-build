@@ -64,22 +64,20 @@ import Testing
 
     @Test func firstBootstrapAdmissionRequiresReceiptButLaterReconnectDoesNot() {
         #expect(NodeAppModel.mobileSetupHandoffValidationDecision(
-            usedBootstrapToken: true,
             validationPending: true,
             currentRouteState: nil) == .rejected(.invalid))
         #expect(NodeAppModel.mobileSetupHandoffValidationDecision(
-            usedBootstrapToken: true,
             validationPending: true,
             currentRouteState: .ready) == .ready)
         #expect(NodeAppModel.mobileSetupHandoffValidationDecision(
-            usedBootstrapToken: true,
             validationPending: false,
             currentRouteState: nil) == .notRequired)
+    }
+
+    @Test func carriedReceiptIsValidatedByHandoffOwnershipNotReconnectAuthSource() {
         #expect(NodeAppModel.mobileSetupHandoffValidationDecision(
-            usedBootstrapToken: true,
             validationPending: true,
-            routeIsCurrent: false,
-            currentRouteState: nil) == .staleRoute)
+            currentRouteState: .ready) == .ready)
     }
 
     @Test func explicitAuthPrecedenceMatchesWireSelectionAndHandoffAdmission() {
@@ -171,6 +169,35 @@ import Testing
         #expect(!model.gatewayPairingPaused)
     }
 
+    @Test @MainActor func runtimeUnauthorizedRoleRemainsDistinctFromMissingScope() {
+        let roleModel = NodeAppModel()
+        roleModel._test_setGatewayRoleStates(node: .online, operator: .online)
+        roleModel._test_applyOperatorRoleBlock()
+        #expect(roleModel.nodeRoleState == .online)
+        #expect(roleModel.operatorRoleState == .missingRole)
+
+        let scopeModel = NodeAppModel()
+        scopeModel._test_setGatewayRoleStates(node: .online, operator: .online)
+        scopeModel._test_applyOperatorScopeBlock(missing: [])
+        #expect(scopeModel.nodeRoleState == .online)
+        #expect(scopeModel.operatorRoleState == .scopeBlocked(missing: []))
+    }
+
+    @Test @MainActor func preAdmissionNodeOnlyOutcomeIsAnHonestTerminalSetupError() {
+        let model = NodeAppModel()
+        defer { model.disconnectGateway() }
+
+        model._test_applyBootstrapHandoffOutcome(
+            issues: [.missingOperatorRole],
+            persistence: .notAttempted)
+
+        #expect(model.operatorRoleState == .missingRole)
+        #expect(model.gatewayPairingPaused)
+        #expect(!model.gatewayAutoReconnectEnabled)
+        #expect(model.screen.errorText ==
+            "This device was approved for node only. Remove only this new device from the gateway and pair again using a setup code.")
+    }
+
     @Test func chatPresentationNeverHidesRoleRouteOrIdentityBlockers() {
         #expect(ChatConnectionPresentation.blockingText(
             deliveryGate: .routingContractUnavailable,
@@ -200,6 +227,14 @@ import Testing
             deliveryGate: .capabilityUnavailable,
             nodeState: .online,
             operatorState: .connecting) == "Operator connecting")
+        #expect(ChatConnectionPresentation.blockingText(
+            deliveryGate: nil,
+            nodeState: .offline,
+            operatorState: .online) == nil)
+        #expect(ChatConnectionPresentation.blockingText(
+            deliveryGate: .routingContractUnavailable,
+            nodeState: .offline,
+            operatorState: .online) == "Routing contract unavailable")
         #expect(ChatConnectionPresentation.messagePlaceholder(
             agentName: "Main",
             blockingText: "Routing contract unavailable",
@@ -285,8 +320,8 @@ import Testing
         #expect(talk.contains("operator session required for Talk is unavailable"))
         #expect(talk.contains("server has no Talk configuration"))
         #expect(model.contains("onConnectedRoute: { [weak self] admittedRoute in"))
-        #expect(model.contains("case .staleRoute:"))
-        #expect(model.contains("bootstrapHandoffRouteState(ifCurrentRoute: route)"))
+        #expect(model.contains("onConnectedAdmission: { [weak self] admission in"))
+        #expect(model.contains("admission.bootstrapHandoffReceipt"))
         #expect(model.contains("self.gatewayOwnerCheck(loopOwner)"))
         #expect(model.contains("self.gatewayOwnerCheck(owner)"))
         #expect(model.contains("ifCurrentRoute: admittedRoute"))

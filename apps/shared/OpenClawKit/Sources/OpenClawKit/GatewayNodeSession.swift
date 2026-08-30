@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OpenClawProtocol
 import OSLog
@@ -17,6 +18,14 @@ public struct GatewayNodeSessionRoute: Sendable, Equatable {
     fileprivate let channelGeneration: UInt64
     fileprivate let admissionGeneration: UInt64
     fileprivate let socketGeneration: UInt64
+}
+
+/// Immutable evidence captured in the actor turn that admits a physical route.
+/// Bootstrap issuance stays bound to that admission even if the socket retires
+/// while its serialized lifecycle callback is running.
+public struct GatewayNodeSessionAdmission: Sendable, Equatable {
+    public let route: GatewayNodeSessionRoute
+    public let bootstrapHandoffReceipt: GatewayBootstrapHandoffReceipt?
 }
 
 func canonicalizeCanvasHostUrl(raw: String?, activeURL: URL?) -> String? {
@@ -77,6 +86,14 @@ public actor GatewayNodeSession {
         let receipt: GatewayBootstrapHandoffReceipt
     }
 
+    private struct PendingBootstrapHandoffReceipt {
+        let channelGeneration: UInt64
+        let receipt: GatewayBootstrapHandoffConnectionReceipt
+        let url: URL
+        let connectOptionsKey: String
+        let sessionIdentity: ObjectIdentifier?
+    }
+
     private let logger = Logger(subsystem: "ai.openclaw", category: "node.gateway")
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
@@ -85,6 +102,7 @@ public actor GatewayNodeSession {
     private var activeURL: URL?
     private var activeToken: String?
     private var activeBootstrapToken: String?
+    private var consumedBootstrapTokenDigest: Data?
     private var activePassword: String?
     private var activeConnectOptionsKey: String?
     private var activeSessionIdentity: ObjectIdentifier?
@@ -97,6 +115,9 @@ public actor GatewayNodeSession {
     private var connectOptions: GatewayConnectOptions?
     private var onConnected: (@Sendable () async -> Void)?
     private var onConnectedRoute: (@Sendable (GatewayNodeSessionRoute) async -> Void)?
+    private var onConnectedAdmission: (@Sendable (GatewayNodeSessionAdmission) async -> Void)?
+    private var onBootstrapHandoffOutcome:
+        (@Sendable (GatewayBootstrapHandoffConnectionReceipt) async -> Void)?
     private var onDisconnected: (@Sendable (String) async -> Void)?
     private var onInvoke: (@Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse)?
     private var hasEverConnected = false
@@ -106,6 +127,7 @@ public actor GatewayNodeSession {
     private var serverCapabilityNames: Set<String>?
     private var authenticatedOperatorScopes: Set<String>?
     private var routeBoundBootstrapHandoffReceipt: RouteBoundBootstrapHandoffReceipt?
+    private var pendingBootstrapHandoffReceipt: PendingBootstrapHandoffReceipt?
     private var snapshotWaiters: [UUID: SnapshotWaiter] = [:]
     #if DEBUG
     private var testBeforePushAdmission: (@Sendable () async -> Void)?
@@ -241,16 +263,39 @@ public actor GatewayNodeSession {
         password: String?,
         connectOptions: GatewayConnectOptions,
         sessionBox: WebSocketSessionBox?,
+        forceReconnect: Bool = false,
         onConnected: @escaping @Sendable () async -> Void,
         onConnectedRoute: (@Sendable (GatewayNodeSessionRoute) async -> Void)? = nil,
+        onConnectedAdmission: (@Sendable (GatewayNodeSessionAdmission) async -> Void)? = nil,
+        onBootstrapHandoffOutcome:
+            (@Sendable (GatewayBootstrapHandoffConnectionReceipt) async -> Void)? = nil,
         onDisconnected: @escaping @Sendable (String) async -> Void,
         onInvoke: @escaping @Sendable (BridgeInvokeRequest) async -> BridgeInvokeResponse) async throws
     {
         let nextOptionsKey = self.connectOptionsKey(connectOptions)
         let nextSessionIdentity = sessionBox.map { ObjectIdentifier($0.session) }
-        let shouldReconnect = self.activeURL != url ||
+        let incomingBootstrapTokenDigest = Self.bootstrapTokenDigest(bootstrapToken)
+        let effectiveBootstrapToken = incomingBootstrapTokenDigest != nil &&
+            incomingBootstrapTokenDigest == self.consumedBootstrapTokenDigest
+            ? nil
+            : bootstrapToken
+        let carriedBootstrapHandoffReceipt = self.pendingBootstrapHandoffReceipt.flatMap { pending in
+            let hasNoExplicitReplacementCredential = GatewayAuthSource.explicitCredentialSource(
+                token: token,
+                bootstrapToken: effectiveBootstrapToken,
+                password: password) == .none
+            return pending.receipt.isReady &&
+                pending.url == url &&
+                pending.connectOptionsKey == nextOptionsKey &&
+                pending.sessionIdentity == nextSessionIdentity &&
+                hasNoExplicitReplacementCredential
+                ? pending.receipt
+                : nil
+        }
+        let shouldReconnect = forceReconnect ||
+            self.activeURL != url ||
             self.activeToken != token ||
-            self.activeBootstrapToken != bootstrapToken ||
+            self.activeBootstrapToken != effectiveBootstrapToken ||
             self.activePassword != password ||
             self.activeConnectOptionsKey != nextOptionsKey ||
             self.activeSessionIdentity != nextSessionIdentity ||
@@ -273,7 +318,16 @@ public actor GatewayNodeSession {
             self.channelGeneration &+= 1
             self.admissionGeneration &+= 1
             installedChannelGeneration = self.channelGeneration
-            self.resetConnectionState()
+            self.resetConnectionState(
+                preservingPendingBootstrapHandoff: carriedBootstrapHandoffReceipt != nil)
+            if let carriedBootstrapHandoffReceipt {
+                self.pendingBootstrapHandoffReceipt = PendingBootstrapHandoffReceipt(
+                    channelGeneration: installedChannelGeneration,
+                    receipt: carriedBootstrapHandoffReceipt,
+                    url: url,
+                    connectOptionsKey: nextOptionsKey,
+                    sessionIdentity: nextSessionIdentity)
+            }
             let existing = self.channel
             // Detach synchronously so callbacks from the retiring channel fail their
             // owner-generation check even while shutdown is suspended.
@@ -288,12 +342,24 @@ public actor GatewayNodeSession {
             let channel = GatewayChannelActor(
                 url: url,
                 token: token,
-                bootstrapToken: bootstrapToken,
+                bootstrapToken: effectiveBootstrapToken,
                 password: password,
                 session: sessionBox,
                 generationAwarePushHandler: { [weak self] push, socketGeneration in
                     await self?.handlePush(
                         push,
+                        channelGeneration: installedChannelGeneration,
+                        socketGeneration: socketGeneration)
+                },
+                generationAwareSnapshotAdmissionHandler: { [weak self] hello, socketGeneration in
+                    await self?.handleSnapshotAdmission(
+                        hello,
+                        channelGeneration: installedChannelGeneration,
+                        socketGeneration: socketGeneration)
+                },
+                generationAwareBootstrapHandoffHandler: { [weak self] receipt, socketGeneration in
+                    await self?.handleBootstrapHandoffReceipt(
+                        receipt,
                         channelGeneration: installedChannelGeneration,
                         socketGeneration: socketGeneration)
                 },
@@ -312,11 +378,13 @@ public actor GatewayNodeSession {
             self.connectOptions = connectOptions
             self.onConnected = onConnected
             self.onConnectedRoute = onConnectedRoute
+            self.onConnectedAdmission = onConnectedAdmission
+            self.onBootstrapHandoffOutcome = onBootstrapHandoffOutcome
             self.onDisconnected = onDisconnected
             self.onInvoke = onInvoke
             self.activeURL = url
             self.activeToken = token
-            self.activeBootstrapToken = bootstrapToken
+            self.activeBootstrapToken = effectiveBootstrapToken
             self.activePassword = password
             self.activeConnectOptionsKey = nextOptionsKey
             self.activeSessionIdentity = nextSessionIdentity
@@ -325,6 +393,8 @@ public actor GatewayNodeSession {
             self.connectOptions = connectOptions
             self.onConnected = onConnected
             self.onConnectedRoute = onConnectedRoute
+            self.onConnectedAdmission = onConnectedAdmission
+            self.onBootstrapHandoffOutcome = onBootstrapHandoffOutcome
             self.onDisconnected = onDisconnected
             self.onInvoke = onInvoke
         }
@@ -401,6 +471,8 @@ public actor GatewayNodeSession {
         self.connectOptions = nil
         self.onConnected = nil
         self.onConnectedRoute = nil
+        self.onConnectedAdmission = nil
+        self.onBootstrapHandoffOutcome = nil
         self.onDisconnected = nil
         self.onInvoke = nil
         self.activeSocketGeneration = nil
@@ -513,32 +585,16 @@ public actor GatewayNodeSession {
     public func bootstrapHandoffReceipt(
         ifCurrentRoute route: GatewayNodeSessionRoute) async -> GatewayBootstrapHandoffReceipt?
     {
-        switch await self.bootstrapHandoffRouteState(ifCurrentRoute: route) {
-        case let .receipt(receipt): receipt
-        case .retired, .missing: nil
-        }
-    }
-
-    /// Distinguishes a current route with missing issuance evidence from a route
-    /// that retired while its admission callback was awaiting validation.
-    public func bootstrapHandoffRouteState(
-        ifCurrentRoute route: GatewayNodeSessionRoute) async -> GatewayBootstrapHandoffRouteState
-    {
-        guard self.isCurrentRoute(route), let channel = self.channel else { return .retired }
-        guard let bound = self.routeBoundBootstrapHandoffReceipt,
+        guard self.isCurrentRoute(route),
+              self.channel != nil,
+              let bound = self.routeBoundBootstrapHandoffReceipt,
               bound.route == route
-        else { return .missing }
-
-        // The channel clears its receipt synchronously at the start of every real
-        // physical connection attempt. Recheck every owner after the actor hop so
-        // route retirement is never reported as a malformed current receipt.
-        let connectionReceipt = await channel.bootstrapHandoffConnectionReceipt(
-            ifCurrentConnectionGeneration: route.socketGeneration)
-        guard self.isCurrentRoute(route), self.channel === channel else { return .retired }
-        guard connectionReceipt != nil,
-              self.routeBoundBootstrapHandoffReceipt?.route == route
-        else { return .missing }
-        return .receipt(bound.receipt)
+        else { return nil }
+        // This token-free value was copied from the channel before listen() and
+        // atomically attached to this exact admitted route. Re-querying mutable
+        // channel state would incorrectly discard an A receipt carried across an
+        // immediate physical reconnect and consumed by surviving route B.
+        return bound.receipt
     }
 
     public func sendEvent(event: String, payloadJSON: String?) async {
@@ -718,55 +774,11 @@ public actor GatewayNodeSession {
         }
         switch push {
         case let .snapshot(ok):
-            let admissionGeneration = self.admissionGeneration
-            guard let channel = self.channel else { return }
-            let route = GatewayNodeSessionRoute(
+            await self.handleSnapshotAdmission(
+                ok,
                 channelGeneration: channelGeneration,
-                admissionGeneration: admissionGeneration,
-                socketGeneration: socketGeneration)
-            let connectionReceipt = await channel.bootstrapHandoffConnectionReceipt(
-                ifCurrentConnectionGeneration: socketGeneration)
-            guard self.channelGeneration == channelGeneration,
-                  self.admissionGeneration == admissionGeneration,
-                  self.channel === channel,
-                  self.isCurrentRoute(route)
-            else { return }
-            if let connectionReceipt {
-                self.activeBootstrapToken = nil
-                self.routeBoundBootstrapHandoffReceipt = RouteBoundBootstrapHandoffReceipt(
-                    route: route,
-                    receipt: GatewayBootstrapHandoffReceipt(
-                        channelGeneration: route.channelGeneration,
-                        routeGeneration: route.admissionGeneration,
-                        physicalConnectionGeneration: route.socketGeneration,
-                        issuedRoles: connectionReceipt.issuedRoles,
-                        issues: connectionReceipt.issues,
-                        persistence: connectionReceipt.persistence))
-            }
-            self.pluginSurfaceUrls = self.normalizePluginSurfaceUrls(ok.pluginsurfaceurls)
-            self.serverCapabilities = ok.advertisedServerCapabilities
-            self.serverCapabilityNames = ok.advertisedServerCapabilityNames
-            self.authenticatedOperatorScopes = ok.authenticatedOperatorScopes
-            let supportsRoutingGuard = self.serverCapabilities?.contains(.chatSendRoutingContract) == true
-            let hasOperatorRead = self.authenticatedOperatorScopes?.contains("operator.read") == true
-            let hasOperatorWrite = self.authenticatedOperatorScopes?.contains("operator.write") == true
-            let gatewayVersion = Self.diagnosticGatewayVersion(ok.server["version"]?.value as? String)
-            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-                kind: .route,
-                state: Self.diagnosticHelloState(
-                    supportsRoutingGuard: supportsRoutingGuard,
-                    hasRequiredOperatorScopes: hasOperatorRead && hasOperatorWrite),
                 socketGeneration: socketGeneration,
-                routeGeneration: admissionGeneration,
-                sequence: ok._protocol,
-                stream: gatewayVersion))
-            if self.hasEverConnected {
-                self.broadcastServerEvent(
-                    EventFrame(type: "event", event: "seqGap", payload: nil, seq: nil, stateversion: nil))
-            }
-            self.hasEverConnected = true
-            self.markSnapshotReceived()
-            await self.notifyConnectedIfNeeded(admissionGeneration: admissionGeneration)
+                admissionAlreadyEstablished: true)
         case let .event(evt):
             guard let channel = self.channel else { return }
             let route = GatewayNodeSessionRoute(
@@ -779,11 +791,143 @@ public actor GatewayNodeSession {
         }
     }
 
+    private func handleSnapshotAdmission(
+        _ ok: HelloOk,
+        channelGeneration: UInt64,
+        socketGeneration: UInt64,
+        admissionAlreadyEstablished: Bool = false) async
+    {
+        #if DEBUG
+        if !admissionAlreadyEstablished {
+            await self.testBeforePushAdmission?()
+        }
+        #endif
+        if !admissionAlreadyEstablished, self.activeSocketGeneration != socketGeneration {
+            await self.waitForLifecycleCallbacksIfNeeded()
+        }
+        if !admissionAlreadyEstablished,
+           let pendingReceipt = self.pendingBootstrapHandoffReceipt,
+           pendingReceipt.channelGeneration == channelGeneration,
+           pendingReceipt.receipt.physicalConnectionGeneration != socketGeneration
+        {
+            guard let pendingChannel = self.channel else { return }
+            let authSource = await pendingChannel.authSource()
+            guard authSource == .deviceToken,
+                  self.channelGeneration == channelGeneration,
+                  self.channel === pendingChannel,
+                  self.pendingBootstrapHandoffReceipt?.channelGeneration == channelGeneration
+            else { return }
+        }
+        let isNewSocketAdmission = self.activeSocketGeneration == nil
+        guard admissionAlreadyEstablished || (
+            self.channelGeneration == channelGeneration && self.admitSocketGeneration(socketGeneration))
+        else { return }
+        if !admissionAlreadyEstablished, isNewSocketAdmission {
+            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+                kind: .route,
+                state: "admitted",
+                socketGeneration: socketGeneration,
+                routeGeneration: self.admissionGeneration))
+        }
+
+        let admissionGeneration = self.admissionGeneration
+        guard let channel = self.channel else { return }
+        let route = GatewayNodeSessionRoute(
+            channelGeneration: channelGeneration,
+            admissionGeneration: admissionGeneration,
+            socketGeneration: socketGeneration)
+        guard self.channelGeneration == channelGeneration,
+              self.admissionGeneration == admissionGeneration,
+              self.channel === channel,
+              self.isCurrentRoute(route)
+        else { return }
+        if let pendingReceipt = self.pendingBootstrapHandoffReceipt,
+           pendingReceipt.channelGeneration == channelGeneration
+        {
+            let connectionReceipt = pendingReceipt.receipt
+            self.activeBootstrapToken = nil
+            self.routeBoundBootstrapHandoffReceipt = RouteBoundBootstrapHandoffReceipt(
+                route: route,
+                receipt: GatewayBootstrapHandoffReceipt(
+                    channelGeneration: route.channelGeneration,
+                    routeGeneration: route.admissionGeneration,
+                    physicalConnectionGeneration: connectionReceipt.physicalConnectionGeneration,
+                    issuedRoles: connectionReceipt.issuedRoles,
+                    issues: connectionReceipt.issues,
+                    persistence: connectionReceipt.persistence))
+            self.pendingBootstrapHandoffReceipt = nil
+        }
+        self.pluginSurfaceUrls = self.normalizePluginSurfaceUrls(ok.pluginsurfaceurls)
+        self.serverCapabilities = ok.advertisedServerCapabilities
+        self.serverCapabilityNames = ok.advertisedServerCapabilityNames
+        self.authenticatedOperatorScopes = ok.authenticatedOperatorScopes
+        let supportsRoutingGuard = self.serverCapabilities?.contains(.chatSendRoutingContract) == true
+        let hasOperatorRead = self.authenticatedOperatorScopes?.contains("operator.read") == true
+        let hasOperatorWrite = self.authenticatedOperatorScopes?.contains("operator.write") == true
+        let gatewayVersion = Self.diagnosticGatewayVersion(ok.server["version"]?.value as? String)
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .route,
+            state: Self.diagnosticHelloState(
+                supportsRoutingGuard: supportsRoutingGuard,
+                hasRequiredOperatorScopes: hasOperatorRead && hasOperatorWrite),
+            socketGeneration: socketGeneration,
+            routeGeneration: admissionGeneration,
+            sequence: ok._protocol,
+            stream: gatewayVersion))
+        if self.hasEverConnected {
+            self.broadcastServerEvent(
+                EventFrame(type: "event", event: "seqGap", payload: nil, seq: nil, stateversion: nil))
+        }
+        self.hasEverConnected = true
+        self.markSnapshotReceived()
+        await self.notifyConnectedIfNeeded(admissionGeneration: admissionGeneration)
+    }
+
+    private func handleBootstrapHandoffReceipt(
+        _ receipt: GatewayBootstrapHandoffConnectionReceipt,
+        channelGeneration: UInt64,
+        socketGeneration: UInt64) async
+    {
+        guard self.channelGeneration == channelGeneration,
+              receipt.physicalConnectionGeneration == socketGeneration,
+              self.activeBootstrapToken?.isEmpty == false,
+              let activeURL = self.activeURL,
+              let activeConnectOptionsKey = self.activeConnectOptionsKey
+        else { return }
+        self.pendingBootstrapHandoffReceipt = PendingBootstrapHandoffReceipt(
+            channelGeneration: channelGeneration,
+            receipt: receipt,
+            url: activeURL,
+            connectOptionsKey: activeConnectOptionsKey,
+            sessionIdentity: self.activeSessionIdentity)
+        // The Channel already consumed its one-shot copy before invoking this
+        // boundary. Mirror that fact in session ownership before any await so a
+        // snapshot timeout cannot make a caller believe replay is permitted.
+        self.consumedBootstrapTokenDigest = Self.bootstrapTokenDigest(self.activeBootstrapToken)
+        self.activeBootstrapToken = nil
+        // A rejected one-shot setup cannot rely on a later route admission: no
+        // partial credential batch is persisted, so an immediate socket loss has
+        // no authenticated reconnect path. Deliver the token-free outcome before
+        // listen() so the owner can surface the exact role/scope failure once.
+        if let onBootstrapHandoffOutcome {
+            await onBootstrapHandoffOutcome(receipt)
+        }
+        guard self.channelGeneration == channelGeneration,
+              self.pendingBootstrapHandoffReceipt?.receipt.physicalConnectionGeneration == socketGeneration
+        else { return }
+    }
+
     private nonisolated static func diagnosticGatewayVersion(_ value: String?) -> String {
         let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !normalized.isEmpty, normalized.count <= 64 else { return "redacted" }
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_+"))
         return normalized.unicodeScalars.allSatisfy { allowed.contains($0) } ? normalized : "redacted"
+    }
+
+    private nonisolated static func bootstrapTokenDigest(_ value: String?) -> Data? {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalized.isEmpty else { return nil }
+        return Data(SHA256.hash(data: Data(normalized.utf8)))
     }
 
     nonisolated static func diagnosticHelloState(
@@ -798,13 +942,16 @@ public actor GatewayNodeSession {
         }
     }
 
-    private func resetConnectionState() {
+    private func resetConnectionState(preservingPendingBootstrapHandoff: Bool = false) {
         self.hasNotifiedConnected = false
         self.snapshotReceived = false
         self.serverCapabilities = nil
         self.serverCapabilityNames = nil
         self.authenticatedOperatorScopes = nil
         self.routeBoundBootstrapHandoffReceipt = nil
+        if !preservingPendingBootstrapHandoff {
+            self.pendingBootstrapHandoffReceipt = nil
+        }
         self.drainSnapshotWaiters(returning: .invalidated)
     }
 
@@ -825,7 +972,7 @@ public actor GatewayNodeSession {
         let onDisconnected = self.onDisconnected
         // The underlying channel can auto-reconnect; resetting state here ensures we surface a fresh
         // onConnected callback once a new snapshot arrives after reconnect.
-        self.resetConnectionState()
+        self.resetConnectionState(preservingPendingBootstrapHandoff: true)
         if let onDisconnected {
             _ = self.enqueueLifecycleCallback {
                 await onDisconnected(reason)
@@ -901,6 +1048,8 @@ public actor GatewayNodeSession {
         self.connectOptions = nil
         self.onConnected = nil
         self.onConnectedRoute = nil
+        self.onConnectedAdmission = nil
+        self.onBootstrapHandoffOutcome = nil
         self.onDisconnected = nil
         self.onInvoke = nil
         self.activeSocketGeneration = nil
@@ -936,9 +1085,18 @@ public actor GatewayNodeSession {
         else { return }
         let onConnected = self.onConnected
         let onConnectedRoute = self.onConnectedRoute
-        guard onConnected != nil || onConnectedRoute != nil else { return }
+        let onConnectedAdmission = self.onConnectedAdmission
+        let bootstrapReceipt = self.routeBoundBootstrapHandoffReceipt.flatMap { bound in
+            bound.route == route ? bound.receipt : nil
+        }
+        let admission = GatewayNodeSessionAdmission(
+            route: route,
+            bootstrapHandoffReceipt: bootstrapReceipt)
+        guard onConnected != nil || onConnectedRoute != nil || onConnectedAdmission != nil else { return }
         let callback = self.enqueueLifecycleCallback {
-            if let onConnectedRoute {
+            if let onConnectedAdmission {
+                await onConnectedAdmission(admission)
+            } else if let onConnectedRoute {
                 await onConnectedRoute(route)
             } else if let onConnected {
                 await onConnected()
