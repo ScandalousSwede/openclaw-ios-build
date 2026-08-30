@@ -515,7 +515,7 @@ private func connectForGenerationTest(
     }) async throws
 {
     let onConnectedAdmission: (@Sendable (GatewayNodeSessionAdmission) async -> Void)? =
-        admissionRecorder.map { recorder in
+        admissionRecorder.map { recorder -> (@Sendable (GatewayNodeSessionAdmission) async -> Void) in
             { admission in await recorder.record(admission) }
         }
     try await gateway.connect(
@@ -769,7 +769,8 @@ struct GatewayNodeSessionTests {
             })
 
         let callbackRoute = try #require(await recorder.value())
-        #expect(callbackRoute == await gateway.currentRoute(ifGatewayID: "route-owner"))
+        let currentRoute = await gateway.currentRoute(ifGatewayID: "route-owner")
+        #expect(callbackRoute == currentRoute)
         await gateway.disconnect()
         #expect(await gateway.currentGatewayID(ifCurrentRoute: callbackRoute) == nil)
     }
