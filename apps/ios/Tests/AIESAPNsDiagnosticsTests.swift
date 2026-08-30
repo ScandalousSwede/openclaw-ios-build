@@ -109,10 +109,10 @@ struct AIESAPNsDiagnosticsTests {
 
     @Test @MainActor
     func deviceTokenBytesNeverEnterDiagnosticEvents() throws {
+        let model = NodeAppModel()
         let probe = APNsDiagnosticLineProbe()
         OpenClawDiagnosticRecorder.installSink { probe.append($0) }
         defer { OpenClawDiagnosticRecorder.clearSink() }
-        let model = NodeAppModel()
 
         model.updateAPNsDeviceToken(
             Data([0xde, 0xad, 0xbe, 0xef]),
@@ -123,9 +123,10 @@ struct AIESAPNsDiagnosticsTests {
 
         let superseded = probe.events().filter { $0.state == "registration_superseded" }
         #expect(superseded.count == 1)
-        #expect(superseded[0].resultClass == "new_os_token_received")
-        #expect(superseded[0].byteCount == nil)
-        #expect(superseded[0].deviceIdentityHash == nil)
+        let supersededEvent = try #require(superseded.first)
+        #expect(supersededEvent.resultClass == "new_os_token_received")
+        #expect(supersededEvent.byteCount == nil)
+        #expect(supersededEvent.deviceIdentityHash == nil)
         let output = String(
             decoding: try JSONEncoder().encode(probe.events()),
             as: UTF8.self).lowercased()
