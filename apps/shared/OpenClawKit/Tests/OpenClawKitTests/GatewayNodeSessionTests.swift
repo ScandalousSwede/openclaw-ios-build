@@ -1520,6 +1520,14 @@ struct GatewayNodeSessionTests {
         let operatorSession = FakeGatewayWebSocketSession()
         let nodeGateway = GatewayNodeSession(connectionRole: .node)
         let operatorGateway = GatewayNodeSession(connectionRole: .operator)
+        let nodeEvents = await nodeGateway.subscribeServerEvents(bufferingNewest: 32)
+        let nodeEventProbe = GatewayEventProbe()
+        let nodeEventListener = Task {
+            for await event in nodeEvents {
+                await nodeEventProbe.append(event.event)
+            }
+        }
+        defer { nodeEventListener.cancel() }
 
         try await connectForGenerationTest(
             nodeGateway,
@@ -1531,26 +1539,26 @@ struct GatewayNodeSessionTests {
             endpoint: "ws://operator.example.invalid")
         let operatorRoute = try #require(await operatorGateway.currentRoute())
         let oldNodeTask = try #require(firstNodeSession.latestTask())
-        let staleNodeCountBefore = diagnostics.snapshot()
-            .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
-            .filter {
-                $0.state == "stale_callback_ignored" && $0.connectionRole == .node
-            }.count
 
         try await connectForGenerationTest(
             nodeGateway,
             session: replacementNodeSession,
             endpoint: "ws://node-replacement.example.invalid")
-        oldNodeTask.emitReceiveFailure()
-        try await waitUntil("stale node callback is diagnosed") {
-            diagnostics.snapshot()
-                .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
-                .filter {
-                    $0.state == "stale_callback_ignored" && $0.connectionRole == .node
-                }.count > staleNodeCountBefore
+        let replacementNodeTask = try #require(replacementNodeSession.latestTask())
+        let replacementNodeRoute = try #require(await nodeGateway.currentRoute())
+
+        // A replaced channel is weakly owned by its receive callback and may already be
+        // deallocated, so a late fake callback is not required to emit a diagnostic. The
+        // product invariant is that it cannot cross into or relabel the replacement route.
+        try oldNodeTask.emitEvent(name: "old.node.route.event", seq: 1)
+        try replacementNodeTask.emitEvent(name: "current.node.route.event", seq: 1)
+        try await waitUntil("replacement node event is delivered") {
+            await nodeEventProbe.contains("current.node.route.event")
         }
 
         #expect(await operatorGateway.currentRoute() == operatorRoute)
+        #expect(await nodeGateway.currentRoute() == replacementNodeRoute)
+        #expect(await nodeEventProbe.contains("old.node.route.event") == false)
         let events = diagnostics.snapshot().compactMap(OpenClawDiagnosticRecorder.decodeRecord)
         let routeAndSocketEvents = events.filter { $0.kind == .route || $0.kind == .socket }
         #expect(!routeAndSocketEvents.isEmpty)
@@ -1559,9 +1567,6 @@ struct GatewayNodeSessionTests {
         })
         #expect(routeAndSocketEvents.contains { $0.connectionRole == .node })
         #expect(routeAndSocketEvents.contains { $0.connectionRole == .operator })
-        #expect(events.filter {
-            $0.state == "stale_callback_ignored" && $0.connectionRole == .node
-        }.count > staleNodeCountBefore)
         let encodedDiagnostics = String(
             decoding: try JSONEncoder().encode(routeAndSocketEvents),
             as: UTF8.self)
