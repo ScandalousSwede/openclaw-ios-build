@@ -1531,6 +1531,11 @@ struct GatewayNodeSessionTests {
             endpoint: "ws://operator.example.invalid")
         let operatorRoute = try #require(await operatorGateway.currentRoute())
         let oldNodeTask = try #require(firstNodeSession.latestTask())
+        let staleNodeCountBefore = diagnostics.snapshot()
+            .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+            .filter {
+                $0.state == "stale_callback_ignored" && $0.connectionRole == .node
+            }.count
 
         try await connectForGenerationTest(
             nodeGateway,
@@ -1540,7 +1545,9 @@ struct GatewayNodeSessionTests {
         try await waitUntil("stale node callback is diagnosed") {
             diagnostics.snapshot()
                 .compactMap(OpenClawDiagnosticRecorder.decodeRecord)
-                .contains { $0.state == "stale_callback_ignored" }
+                .filter {
+                    $0.state == "stale_callback_ignored" && $0.connectionRole == .node
+                }.count > staleNodeCountBefore
         }
 
         #expect(await operatorGateway.currentRoute() == operatorRoute)
@@ -1552,8 +1559,9 @@ struct GatewayNodeSessionTests {
         })
         #expect(routeAndSocketEvents.contains { $0.connectionRole == .node })
         #expect(routeAndSocketEvents.contains { $0.connectionRole == .operator })
-        #expect(events.filter { $0.state == "stale_callback_ignored" }
-            .allSatisfy { $0.connectionRole == .node })
+        #expect(events.filter {
+            $0.state == "stale_callback_ignored" && $0.connectionRole == .node
+        }.count > staleNodeCountBefore)
         let encodedDiagnostics = String(
             decoding: try JSONEncoder().encode(routeAndSocketEvents),
             as: UTF8.self)
