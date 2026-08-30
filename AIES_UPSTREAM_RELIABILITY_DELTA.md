@@ -51,6 +51,7 @@ Resulting commits:
 - `83c06a7bd4` — `fix(ios): fence dual-role recovery to exact routes`
 - `43b567b6af` — `fix(ios): bind dual-role handoff to one route`
 - `9081ef9ccf` — `fix(shared): type credential selection explicitly`
+- `e80a15a832` — `test(shared): make route fixture Swift 6.2 compatible`
 
 Rollback: revert Package-B commits without reverting Package A. Package B owns no signing, package-authority, or release-policy state.
 
@@ -172,7 +173,7 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: high but bounded; AIES has role-scoped auth, stable gateway identity, route generations, and a stricter persistence boundary.
 - Action: ported the semantic requirement into a two-role, exact-owner bootstrap receipt. Node and operator tokens/scopes are validated together; a partial result is not mobile-setup success and secrets are excluded from diagnostics.
 - Tests: complete dual-role issuance, node-only, missing operator token, missing each required operator scope, unexpected overgrant, persistence failure, exact route retirement, and reconnect auth.
-- Resulting commits: `575855468c`, `83c06a7bd4`, `43b567b6af`, `9081ef9ccf`
+- Resulting commits: `575855468c`, `83c06a7bd4`, `43b567b6af`, `9081ef9ccf`, `e80a15a832`
 - Rollback commit: revert the Package-B commits in reverse order.
 
 ### PR #92552 — force stale foreground gateway reconnects
@@ -189,7 +190,7 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: high; route-unbound reconnects would violate AIES S1/S3 ownership fencing.
 - Action: ported the foreground-recovery intent with stronger AIES semantics: health, disconnect, reconnect, event delivery, and deferred work are bound to captured node/operator routes and stable gateway identity. An old route cannot disconnect or terminally block its successor.
 - Tests: forced stale reconnect, user-selected replacement protection, route-bound event/lifecycle operations, operator reconnect, and route-generation outbox guards.
-- Resulting commits: `575855468c`, `dd50585dcf`, `83c06a7bd4`, `43b567b6af`, `9081ef9ccf`
+- Resulting commits: `575855468c`, `dd50585dcf`, `83c06a7bd4`, `43b567b6af`, `9081ef9ccf`, `e80a15a832`
 - Rollback commit: revert Package B in reverse order.
 
 ### PR #100732 — harden Apple Watch pairing activation
