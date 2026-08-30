@@ -62,7 +62,8 @@
         "575855468c",
         "dd50585dcf",
         "83c06a7bd4",
-        "43b567b6af"
+        "43b567b6af",
+        "9081ef9ccf"
       ],
       "rollback": "revert Package-B commits in reverse order",
       "upstream_items": [98066, 92552],
@@ -328,7 +329,7 @@
         "LAN reconnect auth",
         "route retirement"
       ],
-      "resulting_commits": ["575855468c", "83c06a7bd4", "43b567b6af"],
+      "resulting_commits": ["575855468c", "83c06a7bd4", "43b567b6af", "9081ef9ccf"],
       "rollback": "revert Package B"
     },
     {
@@ -369,7 +370,8 @@
         "575855468c",
         "dd50585dcf",
         "83c06a7bd4",
-        "43b567b6af"
+        "43b567b6af",
+        "9081ef9ccf"
       ],
       "rollback": "revert Package B in reverse order"
     },
