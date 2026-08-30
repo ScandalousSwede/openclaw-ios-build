@@ -266,6 +266,50 @@ private final class TestTTSProgressRecorder {
     }
 }
 
+private struct TestTTSBreadcrumbBoundary: Equatable {
+    let stage: TalkTTSBreadcrumbStage
+    let detail: String?
+    let byteCount: Int?
+    let sampleRate: Int?
+    let durationRecorded: Bool
+
+    init(
+        _ stage: TalkTTSBreadcrumbStage,
+        detail: String? = nil,
+        byteCount: Int? = nil,
+        sampleRate: Int? = nil,
+        durationRecorded: Bool = false)
+    {
+        self.stage = stage
+        self.detail = detail
+        self.byteCount = byteCount
+        self.sampleRate = sampleRate
+        self.durationRecorded = durationRecorded
+    }
+
+    init(_ breadcrumb: TalkTTSBreadcrumb) {
+        self.init(
+            breadcrumb.stage,
+            detail: breadcrumb.detail,
+            byteCount: breadcrumb.byteCount,
+            sampleRate: breadcrumb.sampleRate,
+            durationRecorded: breadcrumb.durationMilliseconds != nil)
+    }
+}
+
+@MainActor
+private final class TestTTSBreadcrumbRecorder {
+    private(set) var values: [TalkTTSBreadcrumb] = []
+
+    var boundaries: [TestTTSBreadcrumbBoundary] {
+        self.values.map { TestTTSBreadcrumbBoundary($0) }
+    }
+
+    func record(_ breadcrumb: TalkTTSBreadcrumb) {
+        self.values.append(breadcrumb)
+    }
+}
+
 @MainActor
 private final class TestGenerationState {
     var isCurrent = true
@@ -506,6 +550,206 @@ private final class TestGenerationState {
         #expect(fixture.pcm.stopCount == 1)
         #expect(fixture.progress.values.contains { $0.firstAudioByteReceived == true && $0.totalAudioBytes == 5 })
         #expect(fixture.progress.values.last?.state == .completed)
+    }
+
+    @Test func successfulPCMBreadcrumbsRecordExactBoundaryOrderAndMetadata() async {
+        let fixture = Self.makeFixture()
+
+        let result = await fixture.pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "pcm_44100"),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        let expected = [
+            TestTTSBreadcrumbBoundary(.playbackPipelineEntered),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareStarted),
+            TestTTSBreadcrumbBoundary(
+                .audioSessionPrepared,
+                detail: "playandrecord_spokenaudio_active_speaker"),
+            TestTTSBreadcrumbBoundary(
+                .providerRequestStarted,
+                detail: "pcm_44100",
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.decoderSelected, detail: "pcm", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.playerCallEntered, detail: "pcm", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(
+                .firstAudioByte,
+                detail: "pcm",
+                byteCount: 4,
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.playerCallReturned, detail: "finished", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(
+                .providerResult,
+                detail: "success",
+                byteCount: 4,
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(
+                .playbackCompleted,
+                detail: "elevenlabs",
+                byteCount: 4,
+                sampleRate: 44100,
+                durationRecorded: true),
+        ]
+        #expect(fixture.breadcrumbs.boundaries == expected)
+    }
+
+    @Test func PCMToMP3ToSystemBreadcrumbsRecordEachFallbackBoundary() async {
+        let fixture = Self.makeFixture()
+        fixture.pcm.result = StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        fixture.mp3.result = StreamingPlaybackResult(finished: false, interruptedAt: nil)
+
+        let result = await fixture.pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "pcm_44100"),
+            mp3Retry: Self.attempt(format: "mp3_44100_128"))
+
+        #expect(result.succeeded)
+        #expect(result.provider == .system)
+        let expected = [
+            TestTTSBreadcrumbBoundary(.playbackPipelineEntered),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareStarted),
+            TestTTSBreadcrumbBoundary(
+                .audioSessionPrepared,
+                detail: "playandrecord_spokenaudio_active_speaker"),
+            TestTTSBreadcrumbBoundary(
+                .providerRequestStarted,
+                detail: "pcm_44100",
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.decoderSelected, detail: "pcm", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.playerCallEntered, detail: "pcm", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(
+                .firstAudioByte,
+                detail: "pcm",
+                byteCount: 4,
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.playerCallReturned, detail: "incomplete", sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(
+                .providerResult,
+                detail: "playback_failed",
+                byteCount: 4,
+                sampleRate: 44100),
+            TestTTSBreadcrumbBoundary(.fallbackTransition, detail: "pcm_to_mp3"),
+            TestTTSBreadcrumbBoundary(.providerRequestStarted, detail: "mp3_44100_128"),
+            TestTTSBreadcrumbBoundary(.decoderSelected, detail: "mp3"),
+            TestTTSBreadcrumbBoundary(.playerCallEntered, detail: "mp3"),
+            TestTTSBreadcrumbBoundary(.firstAudioByte, detail: "mp3", byteCount: 4),
+            TestTTSBreadcrumbBoundary(.playerCallReturned, detail: "incomplete"),
+            TestTTSBreadcrumbBoundary(
+                .providerResult,
+                detail: "playback_failed",
+                byteCount: 4),
+            TestTTSBreadcrumbBoundary(.fallbackTransition, detail: "mp3_to_system"),
+            TestTTSBreadcrumbBoundary(.systemSpeechCallEntered, detail: "playback_failed"),
+            TestTTSBreadcrumbBoundary(.playbackStarted, detail: "system"),
+            TestTTSBreadcrumbBoundary(
+                .playbackCompleted,
+                detail: "system",
+                durationRecorded: true),
+        ]
+        #expect(fixture.breadcrumbs.boundaries == expected)
+    }
+
+    @Test func audioPrepareFailureBreadcrumbsPrecedeSystemFallback() async {
+        let breadcrumbs = TestTTSBreadcrumbRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { throw NSError(domain: "AudioSession", code: 1) },
+            report: { _ in },
+            breadcrumb: { breadcrumbs.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "pcm_44100"),
+            mp3Retry: Self.attempt(format: "mp3_44100_128"))
+
+        #expect(result.succeeded)
+        #expect(result.provider == .system)
+        let expected = [
+            TestTTSBreadcrumbBoundary(.playbackPipelineEntered),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareStarted),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareFailed),
+            TestTTSBreadcrumbBoundary(.fallbackTransition, detail: "audio_session_to_system"),
+            TestTTSBreadcrumbBoundary(.systemSpeechCallEntered, detail: "direct"),
+            TestTTSBreadcrumbBoundary(.playbackStarted, detail: "system"),
+            TestTTSBreadcrumbBoundary(
+                .playbackCompleted,
+                detail: "system",
+                durationRecorded: true),
+        ]
+        #expect(breadcrumbs.boundaries == expected)
+    }
+
+    @Test func systemSpeechFailureBreadcrumbsEndAtPlaybackFailure() async {
+        let fixture = Self.makeFixture()
+        fixture.system.error = NSError(domain: "SystemSpeech", code: 1)
+
+        let result = await fixture.pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: nil,
+            mp3Retry: nil)
+
+        #expect(!result.succeeded)
+        #expect(result.outcome == .playbackFailed)
+        let expected = [
+            TestTTSBreadcrumbBoundary(.playbackPipelineEntered),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareStarted),
+            TestTTSBreadcrumbBoundary(
+                .audioSessionPrepared,
+                detail: "playandrecord_spokenaudio_active_speaker"),
+            TestTTSBreadcrumbBoundary(.fallbackTransition, detail: "provider_unavailable_to_system"),
+            TestTTSBreadcrumbBoundary(.systemSpeechCallEntered, detail: "direct"),
+            TestTTSBreadcrumbBoundary(.playbackStarted, detail: "system"),
+            TestTTSBreadcrumbBoundary(
+                .playbackFailed,
+                detail: "system",
+                durationRecorded: true),
+        ]
+        #expect(fixture.breadcrumbs.boundaries == expected)
+    }
+
+    @Test func cancelledSystemSpeechDoesNotEmitFalseTerminalBreadcrumb() async {
+        let system = SuspendedSystemSpeech()
+        let breadcrumbs = TestTTSBreadcrumbRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: system,
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            breadcrumb: { breadcrumbs.record($0) })
+        let playback = Task { @MainActor in
+            await pipeline.speak(
+                text: "authoritative text",
+                language: nil,
+                providerAttempt: nil,
+                mp3Retry: nil)
+        }
+
+        await system.waitForCallCount(1)
+        playback.cancel()
+        system.complete(callID: 1)
+        let result = await playback.value
+
+        #expect(!result.succeeded)
+        #expect(result.outcome == .interrupted)
+        let expected = [
+            TestTTSBreadcrumbBoundary(.playbackPipelineEntered),
+            TestTTSBreadcrumbBoundary(.audioSessionPrepareStarted),
+            TestTTSBreadcrumbBoundary(
+                .audioSessionPrepared,
+                detail: "playandrecord_spokenaudio_active_speaker"),
+            TestTTSBreadcrumbBoundary(.fallbackTransition, detail: "provider_unavailable_to_system"),
+            TestTTSBreadcrumbBoundary(.systemSpeechCallEntered, detail: "direct"),
+            TestTTSBreadcrumbBoundary(.playbackStarted, detail: "system"),
+        ]
+        #expect(breadcrumbs.boundaries == expected)
     }
 
     @Test func staleSuccessfulSpeechCannotCompleteOrOverwriteReplacement() async {
@@ -815,12 +1059,14 @@ private final class TestGenerationState {
             pcm: TestPCMPlayer,
             mp3: TestMP3Player,
             system: TestSystemSpeech,
-            progress: TestTTSProgressRecorder)
+            progress: TestTTSProgressRecorder,
+            breadcrumbs: TestTTSBreadcrumbRecorder)
     {
         let pcm = TestPCMPlayer()
         let mp3 = TestMP3Player()
         let system = TestSystemSpeech()
         let progress = TestTTSProgressRecorder()
+        let breadcrumbs = TestTTSBreadcrumbRecorder()
         let pipeline = TalkTTSPlaybackPipeline(
             pcmPlayer: pcm,
             mp3Player: mp3,
@@ -835,8 +1081,9 @@ private final class TestGenerationState {
                     activation: .active)
             },
             isCurrent: isCurrent,
-            report: { progress.record($0) })
-        return (pipeline, pcm, mp3, system, progress)
+            report: { progress.record($0) },
+            breadcrumb: { breadcrumbs.record($0) })
+        return (pipeline, pcm, mp3, system, progress, breadcrumbs)
     }
 
     private static var routeEvidence: TalkAudioRouteEvidence {

@@ -9,6 +9,8 @@ struct OpenClawDiagnosticEventTests {
         let event = OpenClawDiagnosticEvent(
             kind: .chat,
             state: "received",
+            processIdentifier: 4242,
+            launchIdentifier: "launch-epoch-one",
             socketGeneration: 7,
             routeGeneration: 9,
             activityGeneration: 11,
@@ -17,13 +19,20 @@ struct OpenClawDiagnosticEventTests {
             messageIdentifier: "private message body\n",
             eventIdentifier: String(repeating: "x", count: 129),
             operationIdentifier: "sk_live_credential",
+            operationGeneration: 17,
             sequence: 42,
             stream: "assistant",
+            byteCount: 8192,
+            sampleRate: 44100,
+            durationMilliseconds: 321,
             networkInterfaces: ["wifi", "cellular", "wifi", "bad interface"],
             observedAt: Date(timeIntervalSince1970: 0))
 
         #expect(event.schema == OpenClawDiagnosticEvent.schemaName)
         #expect(event.state == "received")
+        #expect(event.processID == 4242)
+        #expect(event.launchID?.count == 16)
+        #expect(event.launchID != "launch-epoch-one")
         #expect(event.socketGeneration == 7)
         #expect(event.routeGeneration == 9)
         #expect(event.activityGeneration == 11)
@@ -36,8 +45,12 @@ struct OpenClawDiagnosticEventTests {
         #expect(event.eventID?.count == 16)
         #expect(event.operationID?.count == 16)
         #expect(event.operationID != "sk_live_credential")
+        #expect(event.operationGeneration == 17)
         #expect(event.sequence == 42)
         #expect(event.stream == "assistant")
+        #expect(event.byteCount == 8192)
+        #expect(event.sampleRate == 44100)
+        #expect(event.durationMilliseconds == 321)
         #expect(event.networkInterfaces == ["cellular", "wifi"])
         #expect(event.observedAt == "1970-01-01T00:00:00.000Z")
     }
@@ -86,6 +99,11 @@ struct OpenClawDiagnosticEventTests {
             ["prompt": "private transcript"],
             ["run_id": "Bearer sk-private-credential"],
             ["session_hash": "private-session"],
+            ["launch_id": "unhashed-launch-identifier"],
+            ["process_id": -1],
+            ["byte_count": -1],
+            ["sample_rate": 0],
+            ["duration_milliseconds": -1],
             ["observed_at": "not-a-timestamp"],
             ["network_interfaces": ["wifi", "cellular"]],
         ]
@@ -112,5 +130,46 @@ struct OpenClawDiagnosticEventTests {
         defer { OpenClawDiagnosticRecorder.clearSink() }
         OpenClawDiagnosticRecorder.record(unsafeEvent)
         #expect(captured.withLock { $0.isEmpty })
+    }
+
+    @Test func newEventsCarryStablePerProcessLaunchMetadata() {
+        let first = OpenClawDiagnosticEvent(kind: .appLifecycle, state: "first")
+        let second = OpenClawDiagnosticEvent(kind: .tts, state: "second")
+
+        #expect(first.processID == Int(ProcessInfo.processInfo.processIdentifier))
+        #expect(second.processID == first.processID)
+        #expect(first.launchID?.count == 16)
+        #expect(second.launchID == first.launchID)
+    }
+
+    @Test func decoderRetainsLegacyV1RecordsWithoutNewMetadata() throws {
+        let current = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "received",
+            socketGeneration: 3,
+            observedAt: Date(timeIntervalSince1970: 0))
+        var object = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(current)) as? [String: Any])
+        object["schema"] = "argus.openclaw-ios.diagnostic-event.v1"
+        for key in [
+            "process_id",
+            "launch_id",
+            "operation_generation",
+            "byte_count",
+            "sample_rate",
+            "duration_milliseconds",
+        ] {
+            object.removeValue(forKey: key)
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let record = "aies_diagnostic=" + data.base64EncodedString()
+        let decoded = try #require(OpenClawDiagnosticRecorder.decodeRecord(record))
+
+        #expect(decoded.schema == "argus.openclaw-ios.diagnostic-event.v1")
+        #expect(decoded.kind == .chat)
+        #expect(decoded.state == "received")
+        #expect(decoded.socketGeneration == 3)
+        #expect(decoded.processID == nil)
+        #expect(decoded.launchID == nil)
     }
 }

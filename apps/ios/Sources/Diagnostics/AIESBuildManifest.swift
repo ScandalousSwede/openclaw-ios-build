@@ -1,7 +1,9 @@
 import Foundation
 
 struct AIESBuildManifest: Codable, Equatable, Sendable {
-    static let schemaName = "argus.openclaw-ios.build-manifest.v1"
+    /// The on-device crash export is deliberately narrower than the archived build manifest:
+    /// its UUID fields describe the installed main executable used for crash symbolication.
+    static let schemaName = "argus.openclaw-ios.runtime-build-manifest.v1"
 
     let schema: String
     let gitSHA: String
@@ -16,19 +18,24 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
     let extensionBundleIDs: [String]
     let watchBundleIDsIfPresent: [String]
     let archiveUUID: String?
+    let mainBinaryUUIDs: [AIESRuntimeMachOUUIDReader.Slice]
     let dsymUUIDs: [String]
+    let runtimeUUIDSource: String
+    let runtimeUUIDStatus: AIESRuntimeMachOUUIDReader.Status
     let configuration: String
     let apsEnvironmentIfSigned: String?
 
     static func current(bundle: Bundle = .main) -> AIESBuildManifest {
         self.from(
             infoDictionary: bundle.infoDictionary ?? [:],
-            bundleIdentifier: bundle.bundleIdentifier)
+            bundleIdentifier: bundle.bundleIdentifier,
+            runtimeUUIDObservation: AIESRuntimeMachOUUIDReader.readMainExecutable(bundle: bundle))
     }
 
     static func from(
         infoDictionary: [String: Any],
-        bundleIdentifier: String?) -> AIESBuildManifest
+        bundleIdentifier: String?,
+        runtimeUUIDObservation: AIESRuntimeMachOUUIDReader.Observation) -> AIESBuildManifest
     {
         let archiveUUID = self.optionalValue(infoDictionary, key: "OpenClawBuildArchiveUUID")
             .flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
@@ -48,7 +55,10 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
             extensionBundleIDs: self.stringArray(infoDictionary, key: "OpenClawBuildExtensionBundleIDs"),
             watchBundleIDsIfPresent: self.stringArray(infoDictionary, key: "OpenClawBuildWatchBundleIDs"),
             archiveUUID: archiveUUID,
-            dsymUUIDs: [],
+            mainBinaryUUIDs: runtimeUUIDObservation.slices,
+            dsymUUIDs: Array(Set(runtimeUUIDObservation.slices.map(\.uuid))).sorted(),
+            runtimeUUIDSource: runtimeUUIDObservation.source,
+            runtimeUUIDStatus: runtimeUUIDObservation.status,
             configuration: self.value(infoDictionary, key: "OpenClawBuildConfiguration"),
             apsEnvironmentIfSigned: apsEnvironment)
     }
@@ -83,7 +93,10 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
         case extensionBundleIDs = "extension_bundle_ids"
         case watchBundleIDsIfPresent = "watch_bundle_ids_if_present"
         case archiveUUID = "archive_uuid"
+        case mainBinaryUUIDs = "main_binary_uuids"
         case dsymUUIDs = "dsym_uuids"
+        case runtimeUUIDSource = "runtime_uuid_source"
+        case runtimeUUIDStatus = "runtime_uuid_status"
         case configuration
         case apsEnvironmentIfSigned = "aps_environment_if_signed"
     }
@@ -107,7 +120,10 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
         } else {
             try container.encodeNil(forKey: .archiveUUID)
         }
+        try container.encode(self.mainBinaryUUIDs, forKey: .mainBinaryUUIDs)
         try container.encode(self.dsymUUIDs, forKey: .dsymUUIDs)
+        try container.encode(self.runtimeUUIDSource, forKey: .runtimeUUIDSource)
+        try container.encode(self.runtimeUUIDStatus, forKey: .runtimeUUIDStatus)
         try container.encode(self.configuration, forKey: .configuration)
         if let apsEnvironmentIfSigned {
             try container.encode(apsEnvironmentIfSigned, forKey: .apsEnvironmentIfSigned)

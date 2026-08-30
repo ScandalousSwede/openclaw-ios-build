@@ -191,6 +191,7 @@ final class TalkModeManager: NSObject {
     var mp3Player: StreamingAudioPlaying = StreamingAudioPlayer.shared
     var systemSpeech: TalkSystemSpeechProviding = TalkSystemSpeechSynthesizer.shared
     private var ttsGeneration: UInt64 = 0
+    private var activeTTSGeneration: UInt64?
     private var currentAudioActivation: TalkAudioRouteEvidence.Activation = .unknown
     private var audioRouteObserver: NSObjectProtocol?
     private var durableChatGatewayOwnerID: (@MainActor () -> String?)?
@@ -2734,14 +2735,23 @@ final class TalkModeManager: NSObject {
             isCurrent: { [weak self] in self?.ttsGeneration == generation },
             report: { [weak self] progress in
                 self?.updateTTSDiagnostics(progress, generation: generation)
+            },
+            breadcrumb: { [weak self] breadcrumb in
+                self?.recordTTSBreadcrumb(breadcrumb, generation: generation)
             })
     }
 
     private func beginTTSGeneration() -> UInt64 {
+        if let activeTTSGeneration {
+            self.recordTTSBreadcrumb(
+                TalkTTSBreadcrumb(stage: .generationCancelled, detail: "replaced"),
+                generation: activeTTSGeneration)
+        }
         _ = self.pcmPlayer.stop()
         _ = self.mp3Player.stop()
         self.systemSpeech.stop()
         self.ttsGeneration &+= 1
+        self.activeTTSGeneration = self.ttsGeneration
         self.currentPlaybackProvider = .none
         self.ttsDiagnostics.providerAttemptOutcome = .notAttempted
         self.ttsDiagnostics.finalProvider = .none
@@ -2750,10 +2760,19 @@ final class TalkModeManager: NSObject {
         self.ttsDiagnostics.totalAudioBytes = 0
         self.ttsDiagnostics.pcmSampleRate = nil
         self.ttsDiagnostics.durationMilliseconds = nil
+        self.recordTTSBreadcrumb(
+            TalkTTSBreadcrumb(stage: .requestAdmitted),
+            generation: self.ttsGeneration)
         return self.ttsGeneration
     }
 
     private func cancelTTSGeneration() {
+        if let activeTTSGeneration {
+            self.recordTTSBreadcrumb(
+                TalkTTSBreadcrumb(stage: .generationCancelled),
+                generation: activeTTSGeneration)
+        }
+        self.activeTTSGeneration = nil
         self.ttsGeneration &+= 1
     }
 
@@ -2775,8 +2794,15 @@ final class TalkModeManager: NSObject {
         if !keepSpeaking {
             self.isSpeaking = false
         }
+        self.recordTTSBreadcrumb(
+            TalkTTSBreadcrumb(stage: .audioSessionRestoreStarted),
+            generation: generation)
         self.restoreAudioSessionAfterLocalSpeech()
         self.restoreConfiguredVoiceModeDescriptor()
+        self.recordTTSBreadcrumb(
+            TalkTTSBreadcrumb(stage: .generationFinalized),
+            generation: generation)
+        self.activeTTSGeneration = nil
     }
 
     private func updateTTSDiagnostics(_ progress: TalkTTSProgress, generation: UInt64? = nil) {
@@ -2807,10 +2833,31 @@ final class TalkModeManager: NSObject {
                 + "finalProvider=\(finalProvider) finalOutcome=\(finalOutcome) bytes=\(bytes) "
                 + "sampleRate=\(sampleRate) durationMs=\(duration)")
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-            kind: .route,
+            kind: .tts,
             state: "tts_\(progress.state.rawValue)",
             operationIdentifier: generation.map { "tts-generation-\($0)" },
-            stream: Self.sanitizedDiagnosticToken(self.ttsDiagnostics.config.provider, fallback: "unknown")))
+            operationGeneration: generation,
+            stream: Self.sanitizedDiagnosticToken(self.ttsDiagnostics.config.provider, fallback: "unknown"),
+            byteCount: progress.totalAudioBytes,
+            sampleRate: progress.pcmSampleRate,
+            durationMilliseconds: progress.durationMilliseconds))
+    }
+
+    private func recordTTSBreadcrumb(_ breadcrumb: TalkTTSBreadcrumb, generation: UInt64) {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: breadcrumb.stage.rawValue,
+            operationIdentifier: "tts-generation-\(generation)",
+            operationGeneration: generation,
+            stream: breadcrumb.detail.map {
+                Self.sanitizedDiagnosticToken($0, fallback: "unknown")
+            },
+            byteCount: breadcrumb.byteCount,
+            sampleRate: breadcrumb.sampleRate,
+            durationMilliseconds: breadcrumb.durationMilliseconds))
+        if breadcrumb.stage.sealsBeforeReturning {
+            _ = GatewayDiagnostics.flush()
+        }
     }
 
     private func recordTTSConfigEvidence() {
@@ -2823,7 +2870,7 @@ final class TalkModeManager: NSObject {
                 + "credentialOwner=\(config.credentialOwnership.rawValue) "
                 + "operatorTalkSecrets=\(config.operatorTalkSecrets.rawValue)")
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-            kind: .route,
+            kind: .tts,
             state: "tts_config_\(config.secretsAccess.rawValue)",
             stream: config.provider))
     }

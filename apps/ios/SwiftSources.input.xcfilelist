@@ -37,6 +37,7 @@ Sources/Design/AgentProModels.swift
 Sources/Diagnostics/AIESBuildManifest.swift
 Sources/Diagnostics/AIESCrashDiagnosticExporter.swift
 Sources/Diagnostics/AIESNetworkDiagnosticMonitor.swift
+Sources/Diagnostics/AIESRuntimeMachOUUIDReader.swift
 Sources/EventKit/EventKitAuthorization.swift
 Sources/Gateway/DeepLinkAgentPromptAlert.swift
 Sources/Gateway/ExecApprovalPromptDialog.swift

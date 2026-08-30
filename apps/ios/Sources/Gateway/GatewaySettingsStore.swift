@@ -479,7 +479,12 @@ enum GatewaySettingsStore {
 
 enum GatewayDiagnostics {
     private static let logger = Logger(subsystem: "ai.openclaw.ios", category: "GatewayDiag")
-    private static let queue = DispatchQueue(label: "ai.openclaw.gateway.diagnostics")
+    private static let queueMarker = DispatchSpecificKey<UInt8>()
+    private static let queue: DispatchQueue = {
+        let queue = DispatchQueue(label: "ai.openclaw.gateway.diagnostics")
+        queue.setSpecific(key: GatewayDiagnostics.queueMarker, value: 1)
+        return queue
+    }()
     static let logFileName = "openclaw-gateway-aies-v1.log"
     static let evidenceRecordMarker = "evidence-v1 "
     private static let maxLogBytes: Int64 = 512 * 1024
@@ -614,6 +619,28 @@ enum GatewayDiagnostics {
         }
     }
 
+    enum FlushResult: String, Codable, Equatable, Sendable {
+        case completed
+        case timedOut = "timed_out"
+        case alreadyOnQueue = "already_on_queue"
+        case logUnavailable = "log_unavailable"
+    }
+
+    struct SanitizedEventSnapshot: Sendable {
+        let events: [OpenClawDiagnosticEvent]
+        let flushResult: FlushResult
+    }
+
+    /// Boundedly waits for previously enqueued records to reach the protected rolling log.
+    /// The same-queue check prevents a diagnostic call from deadlocking its writer.
+    static func flush(timeout: TimeInterval = 0.1) -> FlushResult {
+        guard fileURL != nil else { return .logUnavailable }
+        guard DispatchQueue.getSpecific(key: self.queueMarker) == nil else { return .alreadyOnQueue }
+        let completed = DispatchSemaphore(value: 0)
+        self.queue.async { completed.signal() }
+        return completed.wait(timeout: .now() + max(0, timeout)) == .success ? .completed : .timedOut
+    }
+
     static func reset() {
         guard let url = fileURL else { return }
         self.queue.async {
@@ -622,15 +649,44 @@ enum GatewayDiagnostics {
     }
 
     static func recentSanitizedEvents(limit: Int) -> [OpenClawDiagnosticEvent] {
-        guard limit > 0, let url = fileURL else { return [] }
-        return self.queue.sync {
+        self.snapshotSanitizedEvents(limit: limit, timeout: 1).events
+    }
+
+    /// Drains prior writes and reads one queue-consistent snapshot without allowing an export
+    /// request to wait forever behind a stuck diagnostic writer.
+    static func snapshotSanitizedEvents(
+        limit: Int,
+        timeout: TimeInterval) -> SanitizedEventSnapshot
+    {
+        guard limit > 0 else {
+            return SanitizedEventSnapshot(events: [], flushResult: .completed)
+        }
+        guard let url = fileURL else {
+            return SanitizedEventSnapshot(events: [], flushResult: .logUnavailable)
+        }
+        guard DispatchQueue.getSpecific(key: self.queueMarker) == nil else {
+            return SanitizedEventSnapshot(events: [], flushResult: .alreadyOnQueue)
+        }
+        let result = OSAllocatedUnfairLock<[OpenClawDiagnosticEvent]?>(initialState: nil)
+        let completed = DispatchSemaphore(value: 0)
+        self.queue.async {
             guard let data = self.readLogTail(url: url, maximumBytes: 256 * 1024),
                   let contents = String(data: data, encoding: .utf8)
             else {
-                return []
+                result.withLock { $0 = [] }
+                completed.signal()
+                return
             }
-            return self.decodeSanitizedEvents(contents, limit: min(limit, 500))
+            let events = self.decodeSanitizedEvents(contents, limit: min(limit, 500))
+            result.withLock { $0 = events }
+            completed.signal()
         }
+        guard completed.wait(timeout: .now() + max(0, timeout)) == .success else {
+            return SanitizedEventSnapshot(events: [], flushResult: .timedOut)
+        }
+        return SanitizedEventSnapshot(
+            events: result.withLock { $0 ?? [] },
+            flushResult: .completed)
     }
 
     static func decodeSanitizedEvents(_ contents: String, limit: Int) -> [OpenClawDiagnosticEvent] {

@@ -3,7 +3,7 @@ import OpenClawKit
 import UIKit
 
 enum AIESCrashDiagnosticExporter {
-    static let schemaName = "argus.openclaw-ios.crash-diagnostic.v1"
+    static let schemaName = "argus.openclaw-ios.crash-diagnostic.v2"
     static let maximumExportBytes = 256 * 1024
     static let maximumEventCount = 250
 
@@ -25,6 +25,7 @@ enum AIESCrashDiagnosticExporter {
         let buildManifest: AIESBuildManifest
         let device: Device
         let diagnosticEvents: [OpenClawDiagnosticEvent]
+        let diagnosticLogFlushStatus: GatewayDiagnostics.FlushResult
         let redactionPolicy: String
 
         private enum CodingKeys: String, CodingKey {
@@ -33,6 +34,7 @@ enum AIESCrashDiagnosticExporter {
             case buildManifest = "build_manifest"
             case device
             case diagnosticEvents = "diagnostic_events"
+            case diagnosticLogFlushStatus = "diagnostic_log_flush_status"
             case redactionPolicy = "redaction_policy"
         }
     }
@@ -51,15 +53,19 @@ enum AIESCrashDiagnosticExporter {
     @MainActor
     static func writeExport() throws -> URL {
         let device = UIDevice.current
+        let diagnosticSnapshot = GatewayDiagnostics.snapshotSanitizedEvents(
+            limit: self.maximumEventCount,
+            timeout: 1)
         let data = try self.makeData(
             buildManifest: .current(),
             device: Device(
                 model: DeviceInfoHelper.modelIdentifier(),
                 osName: device.systemName,
                 osVersion: device.systemVersion),
-            events: GatewayDiagnostics.recentSanitizedEvents(limit: self.maximumEventCount),
+            events: diagnosticSnapshot.events,
             generatedAt: Date(),
-            maximumBytes: self.maximumExportBytes)
+            maximumBytes: self.maximumExportBytes,
+            diagnosticLogFlushStatus: diagnosticSnapshot.flushResult)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("OpenClaw-Crash-Diagnostics.json")
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -71,7 +77,8 @@ enum AIESCrashDiagnosticExporter {
         device: Device,
         events: [OpenClawDiagnosticEvent],
         generatedAt: Date,
-        maximumBytes: Int) throws -> Data
+        maximumBytes: Int,
+        diagnosticLogFlushStatus: GatewayDiagnostics.FlushResult = .completed) throws -> Data
     {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -83,7 +90,8 @@ enum AIESCrashDiagnosticExporter {
                 buildManifest: buildManifest,
                 device: device,
                 diagnosticEvents: boundedEvents,
-                redactionPolicy: "metadata_allowlist_v1")
+                diagnosticLogFlushStatus: diagnosticLogFlushStatus,
+                redactionPolicy: "metadata_allowlist_v2")
             let data = try encoder.encode(value)
             if data.count <= maximumBytes { return data }
             guard !boundedEvents.isEmpty else { throw ExportError.cannotFitBound }

@@ -11,14 +11,22 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case reconnect = "reconnect"
         case route = "route"
         case socket = "socket"
+        case tts = "tts"
     }
 
-    public static let schemaName = "argus.openclaw-ios.diagnostic-event.v1"
+    public static let schemaName = "argus.openclaw-ios.diagnostic-event.v2"
+    private static let supportedSchemaNames: Set<String> = [
+        "argus.openclaw-ios.diagnostic-event.v1",
+        "argus.openclaw-ios.diagnostic-event.v2",
+    ]
+    private static let processLaunchIdentifier = UUID().uuidString
 
     public let schema: String
     public let observedAt: String
     public let kind: Kind
     public let state: String
+    public let processID: Int?
+    public let launchID: String?
     public let socketGeneration: UInt64?
     public let routeGeneration: UInt64?
     public let activityGeneration: UInt64?
@@ -27,13 +35,19 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let messageID: String?
     public let eventID: String?
     public let operationID: String?
+    public let operationGeneration: UInt64?
     public let sequence: Int?
     public let stream: String?
+    public let byteCount: Int?
+    public let sampleRate: Int?
+    public let durationMilliseconds: Int?
     public let networkInterfaces: [String]
 
     public init(
         kind: Kind,
         state: String,
+        processIdentifier: Int? = nil,
+        launchIdentifier: String? = nil,
         socketGeneration: UInt64? = nil,
         routeGeneration: UInt64? = nil,
         activityGeneration: UInt64? = nil,
@@ -42,8 +56,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         messageIdentifier: String? = nil,
         eventIdentifier: String? = nil,
         operationIdentifier: String? = nil,
+        operationGeneration: UInt64? = nil,
         sequence: Int? = nil,
         stream: String? = nil,
+        byteCount: Int? = nil,
+        sampleRate: Int? = nil,
+        durationMilliseconds: Int? = nil,
         networkInterfaces: [String] = [],
         observedAt: Date = Date())
     {
@@ -51,6 +69,9 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.observedAt = Self.timestamp(observedAt)
         self.kind = kind
         self.state = Self.sanitizedToken(state, maximumLength: 64) ?? "redacted"
+        let resolvedProcessID = processIdentifier ?? Int(ProcessInfo.processInfo.processIdentifier)
+        self.processID = resolvedProcessID > 0 ? resolvedProcessID : nil
+        self.launchID = Self.hashedIdentifier(launchIdentifier ?? Self.processLaunchIdentifier)
         self.socketGeneration = socketGeneration
         self.routeGeneration = routeGeneration
         self.activityGeneration = activityGeneration
@@ -59,8 +80,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.messageID = Self.hashedIdentifier(messageIdentifier)
         self.eventID = Self.hashedIdentifier(eventIdentifier)
         self.operationID = Self.hashedIdentifier(operationIdentifier)
+        self.operationGeneration = operationGeneration
         self.sequence = sequence.flatMap { $0 >= 0 ? $0 : nil }
         self.stream = Self.sanitizedToken(stream, maximumLength: 64)
+        self.byteCount = byteCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.sampleRate = sampleRate.flatMap { (1...384_000).contains($0) ? $0 : nil }
+        self.durationMilliseconds = durationMilliseconds.flatMap { $0 >= 0 ? $0 : nil }
         let sanitizedInterfaces = Array(Set(networkInterfaces.compactMap {
             Self.sanitizedToken($0, maximumLength: 32)
         })).sorted()
@@ -72,6 +97,8 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case observedAt = "observed_at"
         case kind
         case state
+        case processID = "process_id"
+        case launchID = "launch_id"
         case socketGeneration = "socket_generation"
         case routeGeneration = "route_generation"
         case activityGeneration = "activity_generation"
@@ -80,8 +107,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case messageID = "message_id"
         case eventID = "event_id"
         case operationID = "operation_id"
+        case operationGeneration = "operation_generation"
         case sequence
         case stream
+        case byteCount = "byte_count"
+        case sampleRate = "sample_rate"
+        case durationMilliseconds = "duration_milliseconds"
         case networkInterfaces = "network_interfaces"
     }
 
@@ -115,13 +146,18 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     }
 
     fileprivate var isValidDecodedRecord: Bool {
-        guard self.schema == Self.schemaName,
+        guard Self.supportedSchemaNames.contains(self.schema),
               Self.isValidTimestamp(self.observedAt),
               self.state == Self.sanitizedToken(self.state, maximumLength: 64),
+              self.processID.map({ $0 > 0 }) ?? true,
+              self.launchID.map(Self.isLowercaseHexDigest) ?? true,
               self.runID.map(Self.isLowercaseHexDigest) ?? true,
               self.messageID.map(Self.isLowercaseHexDigest) ?? true,
               self.eventID.map(Self.isLowercaseHexDigest) ?? true,
               self.operationID.map(Self.isLowercaseHexDigest) ?? true,
+              self.byteCount.map({ $0 >= 0 }) ?? true,
+              self.sampleRate.map({ (1...384_000).contains($0) }) ?? true,
+              self.durationMilliseconds.map({ $0 >= 0 }) ?? true,
               self.stream == Self.sanitizedToken(self.stream, maximumLength: 64),
               self.sequence.map({ $0 >= 0 }) ?? true,
               self.networkInterfaces.count <= 8,
@@ -173,6 +209,8 @@ public enum OpenClawDiagnosticRecorder {
         "network_interfaces",
     ]
     private static let allowedKeys = OpenClawDiagnosticRecorder.requiredKeys.union([
+        "process_id",
+        "launch_id",
         "socket_generation",
         "route_generation",
         "activity_generation",
@@ -181,8 +219,12 @@ public enum OpenClawDiagnosticRecorder {
         "message_id",
         "event_id",
         "operation_id",
+        "operation_generation",
         "sequence",
         "stream",
+        "byte_count",
+        "sample_rate",
+        "duration_milliseconds",
     ])
 
     public static func installSink(_ sink: @escaping Sink) {
