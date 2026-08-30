@@ -299,7 +299,6 @@ extension SettingsProTab {
 
     func openGatewayQRScanner() {
         self.invalidateGatewaySetupAttempt()
-        self.appModel.disconnectGateway()
         self.scannerScanID = self.scannerResultHandoff.beginScan()
         self.connectingGatewayID = nil
         self.setupStatusText = "Opening QR scanner..."

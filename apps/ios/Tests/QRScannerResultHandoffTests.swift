@@ -48,6 +48,55 @@ struct QRScannerResultHandoffTests {
         #expect(rootSource.contains(".gatewayTrustPromptAlert(isEnabled: !self.showOnboarding)"))
     }
 
+    @Test func scannerOwnersPreserveExistingGatewayUntilAReplacementResultIsAccepted() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let iosRoot = testFile.deletingLastPathComponent().deletingLastPathComponent()
+
+        let settingsSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Design/SettingsProTabActions.swift"),
+            encoding: .utf8)
+        let settingsOpenStart = try #require(settingsSource.range(of: "func openGatewayQRScanner()"))
+        let settingsOpenEnd = try #require(
+            settingsSource.range(of: "func handleScannedGatewayLink", range: settingsOpenStart.upperBound..<settingsSource.endIndex))
+        let settingsOpenBody = settingsSource[settingsOpenStart.lowerBound..<settingsOpenEnd.lowerBound]
+        #expect(settingsOpenBody.contains("scannerResultHandoff.beginScan()"))
+        #expect(settingsOpenBody.contains("showQRScanner = true"))
+        #expect(!settingsOpenBody.contains("disconnectGateway()"))
+
+        let settingsReplacementEnd = try #require(
+            settingsSource.range(of: "func queueScannedResult", range: settingsOpenEnd.upperBound..<settingsSource.endIndex))
+        let settingsReplacementBody = settingsSource[settingsOpenEnd.lowerBound..<settingsReplacementEnd.lowerBound]
+        #expect(settingsReplacementBody.contains("connectAfterScannedGatewayLink"))
+
+        let settingsInvalidateStart = try #require(settingsSource.range(of: "func invalidateGatewaySetupAttempt()"))
+        let settingsInvalidateEnd = try #require(
+            settingsSource.range(of: "func connectManual", range: settingsInvalidateStart.upperBound..<settingsSource.endIndex))
+        #expect(!settingsSource[settingsInvalidateStart.lowerBound..<settingsInvalidateEnd.lowerBound]
+            .contains("disconnectGateway()"))
+
+        let onboardingSource = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Onboarding/OnboardingWizardView.swift"),
+            encoding: .utf8)
+        let onboardingOpenStart = try #require(onboardingSource.range(of: "private func openQRScannerFromOnboarding()"))
+        let onboardingOpenEnd = try #require(
+            onboardingSource.range(
+                of: "private func applyPendingGatewaySetupLinkIfNeeded",
+                range: onboardingOpenStart.upperBound..<onboardingSource.endIndex))
+        let onboardingOpenBody = onboardingSource[onboardingOpenStart.lowerBound..<onboardingOpenEnd.lowerBound]
+        #expect(onboardingOpenBody.contains("scannerResultHandoff.beginScan()"))
+        #expect(onboardingOpenBody.contains("showQRScanner = true"))
+        #expect(!onboardingOpenBody.contains("disconnectGateway()"))
+
+        let onboardingInvalidateStart = try #require(
+            onboardingSource.range(of: "private func invalidateGatewaySetupAttempt()"))
+        let onboardingInvalidateEnd = try #require(
+            onboardingSource.range(
+                of: "private func resumeAfterPairingApproval",
+                range: onboardingInvalidateStart.upperBound..<onboardingSource.endIndex))
+        #expect(!onboardingSource[onboardingInvalidateStart.lowerBound..<onboardingInvalidateEnd.lowerBound]
+            .contains("disconnectGateway()"))
+    }
+
     @Test func queuedResultIsDeliveredOnceAfterDismissal() async throws {
         let handoff = QRScannerResultHandoff(settlingNanoseconds: 0)
         var deliveredResult: QRScannerResult?

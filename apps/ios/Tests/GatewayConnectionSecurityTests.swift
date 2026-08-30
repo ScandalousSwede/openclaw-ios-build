@@ -184,8 +184,9 @@ private actor SuspendedGatewayTLSProbe {
 
     @Test @MainActor func setupRouteSelectionFallsBackToReachableTailnetEndpoint() async {
         let probes = OSAllocatedUnfairLock(initialState: [(String, Int)]())
+        let appModel = NodeAppModel()
         let controller = GatewayConnectionController(
-            appModel: NodeAppModel(),
+            appModel: appModel,
             startDiscovery: false,
             tcpReachabilityProbe: { host, port, _, _ in
                 probes.withLock { $0.append((host, port)) }
@@ -212,8 +213,9 @@ private actor SuspendedGatewayTLSProbe {
     }
 
     @Test @MainActor func setupRouteSelectionKeepsPrimaryWhenEveryProbeFails() async {
+        let appModel = NodeAppModel()
         let controller = GatewayConnectionController(
-            appModel: NodeAppModel(),
+            appModel: appModel,
             startDiscovery: false,
             tcpReachabilityProbe: { _, _, _, _ in false })
         let link = GatewayConnectDeepLink(
@@ -238,6 +240,16 @@ private actor SuspendedGatewayTLSProbe {
         clearTLSFingerprint(stableID: stableID)
 
         let appModel = NodeAppModel()
+        let priorProblem = GatewayConnectionProblem(
+            kind: .reachabilityFailed,
+            owner: .gateway,
+            title: "Previous failure",
+            message: "Previous failure",
+            requestId: nil,
+            retryable: true,
+            pauseReconnect: false)
+        appModel._test_applyOperatorGatewayConnectionProblem(priorProblem)
+        #expect(appModel.lastGatewayProblem == priorProblem)
         let controller = GatewayConnectionController(
             appModel: appModel,
             startDiscovery: false,
@@ -250,6 +262,32 @@ private actor SuspendedGatewayTLSProbe {
         #expect(controller.pendingTrustPrompt?.host == host)
         #expect(controller.pendingTrustPrompt?.port == port)
         #expect(appModel.gatewayStatusText == "Verify gateway TLS fingerprint")
+        #expect(appModel.lastGatewayProblem == nil)
+    }
+
+    @Test @MainActor func firstUseTLSProbeBeginsPreconnectVerificationBeforeBothProbePaths() throws {
+        let testFile = URL(fileURLWithPath: #filePath)
+        let sourceURL = testFile
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/Gateway/GatewayConnectionController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let preconnect = "beginGatewayPreconnectVerification(statusText: \"Verifying gateway TLS fingerprint…\")"
+
+        let discoveredStart = try #require(source.range(of: "private func connectDiscoveredGateway"))
+        let manualStart = try #require(source.range(of: "func connectManual", range: discoveredStart.upperBound..<source.endIndex))
+        let discoveredBody = source[discoveredStart.lowerBound..<manualStart.lowerBound]
+        let discoveredPreconnect = try #require(discoveredBody.range(of: preconnect))
+        let discoveredProbe = try #require(discoveredBody.range(of: "await self.probeTLSFingerprint"))
+        #expect(discoveredPreconnect.lowerBound < discoveredProbe.lowerBound)
+
+        let manualEnd = try #require(source.range(of: "func connectLastKnown", range: manualStart.upperBound..<source.endIndex))
+        let manualBody = source[manualStart.lowerBound..<manualEnd.lowerBound]
+        let manualPreconnect = try #require(manualBody.range(of: preconnect))
+        let manualProbe = try #require(manualBody.range(of: "await self.probeTLSFingerprint"))
+        #expect(manualPreconnect.lowerBound < manualProbe.lowerBound)
+
+        #expect(source.components(separatedBy: preconnect).count - 1 == 2)
     }
 
     @Test @MainActor func manualFirstUseTLSProbeSkipsTLSWhenTCPIsUnreachable() async {
@@ -351,8 +389,10 @@ private actor SuspendedGatewayTLSProbe {
         clearTLSFingerprint(stableID: firstStableID)
         clearTLSFingerprint(stableID: secondStableID)
 
+        let appModel = NodeAppModel()
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
         let controller = GatewayConnectionController(
-            appModel: NodeAppModel(),
+            appModel: appModel,
             startDiscovery: false,
             tcpReachabilityProbe: { _, _, _, _ in true },
             tlsFingerprintProbe: { url in .fingerprint("fp-\(url.host ?? "unknown")") })
@@ -373,6 +413,40 @@ private actor SuspendedGatewayTLSProbe {
 
         controller.declinePendingTrustPrompt(secondPrompt)
         #expect(controller.pendingTrustPrompt == nil)
+        #expect(appModel.gatewayStatusText == "Connected")
+    }
+
+    @Test @MainActor func trustPromptPersistenceFailureIsFailClosedAndRetryable() async throws {
+        let host = "gateway-\(UUID().uuidString).example.com"
+        let port = 18789
+        let stableID = "manual|\(host.lowercased())|\(port)"
+        let persistenceCalls = OSAllocatedUnfairLock(initialState: [(String, String)]())
+        defer { clearTLSFingerprint(stableID: stableID) }
+        clearTLSFingerprint(stableID: stableID)
+
+        let appModel = NodeAppModel()
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint("fail-closed-fingerprint") },
+            persistTLSFingerprint: { fingerprint, persistedStableID in
+                persistenceCalls.withLock { $0.append((fingerprint, persistedStableID)) }
+                return false
+            })
+
+        await controller.connectManual(host: host, port: port, useTLS: true)
+        let prompt = try #require(controller.pendingTrustPrompt)
+        await controller.acceptPendingTrustPrompt(prompt)
+
+        #expect(persistenceCalls.withLock { $0.count } == 1)
+        #expect(persistenceCalls.withLock { $0.first?.0 } == "fail-closed-fingerprint")
+        #expect(persistenceCalls.withLock { $0.first?.1 } == stableID)
+        #expect(controller.pendingTrustPrompt == prompt)
+        #expect(GatewayTLSStore.loadFingerprint(stableID: stableID) == nil)
+        #expect(controller._test_didAutoConnect() == false)
+        #expect(appModel.activeGatewayConnectConfig == nil)
+        #expect(appModel.gatewayStatusText == "Could not save gateway certificate")
     }
 
     @Test @MainActor func clearAllTLSFingerprints_removesStoredPins() async {

@@ -811,9 +811,7 @@ extension OnboardingWizardView {
     }
 
     private func openQRScannerFromOnboarding() {
-        // Stop active reconnect loops before scanning new credentials.
         self.invalidateGatewaySetupAttempt()
-        self.appModel.disconnectGateway()
         self.scannerScanID = self.scannerResultHandoff.beginScan()
         self.connectingGatewayID = nil
         self.connectMessage = nil

@@ -19,6 +19,7 @@ import UIKit
 
 typealias GatewayTCPReachabilityProbe = @Sendable (String, Int, Double, String) async -> Bool
 typealias GatewayTLSFingerprintProbeFunction = @Sendable (URL) async -> GatewayTLSFingerprintProbeResult
+typealias GatewayTLSFingerprintPersist = @Sendable (_ fingerprint: String, _ stableID: String) -> Bool
 
 enum GatewayTLSFingerprintProbeFailure: Equatable {
     case endpointUnreachable
@@ -174,6 +175,7 @@ final class GatewayConnectionController {
     private let discovery = GatewayDiscoveryModel()
     private let tcpReachabilityProbe: GatewayTCPReachabilityProbe
     private let tlsFingerprintProbe: GatewayTLSFingerprintProbeFunction
+    private let persistTLSFingerprint: GatewayTLSFingerprintPersist
     private weak var appModel: NodeAppModel?
     private var didAutoConnect = false
     private var pendingServiceResolvers: [String: GatewayServiceResolver] = [:]
@@ -190,11 +192,15 @@ final class GatewayConnectionController {
         appModel: NodeAppModel,
         startDiscovery: Bool = true,
         tcpReachabilityProbe: @escaping GatewayTCPReachabilityProbe = defaultGatewayTCPReachabilityProbe,
-        tlsFingerprintProbe: @escaping GatewayTLSFingerprintProbeFunction = defaultGatewayTLSFingerprintProbe)
+        tlsFingerprintProbe: @escaping GatewayTLSFingerprintProbeFunction = defaultGatewayTLSFingerprintProbe,
+        persistTLSFingerprint: @escaping GatewayTLSFingerprintPersist = { fingerprint, stableID in
+            GatewayTLSStore.replaceFingerprint(fingerprint, stableID: stableID)
+        })
     {
         self.appModel = appModel
         self.tcpReachabilityProbe = tcpReachabilityProbe
         self.tlsFingerprintProbe = tlsFingerprintProbe
+        self.persistTLSFingerprint = persistTLSFingerprint
 
         GatewaySettingsStore.bootstrapPersistence()
         let defaults = UserDefaults.standard
@@ -291,6 +297,7 @@ final class GatewayConnectionController {
         if tlsRequired, stored == nil {
             guard let url = self.buildGatewayURL(host: target.host, port: target.port, useTLS: true)
             else { return "Failed to build TLS URL for trust verification." }
+            self.appModel?.beginGatewayPreconnectVerification(statusText: "Verifying gateway TLS fingerprint…")
             guard let result = await self.probeTLSFingerprint(
                 host: target.host,
                 port: target.port,
@@ -372,6 +379,7 @@ final class GatewayConnectionController {
         let stored = GatewayTLSStore.loadFingerprint(stableID: stableID)
         if resolvedUseTLS, stored == nil {
             guard let url = self.buildGatewayURL(host: host, port: resolvedPort, useTLS: true) else { return }
+            self.appModel?.beginGatewayPreconnectVerification(statusText: "Verifying gateway TLS fingerprint…")
             guard let result = await self.probeTLSFingerprint(
                 host: host,
                 port: resolvedPort,
@@ -481,7 +489,10 @@ final class GatewayConnectionController {
               pending.stableID == prompt.stableID
         else { return }
 
-        GatewayTLSStore.saveFingerprint(prompt.fingerprintSha256, stableID: pending.stableID)
+        guard self.persistTLSFingerprint(prompt.fingerprintSha256, pending.stableID) else {
+            self.appModel?.gatewayStatusText = "Could not save gateway certificate"
+            return
+        }
         self.clearPendingTrustPrompt()
 
         if pending.isManual {
@@ -523,7 +534,7 @@ final class GatewayConnectionController {
               expectedPrompt.generation == self.trustProbeGeneration
         else { return }
         self.clearPendingTrustPrompt()
-        self.appModel?.gatewayStatusText = "Offline"
+        self.appModel?.finishGatewayPreconnectVerificationWithoutReplacement()
     }
 
     @discardableResult
@@ -536,7 +547,7 @@ final class GatewayConnectionController {
             return false
         }
 
-        guard GatewayTLSStore.replaceFingerprint(fingerprint, stableID: stableID) else {
+        guard self.persistTLSFingerprint(fingerprint, stableID) else {
             self.appModel?.gatewayStatusText = "Could not update gateway certificate"
             return false
         }

@@ -2974,6 +2974,25 @@ extension NodeAppModel {
         self.gatewayPairingRequestId = nil
     }
 
+    func beginGatewayPreconnectVerification(statusText: String) {
+        self.lastGatewayProblem = nil
+        self.operatorGatewayProblem = nil
+        self.gatewayPairingPaused = false
+        self.gatewayPairingRequestId = nil
+        self.gatewayStatusText = statusText
+    }
+
+    func finishGatewayPreconnectVerificationWithoutReplacement() {
+        self.gatewayStatusText = switch (self.nodeRoleState, self.operatorRoleState) {
+        case (.online, .online): "Connected"
+        case (.online, .missingRole): "Operator role missing"
+        case (.online, .scopeBlocked): "Operator scopes unavailable"
+        case (.online, .offline): "Operator session unavailable"
+        case (.connecting, _), (_, .connecting): "Connecting…"
+        case (.offline, _): "Offline"
+        }
+    }
+
     private func applyGatewayConnectionProblem(_ problem: GatewayConnectionProblem) {
         guard !self.isAppleReviewDemoModeEnabled else { return }
         self.lastGatewayProblem = problem
