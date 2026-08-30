@@ -18,9 +18,7 @@ let package = Package(
         .default(enabledTraits: ["Talk"]),
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-            revision: "1e292346683ea174d98d1a88763c0f26e966c0af"),
+        .package(url: "https://github.com/steipete/ElevenLabsKit.git", from: "0.1.1"),
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
         .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
     ],

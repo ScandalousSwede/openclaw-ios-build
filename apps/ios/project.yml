@@ -97,6 +97,27 @@ targets:
             exit 1
           fi
           swiftlint lint --config "$SRCROOT/.swiftlint.yml" --use-script-input-file-lists
+    postBuildScripts:
+      - name: Embed Runtime Symbolication Manifest
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          output="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/AIESRuntimeSymbolicationManifest.json"
+          if [[ ! "${OPENCLAW_BUILD_GIT_SHA}" =~ ^[0-9a-f]{40}$ ]] || \
+             [[ ! "${OPENCLAW_BUILD_ARCHIVE_UUID}" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+            rm -f "${output}"
+            echo "Skipping attributable runtime symbolication manifest for an unpinned local build."
+            exit 0
+          fi
+          python3 "${SRCROOT}/Tools/embed_runtime_symbolication_manifest.py" \
+            --app "${TARGET_BUILD_DIR}/${WRAPPER_NAME}" \
+            --output "${output}" \
+            --git-sha "${OPENCLAW_BUILD_GIT_SHA}" \
+            --archive-uuid "${OPENCLAW_BUILD_ARCHIVE_UUID}" \
+            --configuration "${CONFIGURATION}" \
+            --dwarfdump "$(xcrun --find dwarfdump)" \
+            --dsymutil "$(xcrun --find dsymutil)" \
+            --temporary-directory "${DERIVED_FILE_DIR}"
     settings:
       base:
         CODE_SIGN_IDENTITY: "Apple Development"

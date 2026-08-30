@@ -7,12 +7,13 @@ import Testing
 @MainActor
 private final class TestSystemSpeech: TalkSystemSpeechProviding {
     var error: Error?
+    var emitsStartCallback = true
     private(set) var spokenTexts: [String] = []
     private(set) var stopCount = 0
 
     func speak(text: String, language _: String?, onStart: (() -> Void)?) async throws {
         self.spokenTexts.append(text)
-        onStart?()
+        if self.emitsStartCallback { onStart?() }
         if let error { throw error }
     }
 
@@ -119,6 +120,100 @@ private final class TestPCMPlayer: PCMStreamingAudioPlaying {
         self.stopCount += 1
         return self.stopResult
     }
+}
+
+private final class TestStreamingPlaybackObservationRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [StreamingPlaybackObservation] = []
+
+    func record(_ observation: StreamingPlaybackObservation) {
+        self.lock.lock()
+        self.values.append(observation)
+        self.lock.unlock()
+    }
+
+    func observations() -> [StreamingPlaybackObservation] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.values
+    }
+}
+
+private final class TestDiagnosticLineRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        self.lock.lock()
+        self.values.append(value)
+        self.lock.unlock()
+    }
+
+    func lines() -> [String] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.values
+    }
+}
+
+private final class TestLockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        self.lock.lock()
+        self.value += 1
+        self.lock.unlock()
+    }
+
+    func count() -> Int {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.value
+    }
+}
+
+@MainActor
+private final class TestTTSLifecycleObservationRecorder {
+    private(set) var values: [TalkTTSLifecycleObservation] = []
+
+    func record(_ observation: TalkTTSLifecycleObservation) {
+        self.values.append(observation)
+    }
+}
+
+@MainActor
+private final class ObservedTestPCMPlayer: PCMStreamingAudioPlaying {
+    private(set) var usedObserverOverload = false
+
+    func play(stream: AsyncThrowingStream<Data, Error>, sampleRate _: Double) async -> StreamingPlaybackResult {
+        do {
+            for try await _ in stream {}
+        } catch {
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func play(
+        stream: AsyncThrowingStream<Data, Error>,
+        sampleRate _: Double,
+        observer: StreamingPlaybackObserver) async -> StreamingPlaybackResult
+    {
+        self.usedObserverOverload = true
+        observer.record(StreamingPlaybackObservation(stage: .playerInstanceCreated, path: .pcm))
+        observer.record(StreamingPlaybackObservation(stage: .playbackSubmissionStarted, path: .pcm))
+        do {
+            for try await _ in stream {}
+        } catch {
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        observer.record(StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .pcm))
+        observer.record(StreamingPlaybackObservation(stage: .playbackCompleted, path: .pcm))
+        return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func stop() -> Double? { nil }
 }
 
 @MainActor
@@ -256,6 +351,39 @@ private final class TestMP3Player: StreamingAudioPlaying {
 }
 
 @MainActor
+private final class ObservedTestMP3Player: StreamingAudioPlaying {
+    private(set) var usedObserverOverload = false
+
+    func play(stream: AsyncThrowingStream<Data, Error>) async -> StreamingPlaybackResult {
+        do {
+            for try await _ in stream {}
+        } catch {
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func play(
+        stream: AsyncThrowingStream<Data, Error>,
+        observer: StreamingPlaybackObserver) async -> StreamingPlaybackResult
+    {
+        self.usedObserverOverload = true
+        observer.record(StreamingPlaybackObservation(stage: .playerInstanceCreated, path: .mp3))
+        observer.record(StreamingPlaybackObservation(stage: .playbackSubmissionStarted, path: .mp3))
+        do {
+            for try await _ in stream {}
+        } catch {
+            return StreamingPlaybackResult(finished: false, interruptedAt: nil)
+        }
+        observer.record(StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .mp3))
+        observer.record(StreamingPlaybackObservation(stage: .playbackCompleted, path: .mp3))
+        return StreamingPlaybackResult(finished: true, interruptedAt: nil)
+    }
+
+    func stop() -> Double? { nil }
+}
+
+@MainActor
 private final class TestTTSProgressRecorder {
     var values: [TalkTTSProgress] = []
     var snapshot = TalkTTSDiagnosticSnapshot()
@@ -317,6 +445,68 @@ private final class TestGenerationState {
 
 @MainActor
 @Suite struct TalkTTSDiagnosticsTests {
+    @Test func v2TTSAndRouteDiagnosticsDoNotRepurposeLegacyStreamField() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Voice/TalkModeManager.swift"),
+            encoding: .utf8)
+        for forbidden in [
+            "stream: Self.sanitizedDiagnosticToken(self.ttsDiagnostics.config.provider",
+            "stream: breadcrumb.detail",
+            "stream: config.provider",
+            "stream: evidence.outputPortTypes.first",
+            "stream: self.ttsDiagnostics.route.outputPortTypes.first",
+        ] {
+            #expect(!source.contains(forbidden))
+        }
+    }
+
+    @Test func structuredLifecycleRecorderBindsAttemptAndPlaybackGeneration() throws {
+        let lines = TestDiagnosticLineRecorder()
+        let flushes = TestLockedCounter()
+        OpenClawDiagnosticRecorder.installSink { lines.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        TalkModeManager.recordTTSLifecycleObservation(
+            TalkTTSLifecycleObservation(
+                stage: .providerResponseReceived,
+                provider: "elevenlabs",
+                codec: "pcm",
+                playbackPath: "pcm",
+                providerStage: "provider_response_received",
+                byteCount: 4096,
+                resultClass: "success"),
+            generation: 42,
+            flush: { flushes.increment() })
+        TalkModeManager.recordTTSPlaybackObservation(
+            StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .pcm),
+            generation: 42,
+            flush: { flushes.increment() })
+
+        let records = lines.lines().compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+        #expect(records.count == 2)
+        let response = try #require(records.first)
+        #expect(response.state == "provider_response_received")
+        #expect(response.processInstanceID != nil)
+        #expect(response.launchInstanceID != nil)
+        #expect(response.playbackGeneration == 42)
+        #expect(response.cancellationGeneration == 42)
+        #expect(response.operationID == response.diagnosticAttemptID)
+        #expect(response.provider == "elevenlabs")
+        #expect(response.codec == "pcm")
+        #expect(response.playbackPath == "pcm")
+        #expect(response.byteCount == 4096)
+        #expect(response.resultClass == "success")
+        let submission = try #require(records.last)
+        #expect(submission.state == "tts_playback_submission_accepted")
+        #expect(submission.playbackGeneration == 42)
+        #expect(submission.cancellationGeneration == 42)
+        #expect(submission.operationID == submission.diagnosticAttemptID)
+        #expect(flushes.count() == 2)
+    }
+
     @Test func diagnosticVoiceTestsUseFixedNonSensitivePhrases() {
         #expect(TalkTTSTestPhrase.system == "OpenClaw system voice test successful.")
         #expect(TalkTTSTestPhrase.elevenLabs == "OpenClaw ElevenLabs test successful.")
@@ -593,6 +783,249 @@ private final class TestGenerationState {
                 durationRecorded: true),
         ]
         #expect(fixture.breadcrumbs.boundaries == expected)
+    }
+
+    @Test func providerPipelineForwardsTruthfulPCMPlaybackObservations() async {
+        let pcm = ObservedTestPCMPlayer()
+        let recorder = TestStreamingPlaybackObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: pcm,
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            playbackObserver: StreamingPlaybackObserver { recorder.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "pcm_44100"),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(pcm.usedObserverOverload)
+        #expect(recorder.observations() == [
+            StreamingPlaybackObservation(stage: .playerInstanceCreated, path: .pcm),
+            StreamingPlaybackObservation(stage: .playbackSubmissionStarted, path: .pcm),
+            StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .pcm),
+            StreamingPlaybackObservation(stage: .playbackCompleted, path: .pcm),
+        ])
+        #expect(!recorder.observations().contains { $0.stage == .firstRenderCallbackObserved })
+    }
+
+    @Test func providerPipelineDoesNotFabricateMP3DecoderOrFirstRenderObservation() async {
+        let mp3 = ObservedTestMP3Player()
+        let recorder = TestStreamingPlaybackObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: mp3,
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            playbackObserver: StreamingPlaybackObserver { recorder.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "mp3_44100_128"),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(mp3.usedObserverOverload)
+        #expect(recorder.observations() == [
+            StreamingPlaybackObservation(stage: .playerInstanceCreated, path: .mp3),
+            StreamingPlaybackObservation(stage: .playbackSubmissionStarted, path: .mp3),
+            StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .mp3),
+            StreamingPlaybackObservation(stage: .playbackCompleted, path: .mp3),
+        ])
+        #expect(!recorder.observations().contains { $0.stage == .decoderCreated })
+        #expect(!recorder.observations().contains { $0.stage == .firstRenderCallbackObserved })
+    }
+
+    @Test func genericProviderStreamDoesNotClaimPayloadValidation() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(format: "pcm_44100"),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        let stages = lifecycle.values.map(\.stage)
+        #expect(stages.contains(.providerResponseReceived))
+        #expect(stages.contains(.streamFirstChunkReceived))
+        #expect(stages.contains(.streamCompleted))
+        #expect(!stages.contains(.audioPayloadValidated))
+    }
+
+    @Test func providerValidatedNonemptyStreamRecordsPayloadValidation() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+        let attempt = TalkTTSProviderAttempt(
+            outputFormat: "pcm_44100",
+            payloadValidation: .providerContentTypeValidated) {
+            Self.attempt(format: "pcm_44100").makeStream()
+        }
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: attempt,
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        let validation = lifecycle.values.first { $0.stage == .audioPayloadValidated }
+        #expect(validation?.byteCount == 4)
+        #expect(validation?.resultClass == "provider_content_type_validated_nonempty")
+    }
+
+    @Test func zeroByteResponseCompletesWithoutPayloadValidation() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+        let attempt = TalkTTSProviderAttempt(
+            outputFormat: "pcm_44100",
+            payloadValidation: .providerContentTypeValidated) {
+            Self.attempt(format: "pcm_44100", chunks: [Data()]).makeStream()
+        }
+
+        _ = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: attempt,
+            mp3Retry: nil)
+
+        let stages = lifecycle.values.map(\.stage)
+        #expect(stages.contains(.providerResponseReceived))
+        #expect(stages.contains(.streamCompleted))
+        #expect(!stages.contains(.audioPayloadValidated))
+    }
+
+    @Test func HTTPFailureRecordsResponseWithoutSuccessfulStreamOrPayload() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+        let failure = NSError(domain: "ElevenLabsTTS", code: 503)
+        let attempt = TalkTTSProviderAttempt(
+            outputFormat: "pcm_44100",
+            payloadValidation: .providerContentTypeValidated) {
+            Self.attempt(format: "pcm_44100", error: failure).makeStream()
+        }
+
+        _ = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: attempt,
+            mp3Retry: nil)
+
+        let response = lifecycle.values.first { $0.stage == .providerResponseReceived }
+        #expect(response?.resultClass == TalkTTSProviderOutcome.http5xx.rawValue)
+        let stages = lifecycle.values.map(\.stage)
+        #expect(!stages.contains(.streamCompleted))
+        #expect(!stages.contains(.audioPayloadValidated))
+    }
+
+    @Test func audioSessionAndSystemFallbackLifecycleIsCausallyOrdered() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: nil,
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(lifecycle.values.map(\.stage) == [
+            .audioSessionActivationStarted,
+            .audioSessionActivationSucceeded,
+            .outputRouteObserved,
+            .fallbackSelected,
+            .fallbackStarted,
+            .firstRenderCallbackObserved,
+            .fallbackCompleted,
+        ])
+    }
+
+    @Test func systemFirstRenderObservationRequiresDelegateStartCallback() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let system = TestSystemSpeech()
+        system.emitsStartCallback = false
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: system,
+            prepareAudio: { Self.routeEvidence },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: nil,
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(!lifecycle.values.contains { $0.stage == .firstRenderCallbackObserved })
+    }
+
+    @Test func failedSystemFallbackEmitsExplicitTerminalFailure() async {
+        let lifecycle = TestTTSLifecycleObservationRecorder()
+        let system = TestSystemSpeech()
+        system.error = NSError(domain: "SystemSpeech", code: 1)
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: TestPCMPlayer(),
+            mp3Player: TestMP3Player(),
+            systemSpeech: system,
+            prepareAudio: { throw NSError(domain: "AudioSession", code: 1) },
+            report: { _ in },
+            lifecycleObserver: { lifecycle.record($0) })
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: nil,
+            mp3Retry: nil)
+
+        #expect(!result.succeeded)
+        #expect(lifecycle.values.map(\.stage) == [
+            .audioSessionActivationStarted,
+            .audioSessionActivationFailed,
+            .fallbackSelected,
+            .fallbackStarted,
+            .fallbackFailed,
+        ])
+        #expect(lifecycle.values.last?.resultClass == "failed")
     }
 
     @Test func PCMToMP3ToSystemBreadcrumbsRecordEachFallbackBoundary() async {

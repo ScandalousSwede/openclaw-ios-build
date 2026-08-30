@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import pathlib
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 import aies_package_authority as authority
 
@@ -21,6 +24,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
         root = parent / name
         paths = [
             authority.DEFAULT_MANIFEST,
+            "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json",
             "apps/ios/project.yml",
             "apps/shared/OpenClawKit/Package.swift",
             "apps/swabble/Package.swift",
@@ -65,6 +69,75 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                     root, manifest, output, require_origin_hash=True
                 )
 
+    def source_patch_checkout_fixture(
+        self, parent: pathlib.Path, *, head: str = "1e292346683ea174d98d1a88763c0f26e966c0af"
+    ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, object]:
+        root = self.make_root(parent, "root")
+        source_packages = parent / "source-packages"
+        checkout = source_packages / "checkouts/ElevenLabsKit"
+        checkout.mkdir(parents=True)
+        workspace_state = parent / "workspace-state.json"
+        workspace_state.write_text(
+            json.dumps(
+                {
+                    "object": {
+                        "dependencies": [
+                            {
+                                "packageRef": {"identity": "elevenlabskit"},
+                                "subpath": "ElevenLabsKit",
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        changed_paths = self.manifest["sourcePatches"][0]
+        provenance = json.loads(
+            (root / changed_paths["path"]).read_text(encoding="utf-8")
+        )
+        outputs = {
+            ("rev-parse", "HEAD"): head,
+            ("rev-parse", "HEAD^{tree}"): provenance["patch"]["tree"],
+            ("show", "-s", "--format=%P", "HEAD"): provenance["original"]["revision"],
+            (
+                "rev-parse",
+                f"{provenance['original']['revision']}^{{tree}}",
+            ): provenance["original"]["tree"],
+            ("status", "--porcelain=v2", "--untracked-files=all"): "",
+            (
+                "diff",
+                "--name-only",
+                provenance["original"]["revision"],
+                provenance["patch"]["revision"],
+            ): "\n".join(provenance["patch"]["changedPaths"]) + "\n",
+        }
+
+        def run_git(arguments, **options):
+            command = tuple(arguments[1:])
+            if command == (
+                "show",
+                f"{provenance['original']['revision']}:Package.swift",
+            ) or command == (
+                "show",
+                f"{provenance['patch']['revision']}:Package.swift",
+            ):
+                stdout = b"package-manifest"
+            elif command == (
+                "diff",
+                "--binary",
+                provenance["original"]["revision"],
+                provenance["patch"]["revision"],
+            ):
+                stdout = b"reviewed-binary-diff"
+            else:
+                stdout = outputs[command]
+            if options.get("text") and isinstance(stdout, bytes):
+                stdout = stdout.decode()
+            return subprocess.CompletedProcess(arguments, 0, stdout, "" if options.get("text") else b"")
+
+        return root, workspace_state, source_packages, run_git
+
     def test_authority_has_exact_nine_pin_graph(self) -> None:
         self.assertEqual(len(self.manifest["pins"]), 9)
         self.assertEqual(
@@ -90,6 +163,108 @@ class AIESPackageAuthorityTests(unittest.TestCase):
             "8db1bfc0cd61b0a2c479806004dc67ec0385d8f50c53b16edbd2df251149d7e1",
         )
         self.assertEqual(len(standalone["pinIdentities"]), 3)
+
+    def test_elevenlabskit_observability_patch_is_exact_and_immutable(self) -> None:
+        patch = self.manifest["sourcePatches"][0]
+        pin = next(
+            item for item in self.manifest["pins"] if item["identity"] == "elevenlabskit"
+        )
+
+        self.assertEqual(patch["packageIdentity"], "elevenlabskit")
+        self.assertEqual(
+            patch["sha256"],
+            "f68ca77a23f5c4494839e37c8f85cdcb707efabb50eefa74893753581d510c24",
+        )
+        self.assertEqual(
+            pin["location"], "https://github.com/ScandalousSwede/ElevenLabsKit.git"
+        )
+        self.assertIsNone(pin["version"])
+        self.assertEqual(
+            pin["revision"], "1e292346683ea174d98d1a88763c0f26e966c0af"
+        )
+        self.assertEqual(
+            pin["requirement"],
+            {
+                "kind": "revision",
+                "revision": "1e292346683ea174d98d1a88763c0f26e966c0af",
+            },
+        )
+
+    def test_strict_checkout_proves_exact_patch_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, workspace_state, source_packages, run_git = (
+                self.source_patch_checkout_fixture(pathlib.Path(temporary))
+            )
+
+            def digest(data: bytes) -> str:
+                if data == b"package-manifest":
+                    return "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431"
+                if data == b"reviewed-binary-diff":
+                    return "2fcbfadc449965c799ef5b425a27cede0d3464e3b0ec341e3eab0c752d81f9f8"
+                return hashlib.sha256(data).hexdigest()
+
+            with mock.patch.object(authority.subprocess, "run", side_effect=run_git), mock.patch.object(
+                authority, "sha256_bytes", side_effect=digest
+            ):
+                report = authority.validate_source_patch_checkout(
+                    root, self.manifest, workspace_state, source_packages
+                )
+
+            self.assertEqual(report["status"], "verified")
+            self.assertEqual(
+                report["head"], "1e292346683ea174d98d1a88763c0f26e966c0af"
+            )
+            self.assertEqual(report["tree"], "801732d37b8555d4bbbae500d611f7477eac3439")
+            self.assertEqual(len(report["changedPaths"]), 6)
+
+    def test_strict_checkout_rejects_wrong_patch_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root, workspace_state, source_packages, run_git = (
+                self.source_patch_checkout_fixture(
+                    pathlib.Path(temporary), head="0" * 40
+                )
+            )
+            with mock.patch.object(authority.subprocess, "run", side_effect=run_git), mock.patch.object(
+                authority,
+                "sha256_bytes",
+                side_effect=lambda data: (
+                    "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431"
+                    if data == b"package-manifest"
+                    else "2fcbfadc449965c799ef5b425a27cede0d3464e3b0ec341e3eab0c752d81f9f8"
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    authority.AuthorityError, "checkout HEAD differs"
+                ):
+                    authority.validate_source_patch_checkout(
+                        root, self.manifest, workspace_state, source_packages
+                    )
+
+    def test_source_patch_provenance_tampering_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_root(pathlib.Path(temporary), "root")
+            patch_path = root / self.manifest["sourcePatches"][0]["path"]
+            payload = json.loads(patch_path.read_text(encoding="utf-8"))
+            payload["semanticDelta"]["playbackBehaviorChanged"] = True
+            patch_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            manifest_path = root / authority.DEFAULT_MANIFEST
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["sourcePatches"][0]["sha256"] = hashlib.sha256(
+                patch_path.read_bytes()
+            ).hexdigest()
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                authority.AuthorityError, "semantic-delta contract differs"
+            ):
+                authority.validate_manifest(root, manifest_path)
+
+    def test_source_patch_manifest_hash_tampering_is_rejected(self) -> None:
+        self.assert_manifest_error(
+            lambda value: value["sourcePatches"][0].update(sha256="0" * 64),
+            "source-patch provenance changed",
+        )
 
     def test_three_roots_are_semantically_identical_and_path_bound(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,8 +305,11 @@ class AIESPackageAuthorityTests(unittest.TestCase):
 
     def test_v4_origin_hash_formula_matches_all_recorded_roots(self) -> None:
         manifest_bytes = [
-            (self.repo_root / path).read_bytes()
-            for path in self.manifest["originHash"]["manifestPathsInOrder"]
+            (
+                self.repo_root
+                / "apps/ios/PackageAuthority/Fixtures/OpenClawKit-Package-v4.swift"
+            ).read_bytes(),
+            (self.repo_root / "apps/swabble/Package.swift").read_bytes(),
         ]
         cases = {
             "/Users/runner/work/_temp/aies-talk-liveness-v4-33015368816/package-graph-probes/probe-1":
@@ -273,11 +451,58 @@ class AIESPackageAuthorityTests(unittest.TestCase):
         )
 
     def test_incoherent_from_requirement_is_rejected(self) -> None:
+        def mutate(value):
+            pin = next(
+                item
+                for item in value["pins"]
+                if item["requirement"]["kind"] == "from"
+            )
+            pin["requirement"]["minimumVersion"] = "999.0.0"
+
         self.assert_manifest_error(
-            lambda value: value["pins"][1]["requirement"].update(
-                minimumVersion="1.0.0"
-            ),
+            mutate,
             "outside from-requirement range",
+        )
+
+    def test_exact_revision_requirement_with_no_version_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = self.make_root(pathlib.Path(temporary), "root")
+
+            def mutate(value):
+                pin = value["pins"][1]
+                pin["version"] = None
+                pin["requirement"] = {
+                    "kind": "revision",
+                    "revision": pin["revision"],
+                }
+
+            self.rewrite_manifest(root, mutate)
+            manifest = authority.validate_manifest(root, root / authority.DEFAULT_MANIFEST)
+            state = authority.concrete_payload(root, manifest)["pins"][1]["state"]
+            self.assertEqual(state, {"revision": manifest["pins"][1]["revision"]})
+
+    def test_revision_requirement_rejects_claimed_version(self) -> None:
+        def mutate(value):
+            pin = value["pins"][1]
+            pin["version"] = "0.1.1"
+
+        self.assert_manifest_error(mutate, "revision requirement must not claim a version")
+
+    def test_revision_requirement_must_match_resolved_revision(self) -> None:
+        def mutate(value):
+            pin = value["pins"][1]
+            pin["version"] = None
+            pin["requirement"] = {
+                "kind": "revision",
+                "revision": "0" * 40,
+            }
+
+        self.assert_manifest_error(mutate, "revision requirement does not match")
+
+    def test_nonrevision_requirement_still_requires_version(self) -> None:
+        self.assert_manifest_error(
+            lambda value: value["pins"][0].update(version=None),
+            "missing resolved version",
         )
 
     def test_malformed_version_suffix_is_rejected(self) -> None:
@@ -292,6 +517,9 @@ class AIESPackageAuthorityTests(unittest.TestCase):
     def test_workspace_state_validates_pins_and_binary_artifact(self) -> None:
         dependencies = []
         for pin in self.manifest["pins"]:
+            checkout_state = {"revision": pin["revision"]}
+            if pin["version"] is not None:
+                checkout_state["version"] = pin["version"]
             dependencies.append(
                 {
                     "basedOn": None,
@@ -302,10 +530,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                         "name": pin["identity"],
                     },
                     "state": {
-                        "checkoutState": {
-                            "revision": pin["revision"],
-                            "version": pin["version"],
-                        },
+                        "checkoutState": checkout_state,
                         "name": "sourceControlCheckout",
                     },
                     "subpath": pin["identity"],
@@ -351,6 +576,9 @@ class AIESPackageAuthorityTests(unittest.TestCase):
     def test_workspace_state_wrong_artifact_checksum_is_rejected(self) -> None:
         dependencies = []
         for pin in self.manifest["pins"]:
+            checkout_state = {"revision": pin["revision"]}
+            if pin["version"] is not None:
+                checkout_state["version"] = pin["version"]
             dependencies.append(
                 {
                     "basedOn": None,
@@ -361,10 +589,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                         "name": pin["identity"],
                     },
                     "state": {
-                        "checkoutState": {
-                            "revision": pin["revision"],
-                            "version": pin["version"],
-                        },
+                        "checkoutState": checkout_state,
                         "name": "sourceControlCheckout",
                     },
                     "subpath": pin["identity"],

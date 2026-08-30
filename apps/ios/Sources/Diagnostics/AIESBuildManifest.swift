@@ -3,7 +3,7 @@ import Foundation
 struct AIESBuildManifest: Codable, Equatable, Sendable {
     /// The on-device crash export is deliberately narrower than the archived build manifest:
     /// its UUID fields describe the installed main executable used for crash symbolication.
-    static let schemaName = "argus.openclaw-ios.runtime-build-manifest.v1"
+    static let schemaName = "argus.openclaw-ios.runtime-build-manifest.v2"
 
     let schema: String
     let gitSHA: String
@@ -22,20 +22,25 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
     let dsymUUIDs: [String]
     let runtimeUUIDSource: String
     let runtimeUUIDStatus: AIESRuntimeMachOUUIDReader.Status
+    let symbolicationStatus: AIESRuntimeSymbolicationManifest.Status
+    let symbolicationExecutables: [AIESRuntimeSymbolicationManifest.Executable]
     let configuration: String
     let apsEnvironmentIfSigned: String?
 
     static func current(bundle: Bundle = .main) -> AIESBuildManifest {
-        self.from(
+        let runtimeUUIDObservation = AIESRuntimeMachOUUIDReader.readMainExecutable(bundle: bundle)
+        return self.from(
             infoDictionary: bundle.infoDictionary ?? [:],
             bundleIdentifier: bundle.bundleIdentifier,
-            runtimeUUIDObservation: AIESRuntimeMachOUUIDReader.readMainExecutable(bundle: bundle))
+            runtimeUUIDObservation: runtimeUUIDObservation,
+            runtimeSymbolicationObservation: AIESRuntimeSymbolicationManifest.read(bundle: bundle))
     }
 
     static func from(
         infoDictionary: [String: Any],
         bundleIdentifier: String?,
-        runtimeUUIDObservation: AIESRuntimeMachOUUIDReader.Observation) -> AIESBuildManifest
+        runtimeUUIDObservation: AIESRuntimeMachOUUIDReader.Observation,
+        runtimeSymbolicationObservation: AIESRuntimeSymbolicationManifest.Observation) -> AIESBuildManifest
     {
         let archiveUUID = self.optionalValue(infoDictionary, key: "OpenClawBuildArchiveUUID")
             .flatMap { UUID(uuidString: $0)?.uuidString.lowercased() }
@@ -56,9 +61,13 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
             watchBundleIDsIfPresent: self.stringArray(infoDictionary, key: "OpenClawBuildWatchBundleIDs"),
             archiveUUID: archiveUUID,
             mainBinaryUUIDs: runtimeUUIDObservation.slices,
-            dsymUUIDs: Array(Set(runtimeUUIDObservation.slices.map(\.uuid))).sorted(),
+            dsymUUIDs: runtimeSymbolicationObservation.status == .observed
+                ? Array(Set(runtimeSymbolicationObservation.executables.flatMap(\.dsymUUIDs).map(\.uuid))).sorted()
+                : [],
             runtimeUUIDSource: runtimeUUIDObservation.source,
             runtimeUUIDStatus: runtimeUUIDObservation.status,
+            symbolicationStatus: runtimeSymbolicationObservation.status,
+            symbolicationExecutables: runtimeSymbolicationObservation.executables,
             configuration: self.value(infoDictionary, key: "OpenClawBuildConfiguration"),
             apsEnvironmentIfSigned: apsEnvironment)
     }
@@ -97,6 +106,8 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
         case dsymUUIDs = "dsym_uuids"
         case runtimeUUIDSource = "runtime_uuid_source"
         case runtimeUUIDStatus = "runtime_uuid_status"
+        case symbolicationStatus = "symbolication_status"
+        case symbolicationExecutables = "symbolication_executables"
         case configuration
         case apsEnvironmentIfSigned = "aps_environment_if_signed"
     }
@@ -124,6 +135,8 @@ struct AIESBuildManifest: Codable, Equatable, Sendable {
         try container.encode(self.dsymUUIDs, forKey: .dsymUUIDs)
         try container.encode(self.runtimeUUIDSource, forKey: .runtimeUUIDSource)
         try container.encode(self.runtimeUUIDStatus, forKey: .runtimeUUIDStatus)
+        try container.encode(self.symbolicationStatus, forKey: .symbolicationStatus)
+        try container.encode(self.symbolicationExecutables, forKey: .symbolicationExecutables)
         try container.encode(self.configuration, forKey: .configuration)
         if let apsEnvironmentIfSigned {
             try container.encode(apsEnvironmentIfSigned, forKey: .apsEnvironmentIfSigned)

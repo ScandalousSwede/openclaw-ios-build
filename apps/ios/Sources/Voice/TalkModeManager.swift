@@ -2688,7 +2688,9 @@ final class TalkModeManager: NSObject {
             modelId: modelID,
             outputFormat: outputFormat,
             language: language)
-        let initial = TalkTTSProviderAttempt(outputFormat: outputFormat) {
+        let initial = TalkTTSProviderAttempt(
+            outputFormat: outputFormat,
+            payloadValidation: .providerContentTypeValidated) {
             client.streamSynthesize(voiceId: voiceID, request: initialRequest)
         }
         guard TalkTTSValidation.pcmSampleRate(from: outputFormat) != nil else {
@@ -2701,7 +2703,9 @@ final class TalkModeManager: NSObject {
             modelId: modelID,
             outputFormat: mp3Format,
             language: language)
-        let mp3 = TalkTTSProviderAttempt(outputFormat: mp3Format) {
+        let mp3 = TalkTTSProviderAttempt(
+            outputFormat: mp3Format,
+            payloadValidation: .providerContentTypeValidated) {
             client.streamSynthesize(voiceId: voiceID, request: mp3Request)
         }
         return TTSProviderAttempts(initial: initial, mp3: mp3)
@@ -2738,6 +2742,12 @@ final class TalkModeManager: NSObject {
             },
             breadcrumb: { [weak self] breadcrumb in
                 self?.recordTTSBreadcrumb(breadcrumb, generation: generation)
+            },
+            playbackObserver: StreamingPlaybackObserver { observation in
+                Self.recordTTSPlaybackObservation(observation, generation: generation)
+            },
+            lifecycleObserver: { observation in
+                Self.recordTTSLifecycleObservation(observation, generation: generation)
             })
     }
 
@@ -2835,9 +2845,22 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: "tts_\(progress.state.rawValue)",
+            playbackGeneration: generation,
+            cancellationGeneration: generation,
             operationIdentifier: generation.map { "tts-generation-\($0)" },
             operationGeneration: generation,
-            stream: Self.sanitizedDiagnosticToken(self.ttsDiagnostics.config.provider, fallback: "unknown"),
+            diagnosticAttemptID: generation.map { "tts-generation-\($0)" },
+            provider: Self.sanitizedDiagnosticToken(
+                self.currentPlaybackProvider.rawValue,
+                fallback: "unknown"),
+            providerStage: progress.state.rawValue,
+            codec: self.currentPlaybackProvider == .elevenLabs
+                ? (self.lastPlaybackWasPCM ? "pcm" : "mp3")
+                : "system_speech",
+            playbackPath: self.currentPlaybackProvider == .elevenLabs
+                ? (self.lastPlaybackWasPCM ? "pcm" : "mp3")
+                : "system",
+            resultClass: progress.finalOutcome?.rawValue ?? progress.providerAttemptOutcome?.rawValue,
             byteCount: progress.totalAudioBytes,
             sampleRate: progress.pcmSampleRate,
             durationMilliseconds: progress.durationMilliseconds))
@@ -2847,16 +2870,170 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: breadcrumb.stage.rawValue,
+            playbackGeneration: generation,
+            cancellationGeneration: generation,
             operationIdentifier: "tts-generation-\(generation)",
             operationGeneration: generation,
-            stream: breadcrumb.detail.map {
-                Self.sanitizedDiagnosticToken($0, fallback: "unknown")
-            },
+            diagnosticAttemptID: "tts-generation-\(generation)",
+            provider: Self.providerToken(for: breadcrumb),
+            providerStage: breadcrumb.stage.rawValue,
+            codec: Self.codecToken(for: breadcrumb),
+            playbackPath: Self.playbackPathToken(for: breadcrumb),
+            resultClass: Self.resultClassToken(for: breadcrumb),
             byteCount: breadcrumb.byteCount,
             sampleRate: breadcrumb.sampleRate,
             durationMilliseconds: breadcrumb.durationMilliseconds))
-        if breadcrumb.stage.sealsBeforeReturning {
-            _ = GatewayDiagnostics.flush()
+        if breadcrumb.stage.requestsDurableWrite {
+            GatewayDiagnostics.requestFlush()
+        }
+    }
+
+    nonisolated static func recordTTSPlaybackObservation(
+        _ observation: StreamingPlaybackObservation,
+        generation: UInt64,
+        flush: @Sendable () -> Void = { GatewayDiagnostics.requestFlush() })
+    {
+        let resultClass: String? = switch observation.stage {
+        case .playbackCompleted: "success"
+        case .playbackFailed: "failed"
+        case .playbackCancelled: "cancelled"
+        case .decoderCreated,
+             .playerInstanceCreated,
+             .playbackSubmissionStarted,
+             .playbackSubmissionAccepted,
+             .firstRenderCallbackObserved:
+            nil
+        }
+        let attempt = "tts-generation-\(generation)"
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_\(observation.stage.rawValue)",
+            playbackGeneration: generation,
+            cancellationGeneration: generation,
+            operationIdentifier: attempt,
+            operationGeneration: generation,
+            diagnosticAttemptID: attempt,
+            provider: "elevenlabs",
+            providerStage: observation.stage.rawValue,
+            codec: observation.path.rawValue,
+            playbackPath: observation.path.rawValue,
+            resultClass: resultClass))
+        flush()
+    }
+
+    nonisolated static func recordTTSLifecycleObservation(
+        _ observation: TalkTTSLifecycleObservation,
+        generation: UInt64,
+        flush: @Sendable () -> Void = { GatewayDiagnostics.requestFlush() })
+    {
+        let attempt = "tts-generation-\(generation)"
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: observation.stage.rawValue,
+            playbackGeneration: generation,
+            cancellationGeneration: generation,
+            operationIdentifier: attempt,
+            operationGeneration: generation,
+            diagnosticAttemptID: attempt,
+            provider: observation.provider,
+            providerStage: observation.providerStage,
+            codec: observation.codec,
+            playbackPath: observation.playbackPath,
+            resultClass: observation.resultClass,
+            byteCount: observation.byteCount))
+        flush()
+    }
+
+    private nonisolated static func providerToken(for breadcrumb: TalkTTSBreadcrumb) -> String? {
+        switch breadcrumb.stage {
+        case .providerRequestStarted,
+             .decoderSelected,
+             .playerCallEntered,
+             .firstAudioByte,
+             .playerCallReturned,
+             .providerResult:
+            "elevenlabs"
+        case .systemSpeechCallEntered,
+             .playbackStarted:
+            "system"
+        case .playbackCompleted,
+             .playbackFailed:
+            breadcrumb.detail == "system" ? "system" : "elevenlabs"
+        case .requestAdmitted,
+             .playbackPipelineEntered,
+             .audioSessionPrepareStarted,
+             .audioSessionPrepared,
+             .audioSessionPrepareFailed,
+             .fallbackTransition,
+             .audioSessionRestoreStarted,
+             .generationCancelled,
+             .generationFinalized:
+            nil
+        }
+    }
+
+    private nonisolated static func codecToken(for breadcrumb: TalkTTSBreadcrumb) -> String? {
+        switch breadcrumb.stage {
+        case .providerRequestStarted:
+            breadcrumb.detail
+        case .decoderSelected,
+             .playerCallEntered,
+             .firstAudioByte:
+            breadcrumb.detail
+        case .systemSpeechCallEntered,
+             .playbackStarted:
+            "system_speech"
+        case .requestAdmitted,
+             .playbackPipelineEntered,
+             .audioSessionPrepareStarted,
+             .audioSessionPrepared,
+             .audioSessionPrepareFailed,
+             .playerCallReturned,
+             .providerResult,
+             .fallbackTransition,
+             .playbackCompleted,
+             .playbackFailed,
+             .audioSessionRestoreStarted,
+             .generationCancelled,
+             .generationFinalized:
+            nil
+        }
+    }
+
+    private nonisolated static func playbackPathToken(for breadcrumb: TalkTTSBreadcrumb) -> String? {
+        let token = breadcrumb.detail?.lowercased()
+        if token == "pcm" || token?.hasPrefix("pcm_") == true { return "pcm" }
+        if token == "mp3" || token?.hasPrefix("mp3_") == true { return "mp3" }
+        if token == "system" || breadcrumb.stage == .systemSpeechCallEntered { return "system" }
+        return nil
+    }
+
+    private nonisolated static func resultClassToken(for breadcrumb: TalkTTSBreadcrumb) -> String? {
+        switch breadcrumb.stage {
+        case .providerResult:
+            breadcrumb.detail
+        case .playbackCompleted:
+            "success"
+        case .playbackFailed:
+            "failed"
+        case .generationCancelled:
+            "cancelled"
+        case .requestAdmitted,
+             .playbackPipelineEntered,
+             .audioSessionPrepareStarted,
+             .audioSessionPrepared,
+             .audioSessionPrepareFailed,
+             .providerRequestStarted,
+             .decoderSelected,
+             .playerCallEntered,
+             .firstAudioByte,
+             .playerCallReturned,
+             .fallbackTransition,
+             .systemSpeechCallEntered,
+             .playbackStarted,
+             .audioSessionRestoreStarted,
+             .generationFinalized:
+            nil
         }
     }
 
@@ -2872,7 +3049,7 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: "tts_config_\(config.secretsAccess.rawValue)",
-            stream: config.provider))
+            provider: Self.diagnosticProviderToken(config.provider)))
     }
 
     private func prepareAudioSessionForLocalSpeech() throws -> TalkAudioRouteEvidence {
@@ -2892,7 +3069,7 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .route,
             state: "tts_route_prepared",
-            stream: evidence.outputPortTypes.first))
+            connectionRole: .operator))
         return evidence
     }
 
@@ -2932,8 +3109,16 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .route,
             state: "tts_route_changed",
-            sequence: Int(reasonValue),
-            stream: self.ttsDiagnostics.route.outputPortTypes.first))
+            connectionRole: .operator,
+            sequence: Int(reasonValue)))
+    }
+
+    private static func diagnosticProviderToken(_ raw: String) -> String {
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "elevenlabs": "elevenlabs"
+        case "system": "system"
+        default: "unknown"
+        }
     }
 
     private static func sanitizedDiagnosticToken(_ raw: String, fallback: String) -> String {
@@ -3550,7 +3735,9 @@ final class TalkModeManager: NSObject {
                 text: text,
                 context: context,
                 outputFormat: playbackFormat)
-            initialAttempt = TalkTTSProviderAttempt(outputFormat: playbackFormat) {
+            initialAttempt = TalkTTSProviderAttempt(
+                outputFormat: playbackFormat,
+                payloadValidation: .providerContentTypeValidated) {
                 if let prefetchedAudio, !prefetchedAudio.chunks.isEmpty {
                     return Self.makeBufferedAudioStream(chunks: prefetchedAudio.chunks)
                 }
@@ -3562,7 +3749,9 @@ final class TalkModeManager: NSObject {
                     text: text,
                     context: context,
                     outputFormat: mp3Format)
-                mp3Attempt = TalkTTSProviderAttempt(outputFormat: mp3Format) {
+                mp3Attempt = TalkTTSProviderAttempt(
+                    outputFormat: mp3Format,
+                    payloadValidation: .providerContentTypeValidated) {
                     client.streamSynthesize(voiceId: voiceID, request: mp3Request)
                 }
             }

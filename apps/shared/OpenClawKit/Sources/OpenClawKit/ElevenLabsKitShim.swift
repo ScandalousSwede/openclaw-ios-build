@@ -342,6 +342,69 @@ public struct StreamingPlaybackResult: Sendable {
     }
 }
 
+public enum StreamingPlaybackPath: String, Sendable {
+    case pcm
+    case mp3
+}
+
+public enum StreamingPlaybackObservationStage: String, Sendable {
+    case decoderCreated = "decoder_created"
+    case playerInstanceCreated = "player_instance_created"
+    case playbackSubmissionStarted = "playback_submission_started"
+    case playbackSubmissionAccepted = "playback_submission_accepted"
+    case firstRenderCallbackObserved = "first_render_callback_observed"
+    case playbackCompleted = "playback_completed"
+    case playbackFailed = "playback_failed"
+    case playbackCancelled = "playback_cancelled"
+}
+
+public struct StreamingPlaybackObservation: Equatable, Sendable {
+    public let stage: StreamingPlaybackObservationStage
+    public let path: StreamingPlaybackPath
+
+    public init(stage: StreamingPlaybackObservationStage, path: StreamingPlaybackPath) {
+        self.stage = stage
+        self.path = path
+    }
+
+    fileprivate init(_ observation: ElevenLabsKit.ElevenLabsPlaybackObservation) {
+        self.stage = switch observation.stage {
+        case .decoderCreated: .decoderCreated
+        case .playerInstanceCreated: .playerInstanceCreated
+        case .playbackSubmissionStarted: .playbackSubmissionStarted
+        case .playbackSubmissionAccepted: .playbackSubmissionAccepted
+        case .firstRenderCallbackObserved: .firstRenderCallbackObserved
+        case .playbackCompleted: .playbackCompleted
+        case .playbackFailed: .playbackFailed
+        case .playbackCancelled: .playbackCancelled
+        }
+        self.path = switch observation.path {
+        case .pcm: .pcm
+        case .mp3: .mp3
+        }
+    }
+}
+
+public struct StreamingPlaybackObserver: Sendable {
+    fileprivate let handler: @Sendable (StreamingPlaybackObservation) -> Void
+
+    public init(
+        _ handler: @escaping @Sendable (StreamingPlaybackObservation) -> Void = { _ in }
+    ) {
+        self.handler = handler
+    }
+
+    public func record(_ observation: StreamingPlaybackObservation) {
+        self.handler(observation)
+    }
+
+    fileprivate var dependencyObserver: ElevenLabsKit.ElevenLabsPlaybackObserver {
+        ElevenLabsKit.ElevenLabsPlaybackObserver { observation in
+            self.record(StreamingPlaybackObservation(observation))
+        }
+    }
+}
+
 @MainActor
 public final class StreamingAudioPlayer {
     public static let shared = StreamingAudioPlayer()
@@ -353,7 +416,16 @@ public final class StreamingAudioPlayer {
     }
 
     public func play(stream: AsyncThrowingStream<Data, Error>) async -> StreamingPlaybackResult {
-        let result = await self.player.play(stream: stream)
+        return await self.play(stream: stream, observer: StreamingPlaybackObserver())
+    }
+
+    public func play(
+        stream: AsyncThrowingStream<Data, Error>,
+        observer: StreamingPlaybackObserver
+    ) async -> StreamingPlaybackResult {
+        let result = await self.player.play(
+            stream: stream,
+            observer: observer.dependencyObserver)
         return StreamingPlaybackResult(
             finished: result.finished,
             interruptedAt: result.interruptedAt)
@@ -375,7 +447,21 @@ public final class PCMStreamingAudioPlayer {
     }
 
     public func play(stream: AsyncThrowingStream<Data, Error>, sampleRate: Double) async -> StreamingPlaybackResult {
-        let result = await self.player.play(stream: stream, sampleRate: sampleRate)
+        return await self.play(
+            stream: stream,
+            sampleRate: sampleRate,
+            observer: StreamingPlaybackObserver())
+    }
+
+    public func play(
+        stream: AsyncThrowingStream<Data, Error>,
+        sampleRate: Double,
+        observer: StreamingPlaybackObserver
+    ) async -> StreamingPlaybackResult {
+        let result = await self.player.play(
+            stream: stream,
+            sampleRate: sampleRate,
+            observer: observer.dependencyObserver)
         return StreamingPlaybackResult(
             finished: result.finished,
             interruptedAt: result.interruptedAt)

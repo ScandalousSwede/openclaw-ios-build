@@ -15,6 +15,13 @@ import write_build_manifest
 
 
 class BuildManifestTests(unittest.TestCase):
+    def test_runtime_symbolication_paths_reject_traversal_and_oversized_values(self) -> None:
+        for unsafe in ["", "/absolute", "../outside", "PlugIns/../outside", "PlugIns//x"]:
+            with self.subTest(path=unsafe), self.assertRaisesRegex(ValueError, "unsafe|missing"):
+                write_build_manifest.safe_bundle_relative_path(unsafe)
+        with self.assertRaisesRegex(ValueError, "oversized"):
+            write_build_manifest.safe_bundle_relative_path("x" * 257)
+
     def test_unsigned_manifest_uses_archived_metadata_and_hashes_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             temp = pathlib.Path(raw_temp)
@@ -36,8 +43,14 @@ class BuildManifestTests(unittest.TestCase):
                     "OpenClawBuildConfiguration": "Debug",
                     "OpenClawBuildArchiveUUID": "12345678-1234-5678-1234-567812345678",
                     "OpenClawBuildAPSEnvironmentIfSigned": "development",
-                    "OpenClawBuildExtensionBundleIDs": ["ai.openclaw.client.share"],
-                    "OpenClawBuildWatchBundleIDs": ["ai.openclaw.client.watchkitapp"],
+                    "OpenClawBuildExtensionBundleIDs": [
+                        "ai.openclaw.client.activitywidget",
+                        "ai.openclaw.client.share",
+                    ],
+                    "OpenClawBuildWatchBundleIDs": [
+                        "ai.openclaw.client.watchkitapp",
+                        "ai.openclaw.client.watchkitapp.extension",
+                    ],
                 },
             )
             (app / "OpenClaw").write_bytes(b"binary")
@@ -46,10 +59,20 @@ class BuildManifestTests(unittest.TestCase):
                 {"CFBundleIdentifier": "ai.openclaw.client.share"},
             )
             self.write_plist(
-                app / "Watch" / "OpenClaw Watch.app" / "Info.plist",
+                app / "PlugIns" / "Activity.appex" / "Info.plist",
+                {"CFBundleIdentifier": "ai.openclaw.client.activitywidget"},
+            )
+            watch_app = app / "Watch" / "OpenClaw Watch.app"
+            self.write_plist(
+                watch_app / "Info.plist",
                 {"CFBundleIdentifier": "ai.openclaw.client.watchkitapp"},
             )
+            self.write_plist(
+                watch_app / "PlugIns" / "OpenClawWatchExtension.appex" / "Info.plist",
+                {"CFBundleIdentifier": "ai.openclaw.client.watchkitapp.extension"},
+            )
             (archive / "dSYMs" / "OpenClaw.app.dSYM").mkdir(parents=True)
+            self.write_runtime_symbolication_manifest(archive, app)
             ipa = self.write_artifact(temp / "OpenClaw.ipa", b"ipa")
             archive_zip = self.write_artifact(temp / "OpenClaw.xcarchive.zip", b"archive")
             dsym_zip = self.write_artifact(temp / "OpenClaw-dSYMs.zip", b"dsyms")
@@ -103,8 +126,14 @@ class BuildManifestTests(unittest.TestCase):
             self.assertEqual(manifest["version"], "2026.6.2")
             self.assertEqual(manifest["build_number"], "17")
             self.assertEqual(manifest["main_bundle_id"], "ai.openclaw.client")
-            self.assertEqual(manifest["extension_bundle_ids"], ["ai.openclaw.client.share"])
-            self.assertEqual(manifest["watch_bundle_ids_if_present"], ["ai.openclaw.client.watchkitapp"])
+            self.assertEqual(
+                manifest["extension_bundle_ids"],
+                ["ai.openclaw.client.activitywidget", "ai.openclaw.client.share"],
+            )
+            self.assertEqual(
+                manifest["watch_bundle_ids_if_present"],
+                ["ai.openclaw.client.watchkitapp", "ai.openclaw.client.watchkitapp.extension"],
+            )
             self.assertEqual(manifest["dsym_uuids"], ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"])
             self.assertEqual(manifest["aps_environment_if_signed"], "development")
             self.assertEqual([item["kind"] for item in manifest["artifacts"]], ["ipa", "xcarchive", "dsyms"])
@@ -662,7 +691,88 @@ class BuildManifestTests(unittest.TestCase):
             },
         )
         (archive / "dSYMs" / "OpenClaw.app.dSYM").mkdir(parents=True)
+        cls.write_runtime_symbolication_manifest(archive, app)
         return archive
+
+    @classmethod
+    def write_runtime_symbolication_manifest(
+        cls,
+        archive: pathlib.Path,
+        app: pathlib.Path,
+    ) -> None:
+        main_info_path = app / "Info.plist"
+        main_info = plistlib.loads(main_info_path.read_bytes())
+        main_bundle_id = str(main_info["CFBundleIdentifier"])
+        bundles = [
+            app,
+            *sorted((app / "PlugIns").glob("*.appex")),
+            *sorted((app / "Watch").glob("*.app")),
+            *sorted((app / "Watch").glob("*.app/PlugIns/*.appex")),
+        ]
+        records = []
+        for bundle in bundles:
+            info_path = bundle / "Info.plist"
+            info = plistlib.loads(info_path.read_bytes())
+            executable_name = str(info.get("CFBundleExecutable") or bundle.stem)
+            info["CFBundleExecutable"] = executable_name
+            relative = "." if bundle == app else bundle.relative_to(app).as_posix()
+            is_watch_stub = relative.startswith("Watch/") and relative.endswith(".app")
+            if is_watch_stub:
+                info["WKWatchKitApp"] = True
+                info["WKCompanionAppBundleIdentifier"] = main_bundle_id
+            cls.write_plist(info_path, info)
+            (bundle / executable_name).write_bytes(b"binary")
+            slices = [
+                {
+                    "uuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    "architecture": "arm64",
+                }
+            ]
+            if is_watch_stub:
+                role = "sdk_watchkit_stub"
+                requirement = "not_applicable_sdk_watchkit_stub"
+                status = "not_emitted"
+                dsym_slices = []
+            else:
+                role = "compiled_product"
+                requirement = "required_compiled_executable"
+                status = "uuid_matched_during_build"
+                dsym_slices = slices
+                dsym_binary = (
+                    archive
+                    / "dSYMs"
+                    / f"{bundle.name}.dSYM"
+                    / "Contents"
+                    / "Resources"
+                    / "DWARF"
+                    / executable_name
+                )
+                dsym_binary.parent.mkdir(parents=True, exist_ok=True)
+                dsym_binary.write_bytes(b"dsym")
+            records.append(
+                {
+                    "bundle_id": str(info["CFBundleIdentifier"]),
+                    "bundle_relative_path": relative,
+                    "executable_name": executable_name,
+                    "executable_role": role,
+                    "executable_uuids": slices,
+                    "dsym_requirement": requirement,
+                    "dsym_status": status,
+                    "dsym_uuids": dsym_slices,
+                }
+            )
+        manifest = {
+            "schema": write_build_manifest.RUNTIME_SYMBOLICATION_SCHEMA,
+            "git_sha": str(main_info["OpenClawBuildGitSHA"]),
+            "archive_uuid": str(main_info["OpenClawBuildArchiveUUID"]).lower(),
+            "build_number": str(main_info["CFBundleVersion"]),
+            "configuration": str(main_info["OpenClawBuildConfiguration"]),
+            "executables": sorted(records, key=lambda item: item["bundle_relative_path"]),
+        }
+        (app / write_build_manifest.RUNTIME_SYMBOLICATION_FILE).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
 
     @staticmethod
     def write_valid_stage_b_receipt(temp: pathlib.Path) -> pathlib.Path:

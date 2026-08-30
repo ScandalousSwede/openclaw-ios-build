@@ -1,5 +1,5 @@
 {
-  "schema": "aies.ios.aggregate-package-authority.v1",
+  "schema": "aies.ios.aggregate-package-authority.v2",
   "resolvedFileSchemaVersion": 3,
   "project": {
     "path": "apps/ios/OpenClaw.xcodeproj",
@@ -9,15 +9,22 @@
   "sourceDeclarations": [
     {
       "path": "apps/ios/project.yml",
-      "sha256": "e57c99dbcc8f777f568faf22a8fd75524d8a0bb3b29da99b618aa07c79605c06"
+      "sha256": "e7f300c47a2b14111544e687ceb46ff9528f4fc5b88bf7990a7642fc69f2ab04"
     },
     {
       "path": "apps/shared/OpenClawKit/Package.swift",
-      "sha256": "5bc4ab0e19f3c9653eefa50347702511162ff310c57c117453cf4f42002eebc6"
+      "sha256": "86d00fe962bf4692b99b742db160facb91e577d89d3dcbda9a287e28cdf5d51d"
     },
     {
       "path": "apps/swabble/Package.swift",
       "sha256": "6d7e1f2113615b71b6ff35723ea5402358a496aeb79b28ddfde0c343c67b640a"
+    }
+  ],
+  "sourcePatches": [
+    {
+      "packageIdentity": "elevenlabskit",
+      "path": "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json",
+      "sha256": "f68ca77a23f5c4494839e37c8f85cdcb707efabb50eefa74893753581d510c24"
     }
   ],
   "standaloneLocks": [
@@ -97,17 +104,17 @@
     {
       "identity": "elevenlabskit",
       "kind": "remoteSourceControl",
-      "location": "https://github.com/steipete/ElevenLabsKit.git",
-      "version": "0.1.1",
-      "revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+      "location": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
+      "version": null,
+      "revision": "1e292346683ea174d98d1a88763c0f26e966c0af",
       "branch": null,
       "checksum": null,
       "aggregateRole": "transitive",
       "declarationRole": "direct",
       "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:21",
       "requirement": {
-        "kind": "from",
-        "minimumVersion": "0.1.1"
+        "kind": "revision",
+        "revision": "1e292346683ea174d98d1a88763c0f26e966c0af"
       }
     },
     {

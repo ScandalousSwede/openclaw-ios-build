@@ -28,6 +28,11 @@ STAGE_B_RECEIPT_NAME = "OpenClaw-signing-entitlements.json"
 STAGE_A_RECEIPT_NAME = "OpenClaw-archive-signing-entitlements.json"
 UUID_PATTERN = re.compile(r"UUID: ([0-9A-Fa-f-]{36}) \(([^)]+)\)")
 TEAM_ID_PATTERN = re.compile(r"^[A-Z0-9]{10}$")
+RUNTIME_SYMBOLICATION_SCHEMA = (
+    "argus.openclaw-ios.runtime-symbolication-manifest.v1"
+)
+RUNTIME_SYMBOLICATION_FILE = "AIESRuntimeSymbolicationManifest.json"
+RUNTIME_SYMBOLICATION_MAXIMUM_BYTES = 64 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -129,6 +134,222 @@ def run_dwarfdump(path: pathlib.Path, executable: str) -> list[dict[str, str]]:
     if not slices:
         raise ValueError(f"dwarfdump returned no UUIDs for {path}")
     return slices
+
+
+def normalized_uuid_slices(value: Any, source: str) -> list[dict[str, str]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{source} has no UUID slices")
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"uuid", "architecture"}:
+            raise ValueError(f"{source} contains malformed UUID slice")
+        raw_uuid = item.get("uuid")
+        architecture = item.get("architecture")
+        if not isinstance(raw_uuid, str) or not isinstance(architecture, str):
+            raise ValueError(f"{source} contains non-string UUID slice")
+        try:
+            normalized_uuid = str(uuid.UUID(raw_uuid)).lower()
+        except ValueError as error:
+            raise ValueError(f"{source} contains malformed UUID") from error
+        if not architecture or len(architecture.encode()) > 64:
+            raise ValueError(f"{source} contains malformed architecture")
+        result.append({"uuid": normalized_uuid, "architecture": architecture})
+    result.sort(key=lambda item: (item["architecture"], item["uuid"]))
+    if len({(item["architecture"], item["uuid"]) for item in result}) != len(result):
+        raise ValueError(f"{source} contains duplicate UUID slice")
+    return result
+
+
+def safe_bundle_relative_path(value: Any) -> pathlib.PurePosixPath:
+    if not isinstance(value, str) or not value or len(value.encode()) > 256:
+        raise ValueError("runtime symbolication bundle path is missing or oversized")
+    if value == ".":
+        return pathlib.PurePosixPath(".")
+    path = pathlib.PurePosixPath(value)
+    if path.is_absolute() or "\\" in value or any(
+        component in {"", ".", ".."} for component in value.split("/")
+    ):
+        raise ValueError("runtime symbolication bundle path is unsafe")
+    return path
+
+
+def require_resolved_descendant(
+    path: pathlib.Path, root: pathlib.Path, label: str
+) -> None:
+    try:
+        path.resolve(strict=True).relative_to(root.resolve(strict=True))
+    except (FileNotFoundError, ValueError) as error:
+        raise ValueError(f"runtime symbolication {label} escapes its controlled root") from error
+
+
+def verify_runtime_symbolication_manifest(
+    args: argparse.Namespace,
+    app_path: pathlib.Path,
+    *,
+    main_bundle_id: str,
+    version_build_number: str,
+    archive_uuid: str,
+) -> dict[str, Any]:
+    path = app_path / RUNTIME_SYMBOLICATION_FILE
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("archive lacks regular runtime symbolication manifest")
+    data = path.read_bytes()
+    if not data or len(data) > RUNTIME_SYMBOLICATION_MAXIMUM_BYTES:
+        raise ValueError("runtime symbolication manifest violates size bound")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("runtime symbolication manifest is malformed") from error
+    required_keys = {
+        "schema",
+        "git_sha",
+        "archive_uuid",
+        "build_number",
+        "configuration",
+        "executables",
+    }
+    if not isinstance(value, dict) or set(value) != required_keys:
+        raise ValueError("runtime symbolication manifest keys are malformed")
+    expected_provenance = {
+        "schema": RUNTIME_SYMBOLICATION_SCHEMA,
+        "git_sha": args.git_sha,
+        "archive_uuid": archive_uuid,
+        "build_number": version_build_number,
+        "configuration": args.configuration,
+    }
+    for key, expected in expected_provenance.items():
+        if value.get(key) != expected:
+            raise ValueError(f"runtime symbolication {key} mismatch")
+    records = value.get("executables")
+    if not isinstance(records, list) or len(records) != 5:
+        raise ValueError("runtime symbolication manifest requires five executables")
+    expected_record_keys = {
+        "bundle_id",
+        "bundle_relative_path",
+        "executable_name",
+        "executable_role",
+        "executable_uuids",
+        "dsym_requirement",
+        "dsym_status",
+        "dsym_uuids",
+    }
+    verified: list[dict[str, Any]] = []
+    seen_paths: set[pathlib.PurePosixPath] = set()
+    seen_ids: set[str] = set()
+    expected_ids = {
+        main_bundle_id,
+        *string_list(
+            read_plist(app_path / "Info.plist"),
+            "OpenClawBuildExtensionBundleIDs",
+            app_path / "Info.plist",
+        ),
+        *string_list(
+            read_plist(app_path / "Info.plist"),
+            "OpenClawBuildWatchBundleIDs",
+            app_path / "Info.plist",
+        ),
+    }
+    if len(expected_ids) != 5:
+        raise ValueError("runtime symbolication provenance does not name five bundle IDs")
+    for item in records:
+        if not isinstance(item, dict) or set(item) != expected_record_keys:
+            raise ValueError("runtime symbolication executable record keys are malformed")
+        relative = safe_bundle_relative_path(item["bundle_relative_path"])
+        bundle = app_path if relative == pathlib.PurePosixPath(".") else app_path / relative
+        if relative in seen_paths or bundle.is_symlink() or not bundle.is_dir():
+            raise ValueError("runtime symbolication bundle path is missing or duplicate")
+        require_resolved_descendant(bundle, app_path, "bundle path")
+        seen_paths.add(relative)
+        info_path = bundle / "Info.plist"
+        if info_path.is_symlink() or not info_path.is_file():
+            raise ValueError("runtime symbolication bundle Info.plist is missing")
+        require_resolved_descendant(info_path, bundle, "bundle Info.plist")
+        info = read_plist(info_path)
+        bundle_id = require_string(info, "CFBundleIdentifier", info_path)
+        executable_name = require_string(info, "CFBundleExecutable", info_path)
+        if item["bundle_id"] != bundle_id or item["executable_name"] != executable_name:
+            raise ValueError("runtime symbolication bundle/executable identity mismatch")
+        if bundle_id in seen_ids:
+            raise ValueError("runtime symbolication bundle identifier is duplicated")
+        seen_ids.add(bundle_id)
+        executable_path = bundle / executable_name
+        if not executable_path.is_file() or executable_path.is_symlink():
+            raise ValueError("runtime symbolication executable is missing")
+        require_resolved_descendant(executable_path, bundle, "bundle executable")
+        observed_executable = sorted(
+            run_dwarfdump(executable_path, args.dwarfdump),
+            key=lambda record: (record["architecture"], record["uuid"]),
+        )
+        embedded_executable = normalized_uuid_slices(
+            item["executable_uuids"], f"runtime executable {bundle_id}"
+        )
+        if embedded_executable != observed_executable:
+            raise ValueError("runtime symbolication executable UUID mismatch")
+        is_watch_application = (
+            len(relative.parts) == 2
+            and relative.parts[0] == "Watch"
+            and relative.parts[1].endswith(".app")
+        )
+        if item["executable_role"] == "sdk_watchkit_stub":
+            if (
+                not is_watch_application
+                or item["dsym_requirement"] != "not_applicable_sdk_watchkit_stub"
+                or item["dsym_status"] != "not_emitted"
+                or item["dsym_uuids"] != []
+                or info.get("WKWatchKitApp") is not True
+                or info.get("WKCompanionAppBundleIdentifier") != main_bundle_id
+            ):
+                raise ValueError("runtime symbolication WatchKit launcher contract mismatch")
+            if (args.archive / "dSYMs" / f"{bundle.name}.dSYM").exists():
+                raise ValueError("runtime symbolication WatchKit launcher has unexpected dSYM")
+        elif item["executable_role"] == "compiled_product":
+            if (
+                is_watch_application
+                or item["dsym_requirement"] != "required_compiled_executable"
+                or item["dsym_status"] != "uuid_matched_during_build"
+            ):
+                raise ValueError("runtime symbolication compiled dSYM contract mismatch")
+            dsym_binary = (
+                args.archive
+                / "dSYMs"
+                / f"{bundle.name}.dSYM"
+                / "Contents"
+                / "Resources"
+                / "DWARF"
+                / executable_name
+            )
+            if not dsym_binary.is_file() or dsym_binary.is_symlink():
+                raise ValueError("runtime symbolication matching archive dSYM is missing")
+            require_resolved_descendant(
+                dsym_binary,
+                args.archive / "dSYMs",
+                "archive dSYM executable",
+            )
+            observed_dsym = sorted(
+                run_dwarfdump(dsym_binary, args.dwarfdump),
+                key=lambda record: (record["architecture"], record["uuid"]),
+            )
+            embedded_dsym = normalized_uuid_slices(
+                item["dsym_uuids"], f"runtime dSYM {bundle_id}"
+            )
+            if observed_dsym != observed_executable or embedded_dsym != observed_dsym:
+                raise ValueError("runtime symbolication executable/dSYM UUID mismatch")
+        else:
+            raise ValueError("runtime symbolication executable role is unsupported")
+        verified.append(item)
+    if seen_ids != expected_ids:
+        raise ValueError("runtime symbolication bundle identifiers differ from provenance")
+    if len([item for item in verified if item["executable_role"] == "compiled_product"]) != 4:
+        raise ValueError("runtime symbolication requires four compiled products")
+    if len([item for item in verified if item["executable_role"] == "sdk_watchkit_stub"]) != 1:
+        raise ValueError("runtime symbolication requires one WatchKit launcher")
+    return {
+        "status": "verified_archive_executable_and_dsym_mapping",
+        "schema": RUNTIME_SYMBOLICATION_SCHEMA,
+        "resource_file_name": RUNTIME_SYMBOLICATION_FILE,
+        "resource_sha256": hashlib.sha256(data).hexdigest(),
+        "executables": verified,
+    }
 
 
 def signed_aps_environment(app_path: pathlib.Path, executable: str) -> str | None:
@@ -472,6 +693,13 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     version = require_string(info, "CFBundleShortVersionString", info_path)
     build_number = require_string(info, "CFBundleVersion", info_path)
     main_bundle_id = require_string(info, "CFBundleIdentifier", info_path)
+    runtime_symbolication = verify_runtime_symbolication_manifest(
+        args,
+        app_path,
+        main_bundle_id=main_bundle_id,
+        version_build_number=build_number,
+        archive_uuid=archive_uuid,
+    )
     if artifact_stage == EXPORTED_IPA_POST_EXPORT:
         if expected_aps_environment != "production":
             raise ValueError(
@@ -619,6 +847,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "main_binary_uuids": main_binary_slices,
         "dsym_uuids": sorted(dsym_uuids),
         "dsym_slices": sorted(dsym_slices, key=lambda item: (item["bundle"], item["architecture"])),
+        "runtime_symbolication": runtime_symbolication,
         "configuration": args.configuration,
         "aps_environment_if_signed": aps_environment,
         "github_run_id": args.github_run_id,

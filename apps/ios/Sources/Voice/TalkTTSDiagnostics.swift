@@ -207,9 +207,25 @@ struct TalkTTSPlaybackResult: Equatable, Sendable {
     let outcome: TalkTTSProviderOutcome
 }
 
+enum TalkTTSPayloadValidationEvidence: Equatable, Sendable {
+    case notObserved
+    case providerContentTypeValidated
+}
+
 struct TalkTTSProviderAttempt {
     let outputFormat: String?
+    let payloadValidation: TalkTTSPayloadValidationEvidence
     let makeStream: @MainActor () -> AsyncThrowingStream<Data, Error>
+
+    init(
+        outputFormat: String?,
+        payloadValidation: TalkTTSPayloadValidationEvidence = .notObserved,
+        makeStream: @escaping @MainActor () -> AsyncThrowingStream<Data, Error>)
+    {
+        self.outputFormat = outputFormat
+        self.payloadValidation = payloadValidation
+        self.makeStream = makeStream
+    }
 }
 
 struct TalkTTSProgress: Sendable {
@@ -248,30 +264,8 @@ enum TalkTTSBreadcrumbStage: String, Sendable {
     case generationCancelled = "tts_generation_cancelled"
     case generationFinalized = "tts_generation_finalized"
 
-    var sealsBeforeReturning: Bool {
-        switch self {
-        case .audioSessionPrepareStarted,
-             .providerRequestStarted,
-             .playerCallEntered,
-             .firstAudioByte,
-             .systemSpeechCallEntered,
-             .playbackStarted,
-             .generationCancelled,
-             .generationFinalized:
-            true
-        case .requestAdmitted,
-             .playbackPipelineEntered,
-             .audioSessionPrepared,
-             .audioSessionPrepareFailed,
-             .decoderSelected,
-             .playerCallReturned,
-             .providerResult,
-             .fallbackTransition,
-             .playbackCompleted,
-             .playbackFailed,
-             .audioSessionRestoreStarted:
-            false
-        }
+    var requestsDurableWrite: Bool {
+        true
     }
 }
 
@@ -281,6 +275,34 @@ struct TalkTTSBreadcrumb: Equatable, Sendable {
     var byteCount: Int? = nil
     var sampleRate: Int? = nil
     var durationMilliseconds: Int? = nil
+}
+
+enum TalkTTSLifecycleObservationStage: String, Sendable {
+    case providerRequestStarted = "provider_request_started"
+    case providerResponseReceived = "provider_response_received"
+    case streamFirstChunkReceived = "stream_first_chunk_received"
+    case streamCompleted = "stream_completed"
+    case audioPayloadValidated = "audio_payload_validated"
+    case decoderSelected = "decoder_selected"
+    case audioSessionActivationStarted = "audio_session_activation_started"
+    case audioSessionActivationSucceeded = "audio_session_activation_succeeded"
+    case audioSessionActivationFailed = "audio_session_activation_failed"
+    case outputRouteObserved = "output_route_observed"
+    case fallbackSelected = "fallback_selected"
+    case fallbackStarted = "fallback_started"
+    case fallbackCompleted = "fallback_completed"
+    case fallbackFailed = "fallback_failed"
+    case firstRenderCallbackObserved = "first_render_callback_observed"
+}
+
+struct TalkTTSLifecycleObservation: Equatable, Sendable {
+    let stage: TalkTTSLifecycleObservationStage
+    let provider: String
+    let codec: String
+    let playbackPath: String
+    var providerStage: String? = nil
+    var byteCount: Int? = nil
+    var resultClass: String? = nil
 }
 
 extension TalkTTSDiagnosticSnapshot {
@@ -423,6 +445,8 @@ final class TalkTTSPlaybackPipeline {
     private let isCurrent: @MainActor @Sendable () -> Bool
     private let report: (TalkTTSProgress) -> Void
     private let breadcrumb: (TalkTTSBreadcrumb) -> Void
+    private let playbackObserver: StreamingPlaybackObserver
+    private let lifecycleObserver: (TalkTTSLifecycleObservation) -> Void
 
     init(
         pcmPlayer: PCMStreamingAudioPlaying,
@@ -431,7 +455,9 @@ final class TalkTTSPlaybackPipeline {
         prepareAudio: @escaping () throws -> TalkAudioRouteEvidence,
         isCurrent: @escaping @MainActor @Sendable () -> Bool = { true },
         report: @escaping (TalkTTSProgress) -> Void,
-        breadcrumb: @escaping (TalkTTSBreadcrumb) -> Void = { _ in })
+        breadcrumb: @escaping (TalkTTSBreadcrumb) -> Void = { _ in },
+        playbackObserver: StreamingPlaybackObserver = StreamingPlaybackObserver(),
+        lifecycleObserver: @escaping (TalkTTSLifecycleObservation) -> Void = { _ in })
     {
         self.pcmPlayer = pcmPlayer
         self.mp3Player = mp3Player
@@ -440,6 +466,8 @@ final class TalkTTSPlaybackPipeline {
         self.isCurrent = isCurrent
         self.report = report
         self.breadcrumb = breadcrumb
+        self.playbackObserver = playbackObserver
+        self.lifecycleObserver = lifecycleObserver
     }
 
     func speak(
@@ -451,13 +479,27 @@ final class TalkTTSPlaybackPipeline {
         let startedAt = ProcessInfo.processInfo.systemUptime
         self.breadcrumb(TalkTTSBreadcrumb(stage: .playbackPipelineEntered))
         self.breadcrumb(TalkTTSBreadcrumb(stage: .audioSessionPrepareStarted))
+        self.observe(.audioSessionActivationStarted, attempt: providerAttempt)
         do {
             let route = try self.prepareAudio()
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .audioSessionPrepared,
                 detail: Self.routeToken(route)))
+            self.observe(
+                .audioSessionActivationSucceeded,
+                attempt: providerAttempt,
+                resultClass: "success")
+            self.observe(
+                .outputRouteObserved,
+                attempt: providerAttempt,
+                providerStage: TalkTTSLifecycleObservationStage.outputRouteObserved.rawValue,
+                resultClass: Self.outputRouteResultClass(route))
         } catch {
             self.breadcrumb(TalkTTSBreadcrumb(stage: .audioSessionPrepareFailed))
+            self.observe(
+                .audioSessionActivationFailed,
+                attempt: providerAttempt,
+                resultClass: "failed")
             guard self.isCurrent(), !Task.isCancelled else {
                 return TalkTTSPlaybackResult(
                     succeeded: false,
@@ -471,10 +513,12 @@ final class TalkTTSPlaybackPipeline {
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .fallbackTransition,
                 detail: "audio_session_to_system"))
+            self.observeFallbackSelected("audio_session_to_system")
             return await self.speakSystem(
                 text: text,
                 language: language,
                 startedAt: startedAt,
+                fallbackReason: "audio_session_to_system",
                 successMessage: "Audio setup failed — iOS voice succeeded; text reply preserved.")
         }
 
@@ -492,7 +536,12 @@ final class TalkTTSPlaybackPipeline {
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .fallbackTransition,
                 detail: "provider_unavailable_to_system"))
-            return await self.speakSystem(text: text, language: language, startedAt: startedAt)
+            self.observeFallbackSelected("provider_unavailable_to_system")
+            return await self.speakSystem(
+                text: text,
+                language: language,
+                startedAt: startedAt,
+                fallbackReason: "provider_unavailable_to_system")
         }
 
         self.report(TalkTTSProgress(state: .generating))
@@ -542,6 +591,14 @@ final class TalkTTSPlaybackPipeline {
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .fallbackTransition,
                 detail: "pcm_to_mp3"))
+            self.observe(
+                .fallbackSelected,
+                attempt: mp3Retry,
+                providerStage: "pcm_to_mp3")
+            self.observe(
+                .fallbackStarted,
+                attempt: mp3Retry,
+                providerStage: "pcm_to_mp3")
             let retryResult = await self.playProviderAttempt(mp3Retry, state: .mp3Retry)
             guard self.isCurrent() else {
                 return TalkTTSPlaybackResult(
@@ -559,6 +616,11 @@ final class TalkTTSPlaybackPipeline {
                     outcome: .interrupted)
             }
             if retryResult.outcome == .success {
+                self.observe(
+                    .fallbackCompleted,
+                    attempt: mp3Retry,
+                    providerStage: "pcm_to_mp3",
+                    resultClass: "success")
                 self.stopSuccessfulPCMIfNeeded(for: mp3Retry)
                 return self.completeProvider(result: retryResult, startedAt: startedAt)
             }
@@ -575,6 +637,11 @@ final class TalkTTSPlaybackPipeline {
                     textPreserved: true,
                     outcome: .interrupted)
             }
+            self.observe(
+                .fallbackFailed,
+                attempt: mp3Retry,
+                providerStage: "pcm_to_mp3",
+                resultClass: "failed")
             self.stopProviderPlayer(for: mp3Retry)
             self.report(TalkTTSProgress(
                 state: .systemFallback,
@@ -583,10 +650,12 @@ final class TalkTTSPlaybackPipeline {
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .fallbackTransition,
                 detail: "mp3_to_system"))
+            self.observeFallbackSelected("mp3_to_system")
             return await self.speakSystem(
                 text: text,
                 language: language,
                 startedAt: startedAt,
+                fallbackReason: "mp3_to_system",
                 providerFailure: retryResult.outcome)
         } else {
             self.report(TalkTTSProgress(
@@ -596,10 +665,12 @@ final class TalkTTSPlaybackPipeline {
             self.breadcrumb(TalkTTSBreadcrumb(
                 stage: .fallbackTransition,
                 detail: "provider_to_system"))
+            self.observeFallbackSelected("provider_to_system")
             return await self.speakSystem(
                 text: text,
                 language: language,
                 startedAt: startedAt,
+                fallbackReason: "provider_to_system",
                 providerFailure: firstResult.outcome)
         }
     }
@@ -611,18 +682,38 @@ final class TalkTTSPlaybackPipeline {
         let evidence = TalkTTSStreamEvidenceBox()
         let sampleRate = TalkTTSValidation.pcmSampleRate(from: attempt.outputFormat).map(Int.init)
         let decoder = sampleRate == nil ? "mp3" : "pcm"
+        let codec = decoder
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .providerRequestStarted,
-            detail: Self.formatToken(attempt.outputFormat),
+            detail: decoder,
             sampleRate: sampleRate))
+        self.observe(.providerRequestStarted, attempt: attempt)
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .decoderSelected,
             detail: decoder,
             sampleRate: sampleRate))
+        self.observe(.decoderSelected, attempt: attempt)
         let measured = Self.measuredStream(
             attempt.makeStream(),
             evidence: evidence,
             isCurrent: self.isCurrent,
+            onFirstStreamChunk: { [weak self] firstChunkBytes in
+                guard let self, self.isCurrent(), !Task.isCancelled else { return }
+                self.observe(
+                    .providerResponseReceived,
+                    provider: "elevenlabs",
+                    codec: codec,
+                    playbackPath: decoder,
+                    byteCount: firstChunkBytes,
+                    resultClass: "success")
+                self.observe(
+                    .streamFirstChunkReceived,
+                    provider: "elevenlabs",
+                    codec: codec,
+                    playbackPath: decoder,
+                    byteCount: firstChunkBytes,
+                    resultClass: "success")
+            },
             onFirstAudioByte: { [weak self] firstChunkBytes in
                 guard let self, self.isCurrent(), !Task.isCancelled else { return }
                 self.report(TalkTTSProgress(
@@ -635,6 +726,16 @@ final class TalkTTSPlaybackPipeline {
                     detail: decoder,
                     byteCount: firstChunkBytes,
                     sampleRate: sampleRate))
+            },
+            onStreamCompleted: { [weak self] byteCount in
+                guard let self, self.isCurrent(), !Task.isCancelled else { return }
+                self.observe(
+                    .streamCompleted,
+                    provider: "elevenlabs",
+                    codec: codec,
+                    playbackPath: decoder,
+                    byteCount: byteCount,
+                    resultClass: "success")
             })
         self.report(TalkTTSProgress(state: state, pcmSampleRate: sampleRate))
         self.breadcrumb(TalkTTSBreadcrumb(
@@ -643,9 +744,14 @@ final class TalkTTSPlaybackPipeline {
             sampleRate: sampleRate))
         let playback: StreamingPlaybackResult
         if let sampleRate {
-            playback = await self.pcmPlayer.play(stream: measured, sampleRate: Double(sampleRate))
+            playback = await self.pcmPlayer.play(
+                stream: measured,
+                sampleRate: Double(sampleRate),
+                observer: self.playbackObserver)
         } else {
-            playback = await self.mp3Player.play(stream: measured)
+            playback = await self.mp3Player.play(
+                stream: measured,
+                observer: self.playbackObserver)
         }
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .playerCallReturned,
@@ -659,6 +765,22 @@ final class TalkTTSPlaybackPipeline {
             error: evidence.error,
             byteCount: byteCount,
             playback: playback)
+        if byteCount == 0, outcome == .http4xx || outcome == .http5xx {
+            self.observe(
+                .providerResponseReceived,
+                attempt: attempt,
+                resultClass: outcome.rawValue)
+        }
+        if attempt.payloadValidation == .providerContentTypeValidated,
+           evidence.error == nil,
+           byteCount > 0
+        {
+            self.observe(
+                .audioPayloadValidated,
+                attempt: attempt,
+                byteCount: byteCount,
+                resultClass: "provider_content_type_validated_nonempty")
+        }
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .providerResult,
             detail: outcome.rawValue,
@@ -719,6 +841,7 @@ final class TalkTTSPlaybackPipeline {
         text: String,
         language: String?,
         startedAt: TimeInterval,
+        fallbackReason: String,
         providerFailure: TalkTTSProviderOutcome? = nil,
         successMessage: String? = nil) async -> TalkTTSPlaybackResult
     {
@@ -732,11 +855,22 @@ final class TalkTTSPlaybackPipeline {
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .systemSpeechCallEntered,
             detail: providerFailure?.rawValue ?? "direct"))
+        self.observe(
+            .fallbackStarted,
+            provider: "system",
+            codec: "system_speech",
+            playbackPath: "system",
+            providerStage: fallbackReason)
         do {
             try await self.systemSpeech.speak(text: text, language: language) {
-                [report = self.report, breadcrumb = self.breadcrumb] in
+                [weak self, report = self.report, breadcrumb = self.breadcrumb] in
                 report(TalkTTSProgress(state: .speaking))
                 breadcrumb(TalkTTSBreadcrumb(stage: .playbackStarted, detail: "system"))
+                self?.observe(
+                    .firstRenderCallbackObserved,
+                    provider: "system",
+                    codec: "system_speech",
+                    playbackPath: "system")
             }
             guard self.isCurrent(), !Task.isCancelled else {
                 return TalkTTSPlaybackResult(
@@ -756,6 +890,13 @@ final class TalkTTSPlaybackPipeline {
                 stage: .playbackCompleted,
                 detail: "system",
                 durationMilliseconds: duration))
+            self.observe(
+                .fallbackCompleted,
+                provider: "system",
+                codec: "system_speech",
+                playbackPath: "system",
+                providerStage: fallbackReason,
+                resultClass: "success")
             return TalkTTSPlaybackResult(
                 succeeded: true,
                 provider: .system,
@@ -780,12 +921,58 @@ final class TalkTTSPlaybackPipeline {
                 stage: .playbackFailed,
                 detail: "system",
                 durationMilliseconds: duration))
+            self.observe(
+                .fallbackFailed,
+                provider: "system",
+                codec: "system_speech",
+                playbackPath: "system",
+                providerStage: fallbackReason,
+                resultClass: "failed")
             return TalkTTSPlaybackResult(
                 succeeded: false,
                 provider: .system,
                 textPreserved: true,
                 outcome: .playbackFailed)
         }
+    }
+
+    private func observeFallbackSelected(_ reason: String) {
+        self.observe(
+            .fallbackSelected,
+            provider: "system",
+            codec: "system_speech",
+            playbackPath: "system",
+            providerStage: reason)
+    }
+
+    private func observe(
+        _ stage: TalkTTSLifecycleObservationStage,
+        attempt: TalkTTSProviderAttempt? = nil,
+        provider: String? = nil,
+        codec: String? = nil,
+        playbackPath: String? = nil,
+        providerStage: String? = nil,
+        byteCount: Int? = nil,
+        resultClass: String? = nil)
+    {
+        let inferredPath: String
+        if let attempt {
+            inferredPath = TalkTTSValidation.pcmSampleRate(from: attempt.outputFormat) == nil
+                ? "mp3"
+                : "pcm"
+        } else {
+            inferredPath = "system"
+        }
+        self.lifecycleObserver(TalkTTSLifecycleObservation(
+            stage: stage,
+            provider: provider ?? (attempt == nil ? "system" : "elevenlabs"),
+            codec: codec ?? attempt.map {
+                TalkTTSValidation.pcmSampleRate(from: $0.outputFormat) == nil ? "mp3" : "pcm"
+            } ?? "system_speech",
+            playbackPath: playbackPath ?? inferredPath,
+            providerStage: providerStage ?? stage.rawValue,
+            byteCount: byteCount.map { max(0, $0) },
+            resultClass: resultClass))
     }
 
     private func stopProviderPlayer(for attempt: TalkTTSProviderAttempt) {
@@ -823,6 +1010,23 @@ final class TalkTTSPlaybackPipeline {
         return Self.formatToken("\(category)_\(mode)_\(route.activation.rawValue)_\(port)")
     }
 
+    private static func outputRouteResultClass(_ route: TalkAudioRouteEvidence) -> String {
+        guard let rawPort = route.outputPortTypes.first?.lowercased(), !rawPort.isEmpty else {
+            return "production_route_no_output"
+        }
+        if rawPort.contains("builtinspeaker") { return "production_route_speaker" }
+        if rawPort.contains("builtinreceiver") { return "production_route_receiver" }
+        if rawPort.contains("bluetooth") { return "production_route_bluetooth" }
+        if rawPort.contains("headphone") || rawPort.contains("headset") {
+            return "production_route_headphones"
+        }
+        if rawPort.contains("airplay") { return "production_route_airplay" }
+        if rawPort.contains("usb") { return "production_route_usb" }
+        if rawPort.contains("hdmi") { return "production_route_hdmi" }
+        if rawPort.contains("caraudio") { return "production_route_car_audio" }
+        return "production_route_other"
+    }
+
     private static func routeComponent(_ value: String, removing prefix: String) -> String {
         let token = Self.formatToken(value)
         return token.hasPrefix(prefix) ? String(token.dropFirst(prefix.count)) : token
@@ -837,21 +1041,29 @@ final class TalkTTSPlaybackPipeline {
         _ stream: AsyncThrowingStream<Data, Error>,
         evidence: TalkTTSStreamEvidenceBox,
         isCurrent: @escaping @MainActor @Sendable () -> Bool,
-        onFirstAudioByte: @escaping @MainActor @Sendable (Int) -> Void) -> AsyncThrowingStream<Data, Error>
+        onFirstStreamChunk: @escaping @MainActor @Sendable (Int) -> Void,
+        onFirstAudioByte: @escaping @MainActor @Sendable (Int) -> Void,
+        onStreamCompleted: @escaping @MainActor @Sendable (Int) -> Void) -> AsyncThrowingStream<Data, Error>
     {
         AsyncThrowingStream { continuation in
             let task = Task { @MainActor in
+                var receivedChunk = false
                 do {
                     for try await chunk in stream {
                         guard isCurrent(), evidence.isAcceptingBytes, !Task.isCancelled else {
                             continuation.finish()
                             return
                         }
+                        if !receivedChunk {
+                            receivedChunk = true
+                            onFirstStreamChunk(chunk.count)
+                        }
                         if evidence.record(bytes: chunk.count) {
                             onFirstAudioByte(chunk.count)
                         }
                         continuation.yield(chunk)
                     }
+                    onStreamCompleted(evidence.byteCount)
                     continuation.finish()
                 } catch {
                     evidence.record(error: error)

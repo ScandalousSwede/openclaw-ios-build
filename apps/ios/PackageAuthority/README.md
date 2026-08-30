@@ -6,12 +6,27 @@ dependency roots. Their resolved-file authorities must stay separate.
 `apps/swabble/Package.resolved` is the standalone Swabble lock. It contains
 only Swabble's three pins and is never used as the aggregate iOS project lock.
 
-`aggregate-package-graph.json` is the portable semantic authority for the
+`aggregate-package-graph.json` schema v2 is the portable semantic authority for the
 generated iOS project's nine source-control pins. It records declaration
-provenance, exact locations, versions, revisions, requirements, graph roles,
-and the WebRTC binary-artifact checksum. Its declaration hashes fail closed if
-`project.yml` or either local `Package.swift` changes without a reviewed graph
-update.
+provenance, exact locations, versions or immutable revisions, requirements,
+graph roles, governed source-patch provenance, and the WebRTC binary-artifact
+checksum. Its hashes fail closed if `project.yml`, either local `Package.swift`,
+or a governed source-patch record changes without a reviewed graph update.
+
+`elevenlabskit-observability-patch.json` binds the diagnostic-only
+ElevenLabsKit 0.1.1 observer patch to its original tag/revision/tree and its
+immutable fork revision/tree. It records the exact six changed paths, the
+no-op/behavior-neutral semantic contract, truthful observation limits, and the
+exact rollback to upstream 0.1.1. The aggregate graph pins this revision
+directly; a mutable branch is never package authority.
+
+After strict resolution, package preparation locates the ElevenLabsKit checkout
+through SwiftPM's workspace-state `subpath` and verifies its HEAD, tree, sole
+0.1.1 parent, original tree, exact changed paths, unchanged dependency
+`Package.swift`, clean checkout, and reviewed binary-diff digest. That receipt
+is revalidated after build/archive operations. A separate exact detached
+checkout runs the dependency's own tests once in the shared credential-free
+conformance gate used by both unsigned and protected workflows.
 
 The concrete aggregate `Package.resolved` is derived only inside the final
 disposable build root, at the generated project's workspace-scoped location:

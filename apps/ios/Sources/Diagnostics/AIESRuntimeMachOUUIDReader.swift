@@ -32,6 +32,11 @@ enum AIESRuntimeMachOUUIDReader {
             return Observation(source: self.source, status: .executableUnavailable, slices: [])
         }
 
+        return self.readExecutable(at: executableURL)
+    }
+
+    static func readExecutable(at executableURL: URL) -> Observation {
+
         let data: Data
         do {
             data = try Data(contentsOf: executableURL, options: .mappedIfSafe)

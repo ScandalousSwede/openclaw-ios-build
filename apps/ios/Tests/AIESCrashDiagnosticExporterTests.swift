@@ -29,10 +29,16 @@ struct AIESCrashDiagnosticExporterTests {
                     .init(
                         uuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                         architecture: "arm64"),
-                ]))
+                ]),
+            runtimeSymbolicationObservation: .init(
+                status: .observed,
+                executables: [self.symbolicationExecutable(
+                    bundleID: "ai.openclaw.client",
+                    relativePath: ".",
+                    executableName: "OpenClaw")]))
 
         #expect(manifest.schema == AIESBuildManifest.schemaName)
-        #expect(manifest.schema == "argus.openclaw-ios.runtime-build-manifest.v1")
+        #expect(manifest.schema == "argus.openclaw-ios.runtime-build-manifest.v2")
         #expect(manifest.gitSHA == String(repeating: "a", count: 40))
         #expect(manifest.mainBundleID == "ai.openclaw.client")
         #expect(manifest.extensionBundleIDs == ["activity", "share"])
@@ -44,12 +50,15 @@ struct AIESCrashDiagnosticExporterTests {
         #expect(manifest.dsymUUIDs == ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"])
         #expect(manifest.runtimeUUIDSource == "runtime_main_executable_lc_uuid")
         #expect(manifest.runtimeUUIDStatus == .observed)
+        #expect(manifest.symbolicationStatus == .observed)
+        #expect(manifest.symbolicationExecutables.count == 1)
 
         let object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(manifest)) as? [String: Any])
         #expect(object.keys.contains("aps_environment_if_signed"))
         #expect(object["aps_environment_if_signed"] is NSNull)
         #expect(object["runtime_uuid_source"] as? String == "runtime_main_executable_lc_uuid")
         #expect(object["runtime_uuid_status"] as? String == "observed")
+        #expect(object["symbolication_status"] as? String == "verified_runtime_and_build_dsym_mapping")
         let binaryUUIDs = try #require(object["main_binary_uuids"] as? [[String: String]])
         #expect(binaryUUIDs == [[
             "architecture": "arm64",
@@ -152,6 +161,15 @@ struct AIESCrashDiagnosticExporterTests {
         missingUUID[32] = 0x1C
         #expect(AIESRuntimeMachOUUIDReader.observe(missingUUID).status == .uuidMissing)
         #expect(AIESRuntimeMachOUUIDReader.observe(missingUUID).slices.isEmpty)
+    }
+
+    @Test func runtimeSymbolicationManifestRejectsUnsafeBundlePaths() {
+        #expect(AIESRuntimeSymbolicationManifest.isSafeRelativePath("."))
+        #expect(AIESRuntimeSymbolicationManifest.isSafeRelativePath(
+            "Watch/OpenClawWatchApp.app/PlugIns/OpenClawWatchExtension.appex"))
+        for path in ["", "/absolute", "../outside", "PlugIns/../outside", "PlugIns//extension", "PlugIns\\extension"] {
+            #expect(!AIESRuntimeSymbolicationManifest.isSafeRelativePath(path))
+        }
     }
 
     @Test func exportIsBoundedAndRetainsNewestMetadata() throws {
@@ -309,8 +327,34 @@ struct AIESCrashDiagnosticExporterTests {
             dsymUUIDs: ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
             runtimeUUIDSource: AIESRuntimeMachOUUIDReader.source,
             runtimeUUIDStatus: .observed,
+            symbolicationStatus: .observed,
+            symbolicationExecutables: [self.symbolicationExecutable(
+                bundleID: "ai.openclaw.client",
+                relativePath: ".",
+                executableName: "OpenClaw")],
             configuration: "Debug",
             apsEnvironmentIfSigned: nil)
+    }
+
+    private func symbolicationExecutable(
+        bundleID: String,
+        relativePath: String,
+        executableName: String) -> AIESRuntimeSymbolicationManifest.Executable
+    {
+        let slices = [
+            AIESRuntimeMachOUUIDReader.Slice(
+                uuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                architecture: "arm64"),
+        ]
+        return AIESRuntimeSymbolicationManifest.Executable(
+            bundleID: bundleID,
+            bundleRelativePath: relativePath,
+            executableName: executableName,
+            executableRole: .compiledProduct,
+            executableUUIDs: slices,
+            dsymRequirement: .requiredCompiledExecutable,
+            dsymStatus: .uuidMatchedDuringBuild,
+            dsymUUIDs: slices)
     }
 
     private func thinMachO(

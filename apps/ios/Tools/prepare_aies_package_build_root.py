@@ -276,6 +276,14 @@ def verify_receipt(receipt_path: pathlib.Path, output: pathlib.Path | None = Non
     workspace_state = authority.validate_workspace_state(manifest, workspace_state_path)
     if workspace_state["workspaceStateSHA256"] != receipt["workspaceState"]["workspaceStateSHA256"]:
         raise PreparationError("SwiftPM workspace-state changed after preparation")
+    source_patch_checkout = authority.validate_source_patch_checkout(
+        build_root,
+        manifest,
+        workspace_state_path,
+        pathlib.Path(receipt["clonedSourcePackages"]).resolve(),
+    )
+    if source_patch_checkout != receipt["sourcePatchCheckout"]:
+        raise PreparationError("ElevenLabsKit source-patch checkout changed after preparation")
     report = {
         "status": "verified",
         "sourceSHA": receipt["sourceSHA"],
@@ -284,6 +292,7 @@ def verify_receipt(receipt_path: pathlib.Path, output: pathlib.Path | None = Non
         "buildRootStatusPorcelainV2": status,
         "concreteResolved": concrete,
         "workspaceState": workspace_state,
+        "sourcePatchCheckout": source_patch_checkout,
         "lockInventory": current_locks,
     }
     if output is not None:
@@ -318,10 +327,16 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     source_authority_report = {
         "manifestSHA256": sha256(source_root / authority.DEFAULT_MANIFEST),
         "semanticPinCount": len(source_manifest["pins"]),
+        "sourcePatches": source_manifest["sourcePatches"],
         "standaloneLockSHA256": source_manifest["standaloneLocks"][0]["sha256"],
         "sourceStatusPorcelainV2": source_status,
     }
     write_json(evidence / "source-authority.json", source_authority_report)
+    patch_evidence = evidence / "source-patches"
+    patch_evidence.mkdir()
+    for patch in source_manifest["sourcePatches"]:
+        source = source_root / patch["path"]
+        (patch_evidence / source.name).write_bytes(source.read_bytes())
 
     run(
         [
@@ -458,6 +473,13 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         build_manifest, workspace_states[0]
     )
     write_json(evidence / "workspace-state-validation.json", workspace_state)
+    source_patch_checkout = authority.validate_source_patch_checkout(
+        build_root,
+        build_manifest,
+        workspace_states[0],
+        source_packages,
+    )
+    write_json(evidence / "source-patch-checkout.json", source_patch_checkout)
     locks_after_strict = lock_inventory(build_root)
     if locks_after_strict != locks_after_materialization:
         raise PreparationError("strict resolution changed Package.resolved path/content inventory")
@@ -484,6 +506,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         "destination": args.destination,
         "manifest": str(build_root / authority.DEFAULT_MANIFEST),
         "manifestSHA256": sha256(build_root / authority.DEFAULT_MANIFEST),
+        "sourcePatches": build_manifest["sourcePatches"],
         "concreteResolved": concrete_after,
         "standaloneLock": {
             "path": str(standalone_path),
@@ -491,6 +514,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             "scope": standalone["scope"],
         },
         "workspaceState": workspace_state,
+        "sourcePatchCheckout": source_patch_checkout,
         "strictArguments": strict,
         "strictResolveCommand": strict_command,
         "clonedSourcePackages": str(source_packages),

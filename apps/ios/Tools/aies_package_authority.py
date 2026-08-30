@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
-SCHEMA = "aies.ios.aggregate-package-authority.v1"
+SCHEMA = "aies.ios.aggregate-package-authority.v2"
 DEFAULT_MANIFEST = "apps/ios/PackageAuthority/aggregate-package-graph.json"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
@@ -110,6 +110,15 @@ def _validate_requirement(requirement: Any, label: str) -> None:
         if not isinstance(requirement["minimumVersion"], str) or not requirement["minimumVersion"]:
             raise AuthorityError(f"{label} minimum version is invalid")
         numeric_version(requirement["minimumVersion"])
+    elif kind == "revision":
+        _require_exact_keys(
+            requirement, {"kind", "revision"}, f"{label} revision requirement"
+        )
+        if (
+            not isinstance(requirement["revision"], str)
+            or HEX40.fullmatch(requirement["revision"]) is None
+        ):
+            raise AuthorityError(f"{label} exact revision is invalid")
     else:
         raise AuthorityError(f"{label} uses unsupported requirement kind: {kind!r}")
 
@@ -123,6 +132,7 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
             "resolvedFileSchemaVersion",
             "project",
             "sourceDeclarations",
+            "sourcePatches",
             "standaloneLocks",
             "localPackages",
             "originHash",
@@ -185,6 +195,112 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
             f"missing={sorted(expected_declaration_paths - declaration_paths)}, "
             f"extra={sorted(declaration_paths - expected_declaration_paths)}"
         )
+
+    source_patches = payload["sourcePatches"]
+    if not isinstance(source_patches, list) or len(source_patches) != 1:
+        raise AuthorityError("aggregate authority requires exactly one governed source patch")
+    source_patch = source_patches[0]
+    if not isinstance(source_patch, dict):
+        raise AuthorityError("source patch authority must be an object")
+    _require_exact_keys(
+        source_patch, {"packageIdentity", "path", "sha256"}, "source patch authority"
+    )
+    if source_patch["packageIdentity"] != "elevenlabskit":
+        raise AuthorityError("unexpected governed source-patch package identity")
+    if source_patch["path"] != (
+        "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json"
+    ):
+        raise AuthorityError("unexpected ElevenLabsKit source-patch provenance path")
+    if not isinstance(source_patch["sha256"], str) or HEX64.fullmatch(
+        source_patch["sha256"]
+    ) is None:
+        raise AuthorityError("invalid ElevenLabsKit source-patch provenance SHA-256")
+    source_patch_path = repo_path(root, source_patch["path"])
+    if not source_patch_path.is_file():
+        raise AuthorityError("ElevenLabsKit source-patch provenance is missing")
+    source_patch_digest = sha256_bytes(source_patch_path.read_bytes())
+    if source_patch_digest != source_patch["sha256"]:
+        raise AuthorityError(
+            "ElevenLabsKit source-patch provenance changed: "
+            f"expected {source_patch['sha256']}, observed {source_patch_digest}"
+        )
+    provenance = load_json(source_patch_path)
+    _require_exact_keys(
+        provenance,
+        {
+            "schema",
+            "packageIdentity",
+            "purpose",
+            "original",
+            "patch",
+            "semanticDelta",
+            "truthfulObservationLimits",
+            "rollback",
+        },
+        "ElevenLabsKit source-patch provenance",
+    )
+    if provenance["schema"] != "aies.ios.package-source-patch.v1":
+        raise AuthorityError("unsupported ElevenLabsKit source-patch provenance schema")
+    if provenance["packageIdentity"] != "elevenlabskit" or provenance["purpose"] != (
+        "diagnostic_playback_lifecycle_observability_only"
+    ):
+        raise AuthorityError("ElevenLabsKit source-patch purpose or identity differs")
+    expected_original = {
+        "repository": "https://github.com/steipete/ElevenLabsKit.git",
+        "tag": "0.1.1",
+        "revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+        "tree": "3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6",
+    }
+    if provenance["original"] != expected_original:
+        raise AuthorityError("ElevenLabsKit original 0.1.1 provenance differs")
+    expected_patch = {
+        "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
+        "revision": "1e292346683ea174d98d1a88763c0f26e966c0af",
+        "tree": "801732d37b8555d4bbbae500d611f7477eac3439",
+        "changedPaths": [
+            "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
+            "Sources/ElevenLabsKit/PlaybackObservation.swift",
+            "Sources/ElevenLabsKit/StreamingAudioPlayback.swift",
+            "Sources/ElevenLabsKit/StreamingAudioPlayer.swift",
+            "Tests/ElevenLabsKitTests/PlaybackObservationTests.swift",
+            "Tests/ElevenLabsKitTests/StreamingAudioPlaybackTests.swift",
+        ],
+    }
+    if provenance["patch"] != expected_patch:
+        raise AuthorityError("ElevenLabsKit immutable patch provenance differs")
+    expected_semantic_delta = {
+        "observerOptional": True,
+        "observerDefault": "no_op",
+        "applicationBehaviorDependsOnObserver": False,
+        "playbackBehaviorChanged": False,
+        "networkingBehaviorChanged": False,
+        "decodingBehaviorChanged": False,
+        "bufferingBehaviorChanged": False,
+        "routingBehaviorChanged": False,
+        "cancellationBehaviorChanged": False,
+        "fallbackBehaviorChanged": False,
+        "errorBehaviorChanged": False,
+        "transitiveDependenciesAdded": [],
+    }
+    if provenance["semanticDelta"] != expected_semantic_delta:
+        raise AuthorityError("ElevenLabsKit patch semantic-delta contract differs")
+    expected_limits = [
+        "ElevenLabsKit PCM and MP3 paths expose no direct first-render callback",
+        "AudioQueue running state is not treated as first-render evidence",
+        "AudioFileStreamOpen is parser creation and is not emitted as decoder creation",
+        "physical audibility is not observable",
+    ]
+    if provenance["truthfulObservationLimits"] != expected_limits:
+        raise AuthorityError("ElevenLabsKit truthful-observation limits differ")
+    expected_rollback = {
+        "packageRepository": "https://github.com/steipete/ElevenLabsKit.git",
+        "requirement": {"kind": "from", "minimumVersion": "0.1.1"},
+        "resolvedVersion": "0.1.1",
+        "resolvedRevision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
+        "resolvedTree": "3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6",
+    }
+    if provenance["rollback"] != expected_rollback:
+        raise AuthorityError("ElevenLabsKit patch rollback contract differs")
 
     standalone_locks = payload["standaloneLocks"]
     if not isinstance(standalone_locks, list) or len(standalone_locks) != 1:
@@ -324,9 +440,15 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         if pin["kind"] != "remoteSourceControl":
             raise AuthorityError(f"unsupported package kind for {identity}: {pin['kind']!r}")
         canonical_location(pin["location"])
-        if not isinstance(pin["version"], str) or not pin["version"]:
-            raise AuthorityError(f"missing resolved version for {identity}")
-        numeric_version(pin["version"])
+        _validate_requirement(pin["requirement"], identity)
+        requirement = pin["requirement"]
+        if requirement["kind"] == "revision":
+            if pin["version"] is not None:
+                raise AuthorityError(f"revision requirement must not claim a version for {identity}")
+        else:
+            if not isinstance(pin["version"], str) or not pin["version"]:
+                raise AuthorityError(f"missing resolved version for {identity}")
+            numeric_version(pin["version"])
         if not isinstance(pin["revision"], str) or HEX40.fullmatch(pin["revision"]) is None:
             raise AuthorityError(f"invalid resolved revision for {identity}")
         if pin["branch"] is not None:
@@ -339,8 +461,6 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
             raise AuthorityError(f"invalid declaration role for {identity}")
         if not isinstance(pin["sourceDeclaration"], str) or not pin["sourceDeclaration"]:
             raise AuthorityError(f"missing declaration provenance for {identity}")
-        _validate_requirement(pin["requirement"], identity)
-        requirement = pin["requirement"]
         if requirement["kind"] == "exact" and requirement["version"] != pin["version"]:
             raise AuthorityError(f"exact requirement does not match resolved version for {identity}")
         if requirement["kind"] == "from":
@@ -350,6 +470,8 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
                 raise AuthorityError(
                     f"resolved version falls outside from-requirement range for {identity}"
                 )
+        if requirement["kind"] == "revision" and requirement["revision"] != pin["revision"]:
+            raise AuthorityError(f"revision requirement does not match resolved revision for {identity}")
     expected_identities = {
         "commander",
         "elevenlabskit",
@@ -368,6 +490,11 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         )
     if [pin["identity"] for pin in pins] != sorted(pin_identities):
         raise AuthorityError("aggregate package pins must use deterministic identity ordering")
+    elevenlabs_pin = next(pin for pin in pins if pin["identity"] == "elevenlabskit")
+    if elevenlabs_pin["location"] != provenance["patch"]["repository"] or (
+        elevenlabs_pin["revision"] != provenance["patch"]["revision"]
+    ):
+        raise AuthorityError("ElevenLabsKit semantic pin differs from governed patch provenance")
     return payload
 
 
@@ -492,6 +619,12 @@ def compare_semantic_pins(
 
 
 def concrete_payload(root: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    def resolved_state(pin: dict[str, Any]) -> dict[str, Any]:
+        state = {"revision": pin["revision"]}
+        if pin["version"] is not None:
+            state["version"] = pin["version"]
+        return state
+
     return {
         "originHash": compute_origin_hash(root, manifest),
         "pins": [
@@ -499,10 +632,7 @@ def concrete_payload(root: pathlib.Path, manifest: dict[str, Any]) -> dict[str, 
                 "identity": pin["identity"],
                 "kind": pin["kind"],
                 "location": pin["location"],
-                "state": {
-                    "revision": pin["revision"],
-                    "version": pin["version"],
-                },
+                "state": resolved_state(pin),
             }
             for pin in manifest["pins"]
         ],
@@ -568,6 +698,7 @@ def validate_concrete(
         "schema": SCHEMA,
         "resolvedFileSchemaVersion": payload["version"],
         "localPackages": manifest["localPackages"],
+        "sourcePatches": manifest["sourcePatches"],
         "binaryArtifacts": manifest["binaryArtifacts"],
         "pins": observed,
     }
@@ -611,7 +742,12 @@ def validate_scoped_resolved(
         if pin["identity"] in scopes[scope]
     ]
     compare_semantic_pins(observed, expected, scope)
-    semantic = {"schema": SCHEMA, "scope": scope, "pins": observed}
+    semantic = {
+        "schema": SCHEMA,
+        "scope": scope,
+        "sourcePatches": manifest["sourcePatches"],
+        "pins": observed,
+    }
     return {
         "status": "valid",
         "scope": scope,
@@ -701,6 +837,130 @@ def validate_workspace_state(
     }
 
 
+def validate_source_patch_checkout(
+    root: pathlib.Path,
+    manifest: dict[str, Any],
+    workspace_state_path: pathlib.Path,
+    source_packages_root: pathlib.Path,
+) -> dict[str, Any]:
+    """Prove that SwiftPM consumed the exact governed ElevenLabsKit patch tree."""
+    payload = load_json(workspace_state_path)
+    workspace_object = payload.get("object")
+    if not isinstance(workspace_object, dict):
+        raise AuthorityError("workspace-state object is missing for source-patch proof")
+    dependencies = workspace_object.get("dependencies")
+    if not isinstance(dependencies, list):
+        raise AuthorityError("workspace-state dependencies are missing for source-patch proof")
+    matches = [
+        dependency
+        for dependency in dependencies
+        if isinstance(dependency, dict)
+        and isinstance(dependency.get("packageRef"), dict)
+        and dependency["packageRef"].get("identity") == "elevenlabskit"
+    ]
+    if len(matches) != 1:
+        raise AuthorityError("workspace state must name exactly one ElevenLabsKit checkout")
+    subpath = matches[0].get("subpath")
+    if not isinstance(subpath, str):
+        raise AuthorityError("ElevenLabsKit workspace-state checkout subpath is missing")
+    relative = pathlib.PurePosixPath(subpath)
+    if relative.is_absolute() or len(relative.parts) != 1 or relative.name in {"", ".", ".."}:
+        raise AuthorityError("ElevenLabsKit checkout subpath is unsafe")
+    checkouts_root = (source_packages_root.resolve() / "checkouts").resolve()
+    checkout = (checkouts_root / relative.name).resolve()
+    try:
+        checkout.relative_to(checkouts_root)
+    except ValueError as error:
+        raise AuthorityError("ElevenLabsKit checkout escapes cloned-source custody") from error
+    if not checkout.is_dir():
+        raise AuthorityError(f"ElevenLabsKit checkout is missing: {checkout}")
+
+    provenance = load_json(repo_path(root, manifest["sourcePatches"][0]["path"]))
+    original = provenance["original"]
+    patch = provenance["patch"]
+
+    def git_text(*arguments: str) -> str:
+        try:
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=checkout,
+                capture_output=True,
+                check=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            raise AuthorityError(
+                "unable to inspect governed ElevenLabsKit checkout: "
+                + " ".join(arguments)
+            ) from error
+        return completed.stdout
+
+    def git_bytes(*arguments: str) -> bytes:
+        try:
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=checkout,
+                capture_output=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as error:
+            raise AuthorityError(
+                "unable to inspect governed ElevenLabsKit checkout bytes: "
+                + " ".join(arguments)
+            ) from error
+        return completed.stdout
+
+    observed_head = git_text("rev-parse", "HEAD").strip()
+    observed_tree = git_text("rev-parse", "HEAD^{tree}").strip()
+    observed_parents = git_text("show", "-s", "--format=%P", "HEAD").strip().split()
+    original_tree = git_text("rev-parse", f"{original['revision']}^{{tree}}").strip()
+    status = git_text("status", "--porcelain=v2", "--untracked-files=all")
+    changed_paths = git_text(
+        "diff", "--name-only", original["revision"], patch["revision"]
+    ).splitlines()
+    original_manifest = git_bytes("show", f"{original['revision']}:Package.swift")
+    patched_manifest = git_bytes("show", f"{patch['revision']}:Package.swift")
+    binary_diff = git_bytes("diff", "--binary", original["revision"], patch["revision"])
+
+    if observed_head != patch["revision"]:
+        raise AuthorityError("ElevenLabsKit checkout HEAD differs from governed patch revision")
+    if observed_tree != patch["tree"]:
+        raise AuthorityError("ElevenLabsKit checkout tree differs from governed patch tree")
+    if observed_parents != [original["revision"]]:
+        raise AuthorityError("ElevenLabsKit patch must have the exact 0.1.1 commit as sole parent")
+    if original_tree != original["tree"]:
+        raise AuthorityError("ElevenLabsKit original commit tree differs from 0.1.1 provenance")
+    if status:
+        raise AuthorityError("ElevenLabsKit strict checkout is dirty")
+    if changed_paths != patch["changedPaths"]:
+        raise AuthorityError("ElevenLabsKit checkout changed paths differ from provenance")
+    if original_manifest != patched_manifest:
+        raise AuthorityError("ElevenLabsKit dependency Package.swift changed in patch")
+    manifest_sha256 = sha256_bytes(original_manifest)
+    if manifest_sha256 != "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431":
+        raise AuthorityError("ElevenLabsKit dependency Package.swift hash differs from 0.1.1")
+    binary_diff_sha256 = sha256_bytes(binary_diff)
+    if binary_diff_sha256 != "2fcbfadc449965c799ef5b425a27cede0d3464e3b0ec341e3eab0c752d81f9f8":
+        raise AuthorityError("ElevenLabsKit binary patch digest differs from reviewed delta")
+
+    return {
+        "schema": "aies.ios.package-source-patch-checkout.v1",
+        "status": "verified",
+        "packageIdentity": "elevenlabskit",
+        "checkout": str(checkout),
+        "workspaceStateSubpath": subpath,
+        "head": observed_head,
+        "tree": observed_tree,
+        "soleParent": observed_parents[0],
+        "originalTree": original_tree,
+        "changedPaths": changed_paths,
+        "dependencyManifestSHA256": manifest_sha256,
+        "binaryDiffSHA256": binary_diff_sha256,
+        "binaryDiffBytes": len(binary_diff),
+        "statusPorcelainV2": status,
+    }
+
+
 def git_status(root: pathlib.Path) -> str:
     result = subprocess.run(
         ["git", "status", "--porcelain=v2", "--untracked-files=all"],
@@ -761,6 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
             semantic = {
                 "schema": manifest["schema"],
                 "sourceDeclarations": manifest["sourceDeclarations"],
+                "sourcePatches": manifest["sourcePatches"],
                 "standaloneLocks": manifest["standaloneLocks"],
                 "localPackages": manifest["localPackages"],
                 "binaryArtifacts": manifest["binaryArtifacts"],
