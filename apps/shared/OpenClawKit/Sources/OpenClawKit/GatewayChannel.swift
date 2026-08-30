@@ -840,7 +840,7 @@ public actor GatewayChannelActor {
             includeDeviceIdentity && self.pendingDeviceTokenRetry &&
             !requestedScopesExceedStoredToken && storedToken != nil && explicitToken != nil &&
             self.isTrustedDeviceRetryEndpoint()
-        let authToken = switch explicitCredentialSource {
+        let authToken: String? = switch explicitCredentialSource {
         case .sharedToken:
             explicitToken
         case .none:
