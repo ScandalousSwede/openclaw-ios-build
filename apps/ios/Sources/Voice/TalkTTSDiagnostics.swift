@@ -685,7 +685,7 @@ final class TalkTTSPlaybackPipeline {
         let codec = decoder
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .providerRequestStarted,
-            detail: decoder,
+            detail: Self.formatToken(attempt.outputFormat),
             sampleRate: sampleRate))
         self.observe(.providerRequestStarted, attempt: attempt)
         self.breadcrumb(TalkTTSBreadcrumb(

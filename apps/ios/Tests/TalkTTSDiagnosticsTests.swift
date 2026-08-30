@@ -1039,7 +1039,7 @@ private final class TestGenerationState {
         let attempt = TalkTTSProviderAttempt(
             outputFormat: "pcm_44100",
             payloadValidation: .providerContentTypeValidated) {
-            Self.attempt(format: "pcm_44100", error: failure).makeStream()
+            Self.attempt(format: "pcm_44100", chunks: [], error: failure).makeStream()
         }
 
         _ = await pipeline.speak(
@@ -1129,6 +1129,7 @@ private final class TestGenerationState {
             .audioSessionActivationFailed,
             .fallbackSelected,
             .fallbackStarted,
+            .firstRenderCallbackObserved,
             .fallbackFailed,
         ])
         #expect(lifecycle.values.last?.resultClass == "failed")
