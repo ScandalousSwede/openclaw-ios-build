@@ -47,7 +47,9 @@
       "resulting_commits": [
         "73eb4e8fdc",
         "dc81c4a017",
-        "ad50a951ca"
+        "ad50a951ca",
+        "54cbc43ce9",
+        "36b380643b"
       ],
       "rollback": "revert Package-A commits in reverse order",
       "upstream_items": [98429, 99572, 100317, 101235, 100328]
@@ -58,7 +60,9 @@
       "mandatory": true,
       "resulting_commits": [
         "575855468c",
-        "dd50585dcf"
+        "dd50585dcf",
+        "83c06a7bd4",
+        "43b567b6af"
       ],
       "rollback": "revert Package-B commits in reverse order",
       "upstream_items": [98066, 92552],
@@ -125,8 +129,8 @@
         "trust prompt render and source guards",
         "stale setup-attempt rejection"
       ],
-      "resulting_commits": ["73eb4e8fdc"],
-      "rollback": "revert 73eb4e8fdc with Package A"
+      "resulting_commits": ["73eb4e8fdc", "54cbc43ce9", "36b380643b"],
+      "rollback": "revert Package A in reverse order"
     },
     {
       "pr": 99572,
@@ -170,8 +174,8 @@
         "cancel and stale-scan rejection",
         "onboarding and Settings ownership"
       ],
-      "resulting_commits": ["dc81c4a017"],
-      "rollback": "revert dc81c4a017 with Package A",
+      "resulting_commits": ["dc81c4a017", "54cbc43ce9", "36b380643b"],
+      "rollback": "revert Package A in reverse order",
       "excluded_feature_churn": "server, Watch, APNs, localization, and branch synchronization content outside the scanner/trust defect"
     },
     {
@@ -213,8 +217,8 @@
         "bounded endpoints and remote insecure ws rejection",
         "stale probe fencing"
       ],
-      "resulting_commits": ["73eb4e8fdc"],
-      "rollback": "revert 73eb4e8fdc with Package A"
+      "resulting_commits": ["73eb4e8fdc", "54cbc43ce9", "36b380643b"],
+      "rollback": "revert Package A in reverse order"
     },
     {
       "pr": 101235,
@@ -247,8 +251,8 @@
         "duplicate producer rejection",
         "cancellation"
       ],
-      "resulting_commits": ["dc81c4a017"],
-      "rollback": "revert dc81c4a017 with Package A"
+      "resulting_commits": ["dc81c4a017", "36b380643b"],
+      "rollback": "revert Package A in reverse order"
     },
     {
       "pr": 100328,
@@ -284,7 +288,7 @@
         "immutable Settings handoff and acknowledgement",
         "onboarding ownership retained"
       ],
-      "resulting_commits": ["ad50a951ca"],
+      "resulting_commits": ["ad50a951ca", "36b380643b"],
       "rollback": "revert Package-A setup ownership follow-up"
     },
     {
@@ -324,7 +328,7 @@
         "LAN reconnect auth",
         "route retirement"
       ],
-      "resulting_commits": ["575855468c"],
+      "resulting_commits": ["575855468c", "83c06a7bd4", "43b567b6af"],
       "rollback": "revert Package B"
     },
     {
@@ -363,7 +367,9 @@
       ],
       "resulting_commits": [
         "575855468c",
-        "dd50585dcf"
+        "dd50585dcf",
+        "83c06a7bd4",
+        "43b567b6af"
       ],
       "rollback": "revert Package B in reverse order"
     },

@@ -35,6 +35,8 @@ Resulting commits:
 - `73eb4e8fdc` — `fix(ios): harden setup routes and TLS trust`
 - `dc81c4a017` — `fix(ios): defer QR setup until scanner dismissal`
 - `ad50a951ca` — `fix(ios): make root own setup-link delivery`
+- `54cbc43ce9` — `fix(ios): fail closed across TLS trust handoff`
+- `36b380643b` — `fix(ios): make trusted setup admission atomic`
 
 Rollback: revert the Package-A commits in reverse order. No Package-B or Package-C source is required to remove Package A.
 
@@ -42,10 +44,12 @@ Rollback: revert the Package-A commits in reverse order. No Package-B or Package
 
 Purpose: require a validated node-and-operator bootstrap result; preserve role-scoped credentials; bind lifecycle work to exact route ownership; and report node and operator health separately.
 
-Resulting commit:
+Resulting commits:
 
 - `575855468c` — `fix(ios): require dual-role mobile pairing`
 - `dd50585dcf` — `fix(ios): fence reconnect and APNs side effects`
+- `83c06a7bd4` — `fix(ios): fence dual-role recovery to exact routes`
+- `43b567b6af` — `fix(ios): bind dual-role handoff to one route`
 
 Rollback: revert Package-B commits without reverting Package A. Package B owns no signing, package-authority, or release-policy state.
 
@@ -82,8 +86,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: medium; AIES has stronger pin persistence and gateway-identity fencing.
 - Action: ported the timeout/error semantics and typed prompt contract while preserving AIES fail-closed pinning, certificate-rotation handling, and exact attempt ownership.
 - Tests: TLS timeout classification, accepted/rejected/rotated fingerprint, prompt render/source guards, and stale-attempt rejection.
-- Resulting commit: `73eb4e8fdc`
-- Rollback commit: revert `73eb4e8fdc` as part of Package A.
+- Resulting commits: `73eb4e8fdc`, `54cbc43ce9`, `36b380643b`
+- Rollback commit: revert the Package-A commits in reverse order.
 
 ### PR #99572 — fix(ios): defer QR pairing after scanner dismissal
 
@@ -99,8 +103,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: medium; AIES has two setup owners and stronger setup-attempt fencing.
 - Action: ported a first-result-wins typed handoff into both onboarding and Settings, with cancellation and attempt identity retained. No arbitrary trust bypass was added.
 - Tests: scanner starts after presentation, stops before dismissal, one-shot delivery, cancellation, stale scan rejection, onboarding ownership, and post-dismiss trust presentation.
-- Resulting commit: `dc81c4a017`
-- Rollback commit: revert `dc81c4a017` as part of Package A.
+- Resulting commits: `dc81c4a017`, `54cbc43ce9`, `36b380643b`
+- Rollback commit: revert the Package-A commits in reverse order.
 
 ### PR #100317 — fix(pairing): advertise reachable Tailnet routes
 
@@ -116,8 +120,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: medium; the live gateway already has modern server-side route support, while AIES has stricter local/LAN security policy.
 - Action: ported only the iOS/shared-client schema and bounded ordered selection. Supports unpadded Base64URL, raw JSON/copied text/QR input, implicit and explicit WSS 443, and rejects insecure remote `ws://`; no server or CLI source was imported.
 - Tests: implicit/explicit 443, ordered fallback, bounded candidate count, insecure remote rejection, accepted private-LAN policy, and stale probe ownership.
-- Resulting commit: `73eb4e8fdc`
-- Rollback commit: revert `73eb4e8fdc` as part of Package A.
+- Resulting commits: `73eb4e8fdc`, `54cbc43ce9`, `36b380643b`
+- Rollback commit: revert the Package-A commits in reverse order.
 
 ### PR #101235 — fix ios qr scanner lifecycle
 
@@ -133,8 +137,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: low.
 - Action: incorporated into the Package-A scanner handoff rather than copied as a parallel scanner implementation.
 - Tests: VisionKit lifecycle source guard, stop-before-result, duplicate producer rejection, and cancellation.
-- Resulting commit: `dc81c4a017`
-- Rollback commit: revert `dc81c4a017` as part of Package A.
+- Resulting commits: `dc81c4a017`, `36b380643b`
+- Rollback commit: revert the Package-A commits in reverse order.
 
 ### PR #100328 — fix(ios): own gateway setup deep-link delivery
 
@@ -150,8 +154,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: medium; AIES intentionally permits visible onboarding to own setup while it is presented.
 - Action: RootTabs owns Settings delivery; onboarding retains explicit priority; Settings no longer consumes model state directly.
 - Tests: source guard proves one RootTabs consumer for Settings, immutable request handoff, acknowledgement, and retained onboarding ownership.
-- Resulting commit: `ad50a951ca`
-- Rollback commit: revert `ad50a951ca` as part of Package A.
+- Resulting commits: `ad50a951ca`, `36b380643b`
+- Rollback commit: revert the Package-A commits in reverse order.
 
 ### PR #98066 — keep iOS LAN QR pairing authenticated after bootstrap
 
@@ -167,8 +171,8 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: high but bounded; AIES has role-scoped auth, stable gateway identity, route generations, and a stricter persistence boundary.
 - Action: ported the semantic requirement into a two-role, exact-owner bootstrap receipt. Node and operator tokens/scopes are validated together; a partial result is not mobile-setup success and secrets are excluded from diagnostics.
 - Tests: complete dual-role issuance, node-only, missing operator token, missing each required operator scope, unexpected overgrant, persistence failure, exact route retirement, and reconnect auth.
-- Resulting commit: `575855468c`
-- Rollback commit: revert `575855468c` as part of Package B.
+- Resulting commits: `575855468c`, `83c06a7bd4`, `43b567b6af`
+- Rollback commit: revert the Package-B commits in reverse order.
 
 ### PR #92552 — force stale foreground gateway reconnects
 
@@ -184,7 +188,7 @@ Rollback: revert the Package-C commit. The aggregate package-authority record ch
 - Collision risk: high; route-unbound reconnects would violate AIES S1/S3 ownership fencing.
 - Action: ported the foreground-recovery intent with stronger AIES semantics: health, disconnect, reconnect, event delivery, and deferred work are bound to captured node/operator routes and stable gateway identity. An old route cannot disconnect or terminally block its successor.
 - Tests: forced stale reconnect, user-selected replacement protection, route-bound event/lifecycle operations, operator reconnect, and route-generation outbox guards.
-- Resulting commits: `575855468c`, `dd50585dcf`
+- Resulting commits: `575855468c`, `dd50585dcf`, `83c06a7bd4`, `43b567b6af`
 - Rollback commit: revert Package B in reverse order.
 
 ### PR #100732 — harden Apple Watch pairing activation
