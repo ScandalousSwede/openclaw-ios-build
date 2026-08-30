@@ -8,6 +8,7 @@ struct MacNodeModeCoordinatorTests {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .deletingLastPathComponent()
+            .deletingLastPathComponent()
             .appendingPathComponent("Sources/OpenClaw/NodeMode/MacNodeModeCoordinator.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
