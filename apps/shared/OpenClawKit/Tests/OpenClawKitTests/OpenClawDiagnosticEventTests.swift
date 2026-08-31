@@ -155,8 +155,15 @@ struct OpenClawDiagnosticEventTests {
             gatewayErrorCode: "INVALID_REQUEST",
             offsetPresent: true,
             offsetType: .integer,
+            offsetValue: 0,
             limitPresent: false,
             maxCharsPresent: false,
+            encodedPropertyNames: [.sessionKey, .offset],
+            gatewayValidationPath: .offset,
+            gatewayErrorMessageClass: .integerRequired,
+            gatewayValidatorIdentity: "chat-history-0790d9f593ad",
+            protocolSchemaVersion: "gateway-protocol-v4",
+            requestEnvelopeVersion: 4,
             elapsedMilliseconds: 42,
             resultClass: "gateway_rejected",
             observedAt: Date(timeIntervalSince1970: 1))
@@ -166,9 +173,16 @@ struct OpenClawDiagnosticEventTests {
         #expect(object["rpc_method"] as? String == "chat.history")
         #expect(object["offset_present"] as? Bool == true)
         #expect(object["offset_type"] as? String == "integer")
+        #expect(object["offset_value"] as? Int == 0)
         #expect(object["limit_present"] as? Bool == false)
         #expect(object["max_chars_present"] as? Bool == false)
         #expect(object["gateway_error_code"] as? String == "INVALID_REQUEST")
+        #expect(object["encoded_property_names"] as? [String] == ["offset", "sessionKey"])
+        #expect(object["gateway_validation_path"] as? String == "offset")
+        #expect(object["gateway_error_message_class"] as? String == "integer_required")
+        #expect(object["gateway_validator_identity"] as? String == "chat-history-0790d9f593ad")
+        #expect(object["protocol_schema_version"] as? String == "gateway-protocol-v4")
+        #expect(object["request_envelope_version"] as? Int == 4)
         #expect(object["elapsed_milliseconds"] as? Int == 42)
         #expect(object["session_hash"] as? String != "private-session-key")
         #expect(object["operation_id"] as? String != "client-local-operation-id")
@@ -180,7 +194,9 @@ struct OpenClawDiagnosticEventTests {
 
         for key in [
             "operation_id", "rpc_method", "admitted_at", "offset_present",
-            "offset_type", "limit_present", "max_chars_present", "elapsed_milliseconds",
+            "offset_type", "limit_present", "max_chars_present", "encoded_property_names",
+            "gateway_validator_identity", "protocol_schema_version", "request_envelope_version",
+            "elapsed_milliseconds",
         ] {
             var incomplete = object
             incomplete.removeValue(forKey: key)
@@ -200,6 +216,90 @@ struct OpenClawDiagnosticEventTests {
         let rawParamsData = try JSONSerialization.data(withJSONObject: rawParams)
         #expect(OpenClawDiagnosticRecorder.decodeRecord(
             "aies_diagnostic=" + rawParamsData.base64EncodedString()) == nil)
+
+        var rawGatewayMessage = object
+        rawGatewayMessage["gateway_error_message"] = "/offset: must be integer; token=private"
+        let rawGatewayMessageData = try JSONSerialization.data(withJSONObject: rawGatewayMessage)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + rawGatewayMessageData.base64EncodedString()) == nil)
+    }
+
+    @Test func apnsGatewayIdentityEvidenceIsHashedTypedAndInternallyConsistent() throws {
+        let equal = OpenClawDiagnosticEvent(
+            kind: .apns,
+            state: "gateway_publication_admitted",
+            connectionRole: .node,
+            socketGeneration: 3,
+            routeGeneration: 5,
+            configurationGeneration: 7,
+            registrationAttemptID: "private-registration-attempt",
+            resultClass: "direct",
+            configuredGatewayIdentityIdentifier: "wss://gateway.example.ts.net:443",
+            observedGatewayIdentityIdentifier: "wss://gateway.example.ts.net:443",
+            configuredGatewayIdentitySource: .activeGatewayConnectConfig,
+            observedGatewayIdentitySource: .nodeRouteConnectOptions,
+            gatewayIdentityComparison: .equal,
+            apnsTransport: .direct,
+            observedAt: Date(timeIntervalSince1970: 0))
+        let missing = OpenClawDiagnosticEvent(
+            kind: .apns,
+            state: "gateway_publication_deferred",
+            connectionRole: .node,
+            socketGeneration: 11,
+            routeGeneration: 13,
+            configurationGeneration: 17,
+            registrationAttemptID: "private-registration-attempt",
+            providerStage: "node_route_admitted",
+            resultClass: "node_gateway_identity_mismatch",
+            configuredGatewayIdentityIdentifier: "wss://gateway.example.ts.net:443",
+            configuredGatewayIdentitySource: .activeGatewayConnectConfig,
+            observedGatewayIdentitySource: .nodeRouteConnectOptions,
+            gatewayIdentityComparison: .observedMissing,
+            apnsTransport: .relay,
+            observedAt: Date(timeIntervalSince1970: 1))
+        let different = OpenClawDiagnosticEvent(
+            kind: .apns,
+            state: "gateway_publication_deferred",
+            connectionRole: .operator,
+            registrationAttemptID: "private-registration-attempt",
+            resultClass: "operator_gateway_identity_mismatch",
+            configuredGatewayIdentityIdentifier: "wss://first.example.ts.net:443",
+            observedGatewayIdentityIdentifier: "wss://second.example.ts.net:443",
+            configuredGatewayIdentitySource: .activeGatewayConnectConfig,
+            observedGatewayIdentitySource: .operatorRouteConnectOptions,
+            gatewayIdentityComparison: .different,
+            apnsTransport: .relay,
+            observedAt: Date(timeIntervalSince1970: 2))
+
+        for event in [equal, missing, different] {
+            let data = try JSONEncoder().encode(event)
+            let record = "aies_diagnostic=" + data.base64EncodedString()
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(record) == event)
+            let output = String(decoding: data, as: UTF8.self)
+            #expect(!output.contains("gateway.example.ts.net"))
+            #expect(!output.contains("first.example.ts.net"))
+            #expect(!output.contains("second.example.ts.net"))
+            #expect(!output.contains("private-registration-attempt"))
+        }
+        #expect(equal.configuredGatewayIdentityHash?.count == 16)
+        #expect(equal.configuredGatewayIdentityHash == equal.observedGatewayIdentityHash)
+        #expect(equal.gatewayIdentityComparison == .equal)
+        #expect(equal.apnsTransport == .direct)
+        #expect(missing.configuredGatewayIdentityHash?.count == 16)
+        #expect(missing.observedGatewayIdentityHash == nil)
+        #expect(missing.gatewayIdentityComparison == .observedMissing)
+        #expect(missing.socketGeneration == 11)
+        #expect(missing.routeGeneration == 13)
+        #expect(missing.configurationGeneration == 17)
+        #expect(different.configuredGatewayIdentityHash != different.observedGatewayIdentityHash)
+        #expect(different.observedGatewayIdentitySource == .operatorRouteConnectOptions)
+
+        var inconsistent = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(missing)) as? [String: Any])
+        inconsistent["gateway_identity_comparison"] = "equal"
+        let inconsistentData = try JSONSerialization.data(withJSONObject: inconsistent)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + inconsistentData.base64EncodedString()) == nil)
     }
 
     @Test func chatProjectionCountsAndSessionGenerationAreBounded() throws {
@@ -224,6 +324,55 @@ struct OpenClawDiagnosticEventTests {
             messageCount: -1)
         #expect(rejected.eventCount == nil)
         #expect(rejected.messageCount == nil)
+    }
+
+    @Test func buildTransitionMetadataIsTypedBoundedAndRestrictedToLifecycleEvents() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "previous_run_unclosed_build_transition",
+            priorBuildNumber: "104",
+            priorSourceSHA: "22f90eacf93ba05f16aea6b106bd3c063f95d79d",
+            priorMainExecutableUUID: "bec23370-891f-3fa9-91d4-d5021a687519",
+            currentBuildNumber: "105",
+            currentSourceSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            currentMainExecutableUUID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            observedAt: Date(timeIntervalSince1970: 0))
+        let data = try JSONEncoder().encode(event)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + data.base64EncodedString()) == event)
+
+        let malformed = OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "previous_run_unclosed_identity_unknown",
+            priorBuildNumber: "104-beta",
+            priorSourceSHA: "22F90EACF93BA05F16AEA6B106BD3C063F95D79D",
+            priorMainExecutableUUID: "BEC23370-891F-3FA9-91D4-D5021A687519")
+        #expect(malformed.priorBuildNumber == nil)
+        #expect(malformed.priorSourceSHA == nil)
+        #expect(malformed.priorMainExecutableUUID == nil)
+
+        var wrongKind = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        wrongKind["kind"] = "chat"
+        let wrongKindData = try JSONSerialization.data(withJSONObject: wrongKind)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + wrongKindData.base64EncodedString()) == nil)
+
+        var partialIdentity = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        partialIdentity.removeValue(forKey: "prior_source_sha")
+        let partialIdentityData = try JSONSerialization.data(withJSONObject: partialIdentity)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + partialIdentityData.base64EncodedString()) == nil)
+
+        var missingCurrentIdentity = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        missingCurrentIdentity.removeValue(forKey: "current_build_number")
+        missingCurrentIdentity.removeValue(forKey: "current_source_sha")
+        missingCurrentIdentity.removeValue(forKey: "current_main_executable_uuid")
+        let missingCurrentIdentityData = try JSONSerialization.data(withJSONObject: missingCurrentIdentity)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + missingCurrentIdentityData.base64EncodedString()) == nil)
     }
 
     @Test func v2RouteAndSocketRecordsRequireAnExplicitRoleField() throws {
@@ -283,6 +432,21 @@ struct OpenClawDiagnosticEventTests {
             ["diagnostic_attempt_id": "private-attempt"],
             ["registration_attempt_id": "private-attempt"],
             ["device_identity_hash": "private-device"],
+            ["configured_gateway_identity_hash": "private-gateway"],
+            ["observed_gateway_identity_hash": "private-gateway"],
+            ["configured_gateway_identity_source": "raw_user_input"],
+            ["observed_gateway_identity_source": "raw_user_input"],
+            ["gateway_identity_comparison": "approximately_equal"],
+            ["apns_transport": "broadcast"],
+            ["encoded_property_names": ["message"]],
+            ["gateway_validation_path": "raw/private/path"],
+            ["gateway_error_message_class": "token=private"],
+            ["gateway_validator_identity": "unreviewed-validator"],
+            ["protocol_schema_version": "gateway-protocol-v999"],
+            ["request_envelope_version": 999],
+            ["prior_build_number": "build private"],
+            ["prior_source_sha": "22F90EACF93BA05F16AEA6B106BD3C063F95D79D"],
+            ["prior_main_executable_uuid": "BEC23370-891F-3FA9-91D4-D5021A687519"],
             ["provider": "sklivecredential"],
             ["provider_stage": "sklivecredential"],
             ["codec": "sklivecredential"],

@@ -14,6 +14,54 @@ public enum OpenClawDiagnosticRPCOffsetType: String, Codable, Equatable, Sendabl
     case invalid
 }
 
+public enum OpenClawDiagnosticRPCEncodedPropertyName: String, Codable, Equatable, Hashable, Sendable {
+    case agentID = "agentId"
+    case limit
+    case maxChars
+    case offset
+    case sessionKey
+}
+
+public enum OpenClawDiagnosticGatewayValidationPath: String, Codable, Equatable, Sendable {
+    case additionalProperty = "additional_property"
+    case agentID = "agent_id"
+    case limit
+    case maxChars = "max_chars"
+    case offset
+    case selectedAgent = "selected_agent"
+    case sessionKey = "session_key"
+    case unknown
+}
+
+public enum OpenClawDiagnosticGatewayErrorMessageClass: String, Codable, Equatable, Sendable {
+    case integerRequired = "integer_required"
+    case invalidRequestOther = "invalid_request_other"
+    case maximumViolation = "maximum_violation"
+    case minimumViolation = "minimum_violation"
+    case nonEmptyStringRequired = "non_empty_string_required"
+    case requiredPropertyMissing = "required_property_missing"
+    case selectedAgentInvalid = "selected_agent_invalid"
+    case unexpectedProperty = "unexpected_property"
+}
+
+public enum OpenClawDiagnosticGatewayIdentitySource: String, Codable, Equatable, Sendable {
+    case activeGatewayConnectConfig = "active_gateway_connect_config"
+    case nodeRouteConnectOptions = "node_route_connect_options"
+    case operatorRouteConnectOptions = "operator_route_connect_options"
+}
+
+public enum OpenClawDiagnosticGatewayIdentityComparison: String, Codable, Equatable, Sendable {
+    case equal
+    case configuredMissing = "configured_missing"
+    case observedMissing = "observed_missing"
+    case different
+}
+
+public enum OpenClawDiagnosticAPNsTransport: String, Codable, Equatable, Sendable {
+    case direct
+    case relay
+}
+
 public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case appLifecycle = "app_lifecycle"
@@ -66,8 +114,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let gatewayErrorCode: String?
     public let offsetPresent: Bool?
     public let offsetType: OpenClawDiagnosticRPCOffsetType?
+    public let offsetValue: Int?
     public let limitPresent: Bool?
+    public let limitValue: Int?
     public let maxCharsPresent: Bool?
+    public let maxCharsValue: Int?
+    public let encodedPropertyNames: [OpenClawDiagnosticRPCEncodedPropertyName]?
+    public let gatewayValidationPath: OpenClawDiagnosticGatewayValidationPath?
+    public let gatewayErrorMessageClass: OpenClawDiagnosticGatewayErrorMessageClass?
+    public let gatewayValidatorIdentity: String?
+    public let protocolSchemaVersion: String?
+    public let requestEnvelopeVersion: Int?
     public let elapsedMilliseconds: Int?
     public let eventCount: Int?
     public let messageCount: Int?
@@ -82,12 +139,24 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let playbackPath: String?
     public let resultClass: String?
     public let deviceIdentityHash: String?
+    public let configuredGatewayIdentityHash: String?
+    public let observedGatewayIdentityHash: String?
+    public let configuredGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource?
+    public let observedGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource?
+    public let gatewayIdentityComparison: OpenClawDiagnosticGatewayIdentityComparison?
+    public let apnsTransport: OpenClawDiagnosticAPNsTransport?
     public let topic: String?
     public let environment: String?
     public let byteCount: Int?
     public let sampleRate: Int?
     public let durationMilliseconds: Int?
     public let networkInterfaces: [String]
+    public let priorBuildNumber: String?
+    public let priorSourceSHA: String?
+    public let priorMainExecutableUUID: String?
+    public let currentBuildNumber: String?
+    public let currentSourceSHA: String?
+    public let currentMainExecutableUUID: String?
 
     public init(
         kind: Kind,
@@ -118,8 +187,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         gatewayErrorCode: String? = nil,
         offsetPresent: Bool? = nil,
         offsetType: OpenClawDiagnosticRPCOffsetType? = nil,
+        offsetValue: Int? = nil,
         limitPresent: Bool? = nil,
+        limitValue: Int? = nil,
         maxCharsPresent: Bool? = nil,
+        maxCharsValue: Int? = nil,
+        encodedPropertyNames: [OpenClawDiagnosticRPCEncodedPropertyName]? = nil,
+        gatewayValidationPath: OpenClawDiagnosticGatewayValidationPath? = nil,
+        gatewayErrorMessageClass: OpenClawDiagnosticGatewayErrorMessageClass? = nil,
+        gatewayValidatorIdentity: String? = nil,
+        protocolSchemaVersion: String? = nil,
+        requestEnvelopeVersion: Int? = nil,
         elapsedMilliseconds: Int? = nil,
         eventCount: Int? = nil,
         messageCount: Int? = nil,
@@ -134,12 +212,24 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         playbackPath: String? = nil,
         resultClass: String? = nil,
         deviceIdentityIdentifier: String? = nil,
+        configuredGatewayIdentityIdentifier: String? = nil,
+        observedGatewayIdentityIdentifier: String? = nil,
+        configuredGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource? = nil,
+        observedGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource? = nil,
+        gatewayIdentityComparison: OpenClawDiagnosticGatewayIdentityComparison? = nil,
+        apnsTransport: OpenClawDiagnosticAPNsTransport? = nil,
         topic: String? = nil,
         environment: String? = nil,
         byteCount: Int? = nil,
         sampleRate: Int? = nil,
         durationMilliseconds: Int? = nil,
         networkInterfaces: [String] = [],
+        priorBuildNumber: String? = nil,
+        priorSourceSHA: String? = nil,
+        priorMainExecutableUUID: String? = nil,
+        currentBuildNumber: String? = nil,
+        currentSourceSHA: String? = nil,
+        currentMainExecutableUUID: String? = nil,
         observedAt: Date = Date())
     {
         self.schema = Self.schemaName
@@ -179,8 +269,24 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.gatewayErrorCode = Self.sanitizedToken(gatewayErrorCode, maximumLength: 64)
         self.offsetPresent = offsetPresent
         self.offsetType = offsetType
+        self.offsetValue = Self.boundedRPCInteger(offsetValue)
         self.limitPresent = limitPresent
+        self.limitValue = Self.boundedRPCInteger(limitValue)
         self.maxCharsPresent = maxCharsPresent
+        self.maxCharsValue = Self.boundedRPCInteger(maxCharsValue)
+        let orderedPropertyNames = encodedPropertyNames?.sorted { $0.rawValue < $1.rawValue }
+        self.encodedPropertyNames = orderedPropertyNames.map { names in
+            Array(Set(names).sorted(by: { $0.rawValue < $1.rawValue }).prefix(5))
+        }
+        self.gatewayValidationPath = gatewayValidationPath
+        self.gatewayErrorMessageClass = gatewayErrorMessageClass
+        self.gatewayValidatorIdentity = Self.allowlistedToken(
+            gatewayValidatorIdentity,
+            allowed: Self.allowedGatewayValidatorIdentities)
+        self.protocolSchemaVersion = Self.allowlistedToken(
+            protocolSchemaVersion,
+            allowed: Self.allowedProtocolSchemaVersions)
+        self.requestEnvelopeVersion = requestEnvelopeVersion.flatMap { $0 == 4 ? $0 : nil }
         self.elapsedMilliseconds = elapsedMilliseconds.flatMap { $0 >= 0 ? $0 : nil }
         self.eventCount = eventCount.flatMap { $0 >= 0 ? $0 : nil }
         self.messageCount = messageCount.flatMap { $0 >= 0 ? $0 : nil }
@@ -195,6 +301,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.playbackPath = Self.allowlistedToken(playbackPath, allowed: Self.allowedPlaybackPaths)
         self.resultClass = Self.allowlistedToken(resultClass, allowed: Self.allowedResultClasses)
         self.deviceIdentityHash = Self.hashedIdentifier(deviceIdentityIdentifier)
+        self.configuredGatewayIdentityHash = Self.hashedIdentifier(
+            configuredGatewayIdentityIdentifier)
+        self.observedGatewayIdentityHash = Self.hashedIdentifier(
+            observedGatewayIdentityIdentifier)
+        self.configuredGatewayIdentitySource = configuredGatewayIdentitySource
+        self.observedGatewayIdentitySource = observedGatewayIdentitySource
+        self.gatewayIdentityComparison = gatewayIdentityComparison
+        self.apnsTransport = apnsTransport
         self.topic = Self.allowlistedToken(topic, allowed: Self.allowedTopics)
         self.environment = Self.allowlistedToken(environment, allowed: Self.allowedEnvironments)
         self.byteCount = byteCount.flatMap { $0 >= 0 ? $0 : nil }
@@ -204,6 +318,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
             Self.sanitizedToken($0, maximumLength: 32)
         })).sorted()
         self.networkInterfaces = Array(sanitizedInterfaces.prefix(8))
+        self.priorBuildNumber = Self.validBuildNumber(priorBuildNumber)
+        self.priorSourceSHA = Self.validSourceSHA(priorSourceSHA)
+        self.priorMainExecutableUUID = Self.canonicalUUID(priorMainExecutableUUID)
+        self.currentBuildNumber = Self.validBuildNumber(currentBuildNumber)
+        self.currentSourceSHA = Self.validSourceSHA(currentSourceSHA)
+        self.currentMainExecutableUUID = Self.canonicalUUID(currentMainExecutableUUID)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -237,8 +357,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case gatewayErrorCode = "gateway_error_code"
         case offsetPresent = "offset_present"
         case offsetType = "offset_type"
+        case offsetValue = "offset_value"
         case limitPresent = "limit_present"
+        case limitValue = "limit_value"
         case maxCharsPresent = "max_chars_present"
+        case maxCharsValue = "max_chars_value"
+        case encodedPropertyNames = "encoded_property_names"
+        case gatewayValidationPath = "gateway_validation_path"
+        case gatewayErrorMessageClass = "gateway_error_message_class"
+        case gatewayValidatorIdentity = "gateway_validator_identity"
+        case protocolSchemaVersion = "protocol_schema_version"
+        case requestEnvelopeVersion = "request_envelope_version"
         case elapsedMilliseconds = "elapsed_milliseconds"
         case eventCount = "event_count"
         case messageCount = "message_count"
@@ -253,12 +382,24 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case playbackPath = "playback_path"
         case resultClass = "result_class"
         case deviceIdentityHash = "device_identity_hash"
+        case configuredGatewayIdentityHash = "configured_gateway_identity_hash"
+        case observedGatewayIdentityHash = "observed_gateway_identity_hash"
+        case configuredGatewayIdentitySource = "configured_gateway_identity_source"
+        case observedGatewayIdentitySource = "observed_gateway_identity_source"
+        case gatewayIdentityComparison = "gateway_identity_comparison"
+        case apnsTransport = "apns_transport"
         case topic
         case environment
         case byteCount = "byte_count"
         case sampleRate = "sample_rate"
         case durationMilliseconds = "duration_milliseconds"
         case networkInterfaces = "network_interfaces"
+        case priorBuildNumber = "prior_build_number"
+        case priorSourceSHA = "prior_source_sha"
+        case priorMainExecutableUUID = "prior_main_executable_uuid"
+        case currentBuildNumber = "current_build_number"
+        case currentSourceSHA = "current_source_sha"
+        case currentMainExecutableUUID = "current_main_executable_uuid"
     }
 
     private static func timestamp(_ date: Date) -> String {
@@ -278,6 +419,43 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     private static func normalizedIdentifierDigest(_ value: String?) -> String? {
         guard let value else { return nil }
         return Self.isLowercaseHexDigest(value) ? value : Self.hashedIdentifier(value)
+    }
+
+    private static func boundedRPCInteger(_ value: Int?) -> Int? {
+        value.flatMap { (-1_000_000...1_000_000).contains($0) ? $0 : nil }
+    }
+
+    private static func validBuildNumber(_ value: String?) -> String? {
+        guard let value,
+              !value.isEmpty,
+              value.utf8.count <= 32
+        else { return nil }
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...3).contains(components.count),
+              components.allSatisfy({ component in
+                  !component.isEmpty && component.utf8.allSatisfy { (48...57).contains($0) }
+              })
+        else { return nil }
+        return value
+    }
+
+    private static func validSourceSHA(_ value: String?) -> String? {
+        guard let value,
+              value.utf8.count == 40,
+              value.utf8.allSatisfy({ byte in
+                  (48...57).contains(byte) || (97...102).contains(byte)
+              })
+        else { return nil }
+        return value
+    }
+
+    private static func canonicalUUID(_ value: String?) -> String? {
+        guard let value,
+              value == value.lowercased(),
+              let uuid = UUID(uuidString: value),
+              uuid.uuidString.lowercased() == value
+        else { return nil }
+        return value
     }
 
     private static func sanitizedToken(_ value: String?, maximumLength: Int) -> String? {
@@ -313,6 +491,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     private static let allowedTopics: Set<String> = [
         "ai.openclaw.client",
         "ai.openclaw.client.J76B47MZ6V",
+    ]
+    private static let allowedGatewayValidatorIdentities: Set<String> = [
+        "chat-history-0790d9f593ad",
+    ]
+    private static let allowedProtocolSchemaVersions: Set<String> = [
+        "gateway-protocol-v4",
     ]
     private static let allowedProviderStages: Set<String> = [
         "application_launch",
@@ -490,12 +674,29 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
               self.admittedAt.map(Self.isValidTimestamp) ?? true,
               self.gatewayErrorCode == Self.sanitizedToken(
                   self.gatewayErrorCode, maximumLength: 64),
+              self.offsetValue == Self.boundedRPCInteger(self.offsetValue),
+              self.limitValue == Self.boundedRPCInteger(self.limitValue),
+              self.maxCharsValue == Self.boundedRPCInteger(self.maxCharsValue),
+              self.encodedPropertyNames.map({ names in
+                  names.count <= 5 && names == Array(Set(names).sorted {
+                      $0.rawValue < $1.rawValue
+                  })
+              }) ?? true,
+              self.gatewayValidatorIdentity == Self.allowlistedToken(
+                  self.gatewayValidatorIdentity,
+                  allowed: Self.allowedGatewayValidatorIdentities),
+              self.protocolSchemaVersion == Self.allowlistedToken(
+                  self.protocolSchemaVersion,
+                  allowed: Self.allowedProtocolSchemaVersions),
+              self.requestEnvelopeVersion.map({ $0 == 4 }) ?? true,
               self.elapsedMilliseconds.map({ $0 >= 0 }) ?? true,
               self.eventCount.map({ $0 >= 0 }) ?? true,
               self.messageCount.map({ $0 >= 0 }) ?? true,
               self.diagnosticAttemptID.map(Self.isLowercaseHexDigest) ?? true,
               self.registrationAttemptID.map(Self.isLowercaseHexDigest) ?? true,
               self.deviceIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.configuredGatewayIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.observedGatewayIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
               self.byteCount.map({ $0 >= 0 }) ?? true,
               self.sampleRate.map({ (1...384_000).contains($0) }) ?? true,
               self.durationMilliseconds.map({ $0 >= 0 }) ?? true,
@@ -517,7 +718,13 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
               self.networkInterfaces.allSatisfy({
                   $0 == Self.sanitizedToken($0, maximumLength: 32)
               }),
-              self.sessionHash.map(Self.isLowercaseHexDigest) ?? true
+              self.sessionHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.priorBuildNumber == Self.validBuildNumber(self.priorBuildNumber),
+              self.priorSourceSHA == Self.validSourceSHA(self.priorSourceSHA),
+              self.priorMainExecutableUUID == Self.canonicalUUID(self.priorMainExecutableUUID),
+              self.currentBuildNumber == Self.validBuildNumber(self.currentBuildNumber),
+              self.currentSourceSHA == Self.validSourceSHA(self.currentSourceSHA),
+              self.currentMainExecutableUUID == Self.canonicalUUID(self.currentMainExecutableUUID)
         else {
             return false
         }
@@ -535,9 +742,54 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         {
             return false
         }
+        let hasGatewayIdentityEvidence = self.configuredGatewayIdentityHash != nil ||
+            self.observedGatewayIdentityHash != nil ||
+            self.configuredGatewayIdentitySource != nil ||
+            self.observedGatewayIdentitySource != nil ||
+            self.gatewayIdentityComparison != nil
+        if self.apnsTransport != nil,
+           (self.schema != Self.schemaName || self.kind != .apns)
+        {
+            return false
+        }
+        if hasGatewayIdentityEvidence {
+            guard self.schema == Self.schemaName,
+                  self.kind == .apns,
+                  self.configuredGatewayIdentitySource != nil,
+                  self.observedGatewayIdentitySource != nil,
+                  let comparison = self.gatewayIdentityComparison,
+                  self.apnsTransport != nil
+            else {
+                return false
+            }
+            switch comparison {
+            case .equal:
+                guard let configured = self.configuredGatewayIdentityHash,
+                      configured == self.observedGatewayIdentityHash
+                else { return false }
+            case .configuredMissing:
+                guard self.configuredGatewayIdentityHash == nil,
+                      self.observedGatewayIdentityHash != nil
+                else { return false }
+            case .observedMissing:
+                guard self.configuredGatewayIdentityHash != nil,
+                      self.observedGatewayIdentityHash == nil
+                else { return false }
+            case .different:
+                guard let configured = self.configuredGatewayIdentityHash,
+                      let observed = self.observedGatewayIdentityHash,
+                      configured != observed
+                else { return false }
+            }
+        }
         let hasRPCMetadata = self.rpcMethod != nil || self.admittedAt != nil ||
             self.gatewayErrorCode != nil || self.offsetPresent != nil || self.offsetType != nil ||
-            self.limitPresent != nil || self.maxCharsPresent != nil || self.elapsedMilliseconds != nil
+            self.offsetValue != nil || self.limitPresent != nil || self.limitValue != nil ||
+            self.maxCharsPresent != nil || self.maxCharsValue != nil ||
+            self.encodedPropertyNames != nil || self.gatewayValidationPath != nil ||
+            self.gatewayErrorMessageClass != nil || self.gatewayValidatorIdentity != nil ||
+            self.protocolSchemaVersion != nil || self.requestEnvelopeVersion != nil ||
+            self.elapsedMilliseconds != nil
         if hasRPCMetadata {
             guard self.schema == Self.schemaName,
                   self.kind == .socket,
@@ -548,11 +800,62 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
                   let offsetType = self.offsetType,
                   self.limitPresent != nil,
                   self.maxCharsPresent != nil,
+                  let encodedPropertyNames = self.encodedPropertyNames,
+                  self.protocolSchemaVersion != nil,
+                  self.requestEnvelopeVersion == 4,
                   self.elapsedMilliseconds != nil,
-                  offsetPresent == (offsetType != .absent)
+                  offsetPresent == (offsetType != .absent),
+                  (self.offsetValue == nil || offsetType == .integer),
+                  (self.offsetValue == nil || offsetPresent),
+                  (self.limitValue == nil || self.limitPresent == true),
+                  (self.maxCharsValue == nil || self.maxCharsPresent == true),
+                  (self.gatewayValidationPath == nil) == (self.gatewayErrorMessageClass == nil)
             else {
                 return false
             }
+            if self.rpcMethod == "chat.history" {
+                guard self.gatewayValidatorIdentity == "chat-history-0790d9f593ad",
+                      encodedPropertyNames.contains(.offset) == offsetPresent,
+                      encodedPropertyNames.contains(.limit) == (self.limitPresent == true),
+                      encodedPropertyNames.contains(.maxChars) == (self.maxCharsPresent == true)
+                else { return false }
+            } else if self.gatewayValidatorIdentity != nil || !encodedPropertyNames.isEmpty {
+                return false
+            }
+            if self.gatewayValidationPath != nil,
+               self.gatewayErrorCode != "INVALID_REQUEST"
+            {
+                return false
+            }
+        }
+        let hasBuildTransitionMetadata = self.priorBuildNumber != nil || self.priorSourceSHA != nil ||
+            self.priorMainExecutableUUID != nil || self.currentBuildNumber != nil ||
+            self.currentSourceSHA != nil || self.currentMainExecutableUUID != nil
+        let hasCompletePriorBuildIdentity = self.priorBuildNumber != nil &&
+            self.priorSourceSHA != nil && self.priorMainExecutableUUID != nil
+        let hasCompleteCurrentBuildIdentity = self.currentBuildNumber != nil &&
+            self.currentSourceSHA != nil && self.currentMainExecutableUUID != nil
+        let hasAnyPriorBuildIdentity = self.priorBuildNumber != nil || self.priorSourceSHA != nil ||
+            self.priorMainExecutableUUID != nil
+        let hasAnyCurrentBuildIdentity = self.currentBuildNumber != nil ||
+            self.currentSourceSHA != nil || self.currentMainExecutableUUID != nil
+        if hasBuildTransitionMetadata,
+           (self.schema != Self.schemaName || self.kind != .appLifecycle)
+        {
+            return false
+        }
+        if hasAnyPriorBuildIdentity != hasCompletePriorBuildIdentity ||
+            hasAnyCurrentBuildIdentity != hasCompleteCurrentBuildIdentity
+        {
+            return false
+        }
+        if [
+            "previous_run_unclosed_same_build",
+            "previous_run_unclosed_build_transition",
+        ].contains(self.state),
+            (!hasCompletePriorBuildIdentity || !hasCompleteCurrentBuildIdentity)
+        {
+            return false
         }
         return true
     }
@@ -638,8 +941,17 @@ public enum OpenClawDiagnosticRecorder {
         "gateway_error_code",
         "offset_present",
         "offset_type",
+        "offset_value",
         "limit_present",
+        "limit_value",
         "max_chars_present",
+        "max_chars_value",
+        "encoded_property_names",
+        "gateway_validation_path",
+        "gateway_error_message_class",
+        "gateway_validator_identity",
+        "protocol_schema_version",
+        "request_envelope_version",
         "elapsed_milliseconds",
         "event_count",
         "message_count",
@@ -654,11 +966,23 @@ public enum OpenClawDiagnosticRecorder {
         "playback_path",
         "result_class",
         "device_identity_hash",
+        "configured_gateway_identity_hash",
+        "observed_gateway_identity_hash",
+        "configured_gateway_identity_source",
+        "observed_gateway_identity_source",
+        "gateway_identity_comparison",
+        "apns_transport",
         "topic",
         "environment",
         "byte_count",
         "sample_rate",
         "duration_milliseconds",
+        "prior_build_number",
+        "prior_source_sha",
+        "prior_main_executable_uuid",
+        "current_build_number",
+        "current_source_sha",
+        "current_main_executable_uuid",
     ])
 
     public static func installSink(_ sink: @escaping Sink) {
