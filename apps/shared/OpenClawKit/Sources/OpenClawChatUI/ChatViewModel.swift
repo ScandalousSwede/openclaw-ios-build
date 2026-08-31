@@ -512,12 +512,12 @@ public final class OpenClawChatViewModel {
             kind: .chat,
             state: state,
             sessionIdentifier: session.key,
-            diagnosticAttemptID: diagnosticAttemptID,
-            stream: stream,
-            resultClass: resultClass,
             eventCount: eventCount,
             messageCount: messageCount,
-            sessionGeneration: session.generation))
+            sessionGeneration: session.generation,
+            diagnosticAttemptID: diagnosticAttemptID,
+            stream: stream,
+            resultClass: resultClass))
     }
 
     func chatViewAppeared() {
