@@ -611,45 +611,60 @@ struct GatewayNodeSessionTests {
         return .integer(Int(double))
     }
 
-    private func exactWireParams(_ data: Data) throws -> [String: Any] {
+    private func exactWireParams(
+        _ data: Data,
+        method expectedMethod: String = "chat.history"
+    ) throws -> [String: Any] {
         let frame = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(frame["type"] as? String == "req")
-        #expect(frame["method"] as? String == "chat.history")
+        #expect(frame["method"] as? String == expectedMethod)
         #expect(frame["id"] as? String != nil)
         return try #require(frame["params"] as? [String: Any])
     }
 
     @Test
     func chatHistoryExactWebSocketFramePreservesIntegerParametersAcrossJSONBridge() async throws {
-        let session = FakeGatewayWebSocketSession()
-        let gateway = GatewayNodeSession(connectionRole: .operator)
-        try await connectForGenerationTest(
-            gateway,
-            session: session,
-            endpoint: "ws://example.invalid")
-        let route = try #require(await gateway.currentRoute())
-        let socket = try #require(session.latestTask())
+        let cases: [(offset: Int, limit: Int, maxChars: Int)] = [
+            (0, 200, 500_000),
+            (0, 1, 1),
+            (1, 200, 500_000),
+            (2, 200, 500_000),
+        ]
 
-        let request = Task {
-            try await gateway.request(
-                method: "chat.history",
-                paramsJSON: #"{"sessionKey":"fixture-session","limit":200,"offset":0,"maxChars":500000}"#,
-                ifCurrentRoute: route)
-        }
-        try await waitUntil("history request exact frame physically dispatched") {
-            socket.latestRequestFrame(method: "chat.history") != nil
-        }
-        let frame = try #require(socket.latestRequestFrame(method: "chat.history"))
-        let params = try self.exactWireParams(frame)
-        #expect(Set(params.keys) == ["sessionKey", "limit", "offset", "maxChars"])
-        #expect(params["sessionKey"] as? String == "fixture-session")
-        #expect(self.exactWireJSONType(params["offset"]) == .integer(0))
-        #expect(self.exactWireJSONType(params["limit"]) == .integer(200))
-        #expect(self.exactWireJSONType(params["maxChars"]) == .integer(500_000))
+        for (index, fixture) in cases.enumerated() {
+            let session = FakeGatewayWebSocketSession()
+            let gateway = GatewayNodeSession(connectionRole: .operator)
+            try await connectForGenerationTest(
+                gateway,
+                session: session,
+                endpoint: "ws://example.invalid/valid-\(index)")
+            let route = try #require(await gateway.currentRoute())
+            let socket = try #require(session.latestTask())
+            let paramsJSON = """
+            {"sessionKey":"fixture-session","limit":\(fixture.limit),"offset":\(fixture.offset),"maxChars":\(fixture.maxChars)}
+            """
 
-        try socket.emitResponse(id: try #require(socket.latestRequestID(method: "chat.history")))
-        _ = try await request.value
-        await gateway.disconnect()
+            let request = Task {
+                try await gateway.request(
+                    method: "chat.history",
+                    paramsJSON: paramsJSON,
+                    ifCurrentRoute: route)
+            }
+            try await waitUntil("history request exact frame \(index) physically dispatched") {
+                socket.latestRequestFrame(method: "chat.history") != nil
+            }
+            let frame = try #require(socket.latestRequestFrame(method: "chat.history"))
+            let params = try self.exactWireParams(frame)
+            #expect(Set(params.keys) == ["sessionKey", "limit", "offset", "maxChars"])
+            #expect(params["sessionKey"] as? String == "fixture-session")
+            #expect(self.exactWireJSONType(params["offset"]) == .integer(fixture.offset))
+            #expect(self.exactWireJSONType(params["limit"]) == .integer(fixture.limit))
+            #expect(self.exactWireJSONType(params["maxChars"]) == .integer(fixture.maxChars))
+
+            try socket.emitResponse(id: try #require(socket.latestRequestID(method: "chat.history")))
+            _ = try await request.value
+            await gateway.disconnect()
+        }
     }
 
     @Test
@@ -689,6 +704,46 @@ struct GatewayNodeSessionTests {
             _ = try await request.value
             await gateway.disconnect()
         }
+    }
+
+    @Test
+    func requestParamsJSONDirectDecodePreservesEveryJSONValueKindOnTheWire() async throws {
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession(connectionRole: .operator)
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid/json-value-kinds")
+        let route = try #require(await gateway.currentRoute())
+        let socket = try #require(session.latestTask())
+        let method = "fixture.params"
+
+        let request = Task {
+            try await gateway.request(
+                method: method,
+                paramsJSON: #"{"bool":true,"integer":1,"double":1.5,"string":"value","null":null,"object":{"integer":2},"array":[false,3]}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("all JSON value kinds physically dispatched") {
+            socket.latestRequestFrame(method: method) != nil
+        }
+        let frame = try #require(socket.latestRequestFrame(method: method))
+        let params = try self.exactWireParams(frame, method: method)
+        #expect(self.exactWireJSONType(params["bool"]) == .bool)
+        #expect(self.exactWireJSONType(params["integer"]) == .integer(1))
+        #expect(self.exactWireJSONType(params["double"]) == .fractional(1.5))
+        #expect(params["string"] as? String == "value")
+        #expect(params["null"] is NSNull)
+        let object = try #require(params["object"] as? [String: Any])
+        #expect(self.exactWireJSONType(object["integer"]) == .integer(2))
+        let array = try #require(params["array"] as? [Any])
+        try #require(array.count == 2)
+        #expect(self.exactWireJSONType(array[0]) == .bool)
+        #expect(self.exactWireJSONType(array[1]) == .integer(3))
+
+        try socket.emitResponse(id: try #require(socket.latestRequestID(method: method)))
+        _ = try await request.value
+        await gateway.disconnect()
     }
 
     @Test
