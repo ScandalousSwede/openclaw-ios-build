@@ -587,7 +587,7 @@ struct GatewayNodeSessionTests {
     private enum ExactWireJSONType: Equatable {
         case missing
         case null
-        case bool
+        case bool(Bool)
         case integer(Int)
         case fractional(Double)
         case string(String)
@@ -601,7 +601,9 @@ struct GatewayNodeSessionTests {
             if let string = value as? String { return .string(string) }
             return .other
         }
-        guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return .bool }
+        guard CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return .bool(number.boolValue)
+        }
         let double = number.doubleValue
         guard double.isFinite,
               double.rounded(.towardZero) == double,
@@ -657,7 +659,14 @@ struct GatewayNodeSessionTests {
             let params = try self.exactWireParams(frame)
             #expect(Set(params.keys) == ["sessionKey", "limit", "offset", "maxChars"])
             #expect(params["sessionKey"] as? String == "fixture-session")
-            #expect(self.exactWireJSONType(params["offset"]) == .integer(fixture.offset))
+            let offsetType = self.exactWireJSONType(params["offset"])
+            #expect(offsetType == .integer(fixture.offset))
+            if fixture.offset == 0 {
+                #expect(offsetType != .bool(false))
+            }
+            if fixture.offset == 1 {
+                #expect(offsetType != .bool(true))
+            }
             #expect(self.exactWireJSONType(params["limit"]) == .integer(fixture.limit))
             #expect(self.exactWireJSONType(params["maxChars"]) == .integer(fixture.maxChars))
 
@@ -668,13 +677,36 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
+    func historicalJSONSerializationBridgeFixtureEncodesIntegerZeroAsBooleanFalse() throws {
+        let raw = try #require(
+            JSONSerialization.jsonObject(
+                with: Data(#"{"sessionKey":"fixture-session","offset":0}"#.utf8))
+                as? [String: Any]
+        )
+        #expect(self.exactWireJSONType(raw["offset"]) == .integer(0))
+
+        let historicalFrame = RequestFrame(
+            type: "req",
+            id: "historical-jsonserialization-bridge",
+            method: "chat.history",
+            params: AnyCodable(raw.mapValues { AnyCodable($0) })
+        )
+        let encoded = try JSONEncoder().encode(historicalFrame)
+        let params = try self.exactWireParams(encoded)
+
+        #expect(self.exactWireJSONType(params["offset"]) == .bool(false))
+        #expect(String(decoding: encoded, as: UTF8.self).contains(#""offset":false"#))
+    }
+
+    @Test
     func chatHistoryExactWebSocketFrameProbeDistinguishesInvalidOffsetRepresentations() async throws {
         let cases: [(params: String, expected: ExactWireJSONType)] = [
             (#"{"sessionKey":"fixture-session"}"#, .missing),
             (#"{"sessionKey":"fixture-session","offset":null}"#, .null),
             (#"{"sessionKey":"fixture-session","offset":"0"}"#, .string("0")),
             (#"{"sessionKey":"fixture-session","offset":0.5}"#, .fractional(0.5)),
-            (#"{"sessionKey":"fixture-session","offset":true}"#, .bool),
+            (#"{"sessionKey":"fixture-session","offset":false}"#, .bool(false)),
+            (#"{"sessionKey":"fixture-session","offset":true}"#, .bool(true)),
         ]
 
         for (index, fixture) in cases.enumerated() {
@@ -729,7 +761,7 @@ struct GatewayNodeSessionTests {
         }
         let frame = try #require(socket.latestRequestFrame(method: method))
         let params = try self.exactWireParams(frame, method: method)
-        #expect(self.exactWireJSONType(params["bool"]) == .bool)
+        #expect(self.exactWireJSONType(params["bool"]) == .bool(true))
         #expect(self.exactWireJSONType(params["integer"]) == .integer(1))
         #expect(self.exactWireJSONType(params["double"]) == .fractional(1.5))
         #expect(params["string"] as? String == "value")
@@ -738,7 +770,7 @@ struct GatewayNodeSessionTests {
         #expect(self.exactWireJSONType(object["integer"]) == .integer(2))
         let array = try #require(params["array"] as? [Any])
         try #require(array.count == 2)
-        #expect(self.exactWireJSONType(array[0]) == .bool)
+        #expect(self.exactWireJSONType(array[0]) == .bool(false))
         #expect(self.exactWireJSONType(array[1]) == .integer(3))
 
         try socket.emitResponse(id: try #require(socket.latestRequestID(method: method)))
