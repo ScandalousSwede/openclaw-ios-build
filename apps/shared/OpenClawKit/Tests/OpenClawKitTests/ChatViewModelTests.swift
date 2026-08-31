@@ -4981,10 +4981,12 @@ struct ChatViewModelTests {
 
         vm.refresh()
         try await waitUntil("later refresh applies") {
-            vm.sessionId == "sess-latest" &&
-                vm.messages.contains { message in
-                    message.content.contains { $0.text == "latest history" }
-                }
+            await MainActor.run {
+                vm.sessionId == "sess-latest" &&
+                    vm.messages.contains { message in
+                        message.content.contains { $0.text == "latest history" }
+                    }
+            }
         }
 
         await staleHistoryGate.release()
@@ -5048,10 +5050,12 @@ struct ChatViewModelTests {
 
         await newerHistoryGate.release()
         try await waitUntil("newer refresh applies") {
-            vm.sessionId == "sess-latest" &&
-                vm.messages.contains { message in
-                    message.content.contains { $0.text == "newer history" }
-                }
+            await MainActor.run {
+                vm.sessionId == "sess-latest" &&
+                    vm.messages.contains { message in
+                        message.content.contains { $0.text == "newer history" }
+                    }
+            }
         }
         #expect(vm.errorText == nil)
         vm.shutdown()
@@ -5082,14 +5086,18 @@ struct ChatViewModelTests {
         }
         transport.emit(.seqGap)
         try await waitUntil("later event refresh applies") {
-            vm.sessionId == "sess-latest" &&
-                vm.messages.contains { message in
-                    message.content.contains { $0.text == "later history" }
-                }
+            await MainActor.run {
+                vm.sessionId == "sess-latest" &&
+                    vm.messages.contains { message in
+                        message.content.contains { $0.text == "later history" }
+                    }
+            }
         }
 
         await staleBootstrapGate.release()
-        try await waitUntil("older bootstrap rejection settles") { !vm.isLoading }
+        try await waitUntil("older bootstrap rejection settles") {
+            await MainActor.run { !vm.isLoading }
+        }
 
         #expect(vm.errorText == nil)
         #expect(vm.sessionId == "sess-latest")
@@ -5123,12 +5131,12 @@ struct ChatViewModelTests {
         }
         transport.emit(.seqGap)
         try await waitUntil("newer history rejection surfaces") {
-            vm.errorText?.contains("INVALID_REQUEST") == true
+            await MainActor.run { vm.errorText?.contains("INVALID_REQUEST") == true }
         }
 
         await olderBootstrapGate.release()
         try await waitUntil("older bootstrap success settles") {
-            !vm.isLoading && vm.sessionId == "sess-bootstrap"
+            await MainActor.run { !vm.isLoading && vm.sessionId == "sess-bootstrap" }
         }
 
         #expect(vm.errorText?.contains("INVALID_REQUEST") == true)
@@ -5157,12 +5165,12 @@ struct ChatViewModelTests {
         vm.chatViewAppeared()
         vm.load()
         try await waitUntil("history and diagnostics complete") {
-            vm.sessionId == "sess-main" && !vm.isLoading
+            await MainActor.run { vm.sessionId == "sess-main" && !vm.isLoading }
         }
 
         let projection = vm.beginMessageListProjection(inputMessageCount: vm.messages.count)
         vm.completeMessageListProjection(projection, outputMessageCount: 1)
-        #expect(vm.beginMessageListProjection(inputMessageCount: vm.messages.count) is nil)
+        #expect(vm.beginMessageListProjection(inputMessageCount: vm.messages.count) == nil)
         transport.emit(.health(ok: false))
         try await waitUntil("event batch diagnostic completes") {
             captured.withLock { lines in
