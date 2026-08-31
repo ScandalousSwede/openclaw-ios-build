@@ -1,0 +1,80 @@
+{
+  "archive_uuid": "82affdac-812e-404c-953e-15f5920699f5",
+  "build_number": "94",
+  "configuration": "Release",
+  "executables": [
+    {
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V",
+      "bundle_relative_path": ".",
+      "dsym_requirement": "required_compiled_executable",
+      "dsym_status": "uuid_matched_during_build",
+      "dsym_uuids": [
+        {"architecture": "arm64", "uuid": "fb6959aa-a5ed-3c96-a22c-7358085d1323"}
+      ],
+      "executable_name": "OpenClaw",
+      "executable_role": "compiled_product",
+      "executable_uuids": [
+        {"architecture": "arm64", "uuid": "fb6959aa-a5ed-3c96-a22c-7358085d1323"}
+      ]
+    },
+    {
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.activitywidget",
+      "bundle_relative_path": "PlugIns/OpenClawActivityWidget.appex",
+      "dsym_requirement": "required_compiled_executable",
+      "dsym_status": "uuid_matched_during_build",
+      "dsym_uuids": [
+        {"architecture": "arm64", "uuid": "5e7618fc-14b3-3251-b2df-a74e7fd2edb6"}
+      ],
+      "executable_name": "OpenClawActivityWidget",
+      "executable_role": "compiled_product",
+      "executable_uuids": [
+        {"architecture": "arm64", "uuid": "5e7618fc-14b3-3251-b2df-a74e7fd2edb6"}
+      ]
+    },
+    {
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.share",
+      "bundle_relative_path": "PlugIns/OpenClawShareExtension.appex",
+      "dsym_requirement": "required_compiled_executable",
+      "dsym_status": "uuid_matched_during_build",
+      "dsym_uuids": [
+        {"architecture": "arm64", "uuid": "013e9746-0fd7-3cf7-951a-57fbfca8d277"}
+      ],
+      "executable_name": "OpenClawShareExtension",
+      "executable_role": "compiled_product",
+      "executable_uuids": [
+        {"architecture": "arm64", "uuid": "013e9746-0fd7-3cf7-951a-57fbfca8d277"}
+      ]
+    },
+    {
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+      "bundle_relative_path": "Watch/OpenClawWatchApp.app",
+      "dsym_requirement": "not_applicable_sdk_watchkit_stub",
+      "dsym_status": "not_emitted",
+      "dsym_uuids": [],
+      "executable_name": "OpenClawWatchApp",
+      "executable_role": "sdk_watchkit_stub",
+      "executable_uuids": [
+        {"architecture": "arm64", "uuid": "bda0d008-4c52-39b9-a969-801bc5472761"},
+        {"architecture": "arm64_32", "uuid": "03fe4bed-103a-3363-a03c-f6245cdf7dcb"}
+      ]
+    },
+    {
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+      "bundle_relative_path": "Watch/OpenClawWatchApp.app/PlugIns/OpenClawWatchExtension.appex",
+      "dsym_requirement": "required_compiled_executable",
+      "dsym_status": "uuid_matched_during_build",
+      "dsym_uuids": [
+        {"architecture": "arm64", "uuid": "1422df40-9729-3fd6-a456-71e411262d07"},
+        {"architecture": "arm64_32", "uuid": "778413d0-23e4-3347-8b3a-b17a65ed469b"}
+      ],
+      "executable_name": "OpenClawWatchExtension",
+      "executable_role": "compiled_product",
+      "executable_uuids": [
+        {"architecture": "arm64", "uuid": "1422df40-9729-3fd6-a456-71e411262d07"},
+        {"architecture": "arm64_32", "uuid": "778413d0-23e4-3347-8b3a-b17a65ed469b"}
+      ]
+    }
+  ],
+  "git_sha": "6ba39a08256dd6946780e26d70527fb02f7d825f",
+  "schema": "argus.openclaw-ios.runtime-symbolication-manifest.v1"
+}

@@ -172,6 +172,155 @@ struct AIESCrashDiagnosticExporterTests {
         }
     }
 
+    @Test func build94ArchiveInventorySurvivesRuntimeChildThinning() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Build94RuntimeSymbolicationManifest.json")
+        let fixture = try JSONDecoder().decode(
+            AIESRuntimeSymbolicationManifest.self,
+            from: Data(contentsOf: fixtureURL))
+        let mainRecord = try #require(fixture.executables.first(where: {
+            $0.bundleRelativePath == "."
+        }))
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "ai.openclaw.client.J76B47MZ6V",
+            "CFBundleVersion": "94",
+            "OpenClawBuildGitSHA": "6ba39a08256dd6946780e26d70527fb02f7d825f",
+            "OpenClawBuildArchiveUUID": "82affdac-812e-404c-953e-15f5920699f5",
+            "OpenClawBuildConfiguration": "Release",
+            "OpenClawBuildExtensionBundleIDs": [
+                "ai.openclaw.client.J76B47MZ6V.activitywidget",
+                "ai.openclaw.client.J76B47MZ6V.share",
+            ],
+            "OpenClawBuildWatchBundleIDs": [
+                "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+                "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+            ],
+        ]
+
+        // The installed phone slice can differ from archived child targets after TestFlight
+        // thinning. The signed archive inventory remains the dSYM authority.
+        let observation = fixture.validate(
+            infoDictionary: info,
+            bundleIdentifier: "ai.openclaw.client.J76B47MZ6V",
+            runtimeMainUUIDObservation: .init(
+                source: AIESRuntimeMachOUUIDReader.source,
+                status: .observed,
+                slices: mainRecord.executableUUIDs))
+
+        #expect(observation.status == .observed)
+        #expect(observation.executables == fixture.executables)
+        let expectedDSYMUUIDs = Array(Set(
+            fixture.executables.flatMap(\.dsymUUIDs).map(\.uuid))).sorted()
+        #expect(expectedDSYMUUIDs == [
+            "013e9746-0fd7-3cf7-951a-57fbfca8d277",
+            "1422df40-9729-3fd6-a456-71e411262d07",
+            "5e7618fc-14b3-3251-b2df-a74e7fd2edb6",
+            "778413d0-23e4-3347-8b3a-b17a65ed469b",
+            "fb6959aa-a5ed-3c96-a22c-7358085d1323",
+        ])
+
+        let runtimeManifest = AIESBuildManifest.from(
+            infoDictionary: info,
+            bundleIdentifier: "ai.openclaw.client.J76B47MZ6V",
+            runtimeUUIDObservation: .init(
+                source: AIESRuntimeMachOUUIDReader.source,
+                status: .observed,
+                slices: mainRecord.executableUUIDs),
+            runtimeSymbolicationObservation: observation)
+        #expect(runtimeManifest.symbolicationExecutables == fixture.executables)
+        #expect(runtimeManifest.dsymUUIDs == expectedDSYMUUIDs)
+    }
+
+    @Test func build94ArchiveInventoryRejectsWrongInstalledMainExecutable() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Build94RuntimeSymbolicationManifest.json")
+        let fixture = try JSONDecoder().decode(
+            AIESRuntimeSymbolicationManifest.self,
+            from: Data(contentsOf: fixtureURL))
+        let observation = fixture.validate(
+            infoDictionary: [
+                "CFBundleIdentifier": "ai.openclaw.client.J76B47MZ6V",
+                "CFBundleVersion": "94",
+                "OpenClawBuildGitSHA": "6ba39a08256dd6946780e26d70527fb02f7d825f",
+                "OpenClawBuildArchiveUUID": "82affdac-812e-404c-953e-15f5920699f5",
+                "OpenClawBuildConfiguration": "Release",
+                "OpenClawBuildExtensionBundleIDs": [
+                    "ai.openclaw.client.J76B47MZ6V.activitywidget",
+                    "ai.openclaw.client.J76B47MZ6V.share",
+                ],
+                "OpenClawBuildWatchBundleIDs": [
+                    "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+                    "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+                ],
+            ],
+            bundleIdentifier: "ai.openclaw.client.J76B47MZ6V",
+            runtimeMainUUIDObservation: .init(
+                source: AIESRuntimeMachOUUIDReader.source,
+                status: .observed,
+                slices: [
+                    .init(uuid: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", architecture: "arm64"),
+                ]))
+
+        #expect(observation.status == .executableMismatch)
+        #expect(observation.executables.isEmpty)
+    }
+
+    @Test func build94ArchiveInventoryFailsClosedOnProvenanceOrDSYMMutation() throws {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/Build94RuntimeSymbolicationManifest.json")
+        let fixtureData = try Data(contentsOf: fixtureURL)
+        let fixture = try JSONDecoder().decode(
+            AIESRuntimeSymbolicationManifest.self,
+            from: fixtureData)
+        let mainRecord = try #require(fixture.executables.first(where: {
+            $0.bundleRelativePath == "."
+        }))
+        let info: [String: Any] = [
+            "CFBundleIdentifier": "ai.openclaw.client.J76B47MZ6V",
+            "CFBundleVersion": "94",
+            "OpenClawBuildGitSHA": "6ba39a08256dd6946780e26d70527fb02f7d825f",
+            "OpenClawBuildArchiveUUID": "82affdac-812e-404c-953e-15f5920699f5",
+            "OpenClawBuildConfiguration": "Release",
+            "OpenClawBuildExtensionBundleIDs": [
+                "ai.openclaw.client.J76B47MZ6V.activitywidget",
+                "ai.openclaw.client.J76B47MZ6V.share",
+            ],
+            "OpenClawBuildWatchBundleIDs": [
+                "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+                "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+            ],
+        ]
+        let runtimeMain: AIESRuntimeMachOUUIDReader.Observation = .init(
+            source: AIESRuntimeMachOUUIDReader.source,
+            status: .observed,
+            slices: mainRecord.executableUUIDs)
+
+        var wrongProvenance = info
+        wrongProvenance["OpenClawBuildGitSHA"] = String(repeating: "f", count: 40)
+        #expect(fixture.validate(
+            infoDictionary: wrongProvenance,
+            bundleIdentifier: "ai.openclaw.client.J76B47MZ6V",
+            runtimeMainUUIDObservation: runtimeMain).status == .provenanceMismatch)
+
+        var object = try #require(JSONSerialization.jsonObject(with: fixtureData) as? [String: Any])
+        var executables = try #require(object["executables"] as? [[String: Any]])
+        let compiledChildIndex = try #require(executables.firstIndex(where: {
+            ($0["bundle_relative_path"] as? String)?.hasSuffix(".appex") == true
+        }))
+        executables[compiledChildIndex]["dsym_uuids"] = []
+        object["executables"] = executables
+        let malformed = try JSONDecoder().decode(
+            AIESRuntimeSymbolicationManifest.self,
+            from: JSONSerialization.data(withJSONObject: object))
+        #expect(malformed.validate(
+            infoDictionary: info,
+            bundleIdentifier: "ai.openclaw.client.J76B47MZ6V",
+            runtimeMainUUIDObservation: runtimeMain).status == .manifestMalformed)
+    }
+
     @Test func exportIsBoundedAndRetainsNewestMetadata() throws {
         let events = (0..<1000).map { sequence in
             OpenClawDiagnosticEvent(

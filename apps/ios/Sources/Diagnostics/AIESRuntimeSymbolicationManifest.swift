@@ -96,11 +96,17 @@ struct AIESRuntimeSymbolicationManifest: Codable, Equatable, Sendable {
         else {
             return Observation(status: .manifestMalformed, executables: [])
         }
-        return manifest.validate(bundle: bundle)
+        return manifest.validate(
+            infoDictionary: bundle.infoDictionary ?? [:],
+            bundleIdentifier: bundle.bundleIdentifier,
+            runtimeMainUUIDObservation: AIESRuntimeMachOUUIDReader.readMainExecutable(bundle: bundle))
     }
 
-    func validate(bundle: Bundle) -> Observation {
-        let info = bundle.infoDictionary ?? [:]
+    func validate(
+        infoDictionary info: [String: Any],
+        bundleIdentifier: String?,
+        runtimeMainUUIDObservation: AIESRuntimeMachOUUIDReader.Observation) -> Observation
+    {
         guard self.gitSHA == Self.infoString(info, "OpenClawBuildGitSHA"),
               self.archiveUUID == Self.normalizedUUID(Self.infoString(info, "OpenClawBuildArchiveUUID")),
               self.buildNumber == Self.infoString(info, "CFBundleVersion"),
@@ -108,7 +114,7 @@ struct AIESRuntimeSymbolicationManifest: Codable, Equatable, Sendable {
         else {
             return Observation(status: .provenanceMismatch, executables: [])
         }
-        let mainBundleID = bundle.bundleIdentifier ?? Self.infoString(info, "CFBundleIdentifier")
+        let mainBundleID = bundleIdentifier ?? Self.infoString(info, "CFBundleIdentifier")
         let expectedBundleIDs = Set(
             [mainBundleID]
                 + Self.infoStringArray(info, "OpenClawBuildExtensionBundleIDs")
@@ -124,72 +130,81 @@ struct AIESRuntimeSymbolicationManifest: Codable, Equatable, Sendable {
             return Observation(status: .manifestMalformed, executables: [])
         }
 
+        var compiledProductCount = 0
+        var watchKitStubCount = 0
         for record in self.executables {
-            guard let executableURL = Self.executableURL(
-                for: record,
-                mainBundle: bundle,
-                expectedMainBundleID: mainBundleID),
-                AIESRuntimeMachOUUIDReader.readExecutable(at: executableURL).slices
-                    == record.executableUUIDs,
-                !record.executableUUIDs.isEmpty
+            guard Self.isSafeRelativePath(record.bundleRelativePath),
+                  !record.executableName.isEmpty,
+                  record.executableName.utf8.count <= 128,
+                  !record.executableName.contains("/"),
+                  !record.executableName.contains("\\"),
+                  !record.executableUUIDs.isEmpty,
+                  record.executableUUIDs.allSatisfy(Self.isCanonicalSlice),
+                  record.executableUUIDs == record.executableUUIDs.sorted(by: Self.sliceSort),
+                  Set(record.executableUUIDs.map { "\($0.architecture):\($0.uuid)" }).count
+                    == record.executableUUIDs.count
             else {
-                return Observation(status: .executableMismatch, executables: [])
+                return Observation(status: .manifestMalformed, executables: [])
             }
             switch record.executableRole {
             case .compiledProduct:
-                guard record.dsymRequirement == .requiredCompiledExecutable,
+                compiledProductCount += 1
+                guard !Self.isWatchApplicationPath(record.bundleRelativePath),
+                      record.dsymRequirement == .requiredCompiledExecutable,
                       record.dsymStatus == .uuidMatchedDuringBuild,
                       record.dsymUUIDs == record.executableUUIDs
                 else {
                     return Observation(status: .manifestMalformed, executables: [])
                 }
             case .sdkWatchKitStub:
+                watchKitStubCount += 1
                 guard record.dsymRequirement == .notApplicableSDKWatchKitStub,
                       record.dsymStatus == .notEmitted,
-                      record.dsymUUIDs.isEmpty
+                      record.dsymUUIDs.isEmpty,
+                      Self.isWatchApplicationPath(record.bundleRelativePath)
                 else {
                     return Observation(status: .manifestMalformed, executables: [])
                 }
             }
         }
+        guard compiledProductCount == 4,
+              watchKitStubCount == 1,
+              let mainRecord = self.executables.first(where: { $0.bundleRelativePath == "." }),
+              mainRecord.bundleID == mainBundleID,
+              mainRecord.executableRole == .compiledProduct,
+              runtimeMainUUIDObservation.status == .observed,
+              runtimeMainUUIDObservation.slices == mainRecord.executableUUIDs
+        else {
+            return Observation(status: .executableMismatch, executables: [])
+        }
+
+        // Archive generation plus Stage A/write_build_manifest are the trust boundary for
+        // every child bundle, executable, and dSYM relationship in this code-signed resource.
+        // Runtime rechecks the installed main LC_UUID. TestFlight may thin embedded targets
+        // after export, so requiring exact runtime equality for every child slice would discard
+        // valid archive symbolication metadata precisely when a physical crash needs it.
         return Observation(status: .observed, executables: self.executables)
     }
 
-    private static func executableURL(
-        for record: Executable,
-        mainBundle: Bundle,
-        expectedMainBundleID: String) -> URL?
+    private static func isWatchApplicationPath(_ value: String) -> Bool {
+        value.hasPrefix("Watch/")
+            && value.hasSuffix(".app")
+            && value.split(separator: "/").count == 2
+    }
+
+    private static func sliceSort(
+        _ lhs: AIESRuntimeMachOUUIDReader.Slice,
+        _ rhs: AIESRuntimeMachOUUIDReader.Slice) -> Bool
     {
-        guard self.isSafeRelativePath(record.bundleRelativePath),
-              !record.executableName.isEmpty,
-              record.executableName.utf8.count <= 128,
-              !record.executableName.contains("/")
-        else { return nil }
-        let bundleURL = record.bundleRelativePath == "."
-            ? mainBundle.bundleURL
-            : mainBundle.bundleURL.appendingPathComponent(record.bundleRelativePath)
-        let normalizedRoot = mainBundle.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-        let normalizedBundle = bundleURL.resolvingSymlinksInPath().standardizedFileURL.path + "/"
-        let isWatchApplication = record.bundleRelativePath.hasPrefix("Watch/")
-            && record.bundleRelativePath.hasSuffix(".app")
-            && record.bundleRelativePath.split(separator: "/").count == 2
-        guard (record.bundleRelativePath == "." || normalizedBundle.hasPrefix(normalizedRoot)),
-              (record.executableRole == .sdkWatchKitStub) == isWatchApplication,
-              let embeddedBundle = Bundle(url: bundleURL),
-              embeddedBundle.bundleIdentifier == record.bundleID,
-              embeddedBundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String
-                == record.executableName
-        else { return nil }
-        if record.executableRole == .sdkWatchKitStub {
-            guard embeddedBundle.object(forInfoDictionaryKey: "WKWatchKitApp") as? Bool == true,
-                  embeddedBundle.object(forInfoDictionaryKey: "WKCompanionAppBundleIdentifier") as? String
-                    == expectedMainBundleID
-            else { return nil }
-        }
-        let executableURL = bundleURL.appendingPathComponent(record.executableName)
-        let normalizedExecutable = executableURL.resolvingSymlinksInPath().standardizedFileURL.path
-        guard normalizedExecutable.hasPrefix(normalizedBundle) else { return nil }
-        return executableURL
+        lhs.architecture == rhs.architecture
+            ? lhs.uuid < rhs.uuid
+            : lhs.architecture < rhs.architecture
+    }
+
+    private static func isCanonicalSlice(_ slice: AIESRuntimeMachOUUIDReader.Slice) -> Bool {
+        !slice.architecture.isEmpty
+            && slice.architecture.utf8.count <= 64
+            && UUID(uuidString: slice.uuid)?.uuidString.lowercased() == slice.uuid
     }
 
     static func isSafeRelativePath(_ value: String) -> Bool {
