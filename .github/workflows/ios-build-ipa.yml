@@ -29,10 +29,10 @@ permissions:
 # candidate: every credential-free checkout and provenance field below is bound
 # to this immutable source candidate instead.
 env:
-  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build104-chat-history-wire-release-executor-20260831
-  AIES_RELEASE_SOURCE_BRANCH: aies/ios-build104-chat-history-wire-20260831
-  AIES_RELEASE_SOURCE_SHA: 649bf86e848043446736522749a15ab8fcc755f8
-  AIES_RELEASE_SOURCE_TREE: b3e3391bac7c16615d9205d27ea8d1a6dda5c86f
+  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build104-chat-history-wire-test-gap-release-executor-20260831
+  AIES_RELEASE_SOURCE_BRANCH: aies/ios-build104-chat-history-wire-test-gap-20260831
+  AIES_RELEASE_SOURCE_SHA: 068efc8432280e5c7e08208ac28a4b23783cda4f
+  AIES_RELEASE_SOURCE_TREE: de3a2100622670b702fa5b69652cb35a0e553fa7
 
 jobs:
   dispatch-gate:
@@ -587,6 +587,15 @@ jobs:
             --force-resolved-versions
             -Xswiftc -DDEBUG
           )
+          focused_wire_tests=(
+            chatHistoryExactWebSocketFramePreservesIntegerParametersAcrossJSONBridge
+            historicalJSONSerializationBridgeFixtureEncodesIntegerZeroAsBooleanFalse
+            chatHistoryExactWebSocketFrameProbeDistinguishesInvalidOffsetRepresentations
+            requestParamsJSONDirectDecodePreservesEveryJSONValueKindOnTheWire
+          )
+          for focused_test in "${focused_wire_tests[@]}"; do
+            swift test "${release_test_args[@]}" --filter "${focused_test}"
+          done
           swift test "${release_test_args[@]}" --filter OpenClawDiagnosticEventTests
           swift test "${release_test_args[@]}" --filter DeepLinksSecurityTests
           swift test "${release_test_args[@]}" --filter GatewayNodeSessionTests
