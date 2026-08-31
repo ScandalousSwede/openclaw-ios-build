@@ -319,7 +319,8 @@ struct AIESAPNsDiagnosticsTests {
         #expect(state.resolve(
             registrationAttemptID: "sequential-readiness",
             configurationGeneration: 12) == .alreadyCompleted)
-        #expect(!state.consumeRetryAfterInFlightCompletion())
+        let completedRetry = state.consumeRetryAfterInFlightCompletion()
+        #expect(!completedRetry)
     }
 
     @Test
@@ -368,15 +369,18 @@ struct AIESAPNsDiagnosticsTests {
             configurationGeneration: 5)
 
         state.coalesceBehindInFlight(ownedBy: inFlight)
-        #expect(!state.consumeRetryAfterInFlightCompletion())
+        let originalRetry = state.consumeRetryAfterInFlightCompletion()
+        #expect(!originalRetry)
 
         let replacement = state.receiveToken(
             registrationAttemptID: "replacement",
             configurationGeneration: 5)
         state.coalesceBehindInFlight(ownedBy: inFlight)
         #expect(state.pending == replacement)
-        #expect(state.consumeRetryAfterInFlightCompletion())
-        #expect(!state.consumeRetryAfterInFlightCompletion())
+        let replacementRetry = state.consumeRetryAfterInFlightCompletion()
+        let duplicateRetry = state.consumeRetryAfterInFlightCompletion()
+        #expect(replacementRetry)
+        #expect(!duplicateRetry)
         #expect(state.pending == replacement)
     }
 
