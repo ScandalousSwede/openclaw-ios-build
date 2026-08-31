@@ -224,6 +224,48 @@ struct OpenClawDiagnosticEventTests {
             "aies_diagnostic=" + rawGatewayMessageData.base64EncodedString()) == nil)
     }
 
+    @Test func decoderRetainsLegacyV2RPCRecordsWithoutAdditiveValidatorCustody() throws {
+        let legacyJSON = #"""
+        {
+          "schema": "argus.openclaw-ios.diagnostic-event.v2",
+          "kind": "socket",
+          "state": "request_completed",
+          "observed_at": "2026-08-31T15:14:58.979Z",
+          "process_instance_id": "1485c598a1351c7b",
+          "launch_instance_id": "cd47892287ec50b9",
+          "connection_role": "operator",
+          "operation_id": "4b2cfeed24694acc",
+          "rpc_method": "chat.history",
+          "admitted_at": "2026-08-31T15:14:58.820Z",
+          "gateway_error_code": "INVALID_REQUEST",
+          "offset_present": true,
+          "offset_type": "integer",
+          "limit_present": true,
+          "max_chars_present": true,
+          "elapsed_milliseconds": 159,
+          "result_class": "gateway_rejected"
+        }
+        """#
+        let data = try #require(legacyJSON.data(using: .utf8))
+        let record = "aies_diagnostic=" + data.base64EncodedString()
+        let decoded = try #require(OpenClawDiagnosticRecorder.decodeRecord(record))
+
+        #expect(decoded.rpcMethod == "chat.history")
+        #expect(decoded.offsetPresent == true)
+        #expect(decoded.offsetType == .integer)
+        #expect(decoded.encodedPropertyNames == nil)
+        #expect(decoded.gatewayValidatorIdentity == nil)
+        #expect(decoded.protocolSchemaVersion == nil)
+        #expect(decoded.requestEnvelopeVersion == nil)
+
+        var partialEnrichment = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        partialEnrichment["offset_value"] = 0
+        let partialData = try JSONSerialization.data(withJSONObject: partialEnrichment)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + partialData.base64EncodedString()) == nil)
+    }
+
     @Test func apnsGatewayIdentityEvidenceIsHashedTypedAndInternallyConsistent() throws {
         let equal = OpenClawDiagnosticEvent(
             kind: .apns,

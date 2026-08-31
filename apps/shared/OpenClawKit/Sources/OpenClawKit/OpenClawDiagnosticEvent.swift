@@ -800,32 +800,46 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
                   let offsetType = self.offsetType,
                   self.limitPresent != nil,
                   self.maxCharsPresent != nil,
-                  let encodedPropertyNames = self.encodedPropertyNames,
-                  self.protocolSchemaVersion != nil,
-                  self.requestEnvelopeVersion == 4,
                   self.elapsedMilliseconds != nil,
-                  offsetPresent == (offsetType != .absent),
+                  offsetPresent == (offsetType != .absent)
+            else {
+                return false
+            }
+
+            // Build 94/104 v2 records predate the additive validator-custody fields below.
+            // Continue accepting that complete legacy core, but fail closed if a record
+            // claims any part of the enriched contract without supplying all of it.
+            let hasNewRPCCustodyMetadata = self.offsetValue != nil || self.limitValue != nil ||
+                self.maxCharsValue != nil || self.encodedPropertyNames != nil ||
+                self.gatewayValidationPath != nil || self.gatewayErrorMessageClass != nil ||
+                self.gatewayValidatorIdentity != nil || self.protocolSchemaVersion != nil ||
+                self.requestEnvelopeVersion != nil
+            if hasNewRPCCustodyMetadata {
+                guard let encodedPropertyNames = self.encodedPropertyNames,
+                      self.protocolSchemaVersion != nil,
+                      self.requestEnvelopeVersion == 4,
                   (self.offsetValue == nil || offsetType == .integer),
                   (self.offsetValue == nil || offsetPresent),
                   (self.limitValue == nil || self.limitPresent == true),
                   (self.maxCharsValue == nil || self.maxCharsPresent == true),
                   (self.gatewayValidationPath == nil) == (self.gatewayErrorMessageClass == nil)
-            else {
-                return false
-            }
-            if self.rpcMethod == "chat.history" {
-                guard self.gatewayValidatorIdentity == "chat-history-0790d9f593ad",
-                      encodedPropertyNames.contains(.offset) == offsetPresent,
-                      encodedPropertyNames.contains(.limit) == (self.limitPresent == true),
-                      encodedPropertyNames.contains(.maxChars) == (self.maxCharsPresent == true)
-                else { return false }
-            } else if self.gatewayValidatorIdentity != nil || !encodedPropertyNames.isEmpty {
-                return false
-            }
-            if self.gatewayValidationPath != nil,
-               self.gatewayErrorCode != "INVALID_REQUEST"
-            {
-                return false
+                else {
+                    return false
+                }
+                if self.rpcMethod == "chat.history" {
+                    guard self.gatewayValidatorIdentity == "chat-history-0790d9f593ad",
+                          encodedPropertyNames.contains(.offset) == offsetPresent,
+                          encodedPropertyNames.contains(.limit) == (self.limitPresent == true),
+                          encodedPropertyNames.contains(.maxChars) == (self.maxCharsPresent == true)
+                    else { return false }
+                } else if self.gatewayValidatorIdentity != nil || !encodedPropertyNames.isEmpty {
+                    return false
+                }
+                if self.gatewayValidationPath != nil,
+                   self.gatewayErrorCode != "INVALID_REQUEST"
+                {
+                    return false
+                }
             }
         }
         let hasBuildTransitionMetadata = self.priorBuildNumber != nil || self.priorSourceSHA != nil ||
