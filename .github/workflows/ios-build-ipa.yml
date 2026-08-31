@@ -117,10 +117,9 @@ jobs:
           test -z "$(git status --porcelain=v2 --untracked-files=all)"
           git cat-file -e "${GITHUB_SHA}^{commit}" 2>/dev/null || \
             git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
-          test "$(git show -s --format=%P "${GITHUB_SHA}")" = "${AIES_RELEASE_SOURCE_SHA}"
-          mapfile -t executor_paths < <(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")
-          test "${#executor_paths[@]}" -eq 1
-          test "${executor_paths[0]}" = ".github/workflows/ios-build-ipa.yml"
+          git merge-base --is-ancestor "${AIES_RELEASE_SOURCE_SHA}" "${GITHUB_SHA}"
+          executor_paths="$(git diff --name-only "${AIES_RELEASE_SOURCE_SHA}" "${GITHUB_SHA}")"
+          test "${executor_paths}" = ".github/workflows/ios-build-ipa.yml"
           remote_candidate="$(git ls-remote origin "refs/heads/${AIES_RELEASE_SOURCE_BRANCH}" | awk '{print $1}')"
           test "${remote_candidate}" = "${AIES_RELEASE_SOURCE_SHA}"
           printf 'workflow_executor=%s\nsource_sha=%s\nsource_tree=%s\n' \
@@ -340,10 +339,9 @@ jobs:
           test -z "$(git status --porcelain=v2 --untracked-files=all)"
           git cat-file -e "${GITHUB_SHA}^{commit}" 2>/dev/null || \
             git fetch --no-tags --depth=1 origin "${GITHUB_SHA}"
-          test "$(git show -s --format=%P "${GITHUB_SHA}")" = "${AIES_RELEASE_SOURCE_SHA}"
-          mapfile -t executor_paths < <(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")
-          test "${#executor_paths[@]}" -eq 1
-          test "${executor_paths[0]}" = ".github/workflows/ios-build-ipa.yml"
+          git merge-base --is-ancestor "${AIES_RELEASE_SOURCE_SHA}" "${GITHUB_SHA}"
+          executor_paths="$(git diff --name-only "${AIES_RELEASE_SOURCE_SHA}" "${GITHUB_SHA}")"
+          test "${executor_paths}" = ".github/workflows/ios-build-ipa.yml"
           remote_candidate="$(git ls-remote origin "refs/heads/${AIES_RELEASE_SOURCE_BRANCH}" | awk '{print $1}')"
           test "${remote_candidate}" = "${AIES_RELEASE_SOURCE_SHA}"
           printf 'workflow_executor=%s\nsource_sha=%s\nsource_tree=%s\n' \
