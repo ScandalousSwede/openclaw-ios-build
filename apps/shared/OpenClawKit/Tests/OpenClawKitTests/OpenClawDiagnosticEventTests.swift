@@ -231,6 +231,7 @@ struct OpenClawDiagnosticEventTests {
           "kind": "socket",
           "state": "request_completed",
           "observed_at": "2026-08-31T15:14:58.979Z",
+          "network_interfaces": [],
           "process_instance_id": "1485c598a1351c7b",
           "launch_instance_id": "cd47892287ec50b9",
           "connection_role": "operator",
