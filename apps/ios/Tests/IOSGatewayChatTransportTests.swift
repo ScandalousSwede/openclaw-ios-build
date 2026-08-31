@@ -200,11 +200,33 @@ private func waitForIOSSessionMutation(
         #expect(params["maxChars"] as? Int == 400_000)
     }
 
-    @Test func ordinaryHistoryRequestOmitsOptionalTailFields() throws {
+    @Test func ordinaryHistoryRequestUsesExplicitBootstrapOffsetForDeployedGateway() throws {
         let params = try self.object(
             from: IOSGatewayChatTransport.makeHistoryParamsJSON(sessionKey: "agent:main:main"))
-        #expect(Set(params.keys) == ["sessionKey"])
+        #expect(Set(params.keys) == ["sessionKey", "offset"])
         #expect(params["sessionKey"] as? String == "agent:main:main")
+        #expect(params["offset"] as? Int == 0)
+    }
+
+    @Test func historyRequestCannotEmitAbsentOrNonintegerOffset() throws {
+        for requestedOffset in [-100, -1, 0, 7] {
+            let params = try self.object(
+                from: IOSGatewayChatTransport.makeHistoryParamsJSON(
+                    sessionKey: "agent:main:main",
+                    offset: requestedOffset))
+            let offset = try #require(params["offset"] as? Int)
+            #expect(offset == max(0, requestedOffset))
+            #expect(params["offset"] is Int)
+        }
+    }
+
+    @Test @MainActor func talkHistoryFallbackUsesTheSameExplicitOffsetContract() throws {
+        let params = try self.object(
+            from: TalkRealtimeWebRTCSession.makeHistoryFallbackParamsJSON(
+                sessionKey: "agent:main:main"))
+        #expect(Set(params.keys) == ["sessionKey", "offset"])
+        #expect(params["sessionKey"] as? String == "agent:main:main")
+        #expect(params["offset"] as? Int == 0)
     }
 
     @Test func pagedHistoryBoundsMatchDeployedLimits() throws {

@@ -842,13 +842,7 @@ final class TalkRealtimeWebRTCSession: NSObject {
         sessionKey: String,
         since: Double) async throws -> String?
     {
-        let params: [String: Any] = ["sessionKey": sessionKey]
-        let data = try JSONSerialization.data(withJSONObject: params)
-        guard let json = String(data: data, encoding: .utf8) else {
-            throw NSError(domain: "TalkRealtimeWebRTC", code: 18, userInfo: [
-                NSLocalizedDescriptionKey: "Failed to encode OpenClaw history request",
-            ])
-        }
+        let json = try Self.makeHistoryFallbackParamsJSON(sessionKey: sessionKey)
         let response = try await gateway.request(method: "chat.history", paramsJSON: json, timeoutSeconds: 15)
         let history = try JSONDecoder().decode(OpenClawChatHistoryPayload.self, from: response)
         let messages = history.messages ?? []
@@ -865,6 +859,20 @@ final class TalkRealtimeWebRTCSession: NSObject {
         let text = assistant.content.compactMap(\.text).joined(separator: "\n")
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    nonisolated static func makeHistoryFallbackParamsJSON(sessionKey: String) throws -> String {
+        // The deployed gateway validates `offset` as an integer even on the
+        // ordinary history path. Keep this fallback on the same explicit
+        // bootstrap-page contract as Chat (offset zero).
+        let params: [String: Any] = ["sessionKey": sessionKey, "offset": 0]
+        let data = try JSONSerialization.data(withJSONObject: params)
+        guard let json = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "TalkRealtimeWebRTC", code: 18, userInfo: [
+                NSLocalizedDescriptionKey: "Failed to encode OpenClaw history request",
+            ])
+        }
+        return json
     }
 
     private func submitToolResult(callId: String, result: [String: String]) {

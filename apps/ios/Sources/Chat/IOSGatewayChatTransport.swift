@@ -80,7 +80,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     private struct HistoryParams: Codable {
         var sessionKey: String
         var limit: Int?
-        var offset: Int?
+        var offset: Int
         var maxChars: Int?
     }
 
@@ -328,13 +328,16 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
     static func makeHistoryParamsJSON(
         sessionKey: String,
         limit: Int? = nil,
-        offset: Int? = nil,
+        offset: Int = 0,
         maxChars: Int? = nil) throws -> String
     {
+        // Upstream stable protocol authority dc575d148a7cb69d0650d271943279a4cd60a7de
+        // introduced the optional, nonnegative integer offset. The deployed gateway
+        // validates it on every history call, so native bootstrap requests send zero.
         try self.encodeParams(HistoryParams(
             sessionKey: sessionKey,
             limit: limit,
-            offset: offset,
+            offset: max(0, offset),
             maxChars: maxChars))
     }
 
@@ -447,7 +450,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         sessionKey: String,
         ifCurrentRoute route: GatewayNodeSessionRoute?) async throws -> OpenClawChatHistoryPayload
     {
-        let json = try Self.makeHistoryParamsJSON(sessionKey: sessionKey)
+        let json = try Self.makeHistoryParamsJSON(sessionKey: sessionKey, offset: 0)
         let res = try await self.requestHistoryData(json: json, ifCurrentRoute: route)
         return try JSONDecoder().decode(OpenClawChatHistoryPayload.self, from: res)
     }
