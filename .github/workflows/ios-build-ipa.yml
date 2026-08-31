@@ -592,6 +592,7 @@ jobs:
             "${strict_package_args[@]}" \
             test \
             'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG AIES_CREDENTIAL_FREE_TEST_KEYCHAIN' \
+            ENABLE_TESTABILITY=YES \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
