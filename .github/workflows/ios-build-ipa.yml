@@ -29,10 +29,10 @@ permissions:
 # candidate: every credential-free checkout and provenance field below is bound
 # to this immutable source candidate instead.
 env:
-  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build104-release-qualification-executor-20260831
+  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build104-release-qualification-executor-v5-20260831
   AIES_RELEASE_SOURCE_BRANCH: aies/ios-build104-chat-history-apns-20260831
-  AIES_RELEASE_SOURCE_SHA: 99ae0675557756a4b391823e9d4164d8c6467a1e
-  AIES_RELEASE_SOURCE_TREE: 74376e11c9caa6bede2cc125423957768141cb2c
+  AIES_RELEASE_SOURCE_SHA: 88a8e05bc0ec0032a8b21faf3a0830ac70545fc2
+  AIES_RELEASE_SOURCE_TREE: 79015c44816ff3a94fb8f6f60c7c9bf51a8da1bf
 
 jobs:
   dispatch-gate:
