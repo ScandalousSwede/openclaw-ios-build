@@ -5419,6 +5419,7 @@ extension NodeAppModel {
         shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
     {
         let usesRelayTransport = await self.pushRegistrationManager.usesRelayTransport
+        let diagnosticTransport: OpenClawDiagnosticAPNsTransport = usesRelayTransport ? .relay : .direct
         let apnsEnvironment = await self.pushRegistrationManager.diagnosticAPNsEnvironment
         let configurationGeneration = self.gatewayConfigurationGeneration
         let registrationAttemptID = self.apnsRegistrationAttemptID ?? UUID().uuidString
@@ -5431,7 +5432,8 @@ extension NodeAppModel {
             role: OpenClawDiagnosticConnectionRole = .node,
             route: GatewayNodeSessionRoute? = nil,
             nodeRoute: GatewayNodeSessionRoute? = nil,
-            operatorRoute: GatewayNodeSessionRoute? = nil)
+            operatorRoute: GatewayNodeSessionRoute? = nil,
+            gatewayIdentityEvidence: AIESAPNsGatewayIdentityDiagnosticEvidence? = nil)
         {
             AIESAPNsDiagnostics.recordPublication(
                 .deferred,
@@ -5445,6 +5447,8 @@ extension NodeAppModel {
                     operatorRoute: operatorRoute,
                     connectionRole: role,
                     deviceIdentity: deviceIdentity,
+                    gatewayIdentityEvidence: gatewayIdentityEvidence,
+                    transport: diagnosticTransport,
                     topic: diagnosticTopic,
                     environment: apnsEnvironment))
         }
@@ -5513,8 +5517,17 @@ extension NodeAppModel {
             recordDeferred(.nodeRouteStale, route: nodeRoute, nodeRoute: nodeRoute)
             return
         }
-        guard await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID else {
-            recordDeferred(.nodeGatewayMismatch, route: nodeRoute, nodeRoute: nodeRoute)
+        let observedNodeGatewayID = await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute)
+        let nodeGatewayIdentityEvidence = AIESAPNsGatewayIdentityDiagnosticEvidence(
+            configuredIdentity: expectedGatewayID,
+            observedIdentity: observedNodeGatewayID,
+            observedSource: .nodeRouteConnectOptions)
+        guard nodeGatewayIdentityEvidence.comparison == .equal else {
+            recordDeferred(
+                .nodeGatewayMismatch,
+                route: nodeRoute,
+                nodeRoute: nodeRoute,
+                gatewayIdentityEvidence: nodeGatewayIdentityEvidence)
             return
         }
         guard self.gatewayConfigurationGeneration == configurationGeneration,
@@ -5530,6 +5543,7 @@ extension NodeAppModel {
         }
 
         let operatorRoute: GatewayNodeSessionRoute?
+        let operatorGatewayIdentityEvidence: AIESAPNsGatewayIdentityDiagnosticEvidence?
         if usesRelayTransport {
             guard self.operatorConnected else {
                 recordDeferred(
@@ -5566,18 +5580,26 @@ extension NodeAppModel {
                     operatorRoute: operatorRoute)
                 return
             }
-            guard await self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID
-            else {
+            let observedOperatorGatewayID = await self.operatorGateway.currentGatewayID(
+                ifCurrentRoute: operatorRoute)
+            let evidence = AIESAPNsGatewayIdentityDiagnosticEvidence(
+                configuredIdentity: expectedGatewayID,
+                observedIdentity: observedOperatorGatewayID,
+                observedSource: .operatorRouteConnectOptions)
+            guard evidence.comparison == .equal else {
                 recordDeferred(
                     .operatorGatewayMismatch,
                     role: .operator,
                     route: operatorRoute,
                     nodeRoute: nodeRoute,
-                    operatorRoute: operatorRoute)
+                    operatorRoute: operatorRoute,
+                    gatewayIdentityEvidence: evidence)
                 return
             }
+            operatorGatewayIdentityEvidence = evidence
         } else {
             operatorRoute = nil
+            operatorGatewayIdentityEvidence = nil
         }
 
         // The operator checks above cross actor boundaries. A token callback or
@@ -5614,6 +5636,8 @@ extension NodeAppModel {
             operatorRoute: operatorRoute,
             connectionRole: .node,
             deviceIdentity: deviceIdentity,
+            gatewayIdentityEvidence: nodeGatewayIdentityEvidence,
+            transport: diagnosticTransport,
             topic: topic,
             environment: apnsEnvironment)
         if !usesRelayTransport, self.apnsLastRegisteredKey == directRegistrationKey {
@@ -5667,6 +5691,8 @@ extension NodeAppModel {
                 operatorRoute: operatorRoute,
                 connectionRole: .operator,
                 deviceIdentity: deviceIdentity,
+                gatewayIdentityEvidence: operatorGatewayIdentityEvidence,
+                transport: diagnosticTransport,
                 topic: topic,
                 environment: apnsEnvironment)
             AIESAPNsDiagnostics.recordPublication(

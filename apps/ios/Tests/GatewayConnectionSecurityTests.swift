@@ -107,6 +107,46 @@ private actor SuspendedGatewayAutoConnectPreparation {
         GatewayTLSStore.clearFingerprint(stableID: stableID)
     }
 
+    @Test @MainActor
+    func tailnetImplicitAndExplicitPort443BindTheSameNodeGatewayIdentity() async throws {
+        let controller = self.makeController()
+        let implicitHost = "Gateway.Example.TS.NET"
+        let explicitHost = "gateway.example.ts.net"
+        let implicitPort = try #require(controller._test_resolveManualPort(
+            host: implicitHost,
+            port: 0,
+            useTLS: true))
+        let explicitPort = try #require(controller._test_resolveManualPort(
+            host: explicitHost,
+            port: 443,
+            useTLS: true))
+
+        #expect(implicitPort == 443)
+        #expect(explicitPort == 443)
+        let implicitID = controller._test_manualStableID(host: implicitHost, port: implicitPort)
+        let explicitID = controller._test_manualStableID(host: explicitHost, port: explicitPort)
+        #expect(implicitID == explicitID)
+
+        let implicitOptions = await controller._test_makeConnectOptions(stableID: implicitID)
+        let explicitOptions = await controller._test_makeConnectOptions(stableID: explicitID)
+        #expect(implicitOptions.stableGatewayID == implicitID)
+        #expect(explicitOptions.stableGatewayID == explicitID)
+    }
+
+    @Test @MainActor
+    func nodeGatewayIdentityBindingKeepsDifferentGatewaysSeparated() async {
+        let controller = self.makeController()
+        let firstID = controller._test_manualStableID(host: "first.example.ts.net", port: 443)
+        let secondID = controller._test_manualStableID(host: "second.example.ts.net", port: 443)
+        #expect(firstID != secondID)
+
+        let firstOptions = await controller._test_makeConnectOptions(stableID: firstID)
+        let secondOptions = await controller._test_makeConnectOptions(stableID: secondID)
+        #expect(firstOptions.stableGatewayID == firstID)
+        #expect(secondOptions.stableGatewayID == secondID)
+        #expect(firstOptions.stableGatewayID != secondOptions.stableGatewayID)
+    }
+
     private func waitForProbeCallCount(
         _ expected: Int,
         probe: SuspendedGatewayTLSProbe,

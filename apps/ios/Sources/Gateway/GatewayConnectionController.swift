@@ -1315,7 +1315,8 @@ extension GatewayConnectionController {
             permissions: permissions,
             clientId: resolvedClientId,
             clientMode: "node",
-            clientDisplayName: displayName)
+            clientDisplayName: displayName,
+            stableGatewayID: stableID)
     }
 
     private func resolvedClientId(defaults: UserDefaults, stableID: String?) -> String {
@@ -1577,6 +1578,14 @@ extension GatewayConnectionController {
 
     func _test_resolveManualPort(host: String, port: Int, useTLS: Bool) -> Int? {
         self.resolveManualPort(host: host, port: port, useTLS: useTLS)
+    }
+
+    func _test_manualStableID(host: String, port: Int) -> String {
+        self.manualStableID(host: host, port: port)
+    }
+
+    func _test_makeConnectOptions(stableID: String?) async -> GatewayConnectOptions {
+        await self.makeConnectOptions(stableID: stableID)
     }
 
     func _test_savedManualEndpointFallback(

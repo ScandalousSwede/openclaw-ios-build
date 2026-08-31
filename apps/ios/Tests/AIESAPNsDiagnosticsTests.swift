@@ -268,6 +268,64 @@ struct AIESAPNsDiagnosticsTests {
     }
 
     @Test
+    func gatewayIdentityEvidenceNormalizesClassifiesAndNeverExportsOperands() throws {
+        let equal = AIESAPNsGatewayIdentityDiagnosticEvidence(
+            configuredIdentity: "  wss://gateway.example.ts.net:443  ",
+            observedIdentity: "wss://gateway.example.ts.net:443",
+            observedSource: .nodeRouteConnectOptions)
+        let missing = AIESAPNsGatewayIdentityDiagnosticEvidence(
+            configuredIdentity: "wss://gateway.example.ts.net:443",
+            observedIdentity: nil,
+            observedSource: .nodeRouteConnectOptions)
+        let different = AIESAPNsGatewayIdentityDiagnosticEvidence(
+            configuredIdentity: "wss://gateway.example.ts.net:443",
+            observedIdentity: "wss://other.example.ts.net:443",
+            observedSource: .operatorRouteConnectOptions)
+
+        #expect(equal.comparison == .equal)
+        #expect(missing.comparison == .observedMissing)
+        #expect(different.comparison == .different)
+
+        let probe = APNsDiagnosticLineProbe()
+        OpenClawDiagnosticRecorder.installSink { probe.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+        for (index, evidence) in [equal, missing, different].enumerated() {
+            AIESAPNsDiagnostics.recordPublication(
+                .deferred,
+                providerStage: "node_route_admitted",
+                resultClass: index == 2
+                    ? AIESAPNsPublicationDeferralReason.operatorGatewayMismatch.rawValue
+                    : AIESAPNsPublicationDeferralReason.nodeGatewayMismatch.rawValue,
+                context: AIESAPNsPublicationDiagnosticContext(
+                    registrationAttemptID: "private-registration-attempt-\(index)",
+                    configurationGeneration: UInt64(20 + index),
+                    connectionRole: index == 2 ? .operator : .node,
+                    deviceIdentity: "private-device-identity",
+                    gatewayIdentityEvidence: evidence,
+                    transport: index == 0 ? .direct : .relay,
+                    topic: "ai.openclaw.client",
+                    environment: "production"))
+        }
+
+        let events = probe.events()
+        #expect(events.count == 3)
+        #expect(events.map(\.gatewayIdentityComparison) == [.equal, .observedMissing, .different])
+        #expect(events.map(\.apnsTransport) == [.direct, .relay, .relay])
+        #expect(events[0].configuredGatewayIdentityHash == events[0].observedGatewayIdentityHash)
+        #expect(events[1].configuredGatewayIdentityHash?.count == 16)
+        #expect(events[1].observedGatewayIdentityHash == nil)
+        #expect(events[2].configuredGatewayIdentityHash != events[2].observedGatewayIdentityHash)
+        #expect(events.map(\.configurationGeneration) == [20, 21, 22])
+
+        let output = String(decoding: try JSONEncoder().encode(events), as: UTF8.self)
+        #expect(!output.contains("gateway.example.ts.net"))
+        #expect(!output.contains("other.example.ts.net"))
+        #expect(!output.contains("private-registration-attempt"))
+        #expect(!output.contains("private-device-identity"))
+        #expect(!output.lowercased().contains("token"))
+    }
+
+    @Test
     func tokenBeforeRouteRetainsOneGenerationFencedIntentUntilCompletion() throws {
         var state = AIESAPNsRegistrationIntentState()
         let intent = state.receiveToken(
@@ -513,6 +571,10 @@ struct AIESAPNsDiagnosticsTests {
         #expect(model.contains("connectionRole: .operator"))
         #expect(model.contains("route: nodeRoute"))
         #expect(model.contains("route: operatorRoute"))
+        #expect(model.contains("observedSource: .nodeRouteConnectOptions"))
+        #expect(model.contains("observedSource: .operatorRouteConnectOptions"))
+        #expect(model.contains("gatewayIdentityEvidence: nodeGatewayIdentityEvidence"))
+        #expect(model.contains("transport: diagnosticTransport"))
         #expect(model.contains("GatewaySettingsStore.currentInstanceID()"))
         #expect(model.contains("GatewayNodeSession(connectionRole: .node)"))
         #expect(model.contains("GatewayNodeSession(connectionRole: .operator)"))

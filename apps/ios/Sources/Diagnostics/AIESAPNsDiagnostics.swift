@@ -35,6 +35,42 @@ enum AIESAPNsPublicationDeferralReason: String, Equatable, Sendable {
     case intentUnavailable = "registration_intent_unavailable"
 }
 
+struct AIESAPNsGatewayIdentityDiagnosticEvidence: Sendable {
+    let configuredIdentity: String?
+    let observedIdentity: String?
+    let configuredSource: OpenClawDiagnosticGatewayIdentitySource
+    let observedSource: OpenClawDiagnosticGatewayIdentitySource
+    let comparison: OpenClawDiagnosticGatewayIdentityComparison
+
+    init(
+        configuredIdentity: String?,
+        observedIdentity: String?,
+        configuredSource: OpenClawDiagnosticGatewayIdentitySource = .activeGatewayConnectConfig,
+        observedSource: OpenClawDiagnosticGatewayIdentitySource)
+    {
+        let configured = configuredIdentity?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let observed = observedIdentity?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.configuredIdentity = configured.flatMap { $0.isEmpty ? nil : $0 }
+        self.observedIdentity = observed.flatMap { $0.isEmpty ? nil : $0 }
+        self.configuredSource = configuredSource
+        self.observedSource = observedSource
+        switch (self.configuredIdentity, self.observedIdentity) {
+        case (nil, nil):
+            // Both operands missing is never an identity comparison; callers
+            // must not construct evidence until at least one source produced an ID.
+            self.comparison = .configuredMissing
+        case (nil, .some):
+            self.comparison = .configuredMissing
+        case (.some, nil):
+            self.comparison = .observedMissing
+        case let (.some(configured), .some(observed)) where configured == observed:
+            self.comparison = .equal
+        case (.some, .some):
+            self.comparison = .different
+        }
+    }
+}
+
 struct AIESAPNsPublicationDiagnosticContext: Sendable {
     let registrationAttemptID: String
     let configurationGeneration: UInt64?
@@ -44,6 +80,8 @@ struct AIESAPNsPublicationDiagnosticContext: Sendable {
     let operatorRouteGeneration: UInt64?
     let connectionRole: OpenClawDiagnosticConnectionRole?
     let deviceIdentity: String?
+    let gatewayIdentityEvidence: AIESAPNsGatewayIdentityDiagnosticEvidence?
+    let transport: OpenClawDiagnosticAPNsTransport?
     let topic: String?
     let environment: String?
 
@@ -55,6 +93,8 @@ struct AIESAPNsPublicationDiagnosticContext: Sendable {
         operatorRoute: GatewayNodeSessionRoute? = nil,
         connectionRole: OpenClawDiagnosticConnectionRole? = nil,
         deviceIdentity: String? = nil,
+        gatewayIdentityEvidence: AIESAPNsGatewayIdentityDiagnosticEvidence? = nil,
+        transport: OpenClawDiagnosticAPNsTransport? = nil,
         topic: String? = nil,
         environment: String? = nil)
     {
@@ -66,6 +106,8 @@ struct AIESAPNsPublicationDiagnosticContext: Sendable {
         self.operatorRouteGeneration = operatorRoute?.diagnosticRouteGeneration
         self.connectionRole = connectionRole
         self.deviceIdentity = deviceIdentity
+        self.gatewayIdentityEvidence = gatewayIdentityEvidence
+        self.transport = transport
         self.topic = topic
         self.environment = environment
     }
@@ -143,6 +185,12 @@ enum AIESAPNsDiagnostics {
             providerStage: providerStage,
             resultClass: resultClass,
             deviceIdentityIdentifier: context.deviceIdentity,
+            configuredGatewayIdentityIdentifier: context.gatewayIdentityEvidence?.configuredIdentity,
+            observedGatewayIdentityIdentifier: context.gatewayIdentityEvidence?.observedIdentity,
+            configuredGatewayIdentitySource: context.gatewayIdentityEvidence?.configuredSource,
+            observedGatewayIdentitySource: context.gatewayIdentityEvidence?.observedSource,
+            gatewayIdentityComparison: context.gatewayIdentityEvidence?.comparison,
+            apnsTransport: context.transport,
             topic: context.topic,
             environment: context.environment))
         if stage != .admitted {
