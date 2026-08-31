@@ -5,6 +5,168 @@ import os
 import Testing
 @testable import OpenClaw
 
+private struct ChatHistoryGatewayValidatorFixture: Decodable {
+    struct PhysicalObservation: Decodable {
+        let build: Int
+        let sourceSHA: String
+        let inputSHA256: String
+        let sessionKeyHash: String
+        let encodedPropertyNames: [String]
+        let offsetPresent: Bool
+        let offsetType: String
+        let limitPresent: Bool
+        let maxCharsPresent: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case build
+            case sourceSHA = "source_sha"
+            case inputSHA256 = "input_sha256"
+            case sessionKeyHash = "session_key_hash"
+            case encodedPropertyNames = "encoded_property_names"
+            case offsetPresent = "offset_present"
+            case offsetType = "offset_type"
+            case limitPresent = "limit_present"
+            case maxCharsPresent = "max_chars_present"
+        }
+    }
+
+    struct ReconstructedPayloadShape: Decodable {
+        let sessionKeyType: String
+        let limitValue: Int
+        let offsetValue: Int
+        let maxCharsValue: Int
+        let sourceRefs: [String]
+        let reconstructionBasis: String
+
+        enum CodingKeys: String, CodingKey {
+            case sessionKeyType = "session_key_type"
+            case limitValue = "limit_value"
+            case offsetValue = "offset_value"
+            case maxCharsValue = "max_chars_value"
+            case sourceRefs = "source_refs"
+            case reconstructionBasis = "reconstruction_basis"
+        }
+    }
+
+    struct PropertyRule: Decodable {
+        let required: Bool
+        let type: String
+        let minimum: Int?
+        let maximum: Int?
+    }
+
+    struct Validator: Decodable {
+        let sourceSHA: String?
+        let release: String?
+        let commit: String?
+        let packageVersion: String?
+        let gatewayProtocolVersion: Int?
+        let requestEnvelopeVersion: Int?
+        let validatorIdentity: String?
+        let typeboxVersion: String?
+        let schemaPath: String
+        let schemaBlob: String
+        let compilerBlob: String?
+        let handlerBlob: String?
+        let offsetIntroductionCommit: String?
+        let additionalProperties: Bool
+        let properties: [String: PropertyRule]
+
+        enum CodingKeys: String, CodingKey {
+            case sourceSHA = "source_sha"
+            case release
+            case commit
+            case packageVersion = "package_version"
+            case gatewayProtocolVersion = "gateway_protocol_version"
+            case requestEnvelopeVersion = "request_envelope_version"
+            case validatorIdentity = "validator_identity"
+            case typeboxVersion = "typebox_version"
+            case schemaPath = "schema_path"
+            case schemaBlob = "schema_blob"
+            case compilerBlob = "compiler_blob"
+            case handlerBlob = "handler_blob"
+            case offsetIntroductionCommit = "offset_introduction_commit"
+            case additionalProperties = "additional_properties"
+            case properties
+        }
+
+        func accepts(_ payload: [String: Any]) -> Bool {
+            if !self.additionalProperties,
+               !Set(payload.keys).isSubset(of: Set(self.properties.keys))
+            {
+                return false
+            }
+            for (name, rule) in self.properties {
+                guard let value = payload[name] else {
+                    if rule.required { return false }
+                    continue
+                }
+                switch rule.type {
+                case "non_empty_string":
+                    guard let string = value as? String, !string.isEmpty else { return false }
+                case "integer":
+                    guard let integer = Self.integer(value) else { return false }
+                    if let minimum = rule.minimum, integer < minimum { return false }
+                    if let maximum = rule.maximum, integer > maximum { return false }
+                default:
+                    return false
+                }
+            }
+            return true
+        }
+
+        private static func integer(_ value: Any) -> Int? {
+            guard !(value is Bool), let number = value as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID()
+            else { return nil }
+            let double = number.doubleValue
+            guard double.isFinite,
+                  double.rounded(.towardZero) == double,
+                  double >= Double(Int.min),
+                  double <= Double(Int.max)
+            else { return nil }
+            return Int(double)
+        }
+    }
+
+    enum JSONValue: Decodable {
+        case string(String)
+        case integer(Int)
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let value = try? container.decode(Int.self) {
+                self = .integer(value)
+            } else {
+                self = .string(try container.decode(String.self))
+            }
+        }
+
+        var jsonObject: Any {
+            switch self {
+            case let .string(value): value
+            case let .integer(value): value
+            }
+        }
+    }
+
+    let schema: String
+    let physicalObservation: PhysicalObservation
+    let reconstructedPayloadShape: ReconstructedPayloadShape
+    let syntheticPayload: [String: JSONValue]
+    let pinnedGateway: Validator
+    let inheritedLocalGateway: Validator
+
+    enum CodingKeys: String, CodingKey {
+        case schema
+        case physicalObservation = "physical_observation"
+        case reconstructedPayloadShape = "reconstructed_payload_shape"
+        case syntheticPayload = "synthetic_payload"
+        case pinnedGateway = "pinned_gateway"
+        case inheritedLocalGateway = "inherited_local_gateway"
+    }
+}
+
 private actor IOSSessionMutationGate {
     private var open = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -90,6 +252,87 @@ private func waitForIOSSessionMutation(
         let data = try #require(json.data(using: .utf8))
         let value = try JSONSerialization.jsonObject(with: data)
         return try #require(value as? [String: Any])
+    }
+
+    private func chatHistoryValidatorFixture() throws -> ChatHistoryGatewayValidatorFixture {
+        let fixtureURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/ChatHistoryGatewayValidatorV2026_7_1_2.json")
+        return try JSONDecoder().decode(
+            ChatHistoryGatewayValidatorFixture.self,
+            from: Data(contentsOf: fixtureURL))
+    }
+
+    @Test func build104ReconstructedHistoryShapeIsAcceptedByPinnedValidatorButRejectedByInheritedLocalSchema()
+        throws
+    {
+        let fixture = try self.chatHistoryValidatorFixture()
+        let payload = fixture.syntheticPayload.mapValues(\.jsonObject)
+
+        #expect(fixture.schema == "aies.chat-history-validator-custody.v1")
+        #expect(fixture.physicalObservation.build == 104)
+        #expect(fixture.physicalObservation.sourceSHA == "22f90eacf93ba05f16aea6b106bd3c063f95d79d")
+        #expect(fixture.physicalObservation.inputSHA256 ==
+            "2762f0ce8a06d09fbf94c2d3c2e43356022cd4ba45d50a42856039d3d959509f")
+        #expect(fixture.physicalObservation.sessionKeyHash == "0d6e4079e36703eb")
+        #expect(fixture.physicalObservation.encodedPropertyNames == [
+            "limit", "maxChars", "offset", "sessionKey",
+        ])
+        #expect(fixture.physicalObservation.offsetPresent)
+        #expect(fixture.physicalObservation.offsetType == "integer")
+        #expect(fixture.physicalObservation.limitPresent)
+        #expect(fixture.physicalObservation.maxCharsPresent)
+        #expect(fixture.reconstructedPayloadShape.sessionKeyType == "non_empty_string")
+        #expect(fixture.reconstructedPayloadShape.limitValue == 200)
+        #expect(fixture.reconstructedPayloadShape.offsetValue == 0)
+        #expect(fixture.reconstructedPayloadShape.maxCharsValue == 500_000)
+        #expect(fixture.reconstructedPayloadShape.sourceRefs.count == 3)
+        #expect(fixture.reconstructedPayloadShape.reconstructionBasis ==
+            "first_paged_reconciliation_request_failed_before_offset_advance")
+        #expect(fixture.pinnedGateway.release == "v2026.7.1-2")
+        #expect(fixture.pinnedGateway.commit == "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c")
+        #expect(fixture.pinnedGateway.packageVersion == "2026.7.1")
+        #expect(fixture.pinnedGateway.gatewayProtocolVersion == 4)
+        #expect(fixture.pinnedGateway.requestEnvelopeVersion == 4)
+        #expect(fixture.pinnedGateway.validatorIdentity == "chat-history-0790d9f593ad")
+        #expect(fixture.pinnedGateway.typeboxVersion == "1.3.3")
+        #expect(fixture.pinnedGateway.schemaBlob == "eb3b7afae22eedfc1b6cda32be969208b7790670")
+        #expect(fixture.pinnedGateway.compilerBlob == "759bbaf1c39d7757350c001838852ebef87c4d51")
+        #expect(fixture.pinnedGateway.handlerBlob == "22d6c3eb47c1caeb294b1b455bf687cb6715f732")
+        #expect(fixture.pinnedGateway.offsetIntroductionCommit ==
+            "dc575d148a7cb69d0650d271943279a4cd60a7de")
+        #expect(fixture.inheritedLocalGateway.schemaBlob ==
+            "a4b8f5aaa43152797962bb0d6ac2cf10a985247f")
+        #expect(fixture.inheritedLocalGateway.handlerBlob ==
+            "47fe162c155aa35009b5f38cc48ab5546079eb52")
+        #expect(fixture.pinnedGateway.accepts(payload))
+        #expect(!fixture.inheritedLocalGateway.accepts(payload))
+        #expect(fixture.inheritedLocalGateway.properties["offset"] == nil)
+    }
+
+    @Test @MainActor func everyIOSHistoryPayloadFactorySatisfiesTheExactPinnedGatewayContract() throws {
+        let fixture = try self.chatHistoryValidatorFixture()
+        let ordinary = try self.object(
+            from: IOSGatewayChatTransport.makeHistoryParamsJSON(sessionKey: "fixture-session"))
+        let syntheticPaged = try self.object(
+            from: IOSGatewayChatTransport.makeBoundedHistoryPageParamsJSON(
+                sessionKey: "fixture-session",
+                limit: 200,
+                offset: 0,
+                maxChars: 500_000))
+        let talkFallback = try self.object(
+            from: TalkRealtimeWebRTCSession.makeHistoryFallbackParamsJSON(
+                sessionKey: "fixture-session"))
+
+        #expect(fixture.pinnedGateway.accepts(ordinary))
+        #expect(fixture.pinnedGateway.accepts(syntheticPaged))
+        #expect(fixture.pinnedGateway.accepts(talkFallback))
+        #expect(Set(ordinary.keys) == ["sessionKey", "offset"])
+        #expect(Set(syntheticPaged.keys) == ["sessionKey", "limit", "offset", "maxChars"])
+        #expect(Set(talkFallback.keys) == ["sessionKey", "offset"])
+        #expect(syntheticPaged["limit"] as? Int == 200)
+        #expect(syntheticPaged["offset"] as? Int == 0)
+        #expect(syntheticPaged["maxChars"] as? Int == 500_000)
     }
 
     @Test func agentWaitTreatsSuccessAsCompletion() {

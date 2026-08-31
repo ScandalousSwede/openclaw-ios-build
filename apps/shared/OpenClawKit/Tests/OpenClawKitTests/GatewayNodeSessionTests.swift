@@ -578,15 +578,22 @@ private func connectForBootstrapHandoffTest(
 struct GatewayNodeSessionTests {
     @Test
     func rpcParameterShapeClassifiesOnlyAllowlistedHistoryMetadata() {
-        let absent = GatewayRPCDiagnosticParameterShape.inspect([
+        let absent = GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "sessionKey": AnyCodable("private-session"),
         ])
         #expect(absent.offsetPresent == false)
         #expect(absent.offsetType == .absent)
         #expect(absent.limitPresent == false)
         #expect(absent.maxCharsPresent == false)
+        #expect(absent.offsetValue == nil)
+        #expect(absent.limitValue == nil)
+        #expect(absent.maxCharsValue == nil)
+        #expect(absent.encodedPropertyNames == [.sessionKey])
+        #expect(absent.gatewayValidatorIdentity == "chat-history-0790d9f593ad")
+        #expect(absent.protocolSchemaVersion == "gateway-protocol-v4")
+        #expect(absent.requestEnvelopeVersion == GATEWAY_PROTOCOL_VERSION)
 
-        let integer = GatewayRPCDiagnosticParameterShape.inspect([
+        let integer = GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "sessionKey": AnyCodable("private-session"),
             "offset": AnyCodable(0),
             "limit": AnyCodable(200),
@@ -597,22 +604,46 @@ struct GatewayNodeSessionTests {
         #expect(integer.offsetType == .integer)
         #expect(integer.limitPresent)
         #expect(integer.maxCharsPresent)
+        #expect(integer.offsetValue == 0)
+        #expect(integer.limitValue == 200)
+        #expect(integer.maxCharsValue == 500_000)
+        #expect(integer.encodedPropertyNames == [.limit, .maxChars, .offset, .sessionKey])
 
-        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+        #expect(GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "offset": AnyCodable(1.5),
         ]).offsetType == .invalid)
-        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+        #expect(GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "offset": AnyCodable(true),
         ]).offsetType == .invalid)
-        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+        #expect(GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "offset": AnyCodable(NSNumber(value: 0)),
         ]).offsetType == .integer)
-        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+        #expect(GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "offset": AnyCodable(NSNumber(value: 1.5)),
         ]).offsetType == .invalid)
-        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+        #expect(GatewayRPCDiagnosticParameterShape.inspect(method: "chat.history", params: [
             "offset": AnyCodable(NSNumber(value: false)),
         ]).offsetType == .invalid)
+
+        let unrelated = GatewayRPCDiagnosticParameterShape.inspect(method: "sessions.list", params: [
+            "limit": AnyCodable(200),
+            "offset": AnyCodable(0),
+        ])
+        #expect(unrelated.offsetValue == nil)
+        #expect(unrelated.limitValue == nil)
+        #expect(unrelated.encodedPropertyNames.isEmpty)
+        #expect(unrelated.gatewayValidatorIdentity == nil)
+
+        let classified = GatewayRPCDiagnosticParameterShape.classifyGatewayValidation(
+            errorCode: "INVALID_REQUEST",
+            message: "/offset: must be integer")
+        #expect(classified.path == .offset)
+        #expect(classified.messageClass == .integerRequired)
+        let privateMessage = GatewayRPCDiagnosticParameterShape.classifyGatewayValidation(
+            errorCode: "INVALID_REQUEST",
+            message: "private transcript content must never survive")
+        #expect(privateMessage.path == .unknown)
+        #expect(privateMessage.messageClass == .invalidRequestOther)
     }
 
     @Test
@@ -660,11 +691,20 @@ struct GatewayNodeSessionTests {
         #expect(admitted.socketGeneration == route.diagnosticSocketGeneration)
         #expect(admitted.offsetPresent == true)
         #expect(admitted.offsetType == .integer)
+        #expect(admitted.offsetValue == 0)
+        #expect(admitted.limitValue == nil)
+        #expect(admitted.maxCharsValue == nil)
+        #expect(admitted.encodedPropertyNames == [.offset, .sessionKey])
+        #expect(admitted.gatewayValidatorIdentity == "chat-history-0790d9f593ad")
+        #expect(admitted.protocolSchemaVersion == "gateway-protocol-v4")
+        #expect(admitted.requestEnvelopeVersion == GATEWAY_PROTOCOL_VERSION)
         #expect(admitted.sessionHash?.count == 16)
         #expect(admitted.resultClass == "requested")
         #expect(completed.resultClass == "gateway_rejected")
         let gatewayErrorCode: String? = completed.gatewayErrorCode
         #expect(gatewayErrorCode == "INVALID_REQUEST")
+        #expect(completed.gatewayValidationPath == .offset)
+        #expect(completed.gatewayErrorMessageClass == .integerRequired)
         #expect(completed.elapsedMilliseconds != nil)
         #expect(!captured.withLock { $0.joined() }.contains("private-session"))
         #expect(!captured.withLock { $0.joined() }.contains("must-not-enter-diagnostics"))

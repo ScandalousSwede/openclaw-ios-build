@@ -207,13 +207,24 @@ public enum GatewayRequestDispatchResult: Sendable, Equatable {
 }
 
 struct GatewayRPCDiagnosticParameterShape: Equatable, Sendable {
+    static let chatHistoryValidatorIdentity = "chat-history-0790d9f593ad"
+    static let currentProtocolSchemaVersion = "gateway-protocol-v4"
+
     let offsetPresent: Bool
     let offsetType: OpenClawDiagnosticRPCOffsetType
+    let offsetValue: Int?
     let limitPresent: Bool
+    let limitValue: Int?
     let maxCharsPresent: Bool
+    let maxCharsValue: Int?
+    let encodedPropertyNames: [OpenClawDiagnosticRPCEncodedPropertyName]
+    let gatewayValidatorIdentity: String?
+    let protocolSchemaVersion: String
+    let requestEnvelopeVersion: Int
     let sessionIdentifier: String?
 
-    static func inspect(_ params: [String: AnyCodable]?) -> Self {
+    static func inspect(method: String, params: [String: AnyCodable]?) -> Self {
+        let isChatHistory = method == "chat.history"
         let offsetPresent = params?["offset"] != nil
         let offsetType: OpenClawDiagnosticRPCOffsetType
         if let value = params?["offset"]?.value {
@@ -244,9 +255,88 @@ struct GatewayRPCDiagnosticParameterShape: Equatable, Sendable {
         return Self(
             offsetPresent: offsetPresent,
             offsetType: offsetType,
+            offsetValue: isChatHistory ? Self.boundedInteger(params?["offset"]?.value) : nil,
             limitPresent: params?["limit"] != nil,
+            limitValue: isChatHistory ? Self.boundedInteger(params?["limit"]?.value) : nil,
             maxCharsPresent: params?["maxChars"] != nil,
+            maxCharsValue: isChatHistory ? Self.boundedInteger(params?["maxChars"]?.value) : nil,
+            encodedPropertyNames: isChatHistory
+                ? (params?.keys.compactMap(OpenClawDiagnosticRPCEncodedPropertyName.init(rawValue:))
+                    .sorted { $0.rawValue < $1.rawValue } ?? [])
+                : [],
+            gatewayValidatorIdentity: isChatHistory ? Self.chatHistoryValidatorIdentity : nil,
+            protocolSchemaVersion: Self.currentProtocolSchemaVersion,
+            requestEnvelopeVersion: GATEWAY_PROTOCOL_VERSION,
             sessionIdentifier: params?["sessionKey"]?.value as? String)
+    }
+
+    private static func boundedInteger(_ rawValue: Any?) -> Int? {
+        guard let rawValue else { return nil }
+        let value: Double
+        if let number = rawValue as? NSNumber {
+            guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+            value = number.doubleValue
+        } else if rawValue is Bool {
+            return nil
+        } else if let integer = rawValue as? Int {
+            value = Double(integer)
+        } else if let double = rawValue as? Double {
+            value = double
+        } else {
+            return nil
+        }
+        guard value.isFinite,
+              value.rounded(.towardZero) == value,
+              (-1_000_000...1_000_000).contains(value)
+        else { return nil }
+        return Int(value)
+    }
+
+    static func classifyGatewayValidation(
+        errorCode: String?,
+        message: String?)
+        -> (
+            path: OpenClawDiagnosticGatewayValidationPath?,
+            messageClass: OpenClawDiagnosticGatewayErrorMessageClass?)
+    {
+        guard errorCode == "INVALID_REQUEST", let message else { return (nil, nil) }
+        let normalized = message.lowercased()
+        let path: OpenClawDiagnosticGatewayValidationPath = if normalized.contains("/sessionkey") {
+            .sessionKey
+        } else if normalized.contains("/agentid") {
+            .agentID
+        } else if normalized.contains("/maxchars") {
+            .maxChars
+        } else if normalized.contains("/offset") {
+            .offset
+        } else if normalized.contains("/limit") {
+            .limit
+        } else if normalized.contains("additional propert") || normalized.contains("unexpected propert") {
+            .additionalProperty
+        } else if normalized.contains("unknown agent") || normalized.contains("does not match session key") {
+            .selectedAgent
+        } else {
+            .unknown
+        }
+        let messageClass: OpenClawDiagnosticGatewayErrorMessageClass =
+            if normalized.contains("must be integer") || normalized.contains("expected integer") {
+                .integerRequired
+            } else if normalized.contains("must be string") || normalized.contains("non-empty string") {
+                .nonEmptyStringRequired
+            } else if normalized.contains("required") {
+                .requiredPropertyMissing
+            } else if normalized.contains("minimum") || normalized.contains("greater than or equal") {
+                .minimumViolation
+            } else if normalized.contains("maximum") || normalized.contains("less than or equal") {
+                .maximumViolation
+            } else if normalized.contains("additional propert") || normalized.contains("unexpected propert") {
+                .unexpectedProperty
+            } else if normalized.contains("unknown agent") || normalized.contains("does not match session key") {
+                .selectedAgentInvalid
+            } else {
+                .invalidRequestOther
+            }
+        return (path, messageClass)
     }
 }
 
@@ -1453,7 +1543,8 @@ public actor GatewayChannelActor {
                     operationIdentifier: id,
                     pending: pending,
                     resultClass: res.ok == false ? "gateway_rejected" : "success",
-                    gatewayErrorCode: res.ok == false ? res.error?.code : nil)
+                    gatewayErrorCode: res.ok == false ? res.error?.code : nil,
+                    gatewayErrorMessage: res.ok == false ? res.error?.message : nil)
                 pending.continuation.resume(returning: .res(res))
             }
         case let .event(evt):
@@ -1773,7 +1864,7 @@ public actor GatewayChannelActor {
     {
         let effectiveTimeout = timeoutMs ?? self.defaultRequestTimeoutMs
         let payload = try self.encodeRequest(method: method, params: params, kind: "request")
-        let parameterShape = GatewayRPCDiagnosticParameterShape.inspect(params)
+        let parameterShape = GatewayRPCDiagnosticParameterShape.inspect(method: method, params: params)
         let admittedAt = Date()
         let admittedUptime = ProcessInfo.processInfo.systemUptime
         let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<GatewayFrame, Error>) in
@@ -1881,7 +1972,7 @@ public actor GatewayChannelActor {
         routeGeneration: UInt64?) async throws
     {
         let payload = try self.encodeRequest(method: method, params: params, kind: "send")
-        let shape = GatewayRPCDiagnosticParameterShape.inspect(params)
+        let shape = GatewayRPCDiagnosticParameterShape.inspect(method: method, params: params)
         let admittedAt = Date()
         let admittedUptime = ProcessInfo.processInfo.systemUptime
         guard self.isConnected(connectionGeneration: connectionGeneration),
@@ -2088,7 +2179,8 @@ public actor GatewayChannelActor {
         operationIdentifier: String,
         pending: PendingRequest,
         resultClass: String,
-        gatewayErrorCode: String? = nil)
+        gatewayErrorCode: String? = nil,
+        gatewayErrorMessage: String? = nil)
     {
         let elapsed = max(
             0,
@@ -2103,7 +2195,8 @@ public actor GatewayChannelActor {
             admittedAt: pending.admittedAt,
             elapsedMilliseconds: elapsed,
             resultClass: resultClass,
-            gatewayErrorCode: gatewayErrorCode)
+            gatewayErrorCode: gatewayErrorCode,
+            gatewayErrorMessage: gatewayErrorMessage)
     }
 
     private func recordRPCDiagnostic(
@@ -2116,8 +2209,12 @@ public actor GatewayChannelActor {
         admittedAt: Date,
         elapsedMilliseconds: Int?,
         resultClass: String,
-        gatewayErrorCode: String? = nil)
+        gatewayErrorCode: String? = nil,
+        gatewayErrorMessage: String? = nil)
     {
+        let validation = GatewayRPCDiagnosticParameterShape.classifyGatewayValidation(
+            errorCode: gatewayErrorCode,
+            message: gatewayErrorMessage)
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
             state: state,
@@ -2131,8 +2228,17 @@ public actor GatewayChannelActor {
             gatewayErrorCode: gatewayErrorCode,
             offsetPresent: shape.offsetPresent,
             offsetType: shape.offsetType,
+            offsetValue: shape.offsetValue,
             limitPresent: shape.limitPresent,
+            limitValue: shape.limitValue,
             maxCharsPresent: shape.maxCharsPresent,
+            maxCharsValue: shape.maxCharsValue,
+            encodedPropertyNames: shape.encodedPropertyNames,
+            gatewayValidationPath: validation.path,
+            gatewayErrorMessageClass: validation.messageClass,
+            gatewayValidatorIdentity: shape.gatewayValidatorIdentity,
+            protocolSchemaVersion: shape.protocolSchemaVersion,
+            requestEnvelopeVersion: shape.requestEnvelopeVersion,
             elapsedMilliseconds: elapsedMilliseconds,
             resultClass: resultClass))
     }

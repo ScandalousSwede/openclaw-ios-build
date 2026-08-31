@@ -1,0 +1,111 @@
+{
+  "schema": "aies.chat-history-validator-custody.v1",
+  "physical_observation": {
+    "build": 104,
+    "source_sha": "22f90eacf93ba05f16aea6b106bd3c063f95d79d",
+    "input_sha256": "2762f0ce8a06d09fbf94c2d3c2e43356022cd4ba45d50a42856039d3d959509f",
+    "session_key_hash": "0d6e4079e36703eb",
+    "encoded_property_names": [
+      "limit",
+      "maxChars",
+      "offset",
+      "sessionKey"
+    ],
+    "offset_present": true,
+    "offset_type": "integer",
+    "limit_present": true,
+    "max_chars_present": true
+  },
+  "reconstructed_payload_shape": {
+    "session_key_type": "non_empty_string",
+    "limit_value": 200,
+    "offset_value": 0,
+    "max_chars_value": 500000,
+    "source_refs": [
+      "apps/shared/OpenClawKit/Sources/OpenClawChatUI/OpenClawChatOutboxCoordinator.swift:549-551",
+      "apps/shared/OpenClawKit/Sources/OpenClawChatUI/OpenClawChatOutboxCoordinator.swift:938-945",
+      "apps/ios/Sources/Chat/IOSGatewayChatTransport.swift:458-472"
+    ],
+    "reconstruction_basis": "first_paged_reconciliation_request_failed_before_offset_advance"
+  },
+  "synthetic_payload": {
+    "sessionKey": "fixture-session",
+    "limit": 200,
+    "offset": 0,
+    "maxChars": 500000
+  },
+  "pinned_gateway": {
+    "repository": "openclaw/openclaw",
+    "release": "v2026.7.1-2",
+    "commit": "0790d9f593ad30c940ed93b5872a8cf6d6f3cf8c",
+    "package_version": "2026.7.1",
+    "gateway_protocol_version": 4,
+    "request_envelope_version": 4,
+    "validator_identity": "chat-history-0790d9f593ad",
+    "typebox_version": "1.3.3",
+    "schema_path": "packages/gateway-protocol/src/schema/logs-chat.ts",
+    "schema_blob": "eb3b7afae22eedfc1b6cda32be969208b7790670",
+    "compiler_path": "packages/gateway-protocol/src/index.ts",
+    "compiler_blob": "759bbaf1c39d7757350c001838852ebef87c4d51",
+    "handler_path": "src/gateway/server-methods/chat.ts",
+    "handler_blob": "22d6c3eb47c1caeb294b1b455bf687cb6715f732",
+    "offset_introduction_commit": "dc575d148a7cb69d0650d271943279a4cd60a7de",
+    "additional_properties": false,
+    "properties": {
+      "sessionKey": {
+        "required": true,
+        "type": "non_empty_string"
+      },
+      "agentId": {
+        "required": false,
+        "type": "non_empty_string"
+      },
+      "limit": {
+        "required": false,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "offset": {
+        "required": false,
+        "type": "integer",
+        "minimum": 0
+      },
+      "maxChars": {
+        "required": false,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500000
+      }
+    }
+  },
+  "inherited_local_gateway": {
+    "source_sha": "22f90eacf93ba05f16aea6b106bd3c063f95d79d",
+    "schema_path": "packages/gateway-protocol/src/schema/logs-chat.ts",
+    "schema_blob": "a4b8f5aaa43152797962bb0d6ac2cf10a985247f",
+    "handler_blob": "47fe162c155aa35009b5f38cc48ab5546079eb52",
+    "additional_properties": false,
+    "properties": {
+      "sessionKey": {
+        "required": true,
+        "type": "non_empty_string"
+      },
+      "agentId": {
+        "required": false,
+        "type": "non_empty_string"
+      },
+      "limit": {
+        "required": false,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000
+      },
+      "maxChars": {
+        "required": false,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 500000
+      }
+    }
+  }
+}
