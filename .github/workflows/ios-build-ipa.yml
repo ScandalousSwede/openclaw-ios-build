@@ -513,13 +513,23 @@ jobs:
             --scope openclawkit \
             --resolved "${shared_package}/Package.resolved" \
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/openclawkit-resolved.json"
+          # Prove the unmodified production module builds under the Release
+          # optimizer first. The existing reliability suites use helpers that
+          # are intentionally compiled only under DEBUG, so enable that
+          # condition solely for the Release-optimized test products.
           swift build -c release --package-path "${shared_package}" --force-resolved-versions
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
-          swift test -c release --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
+          release_test_args=(
+            -c release
+            --package-path "${shared_package}"
+            --force-resolved-versions
+            -Xswiftc -DDEBUG
+          )
+          swift test "${release_test_args[@]}" --filter OpenClawDiagnosticEventTests
+          swift test "${release_test_args[@]}" --filter DeepLinksSecurityTests
+          swift test "${release_test_args[@]}" --filter GatewayNodeSessionTests
+          swift test "${release_test_args[@]}" --filter ChatViewModelTests
+          swift test "${release_test_args[@]}" --filter OpenClawChatOutboxStorageTests
+          swift test "${release_test_args[@]}" --filter OpenClawChatOutboxIntegrationTests
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Run iOS tests
@@ -581,7 +591,7 @@ jobs:
             -only-testing:OpenClawTests/WatchSessionActivationGateTests \
             "${strict_package_args[@]}" \
             test \
-            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) AIES_CREDENTIAL_FREE_TEST_KEYCHAIN' \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) DEBUG AIES_CREDENTIAL_FREE_TEST_KEYCHAIN' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
