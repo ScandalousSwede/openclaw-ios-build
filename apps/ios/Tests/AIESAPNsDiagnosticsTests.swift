@@ -290,16 +290,18 @@ struct AIESAPNsDiagnosticsTests {
         OpenClawDiagnosticRecorder.installSink { probe.append($0) }
         defer { OpenClawDiagnosticRecorder.clearSink() }
         for (index, evidence) in [equal, missing, different].enumerated() {
+            let resultClass: String
+            if index == 0 {
+                resultClass = "direct"
+            } else if index == 2 {
+                resultClass = AIESAPNsPublicationDeferralReason.operatorGatewayMismatch.rawValue
+            } else {
+                resultClass = AIESAPNsPublicationDeferralReason.nodeGatewayMismatch.rawValue
+            }
             AIESAPNsDiagnostics.recordPublication(
                 index == 0 ? .admitted : .deferred,
                 providerStage: "node_route_admitted",
-                resultClass: if index == 0 {
-                    "direct"
-                } else if index == 2 {
-                    AIESAPNsPublicationDeferralReason.operatorGatewayMismatch.rawValue
-                } else {
-                    AIESAPNsPublicationDeferralReason.nodeGatewayMismatch.rawValue
-                },
+                resultClass: resultClass,
                 context: AIESAPNsPublicationDiagnosticContext(
                     registrationAttemptID: "private-registration-attempt-\(index)",
                     configurationGeneration: UInt64(20 + index),
