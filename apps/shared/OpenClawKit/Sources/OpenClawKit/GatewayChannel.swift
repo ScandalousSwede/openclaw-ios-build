@@ -217,7 +217,16 @@ struct GatewayRPCDiagnosticParameterShape: Equatable, Sendable {
         let offsetPresent = params?["offset"] != nil
         let offsetType: OpenClawDiagnosticRPCOffsetType
         if let value = params?["offset"]?.value {
-            if value is Bool {
+            if let number = value as? NSNumber {
+                if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                    offsetType = .invalid
+                } else {
+                    let value = number.doubleValue
+                    offsetType = value.isFinite && value.rounded(.towardZero) == value
+                        ? .integer
+                        : .invalid
+                }
+            } else if value is Bool {
                 offsetType = .invalid
             } else if value is Int {
                 offsetType = .integer

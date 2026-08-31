@@ -604,6 +604,15 @@ struct GatewayNodeSessionTests {
         #expect(GatewayRPCDiagnosticParameterShape.inspect([
             "offset": AnyCodable(true),
         ]).offsetType == .invalid)
+        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+            "offset": AnyCodable(NSNumber(value: 0)),
+        ]).offsetType == .integer)
+        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+            "offset": AnyCodable(NSNumber(value: 1.5)),
+        ]).offsetType == .invalid)
+        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+            "offset": AnyCodable(NSNumber(value: false)),
+        ]).offsetType == .invalid)
     }
 
     @Test
