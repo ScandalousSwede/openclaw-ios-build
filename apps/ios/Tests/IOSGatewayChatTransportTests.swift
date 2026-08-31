@@ -116,7 +116,7 @@ private struct ChatHistoryGatewayValidatorFixture: Decodable {
         }
 
         private static func integer(_ value: Any) -> Int? {
-            guard !(value is Bool), let number = value as? NSNumber,
+            guard let number = value as? NSNumber,
                   CFGetTypeID(number) != CFBooleanGetTypeID()
             else { return nil }
             let double = number.doubleValue
@@ -333,6 +333,13 @@ private func waitForIOSSessionMutation(
         #expect(syntheticPaged["limit"] as? Int == 200)
         #expect(syntheticPaged["offset"] as? Int == 0)
         #expect(syntheticPaged["maxChars"] as? Int == 500_000)
+
+        var booleanOffset = ordinary
+        booleanOffset["offset"] = true
+        #expect(!fixture.pinnedGateway.accepts(booleanOffset))
+        var stringOffset = ordinary
+        stringOffset["offset"] = "0"
+        #expect(!fixture.pinnedGateway.accepts(stringOffset))
     }
 
     @Test func agentWaitTreatsSuccessAsCompletion() {

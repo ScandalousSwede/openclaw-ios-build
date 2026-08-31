@@ -384,9 +384,14 @@ import Testing
         #expect(model.contains(
             "self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID"))
         #expect(model.contains(
-            "self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID"))
+            "let observedNodeGatewayID = await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute)"))
+        #expect(model.contains("configuredIdentity: expectedGatewayID"))
+        #expect(model.contains("observedIdentity: observedNodeGatewayID"))
+        #expect(model.contains("guard nodeGatewayIdentityEvidence.comparison == .equal else"))
         #expect(model.contains(
-            "self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID"))
+            "let observedOperatorGatewayID = await self.operatorGateway.currentGatewayID("))
+        #expect(model.contains("observedIdentity: observedOperatorGatewayID"))
+        #expect(model.contains("guard evidence.comparison == .equal else"))
         #expect(model.contains(
             "if let existingAttempt = self.apnsRegistrationsInFlight.first(where: { $0 == attempt }) {"))
         #expect(model.contains(
