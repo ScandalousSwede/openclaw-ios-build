@@ -222,6 +222,247 @@ struct AIESAPNsDiagnosticsTests {
     }
 
     @Test
+    func publicationDeferralsAreExplicitBoundedAndTokenFree() throws {
+        let probe = APNsDiagnosticLineProbe()
+        OpenClawDiagnosticRecorder.installSink { probe.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+        let context = AIESAPNsPublicationDiagnosticContext(
+            registrationAttemptID: "raw-registration-attempt",
+            configurationGeneration: 7,
+            connectionRole: .operator,
+            deviceIdentity: "raw-device-identity",
+            topic: "ai.openclaw.client",
+            environment: "production")
+
+        for reason in [
+            AIESAPNsPublicationDeferralReason.nodeConnectionUnavailable,
+            .tokenUnavailable,
+            .nodeRouteUnavailable,
+            .operatorConnectionUnavailable,
+            .operatorRouteUnavailable,
+            .configurationChanged,
+        ] {
+            AIESAPNsDiagnostics.recordPublication(
+                .deferred,
+                providerStage: "state_transition",
+                resultClass: reason.rawValue,
+                context: context)
+        }
+
+        let events = probe.events()
+        #expect(events.count == 6)
+        #expect(events.allSatisfy { $0.state == "gateway_publication_deferred" })
+        #expect(events.allSatisfy { $0.connectionRole == .operator })
+        #expect(events.allSatisfy { $0.providerStage == "state_transition" })
+        #expect(events.map(\.resultClass) == [
+            "node_connection_unavailable",
+            "os_token_unavailable",
+            "node_route_unavailable",
+            "operator_connection_unavailable",
+            "operator_route_unavailable",
+            "configuration_generation_changed",
+        ])
+        let output = String(decoding: try JSONEncoder().encode(events), as: UTF8.self)
+        #expect(!output.contains("raw-registration-attempt"))
+        #expect(!output.contains("raw-device-identity"))
+    }
+
+    @Test
+    func tokenBeforeRouteRetainsOneGenerationFencedIntentUntilCompletion() throws {
+        var state = AIESAPNsRegistrationIntentState()
+        let intent = state.receiveToken(
+            registrationAttemptID: "token-before-route",
+            configurationGeneration: 4)
+
+        // A missing route produces evidence in NodeAppModel but must not consume
+        // the pending publication. The route-admission callback owns this intent.
+        #expect(state.pending == intent)
+        #expect(state.owns(intent))
+        state.complete(intent)
+        #expect(state.pending == nil)
+    }
+
+    @Test
+    func routeBeforeTokenAdmitsWhenTheLaterTokenCreatesTheIntent() {
+        var state = AIESAPNsRegistrationIntentState()
+
+        #expect(state.pending == nil)
+        let intent = state.receiveToken(
+            registrationAttemptID: "route-before-token",
+            configurationGeneration: 9)
+        #expect(state.owns(intent))
+    }
+
+    @Test
+    func simultaneousReadinessCreatesExactlyOneOwnedIntent() {
+        var state = AIESAPNsRegistrationIntentState()
+        let intent = state.receiveToken(
+            registrationAttemptID: "simultaneous",
+            configurationGeneration: 12)
+
+        #expect(state.pending == intent)
+        #expect(state.tokenGeneration == 1)
+    }
+
+    @Test
+    func completedRelayGenerationIsNotRecreatedByALaterQueuedReadinessTrigger() {
+        var state = AIESAPNsRegistrationIntentState()
+        let intent = state.receiveToken(
+            registrationAttemptID: "sequential-readiness",
+            configurationGeneration: 12)
+
+        #expect(state.resolve(
+            registrationAttemptID: "sequential-readiness",
+            configurationGeneration: 12) == .pending(intent))
+        state.complete(intent)
+        #expect(state.pending == nil)
+        #expect(state.resolve(
+            registrationAttemptID: "sequential-readiness",
+            configurationGeneration: 12) == .alreadyCompleted)
+        #expect(!state.consumeRetryAfterInFlightCompletion())
+    }
+
+    @Test
+    func postAwaitOwnershipFenceRejectsSupersededIntentBeforeAdmission() {
+        var state = AIESAPNsRegistrationIntentState()
+        let superseded = state.receiveToken(
+            registrationAttemptID: "superseded",
+            configurationGeneration: 20)
+        let replacement = state.receiveToken(
+            registrationAttemptID: "replacement",
+            configurationGeneration: 20)
+
+        #expect(!state.owns(superseded))
+        #expect(state.owns(replacement))
+    }
+
+    @Test
+    func replacementTokenAndConfigurationFenceStaleAttempts() {
+        var state = AIESAPNsRegistrationIntentState()
+        let oldTokenIntent = state.receiveToken(
+            registrationAttemptID: "old-token",
+            configurationGeneration: 2)
+        let replacementTokenIntent = state.receiveToken(
+            registrationAttemptID: "replacement-token",
+            configurationGeneration: 2)
+
+        #expect(!state.owns(oldTokenIntent))
+        #expect(state.owns(replacementTokenIntent))
+        state.complete(oldTokenIntent)
+        #expect(state.pending == replacementTokenIntent)
+
+        let replacementRouteIntent = state.requirePublication(
+            registrationAttemptID: "replacement-token",
+            configurationGeneration: 3)
+        #expect(!state.owns(replacementTokenIntent))
+        #expect(state.owns(replacementRouteIntent))
+        state.complete(replacementTokenIntent)
+        #expect(state.pending == replacementRouteIntent)
+    }
+
+    @Test
+    func duplicateInFlightCoalescesAndRetriesOnlyAReplacementIntent() {
+        var state = AIESAPNsRegistrationIntentState()
+        let inFlight = state.receiveToken(
+            registrationAttemptID: "in-flight",
+            configurationGeneration: 5)
+
+        state.coalesceBehindInFlight(ownedBy: inFlight)
+        #expect(!state.consumeRetryAfterInFlightCompletion())
+
+        let replacement = state.receiveToken(
+            registrationAttemptID: "replacement",
+            configurationGeneration: 5)
+        state.coalesceBehindInFlight(ownedBy: inFlight)
+        #expect(state.pending == replacement)
+        #expect(state.consumeRetryAfterInFlightCompletion())
+        #expect(!state.consumeRetryAfterInFlightCompletion())
+        #expect(state.pending == replacement)
+    }
+
+    @Test
+    func relayIdentityAndTransportFailuresLeaveTheIntentRetriggerable() {
+        var state = AIESAPNsRegistrationIntentState()
+        let intent = state.receiveToken(
+            registrationAttemptID: "retryable-failure",
+            configurationGeneration: 6)
+
+        // The production failure paths intentionally do not call complete(). A
+        // later admitted route can therefore own and retry the same generation.
+        #expect(state.owns(intent))
+        #expect(state.pending == intent)
+
+        #expect(AIESAPNsTransportWriteDisposition(published: false) == .unavailable)
+        #expect(AIESAPNsTransportWriteDisposition(published: true) == .acceptedUnacknowledged)
+        #expect(state.owns(intent))
+    }
+
+    @Test
+    func directRegistrationBuildsTheExactGatewayPayloadWithoutRelayIdentity() async throws {
+        let manager = PushRegistrationManager(buildConfig: PushBuildConfig(
+            transport: .direct,
+            distribution: .official,
+            relayBaseURL: nil,
+            apnsEnvironment: .production))
+
+        let payload = try await manager.makeGatewayRegistrationPayload(
+            apnsTokenHex: "fixture-token-not-a-device-token",
+            topic: "ai.openclaw.fixture",
+            gatewayIdentity: nil)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: String])
+        #expect(object == [
+            "environment": "production",
+            "token": "fixture-token-not-a-device-token",
+            "topic": "ai.openclaw.fixture",
+            "transport": "direct",
+        ])
+    }
+
+    @Test
+    func relayRegistrationFailsBeforePublicationWhenGatewayIdentityIsUnavailable() async {
+        let manager = PushRegistrationManager(buildConfig: PushBuildConfig(
+            transport: .relay,
+            distribution: .official,
+            relayBaseURL: URL(string: "https://relay.invalid"),
+            apnsEnvironment: .production))
+
+        await #expect(throws: PushRelayError.self) {
+            try await manager.makeGatewayRegistrationPayload(
+                apnsTokenHex: "fixture-token-not-a-device-token",
+                topic: "ai.openclaw.fixture",
+                gatewayIdentity: nil)
+        }
+    }
+
+    @Test
+    func publicationSourceRetainsPendingIntentAcrossEveryRetryableOutcome() throws {
+        let iosRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let model = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Model/NodeAppModel.swift"),
+            encoding: .utf8)
+
+        #expect(model.contains("trigger: \"os_token_received\""))
+        #expect(model.contains("trigger: \"node_route_admitted\""))
+        #expect(model.contains("trigger: \"operator_route_admitted\""))
+        #expect(model.contains("trigger: \"in_flight_completed\""))
+        #expect(model.contains("self.apnsRegistrationIntentState.owns(intent)"))
+        #expect(model.contains("self.apnsRegistrationIntentState.complete(intent)"))
+        #expect(model.contains("publication_already_in_flight"))
+        #expect(model.contains("relay_identity_unavailable"))
+        #expect(model.contains("transport_or_route_unavailable"))
+        #expect(model.contains("transport_write_accepted_unacknowledged"))
+        #expect(model.contains("self.apnsLastRegisteredKey == directRegistrationKey"))
+
+        let admission = try #require(model.range(of: "trigger: \"operator_route_admitted\""))
+        let laterSource = model[admission.upperBound...]
+        let chatRecovery = try #require(laterSource.range(of: "startChatOutboxRecovery"))
+        #expect(admission.lowerBound < chatRecovery.lowerBound)
+    }
+
+    @Test
     func publicationWiringIsTruthfulAndKnownRouteOwnersAreExplicit() throws {
         let iosRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -243,6 +484,7 @@ struct AIESAPNsDiagnosticsTests {
             encoding: .utf8)
 
         for stage in [
+            "gateway_publication_deferred",
             "gateway_publication_admitted",
             "gateway_publication_attempted",
             "gateway_publication_duplicate",
@@ -261,6 +503,8 @@ struct AIESAPNsDiagnosticsTests {
         #expect(!model.contains(".gatewayRejected"))
         #expect(diagnostics.contains("flushCriticalBoundary()"))
         #expect(model.contains("transport_write_accepted_unacknowledged"))
+        #expect(model.contains("relay_identity_unavailable"))
+        #expect(diagnostics.contains("connection_owner_unavailable"))
         #expect(model.contains("connectionRole: .node"))
         #expect(model.contains("connectionRole: .operator"))
         #expect(model.contains("route: nodeRoute"))

@@ -3,6 +3,7 @@ import OpenClawKit
 import os
 
 enum AIESAPNsPublicationStage: String, Equatable, Sendable {
+    case deferred = "gateway_publication_deferred"
     case admitted = "gateway_publication_admitted"
     case attempted = "gateway_publication_attempted"
     case accepted = "gateway_publication_accepted"
@@ -15,6 +16,23 @@ enum AIESAPNsPublicationStage: String, Equatable, Sendable {
     case failed = "gateway_publication_failed"
     case superseded = "registration_superseded"
     case cancelled = "registration_cancelled"
+}
+
+enum AIESAPNsPublicationDeferralReason: String, Equatable, Sendable {
+    case ownerUnavailable = "connection_owner_unavailable"
+    case nodeConnectionUnavailable = "node_connection_unavailable"
+    case tokenUnavailable = "os_token_unavailable"
+    case topicUnavailable = "bundle_topic_unavailable"
+    case gatewayIdentityUnavailable = "stable_gateway_identity_unavailable"
+    case nodeRouteUnavailable = "node_route_unavailable"
+    case nodeRouteStale = "node_route_stale"
+    case nodeGatewayMismatch = "node_gateway_identity_mismatch"
+    case configurationChanged = "configuration_generation_changed"
+    case operatorConnectionUnavailable = "operator_connection_unavailable"
+    case operatorRouteUnavailable = "operator_route_unavailable"
+    case operatorRouteStale = "operator_route_stale"
+    case operatorGatewayMismatch = "operator_gateway_identity_mismatch"
+    case intentUnavailable = "registration_intent_unavailable"
 }
 
 struct AIESAPNsPublicationDiagnosticContext: Sendable {

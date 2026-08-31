@@ -388,7 +388,11 @@ import Testing
         #expect(model.contains(
             "self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID"))
         #expect(model.contains(
-            "guard !self.apnsRegistrationsInFlight.contains(attempt) else {"))
+            "if let existingAttempt = self.apnsRegistrationsInFlight.first(where: { $0 == attempt }) {"))
+        #expect(model.contains(
+            "self.apnsRegistrationIntentState.coalesceBehindInFlight("))
+        #expect(model.contains(
+            "self.apnsRegistrationIntentState.consumeRetryAfterInFlightCompletion()"))
         #expect(model.contains(".localDuplicateSuppressed"))
         #expect(model.contains("publication_already_in_flight"))
         #expect(model.contains("ifCurrentRoute: nodeRoute"))

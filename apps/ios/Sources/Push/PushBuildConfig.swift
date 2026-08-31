@@ -39,6 +39,18 @@ struct PushBuildConfig {
         self.relayBaseURL = Self.readURL(bundle: bundle, key: "OpenClawPushRelayBaseURL")
     }
 
+    init(
+        transport: PushTransportMode,
+        distribution: PushDistributionMode,
+        relayBaseURL: URL?,
+        apnsEnvironment: PushAPNsEnvironment)
+    {
+        self.transport = transport
+        self.distribution = distribution
+        self.relayBaseURL = relayBaseURL
+        self.apnsEnvironment = apnsEnvironment
+    }
+
     var usesRelay: Bool {
         self.transport == .relay
     }

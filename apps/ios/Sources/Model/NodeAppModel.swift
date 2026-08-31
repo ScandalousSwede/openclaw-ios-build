@@ -19,12 +19,120 @@ private struct GatewayRelayIdentityResponse: Decodable {
 }
 
 private struct APNsRegistrationAttempt: Equatable {
+    let intent: AIESAPNsPendingRegistrationIntent
     let token: String
     let topic: String
     let configurationGeneration: UInt64
     let usesRelayTransport: Bool
     let nodeRoute: GatewayNodeSessionRoute
     let operatorRoute: GatewayNodeSessionRoute?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.token == rhs.token &&
+            lhs.topic == rhs.topic &&
+            lhs.configurationGeneration == rhs.configurationGeneration &&
+            lhs.usesRelayTransport == rhs.usesRelayTransport &&
+            lhs.nodeRoute == rhs.nodeRoute &&
+            lhs.operatorRoute == rhs.operatorRoute
+    }
+}
+
+struct AIESAPNsPendingRegistrationIntent: Equatable, Sendable {
+    let registrationAttemptID: String
+    let tokenGeneration: UInt64
+    let configurationGeneration: UInt64
+}
+
+enum AIESAPNsRegistrationIntentResolution: Equatable, Sendable {
+    case pending(AIESAPNsPendingRegistrationIntent)
+    case alreadyCompleted
+    case unavailable
+}
+
+/// Keeps one generation-fenced publication intent alive across token/route
+/// ordering. Route callbacks consume it only after a truthful transport result;
+/// an older suspended attempt can never clear its replacement.
+struct AIESAPNsRegistrationIntentState: Equatable, Sendable {
+    private(set) var tokenGeneration: UInt64 = 0
+    private(set) var pending: AIESAPNsPendingRegistrationIntent?
+    private(set) var completed: AIESAPNsPendingRegistrationIntent?
+    private(set) var retryAfterInFlightCompletion = false
+
+    @discardableResult
+    mutating func receiveToken(
+        registrationAttemptID: String,
+        configurationGeneration: UInt64) -> AIESAPNsPendingRegistrationIntent
+    {
+        self.tokenGeneration &+= 1
+        return self.requirePublication(
+            registrationAttemptID: registrationAttemptID,
+            configurationGeneration: configurationGeneration)
+    }
+
+    @discardableResult
+    mutating func requirePublication(
+        registrationAttemptID: String,
+        configurationGeneration: UInt64) -> AIESAPNsPendingRegistrationIntent
+    {
+        let intent = AIESAPNsPendingRegistrationIntent(
+            registrationAttemptID: registrationAttemptID,
+            tokenGeneration: self.tokenGeneration,
+            configurationGeneration: configurationGeneration)
+        self.pending = intent
+        return intent
+    }
+
+    func owns(_ intent: AIESAPNsPendingRegistrationIntent) -> Bool {
+        self.pending == intent &&
+            self.tokenGeneration == intent.tokenGeneration
+    }
+
+    func resolve(
+        registrationAttemptID: String,
+        configurationGeneration: UInt64) -> AIESAPNsRegistrationIntentResolution
+    {
+        if let pending = self.pending,
+           pending.registrationAttemptID == registrationAttemptID,
+           pending.configurationGeneration == configurationGeneration
+        {
+            return .pending(pending)
+        }
+        if let completed = self.completed,
+           completed.registrationAttemptID == registrationAttemptID,
+           completed.configurationGeneration == configurationGeneration
+        {
+            return .alreadyCompleted
+        }
+        return .unavailable
+    }
+
+    mutating func complete(_ intent: AIESAPNsPendingRegistrationIntent) {
+        guard self.owns(intent) else { return }
+        self.pending = nil
+        self.completed = intent
+    }
+
+    mutating func coalesceBehindInFlight(
+        ownedBy existingIntent: AIESAPNsPendingRegistrationIntent)
+    {
+        guard !self.owns(existingIntent) else { return }
+        self.retryAfterInFlightCompletion = true
+    }
+
+    mutating func consumeRetryAfterInFlightCompletion() -> Bool {
+        let shouldRetry = self.retryAfterInFlightCompletion && self.pending != nil
+        self.retryAfterInFlightCompletion = false
+        return shouldRetry
+    }
+}
+
+enum AIESAPNsTransportWriteDisposition: Equatable, Sendable {
+    case unavailable
+    case acceptedUnacknowledged
+
+    init(published: Bool) {
+        self = published ? .acceptedUnacknowledged : .unavailable
+    }
 }
 
 /// Ensures notification requests return promptly even if the system prompt blocks.
@@ -348,6 +456,7 @@ final class NodeAppModel {
     private var apnsDeviceTokenHex: String?
     private var apnsRegistrationAttemptID: String?
     private var apnsLastRegisteredKey: String?
+    @ObservationIgnored private var apnsRegistrationIntentState = AIESAPNsRegistrationIntentState()
     @ObservationIgnored private var apnsRegistrationsInFlight: [APNsRegistrationAttempt] = []
     @ObservationIgnored private let pushRegistrationManager = PushRegistrationManager()
     var gatewaySession: GatewayNodeSession {
@@ -3082,6 +3191,26 @@ extension NodeAppModel {
 extension NodeAppModel {
     private func prepareForGatewayConnect(url: URL, stableID: String) {
         self.gatewayConfigurationGeneration &+= 1
+        if self.apnsDeviceTokenHex?.isEmpty == false,
+           let registrationAttemptID = self.apnsRegistrationAttemptID
+        {
+            let replaced = self.apnsRegistrationIntentState.pending
+            self.apnsRegistrationIntentState.requirePublication(
+                registrationAttemptID: registrationAttemptID,
+                configurationGeneration: self.gatewayConfigurationGeneration)
+            if let replaced,
+               replaced.configurationGeneration != self.gatewayConfigurationGeneration
+            {
+                AIESAPNsDiagnostics.recordPublication(
+                    .superseded,
+                    providerStage: "gateway_configuration_changed",
+                    resultClass: AIESAPNsPublicationDeferralReason.configurationChanged.rawValue,
+                    context: AIESAPNsPublicationDiagnosticContext(
+                        registrationAttemptID: replaced.registrationAttemptID,
+                        configurationGeneration: replaced.configurationGeneration,
+                        connectionRole: .node))
+            }
+        }
         self.foregroundGatewayResumeCheckID = nil
         self.foregroundGatewayResumeCheckInFlight = false
         self.invalidateChatOutboxDeliveryOwnerIfChanged(stableGatewayID: stableID)
@@ -3703,6 +3832,15 @@ extension NodeAppModel {
                             let shouldContinue = await MainActor.run {
                                 self.gatewayOwnerCheck(loopOwner)
                             }
+                            // Token delivery commonly precedes the operator route. Retry the
+                            // retained intent at route admission, before unrelated bootstrap RPCs
+                            // can delay or prevent APNs publication evidence.
+                            Task { @MainActor [weak self] in
+                                await self?.registerAPNsTokenIfNeeded(
+                                    operatorRoute: admittedRoute,
+                                    trigger: "operator_route_admitted",
+                                    shouldContinue: shouldContinue)
+                            }
                             GatewayDiagnostics.log(
                                 "operator gateway connected host=\(url.host ?? "?") scheme=\(url.scheme ?? "?")")
                             await self.startChatOutboxRecovery(
@@ -3730,10 +3868,6 @@ extension NodeAppModel {
                             await self.refreshShareRouteFromGateway(
                                 ifCurrentRoute: admittedRoute,
                                 shouldApply: shouldContinue)
-                            guard await shouldContinue() else { return }
-                            await self.registerAPNsTokenIfNeeded(
-                                operatorRoute: admittedRoute,
-                                shouldContinue: shouldContinue)
                             guard await shouldContinue() else { return }
                             await self.startVoiceWakeSync(
                                 ifCurrentRoute: admittedRoute,
@@ -4511,6 +4645,7 @@ extension NodeAppModel {
         }
         await self.registerAPNsTokenIfNeeded(
             nodeRoute: nodeRoute,
+            trigger: "node_route_admitted",
             shouldContinue: shouldContinue)
         guard shouldContinue() else { return }
         if let nodeRoute {
@@ -5246,8 +5381,18 @@ extension NodeAppModel {
     {
         let tokenHex = tokenData.map { String(format: "%02x", $0) }.joined()
         let trimmed = tokenHex.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
         let resolvedAttemptID = registrationAttemptID ?? UUID().uuidString
+        guard !trimmed.isEmpty else {
+            AIESAPNsDiagnostics.recordPublication(
+                .deferred,
+                providerStage: "os_token_received",
+                resultClass: AIESAPNsPublicationDeferralReason.tokenUnavailable.rawValue,
+                context: AIESAPNsPublicationDiagnosticContext(
+                    registrationAttemptID: resolvedAttemptID,
+                    configurationGeneration: self.gatewayConfigurationGeneration,
+                    connectionRole: .node))
+            return
+        }
         if let previousAttemptID = self.apnsRegistrationAttemptID,
            previousAttemptID != resolvedAttemptID
         {
@@ -5259,63 +5404,205 @@ extension NodeAppModel {
         }
         self.apnsRegistrationAttemptID = resolvedAttemptID
         self.apnsDeviceTokenHex = trimmed
+        self.apnsRegistrationIntentState.receiveToken(
+            registrationAttemptID: resolvedAttemptID,
+            configurationGeneration: self.gatewayConfigurationGeneration)
         Task { [weak self] in
-            await self?.registerAPNsTokenIfNeeded()
+            await self?.registerAPNsTokenIfNeeded(trigger: "os_token_received")
         }
     }
 
     private func registerAPNsTokenIfNeeded(
         nodeRoute expectedNodeRoute: GatewayNodeSessionRoute? = nil,
         operatorRoute expectedOperatorRoute: GatewayNodeSessionRoute? = nil,
+        trigger: String = "registration_state_changed",
         shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
     {
-        guard shouldContinue() else { return }
-        guard self.gatewayConnected else { return }
-        guard let token = self.apnsDeviceTokenHex?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty
-        else {
-            return
-        }
         let usesRelayTransport = await self.pushRegistrationManager.usesRelayTransport
         let apnsEnvironment = await self.pushRegistrationManager.diagnosticAPNsEnvironment
-        guard shouldContinue() else { return }
-        guard let topic = Bundle.main.bundleIdentifier?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !topic.isEmpty
-        else {
-            return
-        }
         let configurationGeneration = self.gatewayConfigurationGeneration
         let registrationAttemptID = self.apnsRegistrationAttemptID ?? UUID().uuidString
         let deviceIdentity = GatewaySettingsStore.currentInstanceID()
-        guard let expectedGatewayID = self.activeGatewayConnectConfig?.effectiveStableID else { return }
+        let diagnosticTopic = Bundle.main.bundleIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        func recordDeferred(
+            _ reason: AIESAPNsPublicationDeferralReason,
+            role: OpenClawDiagnosticConnectionRole = .node,
+            route: GatewayNodeSessionRoute? = nil,
+            nodeRoute: GatewayNodeSessionRoute? = nil,
+            operatorRoute: GatewayNodeSessionRoute? = nil)
+        {
+            AIESAPNsDiagnostics.recordPublication(
+                .deferred,
+                providerStage: trigger,
+                resultClass: reason.rawValue,
+                context: AIESAPNsPublicationDiagnosticContext(
+                    registrationAttemptID: registrationAttemptID,
+                    configurationGeneration: configurationGeneration,
+                    route: route,
+                    nodeRoute: nodeRoute,
+                    operatorRoute: operatorRoute,
+                    connectionRole: role,
+                    deviceIdentity: deviceIdentity,
+                    topic: diagnosticTopic,
+                    environment: apnsEnvironment))
+        }
+
+        guard shouldContinue() else {
+            recordDeferred(.ownerUnavailable)
+            return
+        }
+        guard self.gatewayConnected else {
+            recordDeferred(.nodeConnectionUnavailable)
+            return
+        }
+        guard let token = self.apnsDeviceTokenHex?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !token.isEmpty
+        else {
+            recordDeferred(.tokenUnavailable)
+            return
+        }
+        guard shouldContinue() else {
+            recordDeferred(.ownerUnavailable)
+            return
+        }
+        guard let topic = diagnosticTopic, !topic.isEmpty else {
+            recordDeferred(.topicUnavailable)
+            return
+        }
+        let intent: AIESAPNsPendingRegistrationIntent
+        switch self.apnsRegistrationIntentState.resolve(
+            registrationAttemptID: registrationAttemptID,
+            configurationGeneration: configurationGeneration)
+        {
+        case let .pending(pending):
+            intent = pending
+        case .alreadyCompleted:
+            AIESAPNsDiagnostics.recordPublication(
+                .localDuplicateSuppressed,
+                providerStage: trigger,
+                resultClass: "registration_generation_already_completed",
+                context: AIESAPNsPublicationDiagnosticContext(
+                    registrationAttemptID: registrationAttemptID,
+                    configurationGeneration: configurationGeneration,
+                    connectionRole: .node,
+                    deviceIdentity: deviceIdentity,
+                    topic: diagnosticTopic,
+                    environment: apnsEnvironment))
+            return
+        case .unavailable:
+            recordDeferred(.intentUnavailable)
+            return
+        }
+        guard let expectedGatewayID = self.activeGatewayConnectConfig?.effectiveStableID else {
+            recordDeferred(.gatewayIdentityUnavailable)
+            return
+        }
         let nodeRoute: GatewayNodeSessionRoute
         if let expectedNodeRoute {
             nodeRoute = expectedNodeRoute
         } else {
-            guard let currentNodeRoute = await self.nodeGateway.currentRoute() else { return }
+            guard let currentNodeRoute = await self.nodeGateway.currentRoute() else {
+                recordDeferred(.nodeRouteUnavailable)
+                return
+            }
             nodeRoute = currentNodeRoute
         }
-        guard await self.nodeGateway.isCurrentRoute(nodeRoute),
-              await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID,
-              self.gatewayConfigurationGeneration == configurationGeneration,
+        guard await self.nodeGateway.isCurrentRoute(nodeRoute) else {
+            recordDeferred(.nodeRouteStale, route: nodeRoute, nodeRoute: nodeRoute)
+            return
+        }
+        guard await self.nodeGateway.currentGatewayID(ifCurrentRoute: nodeRoute) == expectedGatewayID else {
+            recordDeferred(.nodeGatewayMismatch, route: nodeRoute, nodeRoute: nodeRoute)
+            return
+        }
+        guard self.gatewayConfigurationGeneration == configurationGeneration,
               self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
-              shouldContinue()
-        else { return }
+              self.apnsRegistrationIntentState.owns(intent)
+        else {
+            recordDeferred(.configurationChanged, route: nodeRoute, nodeRoute: nodeRoute)
+            return
+        }
+        guard shouldContinue() else {
+            recordDeferred(.ownerUnavailable, route: nodeRoute, nodeRoute: nodeRoute)
+            return
+        }
 
         let operatorRoute: GatewayNodeSessionRoute?
         if usesRelayTransport {
-            guard self.operatorConnected else { return }
+            guard self.operatorConnected else {
+                recordDeferred(
+                    .operatorConnectionUnavailable,
+                    role: .operator,
+                    nodeRoute: nodeRoute)
+                return
+            }
             if let expectedOperatorRoute {
                 operatorRoute = expectedOperatorRoute
             } else {
-                guard let currentOperatorRoute = await self.operatorGateway.currentRoute() else { return }
+                guard let currentOperatorRoute = await self.operatorGateway.currentRoute() else {
+                    recordDeferred(
+                        .operatorRouteUnavailable,
+                        role: .operator,
+                        nodeRoute: nodeRoute)
+                    return
+                }
                 operatorRoute = currentOperatorRoute
             }
-            guard let operatorRoute,
-                  await self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID
-            else { return }
+            guard let operatorRoute else {
+                recordDeferred(
+                    .operatorRouteUnavailable,
+                    role: .operator,
+                    nodeRoute: nodeRoute)
+                return
+            }
+            guard await self.operatorGateway.isCurrentRoute(operatorRoute) else {
+                recordDeferred(
+                    .operatorRouteStale,
+                    role: .operator,
+                    route: operatorRoute,
+                    nodeRoute: nodeRoute,
+                    operatorRoute: operatorRoute)
+                return
+            }
+            guard await self.operatorGateway.currentGatewayID(ifCurrentRoute: operatorRoute) == expectedGatewayID
+            else {
+                recordDeferred(
+                    .operatorGatewayMismatch,
+                    role: .operator,
+                    route: operatorRoute,
+                    nodeRoute: nodeRoute,
+                    operatorRoute: operatorRoute)
+                return
+            }
         } else {
             operatorRoute = nil
+        }
+
+        // The operator checks above cross actor boundaries. A token callback or
+        // configuration replacement can run on MainActor during those awaits;
+        // revalidate local ownership immediately before declaring admission.
+        guard self.gatewayConfigurationGeneration == configurationGeneration,
+              self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+              self.apnsRegistrationIntentState.owns(intent)
+        else {
+            recordDeferred(
+                .configurationChanged,
+                role: operatorRoute == nil ? .node : .operator,
+                route: operatorRoute ?? nodeRoute,
+                nodeRoute: nodeRoute,
+                operatorRoute: operatorRoute)
+            return
+        }
+        guard shouldContinue() else {
+            recordDeferred(
+                .ownerUnavailable,
+                role: operatorRoute == nil ? .node : .operator,
+                route: operatorRoute ?? nodeRoute,
+                nodeRoute: nodeRoute,
+                operatorRoute: operatorRoute)
+            return
         }
 
         let directRegistrationKey = [token, topic, expectedGatewayID, "direct"].joined(separator: "|")
@@ -5334,16 +5621,23 @@ extension NodeAppModel {
                 .localDuplicateSuppressed,
                 resultClass: "local_direct_registration_match",
                 context: nodeDiagnosticContext)
+            self.apnsRegistrationIntentState.complete(intent)
             return
         }
         let attempt = APNsRegistrationAttempt(
+            intent: intent,
             token: token,
             topic: topic,
             configurationGeneration: configurationGeneration,
             usesRelayTransport: usesRelayTransport,
             nodeRoute: nodeRoute,
             operatorRoute: operatorRoute)
-        guard !self.apnsRegistrationsInFlight.contains(attempt) else {
+        if let existingAttempt = self.apnsRegistrationsInFlight.first(where: { $0 == attempt }) {
+            // A newer OS callback can replace the generation owned by this
+            // in-flight attempt. Retry exactly once after its defer removes the
+            // duplicate key; otherwise the replacement intent has no trigger.
+            self.apnsRegistrationIntentState.coalesceBehindInFlight(
+                ownedBy: existingAttempt.intent)
             AIESAPNsDiagnostics.recordPublication(
                 .localDuplicateSuppressed,
                 resultClass: "publication_already_in_flight",
@@ -5353,6 +5647,11 @@ extension NodeAppModel {
         self.apnsRegistrationsInFlight.append(attempt)
         defer {
             self.apnsRegistrationsInFlight.removeAll { $0 == attempt }
+            if self.apnsRegistrationIntentState.consumeRetryAfterInFlightCompletion() {
+                Task { @MainActor [weak self] in
+                    await self?.registerAPNsTokenIfNeeded(trigger: "in_flight_completed")
+                }
+            }
         }
 
         AIESAPNsDiagnostics.recordPublication(
@@ -5380,8 +5679,17 @@ extension NodeAppModel {
         do {
             let gatewayIdentity: PushRelayGatewayIdentity?
             if let operatorRoute {
-                gatewayIdentity = try await self.fetchPushRelayGatewayIdentity(
-                    ifCurrentRoute: operatorRoute)
+                do {
+                    gatewayIdentity = try await self.fetchPushRelayGatewayIdentity(
+                        ifCurrentRoute: operatorRoute)
+                } catch {
+                    AIESAPNsDiagnostics.recordPublication(
+                        .failed,
+                        providerStage: "relay_identity_request",
+                        resultClass: "relay_identity_unavailable",
+                        context: nodeDiagnosticContext)
+                    return
+                }
             } else {
                 gatewayIdentity = nil
             }
@@ -5394,6 +5702,7 @@ extension NodeAppModel {
                   operatorRouteStillCurrent,
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  self.apnsRegistrationIntentState.owns(intent),
                   shouldContinue()
             else {
                 AIESAPNsDiagnostics.recordPublication(
@@ -5415,6 +5724,7 @@ extension NodeAppModel {
                   operatorRouteStillCurrentAfterPayload,
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  self.apnsRegistrationIntentState.owns(intent),
                   shouldContinue()
             else {
                 AIESAPNsDiagnostics.recordPublication(
@@ -5431,7 +5741,8 @@ extension NodeAppModel {
                 event: "push.apns.register",
                 payloadJSON: payloadJSON,
                 ifCurrentRoute: nodeRoute)
-            guard published else {
+            let transportDisposition = AIESAPNsTransportWriteDisposition(published: published)
+            guard transportDisposition == .acceptedUnacknowledged else {
                 AIESAPNsDiagnostics.recordPublication(
                     .failed,
                     resultClass: "transport_or_route_unavailable",
@@ -5448,6 +5759,7 @@ extension NodeAppModel {
             guard await self.nodeGateway.isCurrentRoute(nodeRoute),
                   self.gatewayConfigurationGeneration == configurationGeneration,
                   self.activeGatewayConnectConfig?.effectiveStableID == expectedGatewayID,
+                  self.apnsRegistrationIntentState.owns(intent),
                   shouldContinue()
             else {
                 AIESAPNsDiagnostics.recordPublication(
@@ -5459,6 +5771,7 @@ extension NodeAppModel {
             if !usesRelayTransport {
                 self.apnsLastRegisteredKey = directRegistrationKey
             }
+            self.apnsRegistrationIntentState.complete(intent)
         } catch {
             AIESAPNsDiagnostics.recordPublicationFailure(
                 error,
