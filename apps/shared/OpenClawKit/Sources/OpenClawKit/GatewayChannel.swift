@@ -206,6 +206,41 @@ public enum GatewayRequestDispatchResult: Sendable, Equatable {
     case ambiguous(code: String?)
 }
 
+struct GatewayRPCDiagnosticParameterShape: Equatable, Sendable {
+    let offsetPresent: Bool
+    let offsetType: OpenClawDiagnosticRPCOffsetType
+    let limitPresent: Bool
+    let maxCharsPresent: Bool
+    let sessionIdentifier: String?
+
+    static func inspect(_ params: [String: AnyCodable]?) -> Self {
+        let offsetPresent = params?["offset"] != nil
+        let offsetType: OpenClawDiagnosticRPCOffsetType
+        if let value = params?["offset"]?.value {
+            if value is Bool {
+                offsetType = .invalid
+            } else if value is Int {
+                offsetType = .integer
+            } else if let value = value as? Double,
+                      value.isFinite,
+                      value.rounded(.towardZero) == value
+            {
+                offsetType = .integer
+            } else {
+                offsetType = .invalid
+            }
+        } else {
+            offsetType = .absent
+        }
+        return Self(
+            offsetPresent: offsetPresent,
+            offsetType: offsetType,
+            limitPresent: params?["limit"] != nil,
+            maxCharsPresent: params?["maxChars"] != nil,
+            sessionIdentifier: params?["sessionKey"]?.value as? String)
+    }
+}
+
 private final class GatewayRequestDispatchProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var dispatchStarted = false
@@ -274,6 +309,11 @@ public actor GatewayChannelActor {
     private var task: WebSocketTaskBox?
     private struct PendingRequest {
         let connectionGeneration: UInt64
+        let routeGeneration: UInt64?
+        let rpcMethod: String
+        let parameterShape: GatewayRPCDiagnosticParameterShape
+        let admittedAt: Date
+        let admittedUptime: TimeInterval
         let continuation: CheckedContinuation<GatewayFrame, Error>
     }
 
@@ -431,7 +471,8 @@ public actor GatewayChannelActor {
             domain: "Gateway",
             code: 0,
             userInfo: [NSLocalizedDescriptionKey: "gateway channel shutdown"]),
-            connectionGeneration: nil)
+            connectionGeneration: nil,
+            resultClass: "cancelled")
 
         let waiters = self.connectWaiters
         self.connectWaiters.removeAll()
@@ -1398,12 +1439,12 @@ public actor GatewayChannelActor {
                pending.connectionGeneration == connectionGeneration
             {
                 self.pending.removeValue(forKey: id)
-                OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-                    kind: .socket,
+                self.recordRPCDiagnostic(
                     state: "request_completed",
-                    connectionRole: self.diagnosticConnectionRole,
-                    socketGeneration: connectionGeneration,
-                    operationIdentifier: id))
+                    operationIdentifier: id,
+                    pending: pending,
+                    resultClass: res.ok == false ? "gateway_rejected" : "success",
+                    gatewayErrorCode: res.ok == false ? res.error?.code : nil)
                 pending.continuation.resume(returning: .res(res))
             }
         case let .event(evt):
@@ -1626,7 +1667,8 @@ public actor GatewayChannelActor {
     public func request(
         method: String,
         params: [String: AnyCodable]?,
-        timeoutMs: Double? = nil) async throws -> Data
+        timeoutMs: Double? = nil,
+        diagnosticRouteGeneration: UInt64? = nil) async throws -> Data
     {
         try await self.connectOrThrow(context: "gateway connect")
         let connectionGeneration = self.connectionGeneration
@@ -1644,7 +1686,8 @@ public actor GatewayChannelActor {
             params: params,
             timeoutMs: timeoutMs,
             task: task,
-            connectionGeneration: connectionGeneration)
+            connectionGeneration: connectionGeneration,
+            routeGeneration: diagnosticRouteGeneration)
     }
 
     /// Dispatches only through the already-connected physical socket generation.
@@ -1652,7 +1695,8 @@ public actor GatewayChannelActor {
         method: String,
         params: [String: AnyCodable]?,
         timeoutMs: Double? = nil,
-        ifCurrentConnectionGeneration expectedGeneration: UInt64) async throws -> Data
+        ifCurrentConnectionGeneration expectedGeneration: UInt64,
+        diagnosticRouteGeneration: UInt64? = nil) async throws -> Data
     {
         guard self.isConnected(connectionGeneration: expectedGeneration),
               let task = self.task,
@@ -1663,7 +1707,8 @@ public actor GatewayChannelActor {
             params: params,
             timeoutMs: timeoutMs,
             task: task,
-            connectionGeneration: expectedGeneration)
+            connectionGeneration: expectedGeneration,
+            routeGeneration: diagnosticRouteGeneration)
     }
 
     /// Classifies one route-bound request by whether physical dispatch began.
@@ -1673,7 +1718,8 @@ public actor GatewayChannelActor {
         method: String,
         params: [String: AnyCodable]?,
         timeoutMs: Double? = nil,
-        ifCurrentConnectionGeneration expectedGeneration: UInt64) async -> GatewayRequestDispatchResult
+        ifCurrentConnectionGeneration expectedGeneration: UInt64,
+        diagnosticRouteGeneration: UInt64? = nil) async -> GatewayRequestDispatchResult
     {
         guard self.isConnected(connectionGeneration: expectedGeneration),
               let task = self.task,
@@ -1688,6 +1734,7 @@ public actor GatewayChannelActor {
                 timeoutMs: timeoutMs,
                 task: task,
                 connectionGeneration: expectedGeneration,
+                routeGeneration: diagnosticRouteGeneration,
                 dispatchProbe: probe)
             return .response(data)
         } catch let error as GatewayResponseError {
@@ -1712,20 +1759,33 @@ public actor GatewayChannelActor {
         timeoutMs: Double?,
         task: WebSocketTaskBox,
         connectionGeneration: UInt64,
+        routeGeneration: UInt64?,
         dispatchProbe: GatewayRequestDispatchProbe? = nil) async throws -> Data
     {
         let effectiveTimeout = timeoutMs ?? self.defaultRequestTimeoutMs
         let payload = try self.encodeRequest(method: method, params: params, kind: "request")
+        let parameterShape = GatewayRPCDiagnosticParameterShape.inspect(params)
+        let admittedAt = Date()
+        let admittedUptime = ProcessInfo.processInfo.systemUptime
         let response = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<GatewayFrame, Error>) in
             self.pending[payload.id] = PendingRequest(
                 connectionGeneration: connectionGeneration,
+                routeGeneration: routeGeneration,
+                rpcMethod: method,
+                parameterShape: parameterShape,
+                admittedAt: admittedAt,
+                admittedUptime: admittedUptime,
                 continuation: cont)
-            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-                kind: .socket,
+            self.recordRPCDiagnostic(
                 state: "request_admitted",
-                connectionRole: self.diagnosticConnectionRole,
-                socketGeneration: connectionGeneration,
-                operationIdentifier: payload.id))
+                operationIdentifier: payload.id,
+                connectionGeneration: connectionGeneration,
+                routeGeneration: routeGeneration,
+                method: method,
+                shape: parameterShape,
+                admittedAt: admittedAt,
+                elapsedMilliseconds: 0,
+                resultClass: "requested")
             Task { [weak self] in
                 guard let self else { return }
                 try? await Task.sleep(nanoseconds: UInt64(effectiveTimeout * 1_000_000))
@@ -1775,19 +1835,25 @@ public actor GatewayChannelActor {
         return Data() // Should not happen, but tolerate empty payloads.
     }
 
-    public func send(method: String, params: [String: AnyCodable]?) async throws {
+    public func send(
+        method: String,
+        params: [String: AnyCodable]?,
+        diagnosticRouteGeneration: UInt64? = nil) async throws
+    {
         try await self.connectOrThrow(context: "gateway connect")
         try await self.send(
             method: method,
             params: params,
-            connectionGeneration: self.connectionGeneration)
+            connectionGeneration: self.connectionGeneration,
+            routeGeneration: diagnosticRouteGeneration)
     }
 
     /// Dispatches only through the socket that admitted the owning operation.
     public func send(
         method: String,
         params: [String: AnyCodable]?,
-        ifCurrentConnectionGeneration expectedGeneration: UInt64) async throws
+        ifCurrentConnectionGeneration expectedGeneration: UInt64,
+        diagnosticRouteGeneration: UInt64? = nil) async throws
     {
         guard self.isConnected(connectionGeneration: expectedGeneration) else {
             throw CancellationError()
@@ -1795,15 +1861,20 @@ public actor GatewayChannelActor {
         try await self.send(
             method: method,
             params: params,
-            connectionGeneration: expectedGeneration)
+            connectionGeneration: expectedGeneration,
+            routeGeneration: diagnosticRouteGeneration)
     }
 
     private func send(
         method: String,
         params: [String: AnyCodable]?,
-        connectionGeneration: UInt64) async throws
+        connectionGeneration: UInt64,
+        routeGeneration: UInt64?) async throws
     {
         let payload = try self.encodeRequest(method: method, params: params, kind: "send")
+        let shape = GatewayRPCDiagnosticParameterShape.inspect(params)
+        let admittedAt = Date()
+        let admittedUptime = ProcessInfo.processInfo.systemUptime
         guard self.isConnected(connectionGeneration: connectionGeneration),
               let task = self.task
         else {
@@ -1812,14 +1883,60 @@ public actor GatewayChannelActor {
                 code: 5,
                 userInfo: [NSLocalizedDescriptionKey: "gateway socket unavailable"])
         }
+        self.recordRPCDiagnostic(
+            state: "request_admitted",
+            operationIdentifier: payload.id,
+            connectionGeneration: connectionGeneration,
+            routeGeneration: routeGeneration,
+            method: method,
+            shape: shape,
+            admittedAt: admittedAt,
+            elapsedMilliseconds: 0,
+            resultClass: "requested")
         do {
             try await task.send(.data(payload.data))
             guard self.isConnected(connectionGeneration: connectionGeneration) else {
                 throw CancellationError()
             }
+            self.recordRPCDiagnostic(
+                state: "request_completed",
+                operationIdentifier: payload.id,
+                connectionGeneration: connectionGeneration,
+                routeGeneration: routeGeneration,
+                method: method,
+                shape: shape,
+                admittedAt: admittedAt,
+                elapsedMilliseconds: max(
+                    0,
+                    Int((ProcessInfo.processInfo.systemUptime - admittedUptime) * 1000)),
+                resultClass: "transport_write_accepted_unacknowledged")
         } catch is CancellationError {
+            self.recordRPCDiagnostic(
+                state: "request_cancelled",
+                operationIdentifier: payload.id,
+                connectionGeneration: connectionGeneration,
+                routeGeneration: routeGeneration,
+                method: method,
+                shape: shape,
+                admittedAt: admittedAt,
+                elapsedMilliseconds: max(
+                    0,
+                    Int((ProcessInfo.processInfo.systemUptime - admittedUptime) * 1000)),
+                resultClass: "cancelled")
             throw CancellationError()
         } catch {
+            self.recordRPCDiagnostic(
+                state: "request_failed",
+                operationIdentifier: payload.id,
+                connectionGeneration: connectionGeneration,
+                routeGeneration: routeGeneration,
+                method: method,
+                shape: shape,
+                admittedAt: admittedAt,
+                elapsedMilliseconds: max(
+                    0,
+                    Int((ProcessInfo.processInfo.systemUptime - admittedUptime) * 1000)),
+                resultClass: "transport_error")
             let wrapped = self.wrap(error, context: "gateway send \(method)")
             await self.transitionToDisconnected(
                 reason: "send failed: \(wrapped.localizedDescription)",
@@ -1899,7 +2016,11 @@ public actor GatewayChannelActor {
         }
     }
 
-    private func failPending(_ error: Error, connectionGeneration: UInt64?) async {
+    private func failPending(
+        _ error: Error,
+        connectionGeneration: UInt64?,
+        resultClass: String? = nil) async
+    {
         let requestIDs: [String] = self.pending.compactMap { id, pending -> String? in
             if let connectionGeneration, pending.connectionGeneration != connectionGeneration {
                 return nil
@@ -1908,12 +2029,13 @@ public actor GatewayChannelActor {
         }
         for id in requestIDs {
             guard let pending = self.pending.removeValue(forKey: id) else { continue }
-            OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-                kind: .socket,
-                state: "request_failed",
-                connectionRole: self.diagnosticConnectionRole,
-                socketGeneration: pending.connectionGeneration,
-                operationIdentifier: id))
+            let resolvedResultClass = resultClass ??
+                (error is CancellationError ? "cancelled" : "transport_error")
+            self.recordRPCDiagnostic(
+                state: resolvedResultClass == "cancelled" ? "request_cancelled" : "request_failed",
+                operationIdentifier: id,
+                pending: pending,
+                resultClass: resolvedResultClass)
             pending.continuation.resume(throwing: error)
         }
     }
@@ -1927,12 +2049,11 @@ public actor GatewayChannelActor {
               pending.connectionGeneration == connectionGeneration
         else { return }
         self.pending.removeValue(forKey: id)
-        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-            kind: .socket,
+        self.recordRPCDiagnostic(
             state: "request_timed_out",
-            connectionRole: self.diagnosticConnectionRole,
-            socketGeneration: connectionGeneration,
-            operationIdentifier: id))
+            operationIdentifier: id,
+            pending: pending,
+            resultClass: "timeout")
         let err = NSError(
             domain: "Gateway",
             code: 5,
@@ -1945,13 +2066,66 @@ public actor GatewayChannelActor {
               pending.connectionGeneration == connectionGeneration
         else { return }
         self.pending.removeValue(forKey: id)
+        self.recordRPCDiagnostic(
+            state: "request_cancelled",
+            operationIdentifier: id,
+            pending: pending,
+            resultClass: "cancelled")
+        pending.continuation.resume(throwing: CancellationError())
+    }
+
+    private func recordRPCDiagnostic(
+        state: String,
+        operationIdentifier: String,
+        pending: PendingRequest,
+        resultClass: String,
+        gatewayErrorCode: String? = nil)
+    {
+        let elapsed = max(
+            0,
+            Int((ProcessInfo.processInfo.systemUptime - pending.admittedUptime) * 1000))
+        self.recordRPCDiagnostic(
+            state: state,
+            operationIdentifier: operationIdentifier,
+            connectionGeneration: pending.connectionGeneration,
+            routeGeneration: pending.routeGeneration,
+            method: pending.rpcMethod,
+            shape: pending.parameterShape,
+            admittedAt: pending.admittedAt,
+            elapsedMilliseconds: elapsed,
+            resultClass: resultClass,
+            gatewayErrorCode: gatewayErrorCode)
+    }
+
+    private func recordRPCDiagnostic(
+        state: String,
+        operationIdentifier: String,
+        connectionGeneration: UInt64,
+        routeGeneration: UInt64?,
+        method: String,
+        shape: GatewayRPCDiagnosticParameterShape,
+        admittedAt: Date,
+        elapsedMilliseconds: Int?,
+        resultClass: String,
+        gatewayErrorCode: String? = nil)
+    {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .socket,
-            state: "request_cancelled",
+            state: state,
             connectionRole: self.diagnosticConnectionRole,
             socketGeneration: connectionGeneration,
-            operationIdentifier: id))
-        pending.continuation.resume(throwing: CancellationError())
+            routeGeneration: routeGeneration,
+            sessionIdentifier: shape.sessionIdentifier,
+            operationIdentifier: operationIdentifier,
+            rpcMethod: method,
+            admittedAt: admittedAt,
+            gatewayErrorCode: gatewayErrorCode,
+            offsetPresent: shape.offsetPresent,
+            offsetType: shape.offsetType,
+            limitPresent: shape.limitPresent,
+            maxCharsPresent: shape.maxCharsPresent,
+            elapsedMilliseconds: elapsedMilliseconds,
+            resultClass: resultClass))
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import OpenClawKit
+import os
 import Testing
 @testable import OpenClawChatUI
 
@@ -578,6 +579,10 @@ private final class TestChatTransport: @unchecked Sendable, OpenClawChatTranspor
     func createdParentSessionKeys() async -> [String?] {
         await self.state.createdParentSessionKeys
     }
+
+    func historyCallCount() async -> Int {
+        await self.state.historyCallCount
+    }
 }
 
 extension TestChatTransportState {
@@ -650,6 +655,7 @@ extension TestChatTransportState {
     }
 }
 
+@Suite(.serialized)
 struct ChatViewModelTests {
     @Test func `displays error message fallback only for assistant error turns`() throws {
         func decodeMessage(role: String, stopReason: String, contentText: String? = nil) throws -> OpenClawChatMessage {
@@ -4913,4 +4919,311 @@ struct ChatViewModelTests {
 
         try await waitUntil("pending run clears") { await MainActor.run { vm.pendingRunCount == 0 } }
     }
+
+    @Test func `invalid history request stops bounded post send retry churn`() async throws {
+        let historyCalls = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(sessionId: "sess-main")],
+            requestHistoryHook: { _ in
+                let call = await historyCalls.increment()
+                if call >= 2 {
+                    throw GatewayResponseError(
+                        method: "chat.history",
+                        code: "INVALID_REQUEST",
+                        message: "/offset: must be integer",
+                        details: nil)
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+
+        await sendUserMessage(vm, text: "history schema rejection")
+        try await waitUntil("post-send history rejection surfaces") {
+            await MainActor.run {
+                !vm.isSending && vm.errorText?.contains("INVALID_REQUEST") == true
+            }
+        }
+
+        try await Task.sleep(for: .milliseconds(1700))
+        #expect(await transport.historyCallCount() == 2)
+        await MainActor.run { vm.shutdown() }
+    }
+
+    @Test @MainActor func `older failed history cannot invalidate a later successful refresh`() async throws {
+        let staleHistoryGate = SessionSubscribeGate()
+        let historyCalls = AsyncCounter()
+        let staleFailureReleased = AsyncCounter()
+        let latest = historyPayload(
+            sessionId: "sess-latest",
+            messages: [chatTextMessage(role: "assistant", text: "latest history", timestamp: 3)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(sessionId: "sess-initial"),
+                historyPayload(sessionId: "unused-stale"),
+                latest,
+            ],
+            requestHistoryHook: { _ in
+                let call = await historyCalls.increment()
+                guard call == 2 else { return }
+                await staleHistoryGate.wait()
+                _ = await staleFailureReleased.increment()
+                throw GatewayResponseError(
+                    method: "chat.history",
+                    code: "INVALID_REQUEST",
+                    message: "/offset: must be integer",
+                    details: nil)
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
+
+        transport.emit(.seqGap)
+        try await waitUntil("older refresh is awaiting rejection") {
+            await historyCalls.current() == 2
+        }
+
+        vm.refresh()
+        try await waitUntil("later refresh applies") {
+            vm.sessionId == "sess-latest" &&
+                vm.messages.contains { message in
+                    message.content.contains { $0.text == "latest history" }
+                }
+        }
+
+        await staleHistoryGate.release()
+        try await waitUntil("older rejection returns") {
+            await staleFailureReleased.current() == 1
+        }
+
+        #expect(vm.errorText == nil)
+        #expect(vm.sessionId == "sess-latest")
+        #expect(vm.messages.contains { message in
+            message.content.contains { $0.text == "latest history" }
+        })
+        vm.shutdown()
+    }
+
+    @Test @MainActor func `older rejection cannot surface after a newer history request is issued`() async throws {
+        let staleHistoryGate = SessionSubscribeGate()
+        let newerHistoryGate = SessionSubscribeGate()
+        let historyCalls = AsyncCounter()
+        let staleFailureReturned = AsyncCounter()
+        let latest = historyPayload(
+            sessionId: "sess-latest",
+            messages: [chatTextMessage(role: "assistant", text: "newer history", timestamp: 3)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(sessionId: "sess-initial"),
+                historyPayload(sessionId: "unused-stale"),
+                latest,
+            ],
+            requestHistoryHook: { _ in
+                let call = await historyCalls.increment()
+                if call == 2 {
+                    await staleHistoryGate.wait()
+                    _ = await staleFailureReturned.increment()
+                    throw GatewayResponseError(
+                        method: "chat.history",
+                        code: "INVALID_REQUEST",
+                        message: "/offset: must be integer",
+                        details: nil)
+                }
+                if call == 3 {
+                    await newerHistoryGate.wait()
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-initial")
+
+        transport.emit(.seqGap)
+        try await waitUntil("older refresh is awaiting rejection") {
+            await historyCalls.current() == 2
+        }
+        vm.refresh()
+        try await waitUntil("newer refresh is admitted") {
+            await historyCalls.current() == 3
+        }
+
+        await staleHistoryGate.release()
+        try await waitUntil("older rejection returns before newer success") {
+            await staleFailureReturned.current() == 1
+        }
+        #expect(vm.errorText == nil)
+
+        await newerHistoryGate.release()
+        try await waitUntil("newer refresh applies") {
+            vm.sessionId == "sess-latest" &&
+                vm.messages.contains { message in
+                    message.content.contains { $0.text == "newer history" }
+                }
+        }
+        #expect(vm.errorText == nil)
+        vm.shutdown()
+    }
+
+    @Test @MainActor func `older bootstrap rejection cannot invalidate later successful history`() async throws {
+        let staleBootstrapGate = SessionSubscribeGate()
+        let historyCalls = AsyncCounter()
+        let latest = historyPayload(
+            sessionId: "sess-latest",
+            messages: [chatTextMessage(role: "assistant", text: "later history", timestamp: 3)])
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(sessionId: "unused-bootstrap"), latest],
+            requestHistoryHook: { _ in
+                let call = await historyCalls.increment()
+                guard call == 1 else { return }
+                await staleBootstrapGate.wait()
+                throw GatewayResponseError(
+                    method: "chat.history",
+                    code: "INVALID_REQUEST",
+                    message: "/offset: must be integer",
+                    details: nil)
+            })
+
+        vm.load()
+        try await waitUntil("bootstrap history is awaiting rejection") {
+            await historyCalls.current() == 1
+        }
+        transport.emit(.seqGap)
+        try await waitUntil("later event refresh applies") {
+            vm.sessionId == "sess-latest" &&
+                vm.messages.contains { message in
+                    message.content.contains { $0.text == "later history" }
+                }
+        }
+
+        await staleBootstrapGate.release()
+        try await waitUntil("older bootstrap rejection settles") { !vm.isLoading }
+
+        #expect(vm.errorText == nil)
+        #expect(vm.sessionId == "sess-latest")
+        vm.shutdown()
+    }
+
+    @Test @MainActor func `older bootstrap success cannot clear a newer history rejection`() async throws {
+        let olderBootstrapGate = SessionSubscribeGate()
+        let historyCalls = AsyncCounter()
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [
+                historyPayload(sessionId: "sess-bootstrap"),
+                historyPayload(sessionId: "unused-newer"),
+            ],
+            requestHistoryHook: { _ in
+                let call = await historyCalls.increment()
+                if call == 1 {
+                    await olderBootstrapGate.wait()
+                } else if call == 2 {
+                    throw GatewayResponseError(
+                        method: "chat.history",
+                        code: "INVALID_REQUEST",
+                        message: "/offset: must be integer",
+                        details: nil)
+                }
+            })
+
+        vm.load()
+        try await waitUntil("older bootstrap history is awaiting success") {
+            await historyCalls.current() == 1
+        }
+        transport.emit(.seqGap)
+        try await waitUntil("newer history rejection surfaces") {
+            vm.errorText?.contains("INVALID_REQUEST") == true
+        }
+
+        await olderBootstrapGate.release()
+        try await waitUntil("older bootstrap success settles") {
+            !vm.isLoading && vm.sessionId == "sess-bootstrap"
+        }
+
+        #expect(vm.errorText?.contains("INVALID_REQUEST") == true)
+        vm.shutdown()
+    }
+
+    @Test @MainActor func `chat termination breadcrumbs carry only bounded counts and generations`() async throws {
+        let captured = OSAllocatedUnfairLock(initialState: [String]())
+        let sessionKey = "termination-diagnostic-session"
+        let expectedSessionHash = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "expected",
+            sessionIdentifier: sessionKey).sessionHash
+        OpenClawDiagnosticRecorder.installSink { line in
+            captured.withLock { $0.append(line) }
+        }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        let oneMessage = historyPayload(
+            sessionKey: sessionKey,
+            sessionId: "sess-main",
+            messages: [chatTextMessage(role: "assistant", text: "private content", timestamp: 1)])
+        let (transport, vm) = await makeViewModel(
+            sessionKey: sessionKey,
+            historyResponses: [oneMessage])
+        vm.chatViewAppeared()
+        vm.load()
+        try await waitUntil("history and diagnostics complete") {
+            vm.sessionId == "sess-main" && !vm.isLoading
+        }
+
+        let projection = vm.beginMessageListProjection(inputMessageCount: vm.messages.count)
+        vm.completeMessageListProjection(projection, outputMessageCount: 1)
+        #expect(vm.beginMessageListProjection(inputMessageCount: vm.messages.count) is nil)
+        transport.emit(.health(ok: false))
+        try await waitUntil("event batch diagnostic completes") {
+            captured.withLock { lines in
+                lines.compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+                    .contains {
+                        $0.sessionHash == expectedSessionHash &&
+                            $0.state == "event_batch_application_completed"
+                    }
+            }
+        }
+        vm.chatViewDisappeared()
+        let nextSessionKey = "termination-diagnostic-session-next"
+        let expectedNextSessionHash = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "expected",
+            sessionIdentifier: nextSessionKey).sessionHash
+        vm.switchSession(to: nextSessionKey)
+        vm.shutdown()
+
+        let allEvents = captured.withLock { lines in
+            lines.compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+        }
+        let events = allEvents.filter { $0.sessionHash == expectedSessionHash }
+        let states = events.map(\.state)
+        var priorStateIndex = -1
+        for required in [
+            "chat_view_appeared",
+            "history_request_started",
+            "history_request_succeeded",
+            "history_application_started",
+            "history_application_completed",
+            "message_list_projection_started",
+            "message_list_projection_completed",
+            "event_batch_application_started",
+            "event_batch_application_completed",
+            "chat_view_disappeared",
+        ] {
+            let index = try #require(states.firstIndex(of: required))
+            #expect(index > priorStateIndex)
+            priorStateIndex = index
+        }
+        let projectionEvents = events.filter { $0.state.hasPrefix("message_list_projection_") }
+        #expect(projectionEvents.count == 2)
+        #expect(projectionEvents.allSatisfy { $0.messageCount == 1 && $0.sessionGeneration == 0 })
+        #expect(projectionEvents.first?.diagnosticAttemptID != nil)
+        #expect(projectionEvents.first?.diagnosticAttemptID == projectionEvents.last?.diagnosticAttemptID)
+        let eventBatch = events.filter { $0.state.hasPrefix("event_batch_application_") }
+        #expect(eventBatch.count == 2)
+        #expect(eventBatch.allSatisfy { $0.eventCount == 1 })
+        #expect(eventBatch.first?.diagnosticAttemptID != nil)
+        #expect(eventBatch.first?.diagnosticAttemptID == eventBatch.last?.diagnosticAttemptID)
+        let sessionChanges = allEvents.filter {
+            $0.state == "selected_session_generation_changed" &&
+                $0.sessionHash == expectedNextSessionHash
+        }
+        #expect(sessionChanges.count == 1)
+        #expect(sessionChanges.first?.sessionHash == expectedNextSessionHash)
+        #expect(sessionChanges.first?.sessionGeneration == 1)
+        #expect(sessionChanges.first?.messageCount == 0)
+        let encoded = captured.withLock { $0.joined(separator: "\n") }
+        #expect(!encoded.contains("private content"))
+    }
+
 }

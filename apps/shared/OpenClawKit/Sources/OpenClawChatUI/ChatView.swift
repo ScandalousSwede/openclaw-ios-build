@@ -108,7 +108,11 @@ public struct OpenClawChatView: View {
             self.content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear { self.viewModel.load() }
+        .onAppear {
+            self.viewModel.chatViewAppeared()
+            self.viewModel.load()
+        }
+        .onDisappear { self.viewModel.chatViewDisappeared() }
         .sheet(isPresented: self.$showSessions) {
             if self.showsSessionSwitcher {
                 ChatSessionsSheet(viewModel: self.viewModel)
@@ -484,15 +488,25 @@ public struct OpenClawChatView: View {
     }
 
     private var visibleMessages: [OpenClawChatMessage] {
+        let diagnosticContext = self.viewModel.beginMessageListProjection(
+            inputMessageCount: self.viewModel.messages.count)
         let base: [OpenClawChatMessage]
         if self.style == .onboarding {
-            guard let first = self.viewModel.messages.first else { return [] }
-            base = first.role.lowercased() == "user" ? Array(self.viewModel.messages.dropFirst()) : self.viewModel
-                .messages
+            if let first = self.viewModel.messages.first {
+                base = first.role.lowercased() == "user"
+                    ? Array(self.viewModel.messages.dropFirst())
+                    : self.viewModel.messages
+            } else {
+                base = []
+            }
         } else {
             base = self.viewModel.messages
         }
-        return self.mergeToolResults(in: base).filter(self.shouldDisplayMessage(_:))
+        let projected = self.mergeToolResults(in: base).filter(self.shouldDisplayMessage(_:))
+        self.viewModel.completeMessageListProjection(
+            diagnosticContext,
+            outputMessageCount: projected.count)
+        return projected
     }
 
     @ViewBuilder

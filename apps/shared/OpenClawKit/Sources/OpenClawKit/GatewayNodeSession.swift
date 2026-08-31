@@ -619,7 +619,8 @@ public actor GatewayNodeSession {
             try await channel.send(
                 method: "node.event",
                 params: params,
-                ifCurrentConnectionGeneration: route.socketGeneration)
+                ifCurrentConnectionGeneration: route.socketGeneration,
+                diagnosticRouteGeneration: route.admissionGeneration)
             guard self.isCurrentRoute(route), self.channel === channel
             else { return }
         } catch {
@@ -646,7 +647,8 @@ public actor GatewayNodeSession {
             try await channel.send(
                 method: "node.event",
                 params: params,
-                ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+                ifCurrentConnectionGeneration: expectedRoute.socketGeneration,
+                diagnosticRouteGeneration: expectedRoute.admissionGeneration)
             return self.isCurrentRoute(expectedRoute) && self.channel === channel
         } catch {
             self.logger.error("node event failed: \(error.localizedDescription, privacy: .public)")
@@ -665,7 +667,8 @@ public actor GatewayNodeSession {
         try await channel.send(
             method: method,
             params: params,
-            ifCurrentConnectionGeneration: route.socketGeneration)
+            ifCurrentConnectionGeneration: route.socketGeneration,
+            diagnosticRouteGeneration: route.admissionGeneration)
         guard self.isCurrentRoute(route), self.channel === channel
         else { throw CancellationError() }
     }
@@ -682,7 +685,8 @@ public actor GatewayNodeSession {
         try await channel.send(
             method: method,
             params: params,
-            ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+            ifCurrentConnectionGeneration: expectedRoute.socketGeneration,
+            diagnosticRouteGeneration: expectedRoute.admissionGeneration)
         guard self.isCurrentRoute(expectedRoute), self.channel === channel else {
             throw CancellationError()
         }
@@ -700,7 +704,8 @@ public actor GatewayNodeSession {
             method: method,
             params: params,
             timeoutMs: Double(timeoutSeconds * 1000),
-            ifCurrentConnectionGeneration: route.socketGeneration)
+            ifCurrentConnectionGeneration: route.socketGeneration,
+            diagnosticRouteGeneration: route.admissionGeneration)
         guard self.isCurrentRoute(route), self.channel === channel
         else { throw CancellationError() }
         return data
@@ -720,7 +725,8 @@ public actor GatewayNodeSession {
             method: method,
             params: params,
             timeoutMs: Double(timeoutSeconds * 1000),
-            ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+            ifCurrentConnectionGeneration: expectedRoute.socketGeneration,
+            diagnosticRouteGeneration: expectedRoute.admissionGeneration)
         guard self.isCurrentRoute(expectedRoute), self.channel === channel else {
             throw CancellationError()
         }
@@ -746,7 +752,8 @@ public actor GatewayNodeSession {
             method: method,
             params: params,
             timeoutMs: Double(timeoutSeconds * 1000),
-            ifCurrentConnectionGeneration: expectedRoute.socketGeneration)
+            ifCurrentConnectionGeneration: expectedRoute.socketGeneration,
+            diagnosticRouteGeneration: expectedRoute.admissionGeneration)
     }
 
     public func subscribeServerEvents(bufferingNewest: Int = 200) -> AsyncStream<EventFrame> {
@@ -1188,7 +1195,8 @@ public actor GatewayNodeSession {
                 method: method,
                 params: params,
                 timeoutMs: Double(timeoutSeconds * 1000),
-                ifCurrentConnectionGeneration: route.socketGeneration)
+                ifCurrentConnectionGeneration: route.socketGeneration,
+                diagnosticRouteGeneration: route.admissionGeneration)
             guard self.isCurrentRoute(route), self.channel === channel
             else { return nil }
             let decoded = try self.decoder.decode(PluginSurfaceRefreshResponse.self, from: data)
@@ -1237,7 +1245,7 @@ public actor GatewayNodeSession {
                 request: request,
                 response: response,
                 channel: channel,
-                socketGeneration: route.socketGeneration)
+                route: route)
         } catch {
             self.logger.error("node invoke decode failed: \(error.localizedDescription, privacy: .public)")
         }
@@ -1259,7 +1267,7 @@ public actor GatewayNodeSession {
         request: NodeInvokeRequestPayload,
         response: BridgeInvokeResponse,
         channel: GatewayChannelActor,
-        socketGeneration: UInt64) async
+        route: GatewayNodeSessionRoute) async
     {
         self.logger.info(
             "node invoke result sending id=\(request.id, privacy: .public) ok=\(response.ok, privacy: .public)")
@@ -1281,7 +1289,8 @@ public actor GatewayNodeSession {
             try await channel.send(
                 method: "node.invoke.result",
                 params: params,
-                ifCurrentConnectionGeneration: socketGeneration)
+                ifCurrentConnectionGeneration: route.socketGeneration,
+                diagnosticRouteGeneration: route.admissionGeneration)
         } catch {
             self.logger.error(
                 "node invoke result failed id=\(request.id, privacy: .public) error=\(error.localizedDescription, privacy: .public)")

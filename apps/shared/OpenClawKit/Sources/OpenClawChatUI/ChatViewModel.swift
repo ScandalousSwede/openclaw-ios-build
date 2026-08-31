@@ -12,7 +12,9 @@ public final class OpenClawChatViewModel {
     public static let defaultModelSelectionID = "__default__"
     static let maxAttachmentBytes = 5_000_000
 
-    public private(set) var messages: [OpenClawChatMessage] = []
+    public private(set) var messages: [OpenClawChatMessage] = [] {
+        didSet { self.messageProjectionGeneration &+= 1 }
+    }
     public var input: String = "" {
         didSet {
             if self.input != oldValue { self.draftRevision &+= 1 }
@@ -77,6 +79,15 @@ public final class OpenClawChatViewModel {
     // Failed later refreshes must not drop the last successful pending-run history payload.
     private var lastIssuedHistoryRequestID: UInt64 = 0
     private var latestAppliedHistoryRequestID: UInt64 = 0
+    private var historyErrorReceipt: HistoryErrorReceipt?
+    @ObservationIgnored
+    private var lastCompletedMessageProjection: MessageProjectionSignature?
+    @ObservationIgnored
+    private var nextMessageProjectionID: UInt64 = 0
+    @ObservationIgnored
+    private var messageProjectionGeneration: UInt64 = 0
+    @ObservationIgnored
+    private var nextEventApplicationID: UInt64 = 0
 
     @ObservationIgnored
     private nonisolated(unsafe) var pendingRunTimeoutTasks: [String: Task<Void, Never>] = [:]
@@ -129,10 +140,49 @@ public final class OpenClawChatViewModel {
         var latestUserTurn: LatestUserTurn?
     }
 
+    private struct HistoryErrorReceipt {
+        var requestID: UInt64
+        var session: SessionSnapshot
+        var message: String
+    }
+
     private struct LatestUserTurn {
         var refreshKey: String?
         var occurrence: Int
         var timestamp: Double?
+    }
+
+    struct MessageProjectionContext {
+        fileprivate var id: UInt64
+        fileprivate var sessionGeneration: UInt64
+        fileprivate var inputMessageCount: Int
+        fileprivate var sessionKey: String
+    }
+
+    private struct MessageProjectionSignature: Equatable {
+        var sessionGeneration: UInt64
+        var projectionGeneration: UInt64
+        var inputMessageCount: Int
+    }
+
+    private enum HistoryRefreshOutcome: Equatable {
+        case applied
+        case discarded
+        case invalidRequest
+        case transientFailure
+
+        var didApply: Bool {
+            self == .applied
+        }
+
+        var permitsBoundedRetry: Bool {
+            switch self {
+            case .applied, .discarded, .transientFailure:
+                true
+            case .invalidRequest:
+                false
+            }
+        }
     }
 
     private var pendingToolCallsById: [String: OpenClawChatPendingToolCall] = [:] {
@@ -448,6 +498,101 @@ public final class OpenClawChatViewModel {
         self.diagnosticsLog?(message)
     }
 
+    private func recordChatDiagnostic(
+        state: String,
+        session: SessionSnapshot? = nil,
+        diagnosticAttemptID: String? = nil,
+        stream: String? = nil,
+        resultClass: String? = nil,
+        eventCount: Int? = nil,
+        messageCount: Int? = nil)
+    {
+        let session = session ?? self.currentSessionSnapshot()
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: state,
+            sessionIdentifier: session.key,
+            diagnosticAttemptID: diagnosticAttemptID,
+            stream: stream,
+            resultClass: resultClass,
+            eventCount: eventCount,
+            messageCount: messageCount,
+            sessionGeneration: session.generation))
+    }
+
+    func chatViewAppeared() {
+        self.recordChatDiagnostic(
+            state: "chat_view_appeared",
+            resultClass: "success",
+            messageCount: self.messages.count)
+    }
+
+    func chatViewDisappeared() {
+        self.recordChatDiagnostic(
+            state: "chat_view_disappeared",
+            resultClass: "success",
+            messageCount: self.messages.count)
+    }
+
+    func beginMessageListProjection(inputMessageCount: Int) -> MessageProjectionContext? {
+        let session = self.currentSessionSnapshot()
+        let signature = MessageProjectionSignature(
+            sessionGeneration: session.generation,
+            projectionGeneration: self.messageProjectionGeneration,
+            inputMessageCount: inputMessageCount)
+        guard signature != self.lastCompletedMessageProjection else { return nil }
+        self.nextMessageProjectionID &+= 1
+        let context = MessageProjectionContext(
+            id: self.nextMessageProjectionID,
+            sessionGeneration: session.generation,
+            inputMessageCount: inputMessageCount,
+            sessionKey: session.key)
+        self.recordChatDiagnostic(
+            state: "message_list_projection_started",
+            session: session,
+            diagnosticAttemptID: "message-projection-\(context.id)",
+            resultClass: "requested",
+            messageCount: inputMessageCount)
+        return context
+    }
+
+    func completeMessageListProjection(
+        _ context: MessageProjectionContext?,
+        outputMessageCount: Int)
+    {
+        guard let context else { return }
+        let session = SessionSnapshot(
+            key: context.sessionKey,
+            generation: context.sessionGeneration)
+        self.recordChatDiagnostic(
+            state: "message_list_projection_completed",
+            session: session,
+            diagnosticAttemptID: "message-projection-\(context.id)",
+            resultClass: "success",
+            messageCount: outputMessageCount)
+        guard self.isCurrentSession(session) else { return }
+        self.lastCompletedMessageProjection = MessageProjectionSignature(
+            sessionGeneration: context.sessionGeneration,
+            projectionGeneration: self.messageProjectionGeneration,
+            inputMessageCount: context.inputMessageCount)
+    }
+
+    private static func diagnosticStream(for event: OpenClawChatTransportEvent) -> String {
+        switch event {
+        case .health: "health"
+        case .tick: "tick"
+        case .chat: "chat"
+        case .sessionMessage: "session_message"
+        case .agent: "agent"
+        case .seqGap: "seq_gap"
+        }
+    }
+
+    private static func isInvalidRequest(_ error: Error) -> Bool {
+        guard let responseError = error as? GatewayResponseError else { return false }
+        return responseError.code.caseInsensitiveCompare("INVALID_REQUEST") == .orderedSame
+    }
+
     private func currentSessionSnapshot() -> SessionSnapshot {
         SessionSnapshot(key: self.sessionKey, generation: self.sessionGeneration)
     }
@@ -497,7 +642,24 @@ public final class OpenClawChatViewModel {
         guard !self.isShutDown,
               self.eventSubscriptionGeneration == admittedSubscriptionGeneration
         else { return }
+        let stream = Self.diagnosticStream(for: event)
+        self.nextEventApplicationID &+= 1
+        let attemptID = "event-\(admittedSubscriptionGeneration)-\(self.nextEventApplicationID)-\(stream)"
+        self.recordChatDiagnostic(
+            state: "event_batch_application_started",
+            diagnosticAttemptID: attemptID,
+            stream: stream,
+            resultClass: "requested",
+            eventCount: 1,
+            messageCount: self.messages.count)
         self.handleTransportEvent(event)
+        self.recordChatDiagnostic(
+            state: "event_batch_application_completed",
+            diagnosticAttemptID: attemptID,
+            stream: stream,
+            resultClass: "success",
+            eventCount: 1,
+            messageCount: self.messages.count)
     }
 
     #if DEBUG
@@ -557,6 +719,29 @@ public final class OpenClawChatViewModel {
         self.latestAppliedHistoryRequestID = max(self.latestAppliedHistoryRequestID, request.id)
     }
 
+    private func applyHistoryError(_ error: Error, for request: HistoryRequest) {
+        guard request.id == self.lastIssuedHistoryRequestID,
+              self.isCurrentSession(request.session)
+        else { return }
+        let message = error.localizedDescription
+        self.errorText = message
+        self.historyErrorReceipt = HistoryErrorReceipt(
+            requestID: request.id,
+            session: request.session,
+            message: message)
+    }
+
+    private func clearHistoryErrorIfOwned(by request: HistoryRequest) {
+        guard let receipt = self.historyErrorReceipt,
+              receipt.session.key == request.session.key,
+              receipt.session.generation == request.session.generation,
+              request.id >= receipt.requestID,
+              self.errorText == receipt.message
+        else { return }
+        self.errorText = nil
+        self.historyErrorReceipt = nil
+    }
+
     @discardableResult
     private func applyHistoryPayload(
         _ payload: OpenClawChatHistoryPayload,
@@ -564,7 +749,22 @@ public final class OpenClawChatViewModel {
         preservingOptimisticLocalMessages: Bool,
         syncThinkingOptions: Bool = false) -> Bool
     {
-        guard self.canApplyHistory(request) else { return false }
+        let attemptID = "history-\(request.session.generation)-\(request.id)"
+        guard self.canApplyHistory(request) else {
+            self.recordChatDiagnostic(
+                state: "history_application_rejected",
+                session: request.session,
+                diagnosticAttemptID: attemptID,
+                resultClass: "interrupted",
+                messageCount: self.messages.count)
+            return false
+        }
+        self.recordChatDiagnostic(
+            state: "history_application_started",
+            session: request.session,
+            diagnosticAttemptID: attemptID,
+            resultClass: "requested",
+            messageCount: payload.messages?.count ?? 0)
         let previous = self.messages
         let incoming = Self.decodeMessages(payload.messages ?? [])
         self.messages = if preservingOptimisticLocalMessages {
@@ -598,6 +798,12 @@ public final class OpenClawChatViewModel {
         if syncThinkingOptions || appliedThinkingLevel != nil {
             self.syncThinkingLevelOptions()
         }
+        self.recordChatDiagnostic(
+            state: "history_application_completed",
+            session: request.session,
+            diagnosticAttemptID: attemptID,
+            resultClass: "success",
+            messageCount: self.messages.count)
         return true
     }
 
@@ -612,6 +818,7 @@ public final class OpenClawChatViewModel {
         self.bootstrapTask?.cancel()
         self.isLoading = true
         self.errorText = nil
+        self.historyErrorReceipt = nil
         self.healthOK = false
         self.clearPendingRuns(reason: nil)
         self.pendingToolCallsById = [:]
@@ -635,23 +842,44 @@ public final class OpenClawChatViewModel {
             await self.syncActiveSessionSubscription(startingWith: context.session.key)
             guard self.isCurrentBootstrap(context) else { return }
 
+            let historyAttemptID = "history-\(context.session.generation)-\(context.historyRequest.id)"
+            self.recordChatDiagnostic(
+                state: "history_request_started",
+                session: context.session,
+                diagnosticAttemptID: historyAttemptID,
+                resultClass: "requested",
+                messageCount: self.messages.count)
             let payload = try await transport.requestHistory(sessionKey: context.session.key)
             guard self.isCurrentBootstrap(context) else { return }
-            _ = self.applyHistoryPayload(
+            self.recordChatDiagnostic(
+                state: "history_request_succeeded",
+                session: context.session,
+                diagnosticAttemptID: historyAttemptID,
+                resultClass: "success",
+                messageCount: payload.messages?.count ?? 0)
+            let applied = self.applyHistoryPayload(
                 payload,
                 for: context.historyRequest,
                 preservingOptimisticLocalMessages: false,
                 syncThinkingOptions: true)
+            if applied {
+                self.clearHistoryErrorIfOwned(by: context.historyRequest)
+            }
             await self.pollHealthIfNeeded(force: true, sessionSnapshot: context.session)
             guard self.isCurrentBootstrap(context) else { return }
             await self.fetchSessions(limit: 50, sessionSnapshot: context.session)
             guard self.isCurrentBootstrap(context) else { return }
             await self.fetchModels(sessionSnapshot: context.session)
             guard self.isCurrentBootstrap(context) else { return }
-            self.errorText = nil
         } catch {
             guard self.isCurrentBootstrap(context) else { return }
-            self.errorText = error.localizedDescription
+            self.recordChatDiagnostic(
+                state: "history_request_rejected",
+                session: context.session,
+                diagnosticAttemptID: "history-\(context.session.generation)-\(context.historyRequest.id)",
+                resultClass: Self.isInvalidRequest(error) ? "gateway_rejected" : "failed",
+                messageCount: self.messages.count)
+            self.applyHistoryError(error, for: context.historyRequest)
             chatUILogger.error("bootstrap failed \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -1203,20 +1431,22 @@ public final class OpenClawChatViewModel {
                 self.armPendingRunTimeout(runId: response.runId)
             }
             let historyContext = self.beginHistoryRequest(for: sessionSnapshot)
-            await self.refreshHistoryAfterRun(historyRequest: historyContext)
+            let historyRefresh = await self.refreshHistoryAfterRun(historyRequest: historyContext)
             guard self.isCurrentSession(sessionSnapshot) else { return }
             if !self.clearPendingRunIfAssistantMessagePresent(
                 runId: response.runId,
                 after: userMessageTimestamp)
             {
-                self.armPostSendRefreshFallback(
-                    runId: response.runId,
-                    sessionSnapshot: sessionSnapshot,
-                    userMessageTimestamp: userMessageTimestamp)
-                self.armRunCompletionRefresh(
-                    runId: response.runId,
-                    sessionSnapshot: sessionSnapshot,
-                    userMessageTimestamp: userMessageTimestamp)
+                if historyRefresh.permitsBoundedRetry {
+                    self.armPostSendRefreshFallback(
+                        runId: response.runId,
+                        sessionSnapshot: sessionSnapshot,
+                        userMessageTimestamp: userMessageTimestamp)
+                    self.armRunCompletionRefresh(
+                        runId: response.runId,
+                        sessionSnapshot: sessionSnapshot,
+                        userMessageTimestamp: userMessageTimestamp)
+                }
             }
         } catch {
             guard self.isCurrentSession(sessionSnapshot) else { return }
@@ -1491,6 +1721,10 @@ public final class OpenClawChatViewModel {
         guard next != self.sessionKey else { return }
         self.advanceSessionGeneration()
         self.sessionKey = next
+        self.recordChatDiagnostic(
+            state: "selected_session_generation_changed",
+            resultClass: "success",
+            messageCount: 0)
         if intent == .userInitiated {
             self.onSessionChanged?(next)
         }
@@ -1556,6 +1790,10 @@ public final class OpenClawChatViewModel {
         }
         self.advanceSessionGeneration()
         self.sessionKey = next
+        self.recordChatDiagnostic(
+            state: "selected_session_generation_changed",
+            resultClass: "success",
+            messageCount: 0)
         self.onSessionChanged?(next)
         self.modelSelectionID = Self.defaultModelSelectionID
         self.messages = []
@@ -2154,7 +2392,7 @@ public final class OpenClawChatViewModel {
                 // admitted run ended. Retire run-owned transient state only
                 // after refreshed durable history proves an assistant response
                 // follows the latest user turn.
-                if refreshed,
+                if refreshed.didApply,
                    self.isCurrentSession(context.session),
                    !self.pendingRuns.isEmpty,
                    self.hasAssistantMessageAfterLatestUser()
@@ -2457,7 +2695,8 @@ public final class OpenClawChatViewModel {
         }
         self.logDiagnostic(diagnostic)
         let historyContext = self.beginHistoryRequest(for: sessionSnapshot)
-        await self.refreshHistoryAfterRun(historyRequest: historyContext)
+        let refresh = await self.refreshHistoryAfterRun(historyRequest: historyContext)
+        guard refresh.permitsBoundedRetry else { return false }
         guard self.isCurrentSession(sessionSnapshot),
               self.pendingRuns.contains(runId)
         else {
@@ -2574,17 +2813,44 @@ public final class OpenClawChatViewModel {
     }
 
     @discardableResult
-    private func refreshHistoryAfterRun(historyRequest request: HistoryRequest? = nil) async -> Bool {
+    private func refreshHistoryAfterRun(historyRequest request: HistoryRequest? = nil) async -> HistoryRefreshOutcome {
         let request = request ?? self.beginHistoryRequest()
+        let attemptID = "history-\(request.session.generation)-\(request.id)"
+        self.recordChatDiagnostic(
+            state: "history_request_started",
+            session: request.session,
+            diagnosticAttemptID: attemptID,
+            resultClass: "requested",
+            messageCount: self.messages.count)
         do {
             let payload = try await transport.requestHistory(sessionKey: request.session.key)
-            return self.applyHistoryPayload(
+            self.recordChatDiagnostic(
+                state: "history_request_succeeded",
+                session: request.session,
+                diagnosticAttemptID: attemptID,
+                resultClass: "success",
+                messageCount: payload.messages?.count ?? 0)
+            let applied = self.applyHistoryPayload(
                 payload,
                 for: request,
                 preservingOptimisticLocalMessages: true)
+            if applied {
+                self.clearHistoryErrorIfOwned(by: request)
+            }
+            return applied ? .applied : .discarded
         } catch {
+            let invalidRequest = Self.isInvalidRequest(error)
+            self.recordChatDiagnostic(
+                state: "history_request_rejected",
+                session: request.session,
+                diagnosticAttemptID: attemptID,
+                resultClass: invalidRequest ? "gateway_rejected" : "failed",
+                messageCount: self.messages.count)
+            if invalidRequest {
+                self.applyHistoryError(error, for: request)
+            }
             chatUILogger.error("refresh history failed \(error.localizedDescription, privacy: .public)")
-            return false
+            return invalidRequest ? .invalidRequest : .transientFailure
         }
     }
 

@@ -8,6 +8,12 @@ public enum OpenClawDiagnosticConnectionRole: String, Codable, Sendable {
     case unknown
 }
 
+public enum OpenClawDiagnosticRPCOffsetType: String, Codable, Equatable, Sendable {
+    case absent
+    case integer
+    case invalid
+}
+
 public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case appLifecycle = "app_lifecycle"
@@ -55,6 +61,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let eventID: String?
     public let operationID: String?
     public let operationGeneration: UInt64?
+    public let rpcMethod: String?
+    public let admittedAt: String?
+    public let gatewayErrorCode: String?
+    public let offsetPresent: Bool?
+    public let offsetType: OpenClawDiagnosticRPCOffsetType?
+    public let limitPresent: Bool?
+    public let maxCharsPresent: Bool?
+    public let elapsedMilliseconds: Int?
+    public let eventCount: Int?
+    public let messageCount: Int?
+    public let sessionGeneration: UInt64?
     public let diagnosticAttemptID: String?
     public let registrationAttemptID: String?
     public let sequence: Int?
@@ -96,6 +113,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         eventIdentifier: String? = nil,
         operationIdentifier: String? = nil,
         operationGeneration: UInt64? = nil,
+        rpcMethod: String? = nil,
+        admittedAt: Date? = nil,
+        gatewayErrorCode: String? = nil,
+        offsetPresent: Bool? = nil,
+        offsetType: OpenClawDiagnosticRPCOffsetType? = nil,
+        limitPresent: Bool? = nil,
+        maxCharsPresent: Bool? = nil,
+        elapsedMilliseconds: Int? = nil,
+        eventCount: Int? = nil,
+        messageCount: Int? = nil,
+        sessionGeneration: UInt64? = nil,
         diagnosticAttemptID: String? = nil,
         registrationAttemptID: String? = nil,
         sequence: Int? = nil,
@@ -146,6 +174,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.eventID = Self.hashedIdentifier(eventIdentifier)
         self.operationID = Self.hashedIdentifier(operationIdentifier)
         self.operationGeneration = operationGeneration
+        self.rpcMethod = Self.sanitizedToken(rpcMethod, maximumLength: 128)
+        self.admittedAt = admittedAt.map(Self.timestamp)
+        self.gatewayErrorCode = Self.sanitizedToken(gatewayErrorCode, maximumLength: 64)
+        self.offsetPresent = offsetPresent
+        self.offsetType = offsetType
+        self.limitPresent = limitPresent
+        self.maxCharsPresent = maxCharsPresent
+        self.elapsedMilliseconds = elapsedMilliseconds.flatMap { $0 >= 0 ? $0 : nil }
+        self.eventCount = eventCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.messageCount = messageCount.flatMap { $0 >= 0 ? $0 : nil }
+        self.sessionGeneration = sessionGeneration
         self.diagnosticAttemptID = Self.hashedIdentifier(diagnosticAttemptID)
         self.registrationAttemptID = Self.hashedIdentifier(registrationAttemptID)
         self.sequence = sequence.flatMap { $0 >= 0 ? $0 : nil }
@@ -193,6 +232,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case eventID = "event_id"
         case operationID = "operation_id"
         case operationGeneration = "operation_generation"
+        case rpcMethod = "rpc_method"
+        case admittedAt = "admitted_at"
+        case gatewayErrorCode = "gateway_error_code"
+        case offsetPresent = "offset_present"
+        case offsetType = "offset_type"
+        case limitPresent = "limit_present"
+        case maxCharsPresent = "max_chars_present"
+        case elapsedMilliseconds = "elapsed_milliseconds"
+        case eventCount = "event_count"
+        case messageCount = "message_count"
+        case sessionGeneration = "session_generation"
         case diagnosticAttemptID = "diagnostic_attempt_id"
         case registrationAttemptID = "registration_attempt_id"
         case sequence
@@ -282,6 +332,9 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "mp3_to_system",
         "mp3_retry",
         "node_permission_grant",
+        "node_route_admitted",
+        "operator_route_admitted",
+        "os_token_received",
         "output_route_observed",
         "payload_or_relay_preparation",
         "pcm_to_mp3",
@@ -297,7 +350,11 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "provider_to_system",
         "provider_unavailable_to_system",
         "relay_identity_route",
+        "relay_identity_request",
         "relay_registration_response",
+        "registration_state_changed",
+        "gateway_configuration_changed",
+        "state_transition",
         "stream_completed",
         "stream_first_chunk_received",
         "speaking",
@@ -309,6 +366,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "config_redacted",
         "generating",
         "idle",
+        "in_flight_completed",
         "pcm_playing",
         "permission_required",
         "tts_audio_received",
@@ -348,9 +406,12 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     private static let allowedResultClasses: Set<String> = [
         "cancelled",
         "coalesced_request",
+        "connection_owner_unavailable",
+        "configuration_generation_changed",
         "direct",
         "failed",
         "finished",
+        "gateway_rejected",
         "http_4xx",
         "http_5xx",
         "incomplete",
@@ -362,8 +423,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "marker_replaced",
         "marker_write_failed",
         "new_os_token_received",
+        "node_connection_unavailable",
         "node_event_transport",
+        "node_gateway_identity_mismatch",
+        "node_route_stale",
+        "node_route_unavailable",
         "not_attempted",
+        "operator_connection_unavailable",
+        "operator_gateway_identity_mismatch",
+        "operator_route_stale",
+        "operator_route_unavailable",
+        "os_token_unavailable",
         "playback_failed",
         "production_route_airplay",
         "production_route_bluetooth",
@@ -379,15 +449,20 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "publication_already_in_flight",
         "received",
         "relay",
+        "relay_identity_unavailable",
         "relay_http_rejected",
         "relay_http_failed",
         "requested",
+        "registration_generation_already_completed",
+        "registration_intent_unavailable",
         "route_bound",
         "route_or_configuration_changed_after_payload",
         "route_or_configuration_changed_after_transport_write",
         "route_or_configuration_changed_before_payload",
         "success",
         "system_error",
+        "stable_gateway_identity_unavailable",
+        "bundle_topic_unavailable",
         "timeout",
         "transport_error",
         "transport_or_route_unavailable",
@@ -411,6 +486,13 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
               self.messageID.map(Self.isLowercaseHexDigest) ?? true,
               self.eventID.map(Self.isLowercaseHexDigest) ?? true,
               self.operationID.map(Self.isLowercaseHexDigest) ?? true,
+              self.rpcMethod == Self.sanitizedToken(self.rpcMethod, maximumLength: 128),
+              self.admittedAt.map(Self.isValidTimestamp) ?? true,
+              self.gatewayErrorCode == Self.sanitizedToken(
+                  self.gatewayErrorCode, maximumLength: 64),
+              self.elapsedMilliseconds.map({ $0 >= 0 }) ?? true,
+              self.eventCount.map({ $0 >= 0 }) ?? true,
+              self.messageCount.map({ $0 >= 0 }) ?? true,
               self.diagnosticAttemptID.map(Self.isLowercaseHexDigest) ?? true,
               self.registrationAttemptID.map(Self.isLowercaseHexDigest) ?? true,
               self.deviceIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
@@ -452,6 +534,25 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
            self.connectionRole == nil
         {
             return false
+        }
+        let hasRPCMetadata = self.rpcMethod != nil || self.admittedAt != nil ||
+            self.gatewayErrorCode != nil || self.offsetPresent != nil || self.offsetType != nil ||
+            self.limitPresent != nil || self.maxCharsPresent != nil || self.elapsedMilliseconds != nil
+        if hasRPCMetadata {
+            guard self.schema == Self.schemaName,
+                  self.kind == .socket,
+                  self.operationID != nil,
+                  self.rpcMethod != nil,
+                  self.admittedAt != nil,
+                  let offsetPresent = self.offsetPresent,
+                  let offsetType = self.offsetType,
+                  self.limitPresent != nil,
+                  self.maxCharsPresent != nil,
+                  self.elapsedMilliseconds != nil,
+                  offsetPresent == (offsetType != .absent)
+            else {
+                return false
+            }
         }
         return true
     }
@@ -532,6 +633,17 @@ public enum OpenClawDiagnosticRecorder {
         "event_id",
         "operation_id",
         "operation_generation",
+        "rpc_method",
+        "admitted_at",
+        "gateway_error_code",
+        "offset_present",
+        "offset_type",
+        "limit_present",
+        "max_chars_present",
+        "elapsed_milliseconds",
+        "event_count",
+        "message_count",
+        "session_generation",
         "diagnostic_attempt_id",
         "registration_attempt_id",
         "sequence",

@@ -141,6 +141,91 @@ struct OpenClawDiagnosticEventTests {
         #expect(decoded.state == "tts_audio_session_restore_started")
     }
 
+    @Test func rpcDiagnosticsRetainOnlyAllowlistedIdentityAndParameterShape() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .socket,
+            state: "request_completed",
+            connectionRole: .operator,
+            socketGeneration: 17,
+            routeGeneration: 23,
+            sessionIdentifier: "private-session-key",
+            operationIdentifier: "client-local-operation-id",
+            rpcMethod: "chat.history",
+            admittedAt: Date(timeIntervalSince1970: 0),
+            gatewayErrorCode: "INVALID_REQUEST",
+            offsetPresent: true,
+            offsetType: .integer,
+            limitPresent: false,
+            maxCharsPresent: false,
+            elapsedMilliseconds: 42,
+            resultClass: "gateway_rejected",
+            observedAt: Date(timeIntervalSince1970: 1))
+
+        let data = try JSONEncoder().encode(event)
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        #expect(object["rpc_method"] as? String == "chat.history")
+        #expect(object["offset_present"] as? Bool == true)
+        #expect(object["offset_type"] as? String == "integer")
+        #expect(object["limit_present"] as? Bool == false)
+        #expect(object["max_chars_present"] as? Bool == false)
+        #expect(object["gateway_error_code"] as? String == "INVALID_REQUEST")
+        #expect(object["elapsed_milliseconds"] as? Int == 42)
+        #expect(object["session_hash"] as? String != "private-session-key")
+        #expect(object["operation_id"] as? String != "client-local-operation-id")
+        #expect(object["params"] == nil)
+        #expect(object["message"] == nil)
+
+        let record = "aies_diagnostic=" + data.base64EncodedString()
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(record) == event)
+
+        for key in [
+            "operation_id", "rpc_method", "admitted_at", "offset_present",
+            "offset_type", "limit_present", "max_chars_present", "elapsed_milliseconds",
+        ] {
+            var incomplete = object
+            incomplete.removeValue(forKey: key)
+            let incompleteData = try JSONSerialization.data(withJSONObject: incomplete)
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + incompleteData.base64EncodedString()) == nil)
+        }
+
+        var contradictory = object
+        contradictory["offset_present"] = false
+        let contradictoryData = try JSONSerialization.data(withJSONObject: contradictory)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + contradictoryData.base64EncodedString()) == nil)
+
+        var rawParams = object
+        rawParams["params"] = ["sessionKey": "private-session-key"]
+        let rawParamsData = try JSONSerialization.data(withJSONObject: rawParams)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + rawParamsData.base64EncodedString()) == nil)
+    }
+
+    @Test func chatProjectionCountsAndSessionGenerationAreBounded() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "history_application_completed",
+            eventCount: 12,
+            messageCount: 34,
+            sessionGeneration: 56,
+            observedAt: Date(timeIntervalSince1970: 0))
+        let data = try JSONEncoder().encode(event)
+        let decoded = try #require(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + data.base64EncodedString()))
+        #expect(decoded.eventCount == 12)
+        #expect(decoded.messageCount == 34)
+        #expect(decoded.sessionGeneration == 56)
+
+        let rejected = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "history_application_completed",
+            eventCount: -1,
+            messageCount: -1)
+        #expect(rejected.eventCount == nil)
+        #expect(rejected.messageCount == nil)
+    }
+
     @Test func v2RouteAndSocketRecordsRequireAnExplicitRoleField() throws {
         for kind in [OpenClawDiagnosticEvent.Kind.route, .socket] {
             let event = OpenClawDiagnosticEvent(
@@ -211,6 +296,9 @@ struct OpenClawDiagnosticEventTests {
             ["byte_count": -1],
             ["sample_rate": 0],
             ["duration_milliseconds": -1],
+            ["elapsed_milliseconds": -1],
+            ["event_count": -1],
+            ["message_count": -1],
             ["observed_at": "not-a-timestamp"],
             ["network_interfaces": ["wifi", "cellular"]],
         ]

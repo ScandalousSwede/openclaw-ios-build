@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Testing
 @testable import OpenClawKit
 import OpenClawProtocol
@@ -575,6 +576,175 @@ private func connectForBootstrapHandoffTest(
 
 @Suite(.serialized)
 struct GatewayNodeSessionTests {
+    @Test
+    func rpcParameterShapeClassifiesOnlyAllowlistedHistoryMetadata() {
+        let absent = GatewayRPCDiagnosticParameterShape.inspect([
+            "sessionKey": AnyCodable("private-session"),
+        ])
+        #expect(absent.offsetPresent == false)
+        #expect(absent.offsetType == .absent)
+        #expect(absent.limitPresent == false)
+        #expect(absent.maxCharsPresent == false)
+
+        let integer = GatewayRPCDiagnosticParameterShape.inspect([
+            "sessionKey": AnyCodable("private-session"),
+            "offset": AnyCodable(0),
+            "limit": AnyCodable(200),
+            "maxChars": AnyCodable(500_000),
+            "message": AnyCodable("must-not-enter-diagnostics"),
+        ])
+        #expect(integer.offsetPresent)
+        #expect(integer.offsetType == .integer)
+        #expect(integer.limitPresent)
+        #expect(integer.maxCharsPresent)
+
+        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+            "offset": AnyCodable(1.5),
+        ]).offsetType == .invalid)
+        #expect(GatewayRPCDiagnosticParameterShape.inspect([
+            "offset": AnyCodable(true),
+        ]).offsetType == .invalid)
+    }
+
+    @Test
+    func routeBoundRPCDiagnosticsCorrelateAdmissionAndGatewayRejectionWithoutRawParams() async throws {
+        let captured = OSAllocatedUnfairLock(initialState: [String]())
+        OpenClawDiagnosticRecorder.installSink { line in
+            captured.withLock { $0.append(line) }
+        }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession(connectionRole: .operator)
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        let task = try #require(session.latestTask())
+
+        let request = Task {
+            try await gateway.request(
+                method: "chat.history",
+                paramsJSON: #"{"sessionKey":"private-session","offset":0}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("history request physically dispatched") {
+            task.latestRequestID(method: "chat.history") != nil
+        }
+        try task.emitErrorResponse(
+            id: try #require(task.latestRequestID(method: "chat.history")),
+            code: "INVALID_REQUEST",
+            message: "/offset: must be integer")
+        await #expect(throws: GatewayResponseError.self) {
+            _ = try await request.value
+        }
+
+        let records = captured.withLock { $0 }.compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+            .filter { $0.rpcMethod == "chat.history" }
+        #expect(records.map(\.state) == ["request_admitted", "request_completed"])
+        let admitted = try #require(records.first)
+        let completed = try #require(records.last)
+        #expect(admitted.operationID == completed.operationID)
+        #expect(admitted.connectionRole == .operator)
+        #expect(admitted.routeGeneration == route.diagnosticRouteGeneration)
+        #expect(admitted.socketGeneration == route.diagnosticSocketGeneration)
+        #expect(admitted.offsetPresent == true)
+        #expect(admitted.offsetType == .integer)
+        #expect(admitted.sessionHash?.count == 16)
+        #expect(admitted.resultClass == "requested")
+        #expect(completed.resultClass == "gateway_rejected")
+        let gatewayErrorCode: String? = completed.gatewayErrorCode
+        #expect(gatewayErrorCode == "INVALID_REQUEST")
+        #expect(completed.elapsedMilliseconds != nil)
+        #expect(!captured.withLock { $0.joined() }.contains("private-session"))
+        #expect(!captured.withLock { $0.joined() }.contains("must-not-enter-diagnostics"))
+        await gateway.disconnect()
+    }
+
+    @Test
+    func rpcDiagnosticsClassifyResponseTimeoutCancellationAndOneWayWrite() async throws {
+        let captured = OSAllocatedUnfairLock(initialState: [String]())
+        OpenClawDiagnosticRecorder.installSink { line in
+            captured.withLock { $0.append(line) }
+        }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        let session = FakeGatewayWebSocketSession()
+        let gateway = GatewayNodeSession(connectionRole: .operator)
+        try await connectForGenerationTest(
+            gateway,
+            session: session,
+            endpoint: "ws://example.invalid")
+        let route = try #require(await gateway.currentRoute())
+        let task = try #require(session.latestTask())
+
+        let successful = Task {
+            try await gateway.request(
+                method: "health",
+                paramsJSON: nil,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("health request physically dispatched") {
+            task.latestRequestID(method: "health") != nil
+        }
+        try task.emitResponse(id: try #require(task.latestRequestID(method: "health")))
+        _ = try await successful.value
+
+        try await gateway.send(
+            method: "node.event",
+            paramsJSON: #"{"event":"diagnostic-test"}"#,
+            ifCurrentRoute: route)
+
+        await #expect(throws: Error.self) {
+            _ = try await gateway.request(
+                method: "chat.history",
+                paramsJSON: #"{"sessionKey":"session","offset":0}"#,
+                timeoutSeconds: 0,
+                ifCurrentRoute: route)
+        }
+
+        let cancelled = Task {
+            try await gateway.request(
+                method: "sessions.list",
+                paramsJSON: #"{"limit":1}"#,
+                ifCurrentRoute: route)
+        }
+        try await waitUntil("sessions list request physically dispatched") {
+            task.latestRequestID(method: "sessions.list") != nil
+        }
+        await gateway.disconnect()
+        await #expect(throws: Error.self) {
+            _ = try await cancelled.value
+        }
+
+        let events = captured.withLock { $0 }.compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+        func terminal(_ method: String) -> OpenClawDiagnosticEvent? {
+            events.last { event in
+                event.rpcMethod == method && event.state != "request_admitted"
+            }
+        }
+        #expect(terminal("health")?.resultClass == "success")
+        #expect(terminal("health")?.elapsedMilliseconds != nil)
+        #expect(terminal("health")?.routeGeneration == route.diagnosticRouteGeneration)
+        #expect(terminal("node.event")?.resultClass == "transport_write_accepted_unacknowledged")
+        #expect(terminal("node.event")?.routeGeneration == route.diagnosticRouteGeneration)
+        #expect(terminal("chat.history")?.resultClass == "timeout")
+        #expect(terminal("chat.history")?.routeGeneration == route.diagnosticRouteGeneration)
+        #expect(terminal("sessions.list")?.resultClass == "cancelled")
+        #expect(terminal("sessions.list")?.routeGeneration == route.diagnosticRouteGeneration)
+        #expect(events.filter { $0.rpcMethod != nil }.allSatisfy { event in
+            event.operationID != nil &&
+                event.connectionRole == .operator &&
+                event.admittedAt != nil &&
+                event.offsetPresent != nil &&
+                event.offsetType != nil &&
+                event.limitPresent != nil &&
+                event.maxCharsPresent != nil &&
+                event.elapsedMilliseconds != nil
+        })
+    }
+
     @Test
     func websocketPingIgnoresDuplicateSuccessCallbacks() async throws {
         let task = DoubleCallbackPingWebSocketTask(callbacks: [nil, nil])
