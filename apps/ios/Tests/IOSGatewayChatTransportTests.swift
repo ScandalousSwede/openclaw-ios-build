@@ -11,7 +11,6 @@ private struct ChatHistoryGatewayValidatorFixture: Decodable {
         let sourceSHA: String
         let inputSHA256: String
         let sessionKeyHash: String
-        let encodedPropertyNames: [String]
         let offsetPresent: Bool
         let offsetType: String
         let limitPresent: Bool
@@ -22,7 +21,6 @@ private struct ChatHistoryGatewayValidatorFixture: Decodable {
             case sourceSHA = "source_sha"
             case inputSHA256 = "input_sha256"
             case sessionKeyHash = "session_key_hash"
-            case encodedPropertyNames = "encoded_property_names"
             case offsetPresent = "offset_present"
             case offsetType = "offset_type"
             case limitPresent = "limit_present"
@@ -32,6 +30,7 @@ private struct ChatHistoryGatewayValidatorFixture: Decodable {
 
     struct ReconstructedPayloadShape: Decodable {
         let sessionKeyType: String
+        let encodedPropertyNames: [String]
         let limitValue: Int
         let offsetValue: Int
         let maxCharsValue: Int
@@ -40,6 +39,7 @@ private struct ChatHistoryGatewayValidatorFixture: Decodable {
 
         enum CodingKeys: String, CodingKey {
             case sessionKeyType = "session_key_type"
+            case encodedPropertyNames = "encoded_property_names"
             case limitValue = "limit_value"
             case offsetValue = "offset_value"
             case maxCharsValue = "max_chars_value"
@@ -275,14 +275,14 @@ private func waitForIOSSessionMutation(
         #expect(fixture.physicalObservation.inputSHA256 ==
             "2762f0ce8a06d09fbf94c2d3c2e43356022cd4ba45d50a42856039d3d959509f")
         #expect(fixture.physicalObservation.sessionKeyHash == "0d6e4079e36703eb")
-        #expect(fixture.physicalObservation.encodedPropertyNames == [
-            "limit", "maxChars", "offset", "sessionKey",
-        ])
         #expect(fixture.physicalObservation.offsetPresent)
         #expect(fixture.physicalObservation.offsetType == "integer")
         #expect(fixture.physicalObservation.limitPresent)
         #expect(fixture.physicalObservation.maxCharsPresent)
         #expect(fixture.reconstructedPayloadShape.sessionKeyType == "non_empty_string")
+        #expect(fixture.reconstructedPayloadShape.encodedPropertyNames == [
+            "limit", "maxChars", "offset", "sessionKey",
+        ])
         #expect(fixture.reconstructedPayloadShape.limitValue == 200)
         #expect(fixture.reconstructedPayloadShape.offsetValue == 0)
         #expect(fixture.reconstructedPayloadShape.maxCharsValue == 500_000)

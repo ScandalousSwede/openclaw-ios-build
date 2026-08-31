@@ -342,6 +342,22 @@ struct OpenClawDiagnosticEventTests {
         let inconsistentData = try JSONSerialization.data(withJSONObject: inconsistent)
         #expect(OpenClawDiagnosticRecorder.decodeRecord(
             "aies_diagnostic=" + inconsistentData.base64EncodedString()) == nil)
+
+        var falseMismatch = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(equal)) as? [String: Any])
+        falseMismatch["state"] = "gateway_publication_deferred"
+        falseMismatch["result_class"] = "node_gateway_identity_mismatch"
+        let falseMismatchData = try JSONSerialization.data(withJSONObject: falseMismatch)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + falseMismatchData.base64EncodedString()) == nil)
+
+        var falseAdmission = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(different)) as? [String: Any])
+        falseAdmission["state"] = "gateway_publication_admitted"
+        falseAdmission["result_class"] = "direct"
+        let falseAdmissionData = try JSONSerialization.data(withJSONObject: falseAdmission)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + falseAdmissionData.base64EncodedString()) == nil)
     }
 
     @Test func chatProjectionCountsAndSessionGenerationAreBounded() throws {
@@ -382,6 +398,48 @@ struct OpenClawDiagnosticEventTests {
         let data = try JSONEncoder().encode(event)
         #expect(OpenClawDiagnosticRecorder.decodeRecord(
             "aies_diagnostic=" + data.base64EncodedString()) == event)
+
+        var falseSameBuild = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+        falseSameBuild["state"] = "previous_run_unclosed_same_build"
+        let falseSameBuildData = try JSONSerialization.data(withJSONObject: falseSameBuild)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + falseSameBuildData.base64EncodedString()) == nil)
+
+        let sameBuild = OpenClawDiagnosticEvent(
+            kind: .appLifecycle,
+            state: "previous_run_unclosed_same_build",
+            priorBuildNumber: "104",
+            priorSourceSHA: "22f90eacf93ba05f16aea6b106bd3c063f95d79d",
+            priorMainExecutableUUID: "bec23370-891f-3fa9-91d4-d5021a687519",
+            currentBuildNumber: "104",
+            currentSourceSHA: "22f90eacf93ba05f16aea6b106bd3c063f95d79d",
+            currentMainExecutableUUID: "bec23370-891f-3fa9-91d4-d5021a687519",
+            observedAt: Date(timeIntervalSince1970: 1))
+        let sameBuildData = try JSONEncoder().encode(sameBuild)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + sameBuildData.base64EncodedString()) == sameBuild)
+
+        var falseTransition = try #require(
+            JSONSerialization.jsonObject(with: sameBuildData) as? [String: Any])
+        falseTransition["state"] = "previous_run_unclosed_build_transition"
+        let falseTransitionData = try JSONSerialization.data(withJSONObject: falseTransition)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + falseTransitionData.base64EncodedString()) == nil)
+
+        var falseUnknown = falseTransition
+        falseUnknown["state"] = "previous_run_unclosed_identity_unknown"
+        let falseUnknownData = try JSONSerialization.data(withJSONObject: falseUnknown)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + falseUnknownData.base64EncodedString()) == nil)
+
+        var genuinelyUnknown = falseUnknown
+        genuinelyUnknown.removeValue(forKey: "current_build_number")
+        genuinelyUnknown.removeValue(forKey: "current_source_sha")
+        genuinelyUnknown.removeValue(forKey: "current_main_executable_uuid")
+        let genuinelyUnknownData = try JSONSerialization.data(withJSONObject: genuinelyUnknown)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + genuinelyUnknownData.base64EncodedString()) != nil)
 
         let malformed = OpenClawDiagnosticEvent(
             kind: .appLifecycle,

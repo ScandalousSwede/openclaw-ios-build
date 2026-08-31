@@ -291,11 +291,15 @@ struct AIESAPNsDiagnosticsTests {
         defer { OpenClawDiagnosticRecorder.clearSink() }
         for (index, evidence) in [equal, missing, different].enumerated() {
             AIESAPNsDiagnostics.recordPublication(
-                .deferred,
+                index == 0 ? .admitted : .deferred,
                 providerStage: "node_route_admitted",
-                resultClass: index == 2
-                    ? AIESAPNsPublicationDeferralReason.operatorGatewayMismatch.rawValue
-                    : AIESAPNsPublicationDeferralReason.nodeGatewayMismatch.rawValue,
+                resultClass: if index == 0 {
+                    "direct"
+                } else if index == 2 {
+                    AIESAPNsPublicationDeferralReason.operatorGatewayMismatch.rawValue
+                } else {
+                    AIESAPNsPublicationDeferralReason.nodeGatewayMismatch.rawValue
+                },
                 context: AIESAPNsPublicationDiagnosticContext(
                     registrationAttemptID: "private-registration-attempt-\(index)",
                     configurationGeneration: UInt64(20 + index),
@@ -309,6 +313,11 @@ struct AIESAPNsDiagnosticsTests {
 
         let events = probe.events()
         #expect(events.count == 3)
+        #expect(events.map(\.state) == [
+            "gateway_publication_admitted",
+            "gateway_publication_deferred",
+            "gateway_publication_deferred",
+        ])
         #expect(events.map(\.gatewayIdentityComparison) == [.equal, .observedMissing, .different])
         #expect(events.map(\.apnsTransport) == [.direct, .relay, .relay])
         #expect(events[0].configuredGatewayIdentityHash == events[0].observedGatewayIdentityHash)

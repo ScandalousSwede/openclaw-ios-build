@@ -781,6 +781,23 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
                       configured != observed
                 else { return false }
             }
+            switch self.resultClass {
+            case "node_gateway_identity_mismatch":
+                guard self.state == "gateway_publication_deferred",
+                      comparison != .equal,
+                      self.observedGatewayIdentitySource == .nodeRouteConnectOptions
+                else { return false }
+            case "operator_gateway_identity_mismatch":
+                guard self.state == "gateway_publication_deferred",
+                      comparison != .equal,
+                      self.observedGatewayIdentitySource == .operatorRouteConnectOptions
+                else { return false }
+            default:
+                break
+            }
+            if self.state == "gateway_publication_admitted", comparison != .equal {
+                return false
+            }
         }
         let hasRPCMetadata = self.rpcMethod != nil || self.admittedAt != nil ||
             self.gatewayErrorCode != nil || self.offsetPresent != nil || self.offsetType != nil ||
@@ -863,11 +880,23 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         {
             return false
         }
-        if [
-            "previous_run_unclosed_same_build",
-            "previous_run_unclosed_build_transition",
-        ].contains(self.state),
-            (!hasCompletePriorBuildIdentity || !hasCompleteCurrentBuildIdentity)
+        let buildIdentitiesMatch = self.priorBuildNumber == self.currentBuildNumber &&
+            self.priorSourceSHA == self.currentSourceSHA &&
+            self.priorMainExecutableUUID == self.currentMainExecutableUUID
+        if self.state == "previous_run_unclosed_same_build",
+           (!hasCompletePriorBuildIdentity || !hasCompleteCurrentBuildIdentity ||
+               !buildIdentitiesMatch)
+        {
+            return false
+        }
+        if self.state == "previous_run_unclosed_build_transition",
+           (!hasCompletePriorBuildIdentity || !hasCompleteCurrentBuildIdentity ||
+               buildIdentitiesMatch)
+        {
+            return false
+        }
+        if self.state == "previous_run_unclosed_identity_unknown",
+           hasCompletePriorBuildIdentity && hasCompleteCurrentBuildIdentity
         {
             return false
         }
