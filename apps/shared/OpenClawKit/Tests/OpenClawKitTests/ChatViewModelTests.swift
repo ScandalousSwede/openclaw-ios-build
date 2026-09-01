@@ -5153,11 +5153,15 @@ struct ChatViewModelTests {
         let (transport, vm) = await makeViewModel(
             historyResponses: [historyPayload(), historyPayload()])
         vm.load()
-        try await waitUntil("legacy transport is healthy") { vm.healthOK && !vm.isLoading }
+        try await waitUntil("legacy transport is healthy") {
+            await MainActor.run { vm.healthOK && !vm.isLoading }
+        }
         vm.input = "private legacy message"
         vm.send()
         let runID = try await waitForLastSentRunId(transport)
-        try await waitUntil("legacy send is pending") { vm.pendingRunCount == 1 }
+        try await waitUntil("legacy send is pending") {
+            await MainActor.run { vm.pendingRunCount == 1 }
+        }
 
         transport.emit(.sessionMessage(OpenClawSessionMessageEventPayload(
             sessionKey: "main",
@@ -5183,7 +5187,9 @@ struct ChatViewModelTests {
                 text: "private legacy reply",
                 timestamp: Date().timeIntervalSince1970 * 1000),
             errorMessage: nil)))
-        try await waitUntil("legacy run completes") { vm.pendingRunCount == 0 }
+        try await waitUntil("legacy run completes") {
+            await MainActor.run { vm.pendingRunCount == 0 }
+        }
 
         let durableReceiptStates: Set<String> = [
             "outbox_canonical_user_receipt",
