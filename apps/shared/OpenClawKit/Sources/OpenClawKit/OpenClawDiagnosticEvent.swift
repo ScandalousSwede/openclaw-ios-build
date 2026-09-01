@@ -62,6 +62,57 @@ public enum OpenClawDiagnosticAPNsTransport: String, Codable, Equatable, Sendabl
     case relay
 }
 
+public enum OpenClawDiagnosticOutboxOutcome: String, Codable, Equatable, Sendable {
+    case notDispatched = "not_dispatched"
+    case dispatchRejected = "dispatch_rejected"
+    case accepted
+    case ambiguous
+    case canonicalHistoryConfirmed = "canonical_history_confirmed"
+    case expired
+    case cancelled
+    case blockedRouteChanged = "blocked_route_changed"
+}
+
+public enum OpenClawDiagnosticOutboxDeliveryGate: String, Codable, Equatable, Sendable {
+    case offline
+    case unsupportedClient = "unsupported_client"
+    case gatewayIdentityUnavailable = "gateway_identity_unavailable"
+    case gatewayMismatch = "gateway_mismatch"
+    case capabilityUnavailable = "capability_unavailable"
+    case operatorRoleMissing = "operator_role_missing"
+    case operatorSessionUnavailable = "operator_session_unavailable"
+    case operatorScopesUnavailable = "operator_scopes_unavailable"
+    case routingContractUnavailable = "routing_contract_unavailable"
+}
+
+public enum OpenClawDiagnosticOutboxFlushTrigger: String, Codable, Equatable, Sendable {
+    case bootstrapComplete = "bootstrap_complete"
+    case canonicalConfirmationTimer = "canonical_confirmation_timer"
+    case chatEvent = "chat_event"
+    case coalesced
+    case enqueue
+    case explicit
+    case foreground
+    case health
+    case lifecycleRecovery = "lifecycle_recovery"
+    case load
+    case manualRetry = "manual_retry"
+    case refresh
+    case safeCancel = "safe_cancel"
+    case sequenceGap = "sequence_gap"
+    case sessionCreate = "session_create"
+    case sessionMessage = "session_message"
+    case sessionSwitch = "session_switch"
+    case subscriberRestore = "subscriber_restore"
+    case talkDelivery = "talk_delivery"
+    case tick
+    case unknown
+}
+
+public enum OpenClawDiagnosticDeliveryTarget: String, Codable, Equatable, Sendable {
+    case operatorChat = "operator_chat"
+}
+
 public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case appLifecycle = "app_lifecycle"
@@ -145,6 +196,19 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let observedGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource?
     public let gatewayIdentityComparison: OpenClawDiagnosticGatewayIdentityComparison?
     public let apnsTransport: OpenClawDiagnosticAPNsTransport?
+    public let outboxOutcome: OpenClawDiagnosticOutboxOutcome?
+    public let outboxCommandHash: String?
+    public let outboxDeliveryGate: OpenClawDiagnosticOutboxDeliveryGate?
+    public let outboxFlushTrigger: OpenClawDiagnosticOutboxFlushTrigger?
+    public let outboxQueuedCount: Int?
+    public let outboxConfirmingCount: Int?
+    public let outboxBlockedCount: Int?
+    public let outboxHasVerifiedRouteSnapshot: Bool?
+    public let transportHealthOK: Bool?
+    public let deliveryTarget: OpenClawDiagnosticDeliveryTarget?
+    public let deliveryGatewayHash: String?
+    public let routingContractHash: String?
+    public let ackRunHash: String?
     public let topic: String?
     public let environment: String?
     public let byteCount: Int?
@@ -218,6 +282,19 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         observedGatewayIdentitySource: OpenClawDiagnosticGatewayIdentitySource? = nil,
         gatewayIdentityComparison: OpenClawDiagnosticGatewayIdentityComparison? = nil,
         apnsTransport: OpenClawDiagnosticAPNsTransport? = nil,
+        outboxOutcome: OpenClawDiagnosticOutboxOutcome? = nil,
+        outboxCommandIdentifier: String? = nil,
+        outboxDeliveryGate: OpenClawDiagnosticOutboxDeliveryGate? = nil,
+        outboxFlushTrigger: OpenClawDiagnosticOutboxFlushTrigger? = nil,
+        outboxQueuedCount: Int? = nil,
+        outboxConfirmingCount: Int? = nil,
+        outboxBlockedCount: Int? = nil,
+        outboxHasVerifiedRouteSnapshot: Bool? = nil,
+        transportHealthOK: Bool? = nil,
+        deliveryTarget: OpenClawDiagnosticDeliveryTarget? = nil,
+        deliveryGatewayIdentifier: String? = nil,
+        routingContractIdentifier: String? = nil,
+        ackRunIdentifier: String? = nil,
         topic: String? = nil,
         environment: String? = nil,
         byteCount: Int? = nil,
@@ -309,6 +386,19 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.observedGatewayIdentitySource = observedGatewayIdentitySource
         self.gatewayIdentityComparison = gatewayIdentityComparison
         self.apnsTransport = apnsTransport
+        self.outboxOutcome = outboxOutcome
+        self.outboxCommandHash = Self.hashedIdentifier(outboxCommandIdentifier)
+        self.outboxDeliveryGate = outboxDeliveryGate
+        self.outboxFlushTrigger = outboxFlushTrigger
+        self.outboxQueuedCount = Self.boundedOutboxCount(outboxQueuedCount)
+        self.outboxConfirmingCount = Self.boundedOutboxCount(outboxConfirmingCount)
+        self.outboxBlockedCount = Self.boundedOutboxCount(outboxBlockedCount)
+        self.outboxHasVerifiedRouteSnapshot = outboxHasVerifiedRouteSnapshot
+        self.transportHealthOK = transportHealthOK
+        self.deliveryTarget = deliveryTarget
+        self.deliveryGatewayHash = Self.hashedIdentifier(deliveryGatewayIdentifier)
+        self.routingContractHash = Self.hashedIdentifier(routingContractIdentifier)
+        self.ackRunHash = Self.hashedIdentifier(ackRunIdentifier)
         self.topic = Self.allowlistedToken(topic, allowed: Self.allowedTopics)
         self.environment = Self.allowlistedToken(environment, allowed: Self.allowedEnvironments)
         self.byteCount = byteCount.flatMap { $0 >= 0 ? $0 : nil }
@@ -388,6 +478,19 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case observedGatewayIdentitySource = "observed_gateway_identity_source"
         case gatewayIdentityComparison = "gateway_identity_comparison"
         case apnsTransport = "apns_transport"
+        case outboxOutcome = "outbox_outcome"
+        case outboxCommandHash = "outbox_command_hash"
+        case outboxDeliveryGate = "outbox_delivery_gate"
+        case outboxFlushTrigger = "outbox_flush_trigger"
+        case outboxQueuedCount = "outbox_queued_count"
+        case outboxConfirmingCount = "outbox_confirming_count"
+        case outboxBlockedCount = "outbox_blocked_count"
+        case outboxHasVerifiedRouteSnapshot = "outbox_has_verified_route_snapshot"
+        case transportHealthOK = "transport_health_ok"
+        case deliveryTarget = "delivery_target"
+        case deliveryGatewayHash = "delivery_gateway_hash"
+        case routingContractHash = "routing_contract_hash"
+        case ackRunHash = "ack_run_hash"
         case topic
         case environment
         case byteCount = "byte_count"
@@ -423,6 +526,10 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
 
     private static func boundedRPCInteger(_ value: Int?) -> Int? {
         value.flatMap { (-1_000_000...1_000_000).contains($0) ? $0 : nil }
+    }
+
+    private static func boundedOutboxCount(_ value: Int?) -> Int? {
+        value.flatMap { $0 >= 0 ? min($0, 50) : nil }
     }
 
     private static func validBuildNumber(_ value: String?) -> String? {
@@ -588,12 +695,20 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "watch_permission_grant",
     ]
     private static let allowedResultClasses: Set<String> = [
+        "accepted",
+        "ambiguous",
+        "blocked_route_changed",
         "cancelled",
+        "canonical_confirmed",
+        "canonical_not_found_bounded",
         "coalesced_request",
         "connection_owner_unavailable",
         "configuration_generation_changed",
         "direct",
+        "dispatch_rejected",
+        "encoding_failed",
         "failed",
+        "fifo_blocked",
         "finished",
         "gateway_rejected",
         "http_4xx",
@@ -613,6 +728,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "node_route_stale",
         "node_route_unavailable",
         "not_attempted",
+        "not_dispatched",
         "operator_connection_unavailable",
         "operator_gateway_identity_mismatch",
         "operator_route_stale",
@@ -632,6 +748,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "provider_content_type_validated_nonempty",
         "publication_already_in_flight",
         "received",
+        "restored",
         "relay",
         "relay_identity_unavailable",
         "relay_http_rejected",
@@ -640,12 +757,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "registration_generation_already_completed",
         "registration_intent_unavailable",
         "route_bound",
+        "queue_empty",
         "route_or_configuration_changed_after_payload",
         "route_or_configuration_changed_after_transport_write",
         "route_or_configuration_changed_before_payload",
         "success",
         "system_error",
         "stable_gateway_identity_unavailable",
+        "stale_callback",
         "bundle_topic_unavailable",
         "timeout",
         "transport_error",
@@ -654,6 +773,115 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "unattributed_callback",
         "unattributed_system_error",
         "zero_audio",
+    ]
+    private static let allowedOutboxStates: Set<String> = [
+        "chat_send_acknowledged",
+        "chat_send_ambiguous",
+        "chat_send_not_dispatched",
+        "chat_send_pre_dispatch_rejected",
+        "chat_send_rejected",
+        "chat_send_dispatch_invoked",
+        "chat_send_route_blocked",
+        "outbox_canonical_check_completed",
+        "outbox_canonical_check_failed",
+        "outbox_canonical_check_started",
+        "outbox_canonical_receipt_persisted",
+        "outbox_canonical_receipt_stale",
+        "outbox_canonical_user_receipt",
+        "outbox_dispatch_completed",
+        "outbox_dispatch_outcome_persisted",
+        "outbox_dispatch_outcome_stale",
+        "outbox_dispatch_started",
+        "outbox_enqueue_failed",
+        "outbox_enqueue_persisted",
+        "outbox_enqueue_started",
+        "outbox_fifo_head_blocked",
+        "outbox_flush_completed",
+        "outbox_flush_failed",
+        "outbox_flush_requested",
+        "outbox_flush_started",
+        "outbox_health_observed",
+        "outbox_local_echo_projected",
+        "outbox_pre_dispatch_rejected",
+        "outbox_reply_receipt",
+        "outbox_restore_applied",
+        "outbox_route_gate_evaluated",
+        "outbox_row_claim_unavailable",
+        "outbox_row_claimed",
+        "outbox_run_receipt",
+        "outbox_snapshot_loaded",
+        "outbox_status_applied",
+    ]
+    private static let outboxFlushStates: Set<String> = [
+        "outbox_flush_completed",
+        "outbox_flush_failed",
+        "outbox_flush_requested",
+        "outbox_flush_started",
+    ]
+    private static let outboxStatusStates: Set<String> = [
+        "outbox_flush_completed",
+        "outbox_health_observed",
+        "outbox_restore_applied",
+        "outbox_snapshot_loaded",
+        "outbox_status_applied",
+    ]
+    private static let outboxRowStates: Set<String> = [
+        "chat_send_acknowledged",
+        "chat_send_ambiguous",
+        "chat_send_not_dispatched",
+        "chat_send_pre_dispatch_rejected",
+        "chat_send_rejected",
+        "chat_send_dispatch_invoked",
+        "chat_send_route_blocked",
+        "outbox_canonical_check_completed",
+        "outbox_canonical_check_failed",
+        "outbox_canonical_check_started",
+        "outbox_canonical_receipt_persisted",
+        "outbox_canonical_receipt_stale",
+        "outbox_canonical_user_receipt",
+        "outbox_dispatch_completed",
+        "outbox_dispatch_outcome_persisted",
+        "outbox_dispatch_outcome_stale",
+        "outbox_dispatch_started",
+        "outbox_enqueue_failed",
+        "outbox_enqueue_persisted",
+        "outbox_enqueue_started",
+        "outbox_fifo_head_blocked",
+        "outbox_local_echo_projected",
+        "outbox_pre_dispatch_rejected",
+        "outbox_reply_receipt",
+        "outbox_row_claim_unavailable",
+        "outbox_row_claimed",
+        "outbox_run_receipt",
+    ]
+    private static let outboxRouteCustodyStates: Set<String> = [
+        "chat_send_acknowledged",
+        "chat_send_ambiguous",
+        "chat_send_not_dispatched",
+        "chat_send_dispatch_invoked",
+        "chat_send_rejected",
+        "chat_send_route_blocked",
+        "outbox_canonical_check_completed",
+        "outbox_canonical_check_failed",
+        "outbox_canonical_check_started",
+        "outbox_canonical_receipt_persisted",
+        "outbox_canonical_receipt_stale",
+        "outbox_dispatch_completed",
+        "outbox_dispatch_outcome_persisted",
+        "outbox_dispatch_outcome_stale",
+        "outbox_dispatch_started",
+        "outbox_fifo_head_blocked",
+        "outbox_pre_dispatch_rejected",
+        "outbox_row_claim_unavailable",
+        "outbox_row_claimed",
+    ]
+    private static let outboxTransportStates: Set<String> = [
+        "chat_send_acknowledged",
+        "chat_send_ambiguous",
+        "chat_send_not_dispatched",
+        "chat_send_dispatch_invoked",
+        "chat_send_rejected",
+        "chat_send_route_blocked",
     ]
 
     fileprivate var isValidDecodedRecord: Bool {
@@ -697,6 +925,13 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
               self.deviceIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
               self.configuredGatewayIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
               self.observedGatewayIdentityHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.outboxCommandHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.outboxQueuedCount == Self.boundedOutboxCount(self.outboxQueuedCount),
+              self.outboxConfirmingCount == Self.boundedOutboxCount(self.outboxConfirmingCount),
+              self.outboxBlockedCount == Self.boundedOutboxCount(self.outboxBlockedCount),
+              self.deliveryGatewayHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.routingContractHash.map(Self.isLowercaseHexDigest) ?? true,
+              self.ackRunHash.map(Self.isLowercaseHexDigest) ?? true,
               self.byteCount.map({ $0 >= 0 }) ?? true,
               self.sampleRate.map({ (1...384_000).contains($0) }) ?? true,
               self.durationMilliseconds.map({ $0 >= 0 }) ?? true,
@@ -751,6 +986,115 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
            (self.schema != Self.schemaName || self.kind != .apns)
         {
             return false
+        }
+        let hasOutboxMetadata = self.outboxOutcome != nil || self.outboxCommandHash != nil ||
+            self.outboxDeliveryGate != nil ||
+            self.outboxFlushTrigger != nil || self.outboxQueuedCount != nil ||
+            self.outboxConfirmingCount != nil || self.outboxBlockedCount != nil ||
+            self.outboxHasVerifiedRouteSnapshot != nil || self.transportHealthOK != nil ||
+            self.deliveryTarget != nil || self.deliveryGatewayHash != nil ||
+            self.routingContractHash != nil || self.ackRunHash != nil
+        if hasOutboxMetadata,
+           (self.schema != Self.schemaName || self.kind != .chat ||
+               self.deliveryTarget != .operatorChat ||
+               !Self.allowedOutboxStates.contains(self.state))
+        {
+            return false
+        }
+        if Self.allowedOutboxStates.contains(self.state) != hasOutboxMetadata {
+            return false
+        }
+        let hasAnyOutboxCount = self.outboxQueuedCount != nil ||
+            self.outboxConfirmingCount != nil || self.outboxBlockedCount != nil
+        let hasCompleteOutboxCounts = self.outboxQueuedCount != nil &&
+            self.outboxConfirmingCount != nil && self.outboxBlockedCount != nil
+        if hasAnyOutboxCount != hasCompleteOutboxCounts {
+            return false
+        }
+        if Self.outboxStatusStates.contains(self.state), !hasCompleteOutboxCounts {
+            return false
+        }
+        if self.state == "outbox_health_observed", self.transportHealthOK == nil {
+            return false
+        }
+        if self.ackRunHash != nil,
+           (self.ackRunHash != self.runID || self.ackRunHash != self.outboxCommandHash)
+        {
+            return false
+        }
+        if Self.outboxFlushStates.contains(self.state), self.outboxFlushTrigger == nil {
+            return false
+        }
+        if Self.outboxRowStates.contains(self.state),
+           (self.outboxCommandHash == nil || self.sessionHash == nil ||
+               self.diagnosticAttemptID != self.outboxCommandHash)
+        {
+            return false
+        }
+        if Self.outboxRouteCustodyStates.contains(self.state),
+           (self.connectionRole != .operator || self.deliveryGatewayHash == nil ||
+               self.routingContractHash == nil)
+        {
+            return false
+        }
+        if Self.outboxTransportStates.contains(self.state),
+           (self.outboxCommandHash == nil || self.sessionHash == nil || self.routeGeneration == nil ||
+               self.socketGeneration == nil || self.deliveryGatewayHash == nil ||
+               self.routingContractHash == nil)
+        {
+            return false
+        }
+        if self.state == "chat_send_acknowledged",
+           (self.outboxOutcome != .accepted || self.ackRunHash == nil)
+        {
+            return false
+        }
+        if self.state == "outbox_canonical_receipt_persisted",
+           self.outboxOutcome != .canonicalHistoryConfirmed
+        {
+            return false
+        }
+        if self.state == "outbox_canonical_user_receipt",
+           self.outboxOutcome != .canonicalHistoryConfirmed
+        {
+            return false
+        }
+        switch self.state {
+        case "chat_send_dispatch_invoked":
+            guard self.outboxOutcome == nil, self.runID == nil, self.ackRunHash == nil else {
+                return false
+            }
+        case "chat_send_pre_dispatch_rejected", "chat_send_not_dispatched":
+            guard self.outboxOutcome == .notDispatched,
+                  self.runID == nil,
+                  self.ackRunHash == nil
+            else { return false }
+        case "chat_send_rejected":
+            guard self.outboxOutcome == .dispatchRejected,
+                  self.runID == nil,
+                  self.ackRunHash == nil
+            else { return false }
+        case "chat_send_ambiguous":
+            guard self.outboxOutcome == .ambiguous,
+                  self.runID == nil,
+                  self.ackRunHash == nil
+            else { return false }
+        case "chat_send_route_blocked":
+            guard self.outboxOutcome == .blockedRouteChanged,
+                  self.runID == nil,
+                  self.ackRunHash == nil
+            else { return false }
+        case "chat_send_acknowledged":
+            break
+        case "outbox_run_receipt", "outbox_reply_receipt":
+            guard self.runID != nil,
+                  self.runID == self.outboxCommandHash,
+                  self.ackRunHash == nil
+            else { return false }
+        default:
+            if hasOutboxMetadata, self.runID != nil || self.ackRunHash != nil {
+                return false
+            }
         }
         if hasGatewayIdentityEvidence {
             guard self.schema == Self.schemaName,
@@ -1015,6 +1359,19 @@ public enum OpenClawDiagnosticRecorder {
         "observed_gateway_identity_source",
         "gateway_identity_comparison",
         "apns_transport",
+        "outbox_outcome",
+        "outbox_command_hash",
+        "outbox_delivery_gate",
+        "outbox_flush_trigger",
+        "outbox_queued_count",
+        "outbox_confirming_count",
+        "outbox_blocked_count",
+        "outbox_has_verified_route_snapshot",
+        "transport_health_ok",
+        "delivery_target",
+        "delivery_gateway_hash",
+        "routing_contract_hash",
+        "ack_run_hash",
         "topic",
         "environment",
         "byte_count",

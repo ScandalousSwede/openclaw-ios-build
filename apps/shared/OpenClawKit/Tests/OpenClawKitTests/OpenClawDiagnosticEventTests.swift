@@ -385,6 +385,178 @@ struct OpenClawDiagnosticEventTests {
         #expect(rejected.messageCount == nil)
     }
 
+    @Test func outboxDiagnosticsRoundTripStorageAndLiveTransportWithoutSecrets() throws {
+        let storageOnly = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "outbox_snapshot_loaded",
+            outboxDeliveryGate: .operatorSessionUnavailable,
+            outboxQueuedCount: 2,
+            outboxConfirmingCount: 1,
+            outboxBlockedCount: 0,
+            outboxHasVerifiedRouteSnapshot: false,
+            transportHealthOK: true,
+            deliveryTarget: .operatorChat,
+            observedAt: Date(timeIntervalSince1970: 0))
+        let storageData = try JSONEncoder().encode(storageOnly)
+        let storageObject = try #require(
+            JSONSerialization.jsonObject(with: storageData) as? [String: Any])
+        let decodedStorage = try #require(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + storageData.base64EncodedString()))
+
+        #expect(decodedStorage == storageOnly)
+        #expect(decodedStorage.connectionRole == nil)
+        #expect(storageObject["connection_role"] == nil)
+        #expect(decodedStorage.outboxQueuedCount == 2)
+        #expect(decodedStorage.outboxConfirmingCount == 1)
+        #expect(decodedStorage.outboxBlockedCount == 0)
+        #expect(decodedStorage.deliveryTarget == .operatorChat)
+
+        let liveTransport = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "chat_send_acknowledged",
+            connectionRole: .operator,
+            socketGeneration: 41,
+            routeGeneration: 43,
+            sessionIdentifier: "private-session-key",
+            runIdentifier: "private-durable-command-id",
+            diagnosticAttemptID: "private-durable-command-id",
+            resultClass: "success",
+            outboxOutcome: .accepted,
+            outboxCommandIdentifier: "private-durable-command-id",
+            deliveryTarget: .operatorChat,
+            deliveryGatewayIdentifier: "private-gateway-identity",
+            routingContractIdentifier: "private-routing-contract",
+            ackRunIdentifier: "private-durable-command-id",
+            observedAt: Date(timeIntervalSince1970: 1))
+        let transportData = try JSONEncoder().encode(liveTransport)
+        let decodedTransport = try #require(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + transportData.base64EncodedString()))
+        let encodedText = String(decoding: transportData, as: UTF8.self)
+
+        #expect(decodedTransport == liveTransport)
+        #expect(decodedTransport.connectionRole == .operator)
+        #expect(decodedTransport.outboxOutcome == .accepted)
+        #expect(decodedTransport.outboxCommandHash?.count == 16)
+        #expect(decodedTransport.outboxCommandHash == decodedTransport.diagnosticAttemptID)
+        #expect(decodedTransport.outboxCommandHash == decodedTransport.runID)
+        #expect(decodedTransport.outboxCommandHash == decodedTransport.ackRunHash)
+        #expect(decodedTransport.deliveryGatewayHash?.count == 16)
+        #expect(decodedTransport.routingContractHash?.count == 16)
+        for secret in [
+            "private-session-key",
+            "private-durable-command-id",
+            "private-gateway-identity",
+            "private-routing-contract",
+        ] {
+            #expect(!encodedText.contains(secret))
+        }
+        #expect(!encodedText.contains("message_content"))
+        #expect(!encodedText.contains("session_key"))
+        #expect(!encodedText.contains("token"))
+    }
+
+    @Test func outboxDiagnosticsRejectIncompleteContradictoryAndUnknownMetadata() throws {
+        let storageOnly = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "outbox_snapshot_loaded",
+            outboxDeliveryGate: .operatorSessionUnavailable,
+            outboxQueuedCount: 2,
+            outboxConfirmingCount: 1,
+            outboxBlockedCount: 0,
+            outboxHasVerifiedRouteSnapshot: false,
+            transportHealthOK: true,
+            deliveryTarget: .operatorChat,
+            observedAt: Date(timeIntervalSince1970: 0))
+        let storageObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(storageOnly)) as? [String: Any])
+
+        func rejects(_ object: [String: Any]) throws -> Bool {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            return OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + data.base64EncodedString()) == nil
+        }
+
+        for missingCount in [
+            "outbox_queued_count",
+            "outbox_confirming_count",
+            "outbox_blocked_count",
+        ] {
+            var partialCounts = storageObject
+            partialCounts.removeValue(forKey: missingCount)
+            #expect(try rejects(partialCounts))
+        }
+
+        var oversizedCount = storageObject
+        oversizedCount["outbox_queued_count"] = 51
+        #expect(try rejects(oversizedCount))
+
+        var unknownState = storageObject
+        unknownState["state"] = "outbox_unreviewed_state"
+        #expect(try rejects(unknownState))
+
+        var unknownTarget = storageObject
+        unknownTarget["delivery_target"] = "arbitrary_gateway"
+        #expect(try rejects(unknownTarget))
+
+        var unknownRawField = storageObject
+        unknownRawField["message_content"] = "private message"
+        #expect(try rejects(unknownRawField))
+
+        let liveTransport = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "chat_send_acknowledged",
+            connectionRole: .operator,
+            socketGeneration: 41,
+            routeGeneration: 43,
+            sessionIdentifier: "private-session-key",
+            runIdentifier: "private-durable-command-id",
+            diagnosticAttemptID: "private-durable-command-id",
+            resultClass: "success",
+            outboxOutcome: .accepted,
+            outboxCommandIdentifier: "private-durable-command-id",
+            deliveryTarget: .operatorChat,
+            deliveryGatewayIdentifier: "private-gateway-identity",
+            routingContractIdentifier: "private-routing-contract",
+            ackRunIdentifier: "private-durable-command-id",
+            observedAt: Date(timeIntervalSince1970: 1))
+        let transportObject = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(liveTransport)) as? [String: Any])
+
+        for missingIdentity in [
+            "outbox_command_hash",
+            "session_hash",
+            "diagnostic_attempt_id",
+        ] {
+            var missingRowIdentity = transportObject
+            missingRowIdentity.removeValue(forKey: missingIdentity)
+            #expect(try rejects(missingRowIdentity))
+        }
+
+        for missingCustody in [
+            "connection_role",
+            "socket_generation",
+            "route_generation",
+            "delivery_gateway_hash",
+            "routing_contract_hash",
+        ] {
+            var missingTransportCustody = transportObject
+            missingTransportCustody.removeValue(forKey: missingCustody)
+            #expect(try rejects(missingTransportCustody))
+        }
+
+        var ackRunMismatch = transportObject
+        ackRunMismatch["ack_run_hash"] = "0123456789abcdef"
+        #expect(try rejects(ackRunMismatch))
+
+        var stateOutcomeMismatch = transportObject
+        stateOutcomeMismatch["outbox_outcome"] = "ambiguous"
+        #expect(try rejects(stateOutcomeMismatch))
+
+        var rejectedStateWithAcceptedReceipt = transportObject
+        rejectedStateWithAcceptedReceipt["state"] = "chat_send_rejected"
+        #expect(try rejects(rejectedStateWithAcceptedReceipt))
+    }
+
     @Test func buildTransitionMetadataIsTypedBoundedAndRestrictedToLifecycleEvents() throws {
         let event = OpenClawDiagnosticEvent(
             kind: .appLifecycle,

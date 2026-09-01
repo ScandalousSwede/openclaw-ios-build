@@ -73,6 +73,8 @@ public struct OpenClawChatTransportRouteLease: Sendable {
     public let sessionRoutingContract: String
     public let capabilities: [String]
     public let operatorScopes: [String]
+    public let diagnosticSocketGeneration: UInt64?
+    public let diagnosticRouteGeneration: UInt64?
     private let dispatchMessageImpl: DispatchMessage
     private let requestHistoryPageImpl: RequestHistoryPage
 
@@ -81,6 +83,8 @@ public struct OpenClawChatTransportRouteLease: Sendable {
         sessionRoutingContract: String,
         capabilities: [String],
         operatorScopes: [String],
+        diagnosticSocketGeneration: UInt64? = nil,
+        diagnosticRouteGeneration: UInt64? = nil,
         dispatchMessage: @escaping DispatchMessage,
         requestHistoryPage: @escaping RequestHistoryPage)
     {
@@ -88,6 +92,8 @@ public struct OpenClawChatTransportRouteLease: Sendable {
         self.sessionRoutingContract = sessionRoutingContract
         self.capabilities = capabilities
         self.operatorScopes = operatorScopes
+        self.diagnosticSocketGeneration = diagnosticSocketGeneration
+        self.diagnosticRouteGeneration = diagnosticRouteGeneration
         self.dispatchMessageImpl = dispatchMessage
         self.requestHistoryPageImpl = requestHistoryPage
     }

@@ -225,6 +225,8 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             sessionRoutingContract: routingContract,
             capabilities: serverCapabilities.sorted(),
             operatorScopes: operatorScopes.sorted(),
+            diagnosticSocketGeneration: route.diagnosticSocketGeneration,
+            diagnosticRouteGeneration: route.diagnosticRouteGeneration,
             dispatchMessage: { sessionKey, message, thinking, idempotencyKey, attachments in
                 await transport.dispatchOutboxMessage(
                     sessionKey: sessionKey,
@@ -564,6 +566,7 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         routingContract: String,
         route: GatewayNodeSessionRoute) async -> OpenClawChatDispatchOutcome
     {
+        let startedAt = ProcessInfo.processInfo.systemUptime
         let json: String
         do {
             json = try Self.makeChatSendParamsJSON(
@@ -574,16 +577,45 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
                 expectedSessionRoutingContract: routingContract,
                 attachments: attachments)
         } catch {
+            Self.recordDurableSendDiagnostic(
+                state: "chat_send_pre_dispatch_rejected",
+                stableGatewayID: self.stableGatewayID,
+                routingContract: routingContract,
+                route: route,
+                sessionKey: sessionKey,
+                rawCommandID: idempotencyKey,
+                outcome: .notDispatched,
+                resultClass: "encoding_failed",
+                durationMilliseconds: 0)
             return .notDispatched
         }
 
+        Self.recordDurableSendDiagnostic(
+            state: "chat_send_dispatch_invoked",
+            stableGatewayID: self.stableGatewayID,
+            routingContract: routingContract,
+            route: route,
+            sessionKey: sessionKey,
+            rawCommandID: idempotencyKey,
+            resultClass: "requested",
+            durationMilliseconds: 0)
         let result = await self.gateway.requestTrackingDispatch(
             method: "chat.send",
             paramsJSON: json,
             timeoutSeconds: 35,
             ifCurrentRoute: route)
         let outcome = Self.mapDispatchResult(result, rawCommandID: idempotencyKey)
-        Self.recordDispatchOutcome(outcome, rawCommandID: idempotencyKey)
+        let elapsedMilliseconds = max(
+            0,
+            Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))
+        Self.recordDispatchOutcome(
+            outcome,
+            stableGatewayID: self.stableGatewayID,
+            routingContract: routingContract,
+            route: route,
+            sessionKey: sessionKey,
+            rawCommandID: idempotencyKey,
+            durationMilliseconds: elapsedMilliseconds)
         return outcome
     }
 
@@ -618,9 +650,13 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
 
     private static func recordDispatchOutcome(
         _ outcome: OpenClawChatDispatchOutcome,
-        rawCommandID: String)
+        stableGatewayID: String?,
+        routingContract: String,
+        route: GatewayNodeSessionRoute,
+        sessionKey: String,
+        rawCommandID: String,
+        durationMilliseconds: Int)
     {
-        let commandID = self.diagnosticToken(rawCommandID)
         let state: String = switch outcome {
         case .notDispatched: "not_dispatched"
         case .dispatchRejected: "dispatch_rejected"
@@ -628,7 +664,65 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
         case .ambiguous: "ambiguous"
         case .blockedRouteChanged: "blocked_route_changed"
         }
-        GatewayDiagnostics.log("event=chat_outbox_dispatch command_id=\(commandID) outcome=\(state)")
+        let eventState: String = switch outcome {
+        case .accepted: "chat_send_acknowledged"
+        case .notDispatched: "chat_send_not_dispatched"
+        case .dispatchRejected: "chat_send_rejected"
+        case .ambiguous: "chat_send_ambiguous"
+        case .blockedRouteChanged: "chat_send_route_blocked"
+        }
+        let diagnosticOutcome: OpenClawDiagnosticOutboxOutcome = switch outcome {
+        case .notDispatched: .notDispatched
+        case .dispatchRejected: .dispatchRejected
+        case .accepted: .accepted
+        case .ambiguous: .ambiguous
+        case .blockedRouteChanged: .blockedRouteChanged
+        }
+        Self.recordDurableSendDiagnostic(
+            state: eventState,
+            stableGatewayID: stableGatewayID,
+            routingContract: routingContract,
+            route: route,
+            sessionKey: sessionKey,
+            rawCommandID: rawCommandID,
+            outcome: diagnosticOutcome,
+            resultClass: state,
+            durationMilliseconds: durationMilliseconds,
+            ackRunID: {
+                if case let .accepted(runID, _) = outcome { return runID }
+                return nil
+            }())
+    }
+
+    private static func recordDurableSendDiagnostic(
+        state: String,
+        stableGatewayID: String?,
+        routingContract: String,
+        route: GatewayNodeSessionRoute,
+        sessionKey: String,
+        rawCommandID: String,
+        outcome: OpenClawDiagnosticOutboxOutcome? = nil,
+        resultClass: String,
+        durationMilliseconds: Int,
+        ackRunID: String? = nil)
+    {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: state,
+            connectionRole: .operator,
+            socketGeneration: route.diagnosticSocketGeneration,
+            routeGeneration: route.diagnosticRouteGeneration,
+            sessionIdentifier: sessionKey,
+            runIdentifier: ackRunID,
+            diagnosticAttemptID: rawCommandID,
+            resultClass: resultClass,
+            outboxOutcome: outcome,
+            outboxCommandIdentifier: rawCommandID,
+            durationMilliseconds: durationMilliseconds,
+            deliveryTarget: .operatorChat,
+            deliveryGatewayIdentifier: stableGatewayID,
+            routingContractIdentifier: routingContract,
+            ackRunIdentifier: ackRunID))
     }
 
     func sendMessage(
