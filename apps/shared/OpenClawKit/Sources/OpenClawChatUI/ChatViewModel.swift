@@ -551,10 +551,10 @@ public final class OpenClawChatViewModel {
             sessionIdentifier: session.key,
             runIdentifier: runID,
             messageIdentifier: messageID,
-            diagnosticAttemptID: commandID,
             eventCount: eventCount,
             messageCount: messageCount,
             sessionGeneration: session.generation,
+            diagnosticAttemptID: commandID,
             resultClass: resultClass,
             outboxOutcome: outcome,
             outboxCommandIdentifier: commandID,
@@ -1692,7 +1692,7 @@ public final class OpenClawChatViewModel {
         for transition in result.transitions {
             switch transition {
             case .dispatched(let rawCommandID):
-                guard let command = result.unresolvedCommands.first(where: {
+                guard result.unresolvedCommands.contains(where: {
                     $0.rawCommandID == rawCommandID && $0.sessionKey == self.sessionKey
                 }) else { continue }
                 self.retainDurableOutboxCommandID(rawCommandID)

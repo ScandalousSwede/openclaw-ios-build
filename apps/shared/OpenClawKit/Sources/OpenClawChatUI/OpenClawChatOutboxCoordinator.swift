@@ -346,8 +346,8 @@ public actor OpenClawChatOutboxDeliveryOwner {
                     stableGatewayID: self.stableGatewayID,
                     status: result.status,
                     commands: result.unresolvedCommands,
-                    includeCounts: true,
                     flushTrigger: flushTrigger,
+                    includeCounts: true,
                     resultClass: "success")
                 self.publish(self.makeUpdate(from: result))
                 if result.unresolvedCommands.first.map({
