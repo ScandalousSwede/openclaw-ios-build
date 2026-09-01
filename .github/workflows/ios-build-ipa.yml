@@ -29,10 +29,10 @@ permissions:
 # candidate: every credential-free checkout and provenance field below is bound
 # to this immutable source candidate instead.
 env:
-  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build115-outbound-send-boundary-release-executor-v4-20260901
+  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build115-outbound-send-boundary-release-executor-v6-20260901
   AIES_RELEASE_SOURCE_BRANCH: aies/ios-build115-outbound-send-boundary-20260901
-  AIES_RELEASE_SOURCE_SHA: b9e80b0781f310dd65db4115204a47318f5c7e9e
-  AIES_RELEASE_SOURCE_TREE: 6714eb0ec9dd157140242a569d9180bd806a345f
+  AIES_RELEASE_SOURCE_SHA: c254df86857138a5fcd22d683e4064fbd1766b25
+  AIES_RELEASE_SOURCE_TREE: 9d2a4a997d348874dd14bf500984014e2e2c9998
 
 jobs:
   dispatch-gate:
