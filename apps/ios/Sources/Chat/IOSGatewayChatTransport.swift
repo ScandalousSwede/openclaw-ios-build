@@ -718,11 +718,11 @@ struct IOSGatewayChatTransport: OpenClawChatTransport {
             resultClass: resultClass,
             outboxOutcome: outcome,
             outboxCommandIdentifier: rawCommandID,
-            durationMilliseconds: durationMilliseconds,
             deliveryTarget: .operatorChat,
             deliveryGatewayIdentifier: stableGatewayID,
             routingContractIdentifier: routingContract,
-            ackRunIdentifier: ackRunID))
+            ackRunIdentifier: ackRunID,
+            durationMilliseconds: durationMilliseconds))
     }
 
     func sendMessage(
