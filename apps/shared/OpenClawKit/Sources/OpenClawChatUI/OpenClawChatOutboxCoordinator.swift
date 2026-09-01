@@ -1,4 +1,5 @@
 import Foundation
+import OpenClawKit
 
 /// Cross-module owner for one gateway's durable chat FIFO. Chat, Talk, and
 /// lifecycle recovery share this actor so only one coordinator can admit work
@@ -6,6 +7,7 @@ import Foundation
 public actor OpenClawChatOutboxDeliveryOwner {
     private let coordinator: OpenClawChatOutboxCoordinator
     private let store: OpenClawChatOutboxStore
+    private let stableGatewayID: String
     private var generation: UInt64 = 1
     private var isRetired = false
     private var updateSequence: UInt64 = 0
@@ -13,6 +15,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
     private var workerTask: Task<Void, Never>?
     private var workerGeneration: UInt64 = 0
     private var wakeRequested = false
+    private var pendingFlushTrigger: OpenClawDiagnosticOutboxFlushTrigger?
     private let confirmationDelaysNanoseconds: [UInt64]
     private var destructiveSessionActionActive = false
     // An opaque token is intentionally used instead of an owner-local counter.
@@ -37,6 +40,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         ])
     {
         self.store = store
+        self.stableGatewayID = stableGatewayID
         self.confirmationDelaysNanoseconds = confirmationDelaysNanoseconds
         self.coordinator = OpenClawChatOutboxCoordinator(
             store: store,
@@ -62,8 +66,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         // newly attached Chat/Talk observer therefore owns a fresh snapshot
         // wake so it cannot miss a fast lifecycle wake that completed before
         // registration.
-        self.wakeRequested = true
-        self.ensureWorker()
+        self.requestWake(trigger: .subscriberRestore)
         return stream
     }
 
@@ -100,8 +103,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         // A successful return from storage is the persist-before-clear proof.
         // Retirement after commit may fence delivery, but must never turn that
         // committed row back into a failed enqueue that a caller could duplicate.
-        self.wakeRequested = true
-        self.ensureWorker()
+        self.requestWake(trigger: .enqueue, command: command)
         return command
     }
 
@@ -181,25 +183,26 @@ public actor OpenClawChatOutboxDeliveryOwner {
     }
 
     public func wake() throws {
+        try self.wake(trigger: .explicit)
+    }
+
+    public func wake(trigger: OpenClawDiagnosticOutboxFlushTrigger) throws {
         _ = try self.requireCurrentGeneration()
-        self.wakeRequested = true
-        self.ensureWorker()
+        self.requestWake(trigger: trigger)
     }
 
     public func retrySameIdentity(rawCommandID: String) async throws {
         let admittedGeneration = try self.requireCurrentGeneration()
         try await self.coordinator.retrySameIdentity(rawCommandID: rawCommandID)
         try self.requireCurrent(admittedGeneration)
-        self.wakeRequested = true
-        self.ensureWorker()
+        self.requestWake(trigger: .manualRetry)
     }
 
     public func cancelProvablyUnaccepted(rawCommandID: String) async throws {
         let admittedGeneration = try self.requireCurrentGeneration()
         try await self.coordinator.cancelProvablyUnaccepted(rawCommandID: rawCommandID)
         try self.requireCurrent(admittedGeneration)
-        self.wakeRequested = true
-        self.ensureWorker()
+        self.requestWake(trigger: .safeCancel)
     }
 
     public func currentOutcome(rawCommandID: String) async throws -> OpenClawChatOutboxOutcome? {
@@ -231,6 +234,7 @@ public actor OpenClawChatOutboxDeliveryOwner {
         self.isRetired = true
         self.generation &+= 1
         self.wakeRequested = false
+        self.pendingFlushTrigger = nil
         let workerTask = self.workerTask
         workerTask?.cancel()
         self.workerTask = nil
@@ -283,12 +287,34 @@ public actor OpenClawChatOutboxDeliveryOwner {
         }
     }
 
+    private func requestWake(
+        trigger: OpenClawDiagnosticOutboxFlushTrigger,
+        command: OpenClawChatOutboxCommand? = nil)
+    {
+        self.wakeRequested = true
+        if let pendingFlushTrigger = self.pendingFlushTrigger,
+           pendingFlushTrigger != trigger
+        {
+            self.pendingFlushTrigger = .coalesced
+        } else {
+            self.pendingFlushTrigger = trigger
+        }
+        recordOutboxDiagnostic(
+            state: "outbox_flush_requested",
+            stableGatewayID: self.stableGatewayID,
+            command: command,
+            flushTrigger: trigger,
+            resultClass: "requested")
+        self.ensureWorker()
+    }
+
     private func runWorker(
         coordinator: OpenClawChatOutboxCoordinator,
         generation: UInt64) async
     {
         var confirmationAttempt = 0
         while self.isCurrentWorker(generation) {
+            var flushTrigger = self.pendingFlushTrigger ?? .unknown
             if !self.wakeRequested {
                 guard confirmationAttempt < self.confirmationDelaysNanoseconds.count else { break }
                 let delay = self.confirmationDelaysNanoseconds[confirmationAttempt]
@@ -299,11 +325,30 @@ public actor OpenClawChatOutboxDeliveryOwner {
                 }
                 guard self.isCurrentWorker(generation) else { return }
                 confirmationAttempt += 1
+                if self.wakeRequested {
+                    flushTrigger = self.pendingFlushTrigger ?? .unknown
+                } else {
+                    flushTrigger = .canonicalConfirmationTimer
+                }
             }
             self.wakeRequested = false
+            self.pendingFlushTrigger = nil
+            recordOutboxDiagnostic(
+                state: "outbox_flush_started",
+                stableGatewayID: self.stableGatewayID,
+                flushTrigger: flushTrigger,
+                resultClass: "requested")
             do {
                 let result = try await coordinator.processAvailableWork()
                 guard self.isCurrentWorker(generation) else { return }
+                recordOutboxDiagnostic(
+                    state: "outbox_flush_completed",
+                    stableGatewayID: self.stableGatewayID,
+                    status: result.status,
+                    commands: result.unresolvedCommands,
+                    includeCounts: true,
+                    flushTrigger: flushTrigger,
+                    resultClass: "success")
                 self.publish(self.makeUpdate(from: result))
                 if result.unresolvedCommands.first.map({
                     $0.outcome == .accepted || $0.outcome == .ambiguous
@@ -314,6 +359,11 @@ public actor OpenClawChatOutboxDeliveryOwner {
                 guard self.wakeRequested else { break }
             } catch {
                 guard self.isCurrentWorker(generation) else { return }
+                recordOutboxDiagnostic(
+                    state: "outbox_flush_failed",
+                    stableGatewayID: self.stableGatewayID,
+                    flushTrigger: flushTrigger,
+                    resultClass: "failed")
                 break
             }
         }
@@ -618,6 +668,13 @@ actor OpenClawChatOutboxCoordinator {
     func processAvailableWork() async throws -> OpenClawChatOutboxProcessingResult {
         var transitions: [OpenClawChatOutboxProcessingResult.Transition] = []
         var commands = try await self.store.loadUnresolved()
+        recordOutboxDiagnostic(
+            state: "outbox_snapshot_loaded",
+            stableGatewayID: self.stableGatewayID,
+            command: commands.first,
+            commands: commands,
+            includeCounts: true,
+            resultClass: commands.isEmpty ? "queue_empty" : "received")
         guard !Task.isCancelled else {
             return try await self.result(commands: commands, transitions: transitions)
         }
@@ -627,45 +684,192 @@ actor OpenClawChatOutboxCoordinator {
             guard case .unavailable(let deliveryGate) = routeEvidence else {
                 return try await self.result(commands: commands, transitions: transitions)
             }
+            recordOutboxDiagnostic(
+                state: "outbox_route_gate_evaluated",
+                stableGatewayID: self.stableGatewayID,
+                command: commands.first,
+                commands: commands,
+                deliveryGate: deliveryGate,
+                resultClass: "not_attempted")
             return try await self.result(
                 commands: commands,
                 transitions: transitions,
                 deliveryGate: deliveryGate)
         }
+        recordOutboxDiagnostic(
+            state: "outbox_route_gate_evaluated",
+            stableGatewayID: self.stableGatewayID,
+            command: commands.first,
+            commands: commands,
+            routingContract: liveRoute.routingContract,
+            lease: lease,
+            resultClass: "route_bound")
 
         while let head = commands.first, !Task.isCancelled {
             if head.outcome == .accepted || head.outcome == .ambiguous {
-                let canonicalHistoryContainsHead = try await self.canonicalHistoryContains(
-                    head,
-                    using: lease)
+                recordOutboxDiagnostic(
+                    state: "outbox_canonical_check_started",
+                    stableGatewayID: self.stableGatewayID,
+                    command: head,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    resultClass: "requested")
+                let canonicalHistoryContainsHead: Bool
+                do {
+                    canonicalHistoryContainsHead = try await self.canonicalHistoryContains(
+                        head,
+                        using: lease)
+                } catch {
+                    recordOutboxDiagnostic(
+                        state: "outbox_canonical_check_failed",
+                        stableGatewayID: self.stableGatewayID,
+                        command: head,
+                        commands: commands,
+                        routingContract: liveRoute.routingContract,
+                        lease: lease,
+                        resultClass: "failed")
+                    throw error
+                }
+                recordOutboxDiagnostic(
+                    state: "outbox_canonical_check_completed",
+                    stableGatewayID: self.stableGatewayID,
+                    command: head,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    resultClass: canonicalHistoryContainsHead
+                        ? "canonical_confirmed"
+                        : "canonical_not_found_bounded")
                 if canonicalHistoryContainsHead {
                     guard !Task.isCancelled else { break }
-                    _ = try await self.store.confirmCanonicalHistory(
+                    let receiptPersisted = try await self.store.confirmCanonicalHistory(
                         rawCommandID: head.rawCommandID,
                         canonicalUserIdempotencyKey: head.canonicalUserIdempotencyKey)
-                    transitions.append(.canonicalHistoryConfirmed(rawCommandID: head.rawCommandID))
+                    recordOutboxDiagnostic(
+                        state: receiptPersisted
+                            ? "outbox_canonical_receipt_persisted"
+                            : "outbox_canonical_receipt_stale",
+                        stableGatewayID: self.stableGatewayID,
+                        command: head,
+                        commands: commands,
+                        routingContract: liveRoute.routingContract,
+                        lease: lease,
+                        outcome: receiptPersisted
+                            ? .canonicalHistoryConfirmed
+                            : head.outcome.diagnosticValue,
+                        resultClass: receiptPersisted ? "canonical_confirmed" : "stale_callback")
+                    if receiptPersisted {
+                        transitions.append(.canonicalHistoryConfirmed(rawCommandID: head.rawCommandID))
+                    }
                     commands = try await self.store.loadUnresolved()
                     continue
                 }
 
                 // Absence is never proof of non-dispatch and never auto-requeues.
+                recordOutboxDiagnostic(
+                    state: "outbox_fifo_head_blocked",
+                    stableGatewayID: self.stableGatewayID,
+                    command: head,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: head.outcome.diagnosticValue,
+                    resultClass: "fifo_blocked")
                 break
             }
 
-            guard head.outcome == .notDispatched else { break }
-            guard let claim = try await self.store.claimNext() else { break }
+            guard head.outcome == .notDispatched else {
+                recordOutboxDiagnostic(
+                    state: "outbox_fifo_head_blocked",
+                    stableGatewayID: self.stableGatewayID,
+                    command: head,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: head.outcome.diagnosticValue,
+                    resultClass: "fifo_blocked")
+                break
+            }
+            guard let claim = try await self.store.claimNext() else {
+                recordOutboxDiagnostic(
+                    state: "outbox_row_claim_unavailable",
+                    stableGatewayID: self.stableGatewayID,
+                    command: head,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    resultClass: "not_attempted")
+                break
+            }
+            recordOutboxDiagnostic(
+                state: "outbox_row_claimed",
+                stableGatewayID: self.stableGatewayID,
+                command: claim.command,
+                commands: commands,
+                routingContract: liveRoute.routingContract,
+                lease: lease,
+                resultClass: "success")
             await self.afterClaimBeforeDispatch?()
             if Task.isCancelled {
-                _ = try? await self.store.recordDispatchOutcome(.notDispatched, for: claim)
+                let outcomePersisted = (try? await self.store.recordDispatchOutcome(
+                    .notDispatched,
+                    for: claim)) == true
+                recordOutboxDiagnostic(
+                    state: "outbox_pre_dispatch_rejected",
+                    stableGatewayID: self.stableGatewayID,
+                    command: claim.command,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: .notDispatched,
+                    resultClass: "cancelled")
+                recordOutboxDiagnostic(
+                    state: outcomePersisted
+                        ? "outbox_dispatch_outcome_persisted"
+                        : "outbox_dispatch_outcome_stale",
+                    stableGatewayID: self.stableGatewayID,
+                    command: claim.command,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: outcomePersisted
+                        ? .notDispatched
+                        : claim.command.outcome.diagnosticValue,
+                    resultClass: outcomePersisted ? "success" : "stale_callback")
                 break
             }
 
             guard Self.routeAllowsDispatch(stored: claim.command.route, live: liveRoute) else {
-                _ = try await self.store.recordDispatchOutcome(
+                let outcomePersisted = try await self.store.recordDispatchOutcome(
                     .blockedRouteChanged,
                     for: claim,
                     failureCode: OpenClawChatSessionRoutingContract.changedErrorReason)
-                transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
+                if outcomePersisted {
+                    transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
+                }
+                recordOutboxDiagnostic(
+                    state: "outbox_pre_dispatch_rejected",
+                    stableGatewayID: self.stableGatewayID,
+                    command: claim.command,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: .blockedRouteChanged,
+                    resultClass: "route_or_configuration_changed_before_payload")
+                recordOutboxDiagnostic(
+                    state: outcomePersisted
+                        ? "outbox_dispatch_outcome_persisted"
+                        : "outbox_dispatch_outcome_stale",
+                    stableGatewayID: self.stableGatewayID,
+                    command: claim.command,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: outcomePersisted
+                        ? .blockedRouteChanged
+                        : claim.command.outcome.diagnosticValue,
+                    resultClass: outcomePersisted ? "success" : "stale_callback")
                 commands = try await self.store.loadUnresolved()
                 break
             }
@@ -677,65 +881,127 @@ actor OpenClawChatOutboxCoordinator {
                     fileName: $0.fileName,
                     content: $0.data.base64EncodedString())
             }
+            recordOutboxDiagnostic(
+                state: "outbox_dispatch_started",
+                stableGatewayID: self.stableGatewayID,
+                command: claim.command,
+                commands: commands,
+                routingContract: liveRoute.routingContract,
+                lease: lease,
+                resultClass: "requested")
             let dispatch = await lease.dispatchMessage(
                 sessionKey: claim.command.sessionKey,
                 message: claim.command.text,
                 thinking: claim.command.thinkingLevel,
                 idempotencyKey: claim.command.rawCommandID,
                 attachments: attachments)
+            recordOutboxDiagnostic(
+                state: "outbox_dispatch_completed",
+                stableGatewayID: self.stableGatewayID,
+                command: claim.command,
+                commands: commands,
+                routingContract: liveRoute.routingContract,
+                lease: lease,
+                outcome: dispatch.diagnosticOutcome,
+                resultClass: dispatch.diagnosticResultClass)
             if Task.isCancelled {
                 // Admission already happened. Release only this exact CAS claim
                 // into unresolved state; never turn cancellation into a replay.
-                _ = try? await self.store.recordDispatchOutcome(
+                let outcomePersisted = (try? await self.store.recordDispatchOutcome(
                     .ambiguous,
                     for: claim,
-                    failureCode: "worker-cancelled-after-admission")
+                    failureCode: "worker-cancelled-after-admission")) == true
+                recordOutboxDiagnostic(
+                    state: outcomePersisted
+                        ? "outbox_dispatch_outcome_persisted"
+                        : "outbox_dispatch_outcome_stale",
+                    stableGatewayID: self.stableGatewayID,
+                    command: claim.command,
+                    commands: commands,
+                    routingContract: liveRoute.routingContract,
+                    lease: lease,
+                    outcome: outcomePersisted
+                        ? .ambiguous
+                        : claim.command.outcome.diagnosticValue,
+                    resultClass: outcomePersisted ? "success" : "stale_callback")
                 break
             }
 
+            let persistedOutcome: OpenClawDiagnosticOutboxOutcome
+            let outcomePersisted: Bool
             switch dispatch {
             case .notDispatched:
-                _ = try await self.store.recordDispatchOutcome(.notDispatched, for: claim)
+                persistedOutcome = .notDispatched
+                outcomePersisted = try await self.store.recordDispatchOutcome(
+                    .notDispatched,
+                    for: claim)
             case .dispatchRejected(let code, let reason):
                 if reason == OpenClawChatSessionRoutingContract.changedErrorReason {
-                    _ = try await self.store.recordDispatchOutcome(
+                    persistedOutcome = .blockedRouteChanged
+                    outcomePersisted = try await self.store.recordDispatchOutcome(
                         .blockedRouteChanged,
                         for: claim,
                         failureCode: Self.boundedFailureCode(reason))
-                    transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
                 } else {
-                    _ = try await self.store.recordDispatchOutcome(
+                    persistedOutcome = .dispatchRejected
+                    outcomePersisted = try await self.store.recordDispatchOutcome(
                         .dispatchRejected,
                         for: claim,
                         failureCode: Self.boundedFailureCode(code))
+                }
+                if outcomePersisted {
                     transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
                 }
             case .accepted(let runID, _):
                 if runID == claim.command.rawCommandID {
-                    _ = try await self.store.recordDispatchOutcome(
+                    persistedOutcome = .accepted
+                    outcomePersisted = try await self.store.recordDispatchOutcome(
                         .accepted,
                         for: claim,
                         ackRunID: runID)
                 } else {
-                    _ = try await self.store.recordDispatchOutcome(
+                    persistedOutcome = .ambiguous
+                    outcomePersisted = try await self.store.recordDispatchOutcome(
                         .ambiguous,
                         for: claim,
                         failureCode: "ack-identity-mismatch")
                 }
-                transitions.append(.dispatched(rawCommandID: claim.command.rawCommandID))
+                if outcomePersisted {
+                    transitions.append(.dispatched(rawCommandID: claim.command.rawCommandID))
+                }
             case .ambiguous(let code):
-                _ = try await self.store.recordDispatchOutcome(
+                persistedOutcome = .ambiguous
+                outcomePersisted = try await self.store.recordDispatchOutcome(
                     .ambiguous,
                     for: claim,
                     failureCode: Self.boundedFailureCode(code))
-                transitions.append(.dispatched(rawCommandID: claim.command.rawCommandID))
+                if outcomePersisted {
+                    transitions.append(.dispatched(rawCommandID: claim.command.rawCommandID))
+                }
             case .blockedRouteChanged:
-                _ = try await self.store.recordDispatchOutcome(
+                persistedOutcome = .blockedRouteChanged
+                outcomePersisted = try await self.store.recordDispatchOutcome(
                     .blockedRouteChanged,
                     for: claim,
                     failureCode: OpenClawChatSessionRoutingContract.changedErrorReason)
-                transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
+                if outcomePersisted {
+                    transitions.append(.blocked(rawCommandID: claim.command.rawCommandID))
+                }
             }
+
+            recordOutboxDiagnostic(
+                state: outcomePersisted
+                    ? "outbox_dispatch_outcome_persisted"
+                    : "outbox_dispatch_outcome_stale",
+                stableGatewayID: self.stableGatewayID,
+                command: claim.command,
+                commands: commands,
+                routingContract: liveRoute.routingContract,
+                lease: lease,
+                outcome: outcomePersisted
+                    ? persistedOutcome
+                    : claim.command.outcome.diagnosticValue,
+                resultClass: outcomePersisted ? "success" : "stale_callback")
 
             commands = try await self.store.loadUnresolved()
             guard dispatch.shouldContinueOutboxDrain else { break }
@@ -783,9 +1049,12 @@ actor OpenClawChatOutboxCoordinator {
             let lease = try await self.requireLiveLease()
             let confirmed = try await self.canonicalHistoryContains(command, using: lease)
             if confirmed {
-                _ = try await self.store.confirmCanonicalHistory(
+                let receiptPersisted = try await self.store.confirmCanonicalHistory(
                     rawCommandID: rawCommandID,
                     canonicalUserIdempotencyKey: command.canonicalUserIdempotencyKey)
+                guard receiptPersisted else {
+                    throw OpenClawChatOutboxCoordinatorError.noMatchingCommand
+                }
                 return
             }
             let requeued = try await self.store.retryAmbiguousAfterReview(rawCommandID: rawCommandID)
@@ -796,9 +1065,12 @@ actor OpenClawChatOutboxCoordinator {
             let lease = try await self.requireLiveLease()
             let confirmed = try await self.canonicalHistoryContains(command, using: lease)
             if confirmed {
-                _ = try await self.store.confirmCanonicalHistory(
+                let receiptPersisted = try await self.store.confirmCanonicalHistory(
                     rawCommandID: rawCommandID,
                     canonicalUserIdempotencyKey: command.canonicalUserIdempotencyKey)
+                guard receiptPersisted else {
+                    throw OpenClawChatOutboxCoordinatorError.noMatchingCommand
+                }
                 return
             }
             throw OpenClawChatOutboxCoordinatorError.retryRequiresCanonicalConfirmation
@@ -1097,4 +1369,103 @@ private extension OpenClawChatDispatchOutcome {
             false
         }
     }
+
+    var diagnosticOutcome: OpenClawDiagnosticOutboxOutcome {
+        switch self {
+        case .notDispatched: .notDispatched
+        case .dispatchRejected: .dispatchRejected
+        case .accepted: .accepted
+        case .ambiguous: .ambiguous
+        case .blockedRouteChanged: .blockedRouteChanged
+        }
+    }
+
+    var diagnosticResultClass: String {
+        switch self {
+        case .notDispatched: "not_dispatched"
+        case .dispatchRejected: "dispatch_rejected"
+        case .accepted: "accepted"
+        case .ambiguous: "ambiguous"
+        case .blockedRouteChanged: "blocked_route_changed"
+        }
+    }
+}
+
+extension OpenClawChatOutboxOutcome {
+    var diagnosticValue: OpenClawDiagnosticOutboxOutcome {
+        switch self {
+        case .notDispatched: .notDispatched
+        case .dispatchRejected: .dispatchRejected
+        case .accepted: .accepted
+        case .ambiguous: .ambiguous
+        case .canonicalHistoryConfirmed: .canonicalHistoryConfirmed
+        case .expired: .expired
+        case .cancelled: .cancelled
+        case .blockedRouteChanged: .blockedRouteChanged
+        }
+    }
+}
+
+extension OpenClawChatOutboxStatus.DeliveryGate {
+    var diagnosticValue: OpenClawDiagnosticOutboxDeliveryGate {
+        switch self {
+        case .offline: .offline
+        case .unsupportedClient: .unsupportedClient
+        case .gatewayIdentityUnavailable: .gatewayIdentityUnavailable
+        case .gatewayMismatch: .gatewayMismatch
+        case .capabilityUnavailable: .capabilityUnavailable
+        case .operatorRoleMissing: .operatorRoleMissing
+        case .operatorSessionUnavailable: .operatorSessionUnavailable
+        case .operatorScopesUnavailable: .operatorScopesUnavailable
+        case .routingContractUnavailable: .routingContractUnavailable
+        }
+    }
+}
+
+private func recordOutboxDiagnostic(
+    state: String,
+    stableGatewayID: String,
+    command: OpenClawChatOutboxCommand? = nil,
+    status: OpenClawChatOutboxStatus? = nil,
+    commands: [OpenClawChatOutboxCommand]? = nil,
+    routingContract: String? = nil,
+    lease: OpenClawChatTransportRouteLease? = nil,
+    outcome: OpenClawDiagnosticOutboxOutcome? = nil,
+    deliveryGate: OpenClawChatOutboxStatus.DeliveryGate? = nil,
+    flushTrigger: OpenClawDiagnosticOutboxFlushTrigger? = nil,
+    includeCounts: Bool = false,
+    resultClass: String? = nil)
+{
+    let queuedCount = includeCounts
+        ? commands?.filter { $0.outcome == .notDispatched }.count ?? status?.queuedCount
+        : nil
+    let confirmingCount = includeCounts
+        ? commands?.filter { $0.outcome == .accepted || $0.outcome == .ambiguous }.count
+            ?? status?.confirmingCount
+        : nil
+    let blockedCount = includeCounts
+        ? commands?.filter {
+            $0.outcome == .dispatchRejected || $0.outcome == .blockedRouteChanged
+        }.count ?? status?.blockedCount
+        : nil
+    OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+        kind: .chat,
+        state: state,
+        connectionRole: lease == nil ? nil : .operator,
+        socketGeneration: lease?.diagnosticSocketGeneration,
+        routeGeneration: lease?.diagnosticRouteGeneration,
+        sessionIdentifier: command?.sessionKey,
+        diagnosticAttemptID: command?.rawCommandID,
+        resultClass: resultClass,
+        outboxOutcome: outcome,
+        outboxCommandIdentifier: command?.rawCommandID,
+        outboxDeliveryGate: (deliveryGate ?? status?.deliveryGate)?.diagnosticValue,
+        outboxFlushTrigger: flushTrigger,
+        outboxQueuedCount: queuedCount,
+        outboxConfirmingCount: confirmingCount,
+        outboxBlockedCount: blockedCount,
+        outboxHasVerifiedRouteSnapshot: includeCounts ? status?.hasVerifiedRouteSnapshot : nil,
+        deliveryTarget: .operatorChat,
+        deliveryGatewayIdentifier: stableGatewayID,
+        routingContractIdentifier: routingContract ?? command?.route.routingContract))
 }

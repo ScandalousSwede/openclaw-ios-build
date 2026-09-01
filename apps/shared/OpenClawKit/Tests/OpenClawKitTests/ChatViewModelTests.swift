@@ -5143,6 +5143,60 @@ struct ChatViewModelTests {
         vm.shutdown()
     }
 
+    @Test @MainActor func `legacy direct sends never emit durable outbox receipts`() async throws {
+        let captured = OSAllocatedUnfairLock(initialState: [String]())
+        OpenClawDiagnosticRecorder.installSink { line in
+            captured.withLock { $0.append(line) }
+        }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        let (transport, vm) = await makeViewModel(
+            historyResponses: [historyPayload(), historyPayload()])
+        vm.load()
+        try await waitUntil("legacy transport is healthy") { vm.healthOK && !vm.isLoading }
+        vm.input = "private legacy message"
+        vm.send()
+        let runID = try await waitForLastSentRunId(transport)
+        try await waitUntil("legacy send is pending") { vm.pendingRunCount == 1 }
+
+        transport.emit(.sessionMessage(OpenClawSessionMessageEventPayload(
+            sessionKey: "main",
+            message: OpenClawChatMessage(
+                role: "user",
+                content: [OpenClawChatMessageContent(
+                    type: "text",
+                    text: "private legacy message",
+                    mimeType: nil,
+                    fileName: nil,
+                    content: nil)],
+                timestamp: Date().timeIntervalSince1970 * 1000,
+                idempotencyKey: "\(runID):user"),
+            messageId: "legacy-canonical-message",
+            messageSeq: 1)))
+        emitAssistantText(transport: transport, runId: runID, text: "private legacy stream")
+        transport.emit(.chat(OpenClawChatEventPayload(
+            runId: runID,
+            sessionKey: "main",
+            state: "final",
+            message: chatTextMessage(
+                role: "assistant",
+                text: "private legacy reply",
+                timestamp: Date().timeIntervalSince1970 * 1000),
+            errorMessage: nil)))
+        try await waitUntil("legacy run completes") { vm.pendingRunCount == 0 }
+
+        let durableReceiptStates: Set<String> = [
+            "outbox_canonical_user_receipt",
+            "outbox_run_receipt",
+            "outbox_reply_receipt",
+        ]
+        let recordedStates = Set(captured.withLock { lines in
+            lines.compactMap(OpenClawDiagnosticRecorder.decodeRecord).map(\.state)
+        })
+        #expect(recordedStates.isDisjoint(with: durableReceiptStates))
+        vm.shutdown()
+    }
+
     @Test @MainActor func `chat termination breadcrumbs carry only bounded counts and generations`() async throws {
         let captured = OSAllocatedUnfairLock(initialState: [String]())
         let sessionKey = "termination-diagnostic-session"

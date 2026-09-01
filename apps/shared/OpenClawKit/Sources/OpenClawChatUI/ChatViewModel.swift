@@ -61,9 +61,17 @@ public final class OpenClawChatViewModel {
     private var pendingRuns = Set<String>() {
         didSet { self.pendingRunCount = self.pendingRuns.count }
     }
+    // Diagnostic ownership is narrower than generic pending-run ownership:
+    // legacy direct sends also populate pendingRuns but never entered this FIFO.
+    private var durableOutboxCommandIDs = Set<String>()
+    private var durableOutboxCommandOrder: [String] = []
+    private var durableOutboxCanonicalUserReceiptIDs = Set<String>()
+    private var durableOutboxRunReceiptIDs = Set<String>()
+    private var durableOutboxReplyReceiptIDs = Set<String>()
     private var isShutDown = false
     private var outboxWorkerGeneration: UInt64 = 0
     private var outboxWakeRequested = false
+    private var pendingOutboxFlushTrigger: OpenClawDiagnosticOutboxFlushTrigger?
     private var lastAppliedOutboxUpdateSequence: UInt64 = 0
     private var draftRevision: UInt64 = 0
 
@@ -269,6 +277,7 @@ public final class OpenClawChatViewModel {
         self.eventSubscriptionGeneration &+= 1
         self.outboxWorkerGeneration &+= 1
         self.outboxWakeRequested = false
+        self.pendingOutboxFlushTrigger = nil
         self.outboxWorkerTask?.cancel()
         self.outboxWorkerTask = nil
         self.outboxUpdateTask?.cancel()
@@ -518,6 +527,45 @@ public final class OpenClawChatViewModel {
             diagnosticAttemptID: diagnosticAttemptID,
             stream: stream,
             resultClass: resultClass))
+    }
+
+    private func recordOutboxDiagnostic(
+        state: String,
+        session: SessionSnapshot? = nil,
+        commandID: String? = nil,
+        runID: String? = nil,
+        messageID: String? = nil,
+        outcome: OpenClawDiagnosticOutboxOutcome? = nil,
+        flushTrigger: OpenClawDiagnosticOutboxFlushTrigger? = nil,
+        resultClass: String? = nil,
+        eventCount: Int? = nil,
+        messageCount: Int? = nil,
+        status: OpenClawChatOutboxStatus? = nil,
+        includeStatus: Bool = false)
+    {
+        let session = session ?? self.currentSessionSnapshot()
+        let status = status ?? self.outboxStatus
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: state,
+            sessionIdentifier: session.key,
+            runIdentifier: runID,
+            messageIdentifier: messageID,
+            diagnosticAttemptID: commandID,
+            eventCount: eventCount,
+            messageCount: messageCount,
+            sessionGeneration: session.generation,
+            resultClass: resultClass,
+            outboxOutcome: outcome,
+            outboxCommandIdentifier: commandID,
+            outboxDeliveryGate: includeStatus ? status.deliveryGate?.diagnosticValue : nil,
+            outboxFlushTrigger: flushTrigger,
+            outboxQueuedCount: includeStatus ? status.queuedCount : nil,
+            outboxConfirmingCount: includeStatus ? status.confirmingCount : nil,
+            outboxBlockedCount: includeStatus ? status.blockedCount : nil,
+            outboxHasVerifiedRouteSnapshot: includeStatus ? status.hasVerifiedRouteSnapshot : nil,
+            transportHealthOK: self.healthOK,
+            deliveryTarget: .operatorChat))
     }
 
     func chatViewAppeared() {
@@ -1487,6 +1535,12 @@ public final class OpenClawChatViewModel {
 
         guard self.isCurrentSession(sessionSnapshot), !self.isShutDown else { return }
 
+        self.recordOutboxDiagnostic(
+            state: "outbox_enqueue_started",
+            session: sessionSnapshot,
+            commandID: rawCommandID,
+            resultClass: "requested",
+            messageCount: self.messages.count)
         do {
             let persisted = try await coordinator.enqueue(
                 rawCommandID: rawCommandID,
@@ -1496,6 +1550,13 @@ public final class OpenClawChatViewModel {
                 thinkingLevel: thinkingLevel,
                 createdAt: createdAt)
             guard !self.isShutDown else { return }
+            self.recordOutboxDiagnostic(
+                state: "outbox_enqueue_persisted",
+                session: sessionSnapshot,
+                commandID: persisted.rawCommandID,
+                outcome: persisted.outcome.diagnosticValue,
+                resultClass: "success",
+                messageCount: self.messages.count)
             guard self.isCurrentSession(sessionSnapshot) else {
                 self.kickOutboxWorker(reason: "enqueue-after-session-switch")
                 return
@@ -1512,27 +1573,47 @@ public final class OpenClawChatViewModel {
                 self.attachments = []
             }
 
-            self.restoreOptimisticOutboxCommands([persisted])
-            self.logDiagnostic(
-                "chat.outbox persisted sessionKey=\(sessionSnapshot.key) commandId=\(rawCommandID)")
+            self.restoreOptimisticOutboxCommands(
+                [persisted],
+                recordAuthoritativeRestoreDiagnostic: false)
+            self.recordOutboxDiagnostic(
+                state: "outbox_local_echo_projected",
+                session: sessionSnapshot,
+                commandID: persisted.rawCommandID,
+                outcome: persisted.outcome.diagnosticValue,
+                resultClass: "success",
+                messageCount: self.messages.count)
             self.kickOutboxWorker(reason: "enqueue")
         } catch {
             // Persist-before-clear is the safety boundary. On any failure the
             // exact draft and attachments remain user-owned in the composer.
             self.errorText = error.localizedDescription
-            self.logDiagnostic(
-                "chat.outbox persist failed sessionKey=\(sessionSnapshot.key) "
-                    + "commandId=\(rawCommandID) error=\(error.localizedDescription)")
+            self.recordOutboxDiagnostic(
+                state: "outbox_enqueue_failed",
+                session: sessionSnapshot,
+                commandID: rawCommandID,
+                resultClass: "failed",
+                messageCount: self.messages.count)
         }
     }
 
     private func kickOutboxWorker(reason: String) {
         guard let coordinator = self.outboxCoordinator, !self.isShutDown else { return }
         self.outboxWakeRequested = true
-        guard self.outboxWorkerTask == nil else { return }
+        let trigger = Self.outboxFlushTrigger(for: reason)
+        if let pendingOutboxFlushTrigger = self.pendingOutboxFlushTrigger,
+           pendingOutboxFlushTrigger != trigger
+        {
+            self.pendingOutboxFlushTrigger = .coalesced
+        } else {
+            self.pendingOutboxFlushTrigger = trigger
+        }
+        self.startOutboxWorkerIfNeeded(coordinator: coordinator)
+    }
 
+    private func startOutboxWorkerIfNeeded(coordinator: OpenClawChatOutboxDeliveryOwner) {
+        guard self.outboxWorkerTask == nil, !self.isShutDown else { return }
         let generation = self.outboxWorkerGeneration
-        self.logDiagnostic("chat.outbox worker wake reason=\(reason)")
         self.outboxWorkerTask = Task { [weak self, coordinator] in
             guard let self else { return }
             await self.runOutboxWorker(coordinator: coordinator, generation: generation)
@@ -1545,24 +1626,46 @@ public final class OpenClawChatViewModel {
     {
         while self.isCurrentOutboxWorker(generation), self.outboxWakeRequested {
             self.outboxWakeRequested = false
+            let trigger = self.pendingOutboxFlushTrigger ?? .unknown
+            self.pendingOutboxFlushTrigger = nil
             do {
-                try await coordinator.wake()
+                try await coordinator.wake(trigger: trigger)
             } catch {
                 guard self.isCurrentOutboxWorker(generation), !Task.isCancelled else { return }
                 self.errorText = error.localizedDescription
-                self.logDiagnostic("chat.outbox worker failed error=\(error.localizedDescription)")
             }
         }
 
         guard self.isCurrentOutboxWorker(generation) else { return }
         self.outboxWorkerTask = nil
         if self.outboxWakeRequested {
-            self.kickOutboxWorker(reason: "coalesced")
+            self.startOutboxWorkerIfNeeded(coordinator: coordinator)
         }
     }
 
     private func isCurrentOutboxWorker(_ generation: UInt64) -> Bool {
         !self.isShutDown && !Task.isCancelled && generation == self.outboxWorkerGeneration
+    }
+
+    private static func outboxFlushTrigger(for reason: String) -> OpenClawDiagnosticOutboxFlushTrigger {
+        switch reason {
+        case "load": .load
+        case "refresh": .refresh
+        case "foreground": .foreground
+        case "health": .health
+        case "tick": .tick
+        case "chat-event": .chatEvent
+        case "session-message": .sessionMessage
+        case "sequence-gap": .sequenceGap
+        case "session-switch": .sessionSwitch
+        case "session-create": .sessionCreate
+        case "bootstrap-complete": .bootstrapComplete
+        case "enqueue": .enqueue
+        case "enqueue-after-session-switch": .enqueue
+        case "confirmation-timeout": .canonicalConfirmationTimer
+        case "coalesced": .coalesced
+        default: .unknown
+        }
     }
 
     private func applyOutboxResult(_ result: OpenClawChatOutboxDeliveryUpdate) {
@@ -1571,6 +1674,13 @@ public final class OpenClawChatViewModel {
         else { return }
         self.lastAppliedOutboxUpdateSequence = result.sequence
         self.outboxStatus = result.status
+        self.recordOutboxDiagnostic(
+            state: "outbox_status_applied",
+            resultClass: "success",
+            eventCount: result.unresolvedCommands.count,
+            messageCount: self.messages.count,
+            status: result.status,
+            includeStatus: true)
         for receipt in result.terminalReceipts
             where receipt.outcome == .expired || receipt.outcome == .cancelled
         {
@@ -1585,17 +1695,17 @@ public final class OpenClawChatViewModel {
                 guard let command = result.unresolvedCommands.first(where: {
                     $0.rawCommandID == rawCommandID && $0.sessionKey == self.sessionKey
                 }) else { continue }
+                self.retainDurableOutboxCommandID(rawCommandID)
                 self.pendingRuns.insert(rawCommandID)
                 self.armOutboxConfirmationTimeout(rawCommandID: rawCommandID)
-                self.logDiagnostic(
-                    "chat.outbox dispatch admitted sessionKey=\(command.sessionKey) commandId=\(rawCommandID)")
             case .canonicalHistoryConfirmed(let rawCommandID):
-                self.clearPendingRun(rawCommandID)
+                // Canonical history proves delivery, but the matching run/final
+                // event can still arrive afterwards. Keep bounded diagnostic
+                // ownership until that terminal boundary is observed.
+                self.clearPendingRun(rawCommandID, retireDurableOwnership: false)
                 shouldRefreshHistory = true
-                self.logDiagnostic("chat.outbox canonical confirmed commandId=\(rawCommandID)")
             case .blocked(let rawCommandID):
                 self.clearPendingRun(rawCommandID)
-                self.logDiagnostic("chat.outbox blocked commandId=\(rawCommandID)")
             }
         }
 
@@ -1607,7 +1717,13 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func restoreOptimisticOutboxCommands(_ commands: [OpenClawChatOutboxCommand]) {
+    private func restoreOptimisticOutboxCommands(
+        _ commands: [OpenClawChatOutboxCommand],
+        recordAuthoritativeRestoreDiagnostic: Bool = true)
+    {
+        for command in commands {
+            self.retainDurableOutboxCommandID(command.rawCommandID)
+        }
         for command in commands where command.sessionKey == self.sessionKey {
             if let existing = self.messages.first(where: {
                 $0.role.lowercased() == "user" &&
@@ -1648,6 +1764,14 @@ public final class OpenClawChatViewModel {
             self.pendingLocalUserEchoMessageIDsByRunID[command.rawCommandID] = messageID
         }
         self.messages = Self.dedupeMessages(self.messages)
+        if recordAuthoritativeRestoreDiagnostic {
+            self.recordOutboxDiagnostic(
+                state: "outbox_restore_applied",
+                resultClass: "restored",
+                eventCount: commands.filter { $0.sessionKey == self.sessionKey }.count,
+                messageCount: self.messages.count,
+                includeStatus: true)
+        }
     }
 
     private func armOutboxConfirmationTimeout(rawCommandID: String) {
@@ -1657,7 +1781,7 @@ public final class OpenClawChatViewModel {
             try? await Task.sleep(nanoseconds: timeoutMs * 1_000_000)
             await MainActor.run { [weak self] in
                 guard let self, self.pendingRuns.contains(rawCommandID) else { return }
-                self.clearPendingRun(rawCommandID)
+                self.clearPendingRun(rawCommandID, retireDurableOwnership: false)
                 self.errorText =
                     "Delivery remains unconfirmed. Checking canonical history; "
                         + "this message will not be resent automatically."
@@ -2369,6 +2493,13 @@ public final class OpenClawChatViewModel {
         switch evt {
         case let .health(ok):
             self.healthOK = ok
+            if self.supportsDurableOutbox {
+                self.recordOutboxDiagnostic(
+                    state: "outbox_health_observed",
+                    resultClass: ok ? "success" : "failed",
+                    messageCount: self.messages.count,
+                    includeStatus: true)
+            }
             if ok { self.kickOutboxWorker(reason: "health") }
         case .tick:
             let context = self.currentSessionSnapshot()
@@ -2416,6 +2547,14 @@ public final class OpenClawChatViewModel {
         guard let message = payload.message else { return }
 
         let sanitized = Self.stripInboundMetadata(from: message)
+        if let canonicalKey = sanitized.idempotencyKey,
+           canonicalKey.hasSuffix(":user")
+        {
+            let rawCommandID = String(canonicalKey.dropLast(":user".count))
+            self.recordDurableOutboxCanonicalUserReceiptIfNeeded(
+                rawCommandID,
+                messageID: sanitized.transcriptMessageID)
+        }
 
         // The active client also receives the gateway's echo of the user turn it
         // just sent. performSend already appended an optimistic row carrying a
@@ -2435,6 +2574,11 @@ public final class OpenClawChatViewModel {
 
     private func handleChatEvent(_ chat: OpenClawChatEventPayload) {
         let isOurRun = chat.runId.flatMap { self.pendingRuns.contains($0) } ?? false
+        let isDurableOutboxRun = chat.runId.map(self.durableOutboxCommandIDs.contains) ?? false
+        if isDurableOutboxRun, let runID = chat.runId {
+            self.recordDurableOutboxRunReceiptIfNeeded(runID)
+            self.recordDurableOutboxReplyReceiptIfPresent(chat, runID: runID)
+        }
         if let runId = chat.runId {
             self.logDiagnostic(
                 "chat.ui event chat state=\(chat.state ?? "unknown") "
@@ -2449,6 +2593,14 @@ public final class OpenClawChatViewModel {
            !self.matchesCurrentSessionKey(incoming: sessionKey, current: self.sessionKey),
            !isOurRun
         {
+            if isDurableOutboxRun, let runID = chat.runId {
+                switch chat.state {
+                case "final", "aborted", "error":
+                    self.retireDurableOutboxDiagnosticOwnership(runID)
+                default:
+                    break
+                }
+            }
             return
         }
         if !isOurRun {
@@ -2462,6 +2614,9 @@ public final class OpenClawChatViewModel {
                     self.pendingToolCallsById = [:]
                 }
                 self.appendFinalChatMessageIfPresent(chat)
+                if isDurableOutboxRun, let runID = chat.runId {
+                    self.retireDurableOutboxDiagnosticOwnership(runID)
+                }
                 let context = self.beginHistoryRequest()
                 Task { await self.refreshHistoryAfterRun(historyRequest: context) }
             default:
@@ -2547,6 +2702,9 @@ public final class OpenClawChatViewModel {
 
     private func handleAgentEvent(_ evt: OpenClawAgentEventPayload) {
         let isPendingRun = self.pendingRuns.contains(evt.runId)
+        if self.durableOutboxCommandIDs.contains(evt.runId) {
+            self.recordDurableOutboxRunReceiptIfNeeded(evt.runId)
+        }
         let isLegacySessionStream = self.pendingRuns.isEmpty && self.sessionId == evt.runId
         if !isPendingRun, !isLegacySessionStream {
             return
@@ -2580,6 +2738,54 @@ public final class OpenClawChatViewModel {
         default:
             break
         }
+    }
+
+    private func recordDurableOutboxRunReceiptIfNeeded(_ runID: String) {
+        guard self.durableOutboxCommandIDs.contains(runID),
+              self.durableOutboxRunReceiptIDs.insert(runID).inserted
+        else { return }
+        self.recordOutboxDiagnostic(
+            state: "outbox_run_receipt",
+            commandID: runID,
+            runID: runID,
+            resultClass: "received",
+            messageCount: self.messages.count)
+    }
+
+    private func recordDurableOutboxCanonicalUserReceiptIfNeeded(
+        _ rawCommandID: String,
+        messageID: String?)
+    {
+        guard self.durableOutboxCommandIDs.contains(rawCommandID),
+              self.durableOutboxCanonicalUserReceiptIDs.insert(rawCommandID).inserted
+        else { return }
+        self.recordOutboxDiagnostic(
+            state: "outbox_canonical_user_receipt",
+            commandID: rawCommandID,
+            messageID: messageID,
+            outcome: .canonicalHistoryConfirmed,
+            resultClass: "canonical_confirmed",
+            messageCount: self.messages.count)
+    }
+
+    private func recordDurableOutboxReplyReceiptIfPresent(
+        _ chat: OpenClawChatEventPayload,
+        runID: String)
+    {
+        guard chat.state == "final",
+              OpenClawChatEventText.assistantText(from: chat) != nil,
+              self.durableOutboxReplyReceiptIDs.insert(runID).inserted
+        else { return }
+        let messageID = chat.message.flatMap {
+            try? ChatPayloadDecoding.decode($0, as: OpenClawChatMessage.self)
+        }?.transcriptMessageID
+        self.recordOutboxDiagnostic(
+            state: "outbox_reply_receipt",
+            commandID: runID,
+            runID: runID,
+            messageID: messageID,
+            resultClass: "received",
+            messageCount: self.messages.count)
     }
 
     private func handleAgentLifecycleEvent(_ evt: OpenClawAgentEventPayload, isPendingRun: Bool) {
@@ -2871,9 +3077,38 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    private func clearPendingRun(_ runId: String) {
+    private func retainDurableOutboxCommandID(_ rawCommandID: String) {
+        if self.durableOutboxCommandIDs.insert(rawCommandID).inserted {
+            self.durableOutboxCommandOrder.append(rawCommandID)
+        }
+        // Diagnostic ownership is process-local and deliberately bounded. A
+        // missing terminal event cannot grow this custody set without limit.
+        while self.durableOutboxCommandOrder.count > 50 {
+            let evicted = self.durableOutboxCommandOrder.removeFirst()
+            self.durableOutboxCommandIDs.remove(evicted)
+            self.durableOutboxCanonicalUserReceiptIDs.remove(evicted)
+            self.durableOutboxRunReceiptIDs.remove(evicted)
+            self.durableOutboxReplyReceiptIDs.remove(evicted)
+        }
+    }
+
+    private func retireDurableOutboxDiagnosticOwnership(_ runId: String) {
+        self.durableOutboxCommandIDs.remove(runId)
+        self.durableOutboxCommandOrder.removeAll { $0 == runId }
+        self.durableOutboxCanonicalUserReceiptIDs.remove(runId)
+        self.durableOutboxRunReceiptIDs.remove(runId)
+        self.durableOutboxReplyReceiptIDs.remove(runId)
+    }
+
+    private func clearPendingRun(
+        _ runId: String,
+        retireDurableOwnership: Bool = true)
+    {
         let wasPending = self.pendingRuns.contains(runId)
         self.pendingRuns.remove(runId)
+        if retireDurableOwnership {
+            self.retireDurableOutboxDiagnosticOwnership(runId)
+        }
         self.pendingLocalUserEchoMessageIDsByRunID[runId] = nil
         self.pendingRunTimeoutTasks[runId]?.cancel()
         self.pendingRunTimeoutTasks[runId] = nil
@@ -2891,6 +3126,11 @@ public final class OpenClawChatViewModel {
         }
         self.pendingRunTimeoutTasks.removeAll()
         self.pendingRuns.removeAll()
+        self.durableOutboxCommandIDs.removeAll()
+        self.durableOutboxCommandOrder.removeAll()
+        self.durableOutboxCanonicalUserReceiptIDs.removeAll()
+        self.durableOutboxRunReceiptIDs.removeAll()
+        self.durableOutboxReplyReceiptIDs.removeAll()
         self.pendingLocalUserEchoMessageIDsByRunID.removeAll()
         if let reason, !reason.isEmpty {
             self.errorText = reason
@@ -2911,9 +3151,25 @@ public final class OpenClawChatViewModel {
             let ok = try await transport.requestHealth(timeoutMs: 5000)
             if let sessionSnapshot, !self.isCurrentSession(sessionSnapshot) { return }
             self.healthOK = ok
+            if self.supportsDurableOutbox {
+                self.recordOutboxDiagnostic(
+                    state: "outbox_health_observed",
+                    session: sessionSnapshot,
+                    resultClass: ok ? "success" : "failed",
+                    messageCount: self.messages.count,
+                    includeStatus: true)
+            }
         } catch {
             if let sessionSnapshot, !self.isCurrentSession(sessionSnapshot) { return }
             self.healthOK = false
+            if self.supportsDurableOutbox {
+                self.recordOutboxDiagnostic(
+                    state: "outbox_health_observed",
+                    session: sessionSnapshot,
+                    resultClass: "failed",
+                    messageCount: self.messages.count,
+                    includeStatus: true)
+            }
         }
     }
 

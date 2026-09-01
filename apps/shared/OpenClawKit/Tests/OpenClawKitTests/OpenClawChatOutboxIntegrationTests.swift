@@ -1,5 +1,6 @@
 import Foundation
 import OpenClawKit
+import os
 import Testing
 @testable import OpenClawChatUI
 
@@ -145,10 +146,22 @@ private actor S3TestRouteState {
 private final class S3TestTransport: @unchecked Sendable, OpenClawChatTransport {
     let state: S3TestRouteState
     private let stream: AsyncStream<OpenClawChatTransportEvent>
+    private let continuation: AsyncStream<OpenClawChatTransportEvent>.Continuation?
 
-    init(state: S3TestRouteState = S3TestRouteState()) {
+    init(
+        state: S3TestRouteState = S3TestRouteState(),
+        keepsEventStreamOpen: Bool = false)
+    {
         self.state = state
-        self.stream = AsyncStream { continuation in continuation.finish() }
+        if keepsEventStreamOpen {
+            let pair = AsyncStream.makeStream(
+                of: OpenClawChatTransportEvent.self)
+            self.stream = pair.stream
+            self.continuation = pair.continuation
+        } else {
+            self.stream = AsyncStream { continuation in continuation.finish() }
+            self.continuation = nil
+        }
     }
 
     func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
@@ -162,6 +175,8 @@ private final class S3TestTransport: @unchecked Sendable, OpenClawChatTransport 
                 sessionRoutingContract: route.routingContract,
                 capabilities: route.capabilities,
                 operatorScopes: route.scopes,
+                diagnosticSocketGeneration: 41,
+                diagnosticRouteGeneration: 43,
                 dispatchMessage: { _, _, _, rawCommandID, _ in
                     await state.dispatch(rawCommandID: rawCommandID)
                 },
@@ -211,6 +226,7 @@ private final class S3TestTransport: @unchecked Sendable, OpenClawChatTransport 
         await self.state.recordCompactCall()
     }
     func events() -> AsyncStream<OpenClawChatTransportEvent> { self.stream }
+    func emit(_ event: OpenClawChatTransportEvent) { self.continuation?.yield(event) }
 }
 
 private struct S3TestStoreFixture {
@@ -269,7 +285,7 @@ private func s3HistoryMessage(
     ])
 }
 
-@Suite("S3 durable outbox integration")
+@Suite("S3 durable outbox integration", .serialized)
 struct OpenClawChatOutboxIntegrationTests {
     @Test func `concurrent Chat and Talk route refreshes persist both FIFO rows`() async throws {
         let fixture = try await S3TestStoreFixture.make()
@@ -600,6 +616,217 @@ struct OpenClawChatOutboxIntegrationTests {
         _ = try await coordinator.processAvailableWork()
         #expect(await transport.state.dispatchedIDs() == [first, first, second])
         try await fixture.close()
+    }
+
+    @Test @MainActor
+    func `relaunch restores ambiguous FIFO head and parks optimistic successor until canonical confirmation`() async throws {
+        let diagnosticLines = OSAllocatedUnfairLock(initialState: [String]())
+        OpenClawDiagnosticRecorder.installSink { line in
+            diagnosticLines.withLock { $0.append(line) }
+        }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("openclaw-s3-relaunch-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = directoryURL.appendingPathComponent(
+            OpenClawChatOutboxDatabase.databaseFilename,
+            isDirectory: false)
+        defer {
+            try? OpenClawChatOutboxDatabase.removeDatabaseFiles(at: databaseURL)
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+
+        let route = s3Route()
+        let firstRawID = UUID().uuidString.lowercased()
+        let firstDatabase = try OpenClawChatOutboxDatabase(
+            databaseURL: databaseURL,
+            claimProcessIDForTesting: "prior-process")
+        let firstStore = try await firstDatabase.store(stableGatewayID: "gateway-test")
+        try await firstStore.saveVerifiedRouteSnapshot(route)
+        _ = try await firstStore.persistBeforeDraftClear(
+            s3Draft(rawCommandID: firstRawID, route: route, text: "restored first"))
+
+        // Model a process ending after the pessimistic claim commit but before
+        // any wire admission. The next process must preserve the uncertainty
+        // rather than redispatching the raw identity automatically.
+        let priorClaim = try #require(try await firstStore.claimNext())
+        #expect(priorClaim.command.outcome == .ambiguous)
+        try await firstDatabase.close()
+
+        let relaunchedDatabase = try OpenClawChatOutboxDatabase(
+            databaseURL: databaseURL,
+            claimProcessIDForTesting: "relaunched-process")
+        let relaunchedStore = try await relaunchedDatabase.store(stableGatewayID: "gateway-test")
+        let transport = S3TestTransport(keepsEventStreamOpen: true)
+        await transport.state.setHistoryMessages([])
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: relaunchedStore,
+            stableGatewayID: "gateway-test",
+            transport: transport,
+            confirmationDelaysNanoseconds: [])
+        let viewModel = OpenClawChatViewModel(
+            sessionKey: "main",
+            transport: transport,
+            outboxDeliveryOwner: owner)
+        viewModel.load()
+
+        try await waitUntil("relaunch restores uncertain FIFO head on a healthy route") {
+            await MainActor.run {
+                viewModel.healthOK &&
+                    viewModel.outboxStatus.confirmingCount == 1 &&
+                    viewModel.outboxStatus.deliveryGate == nil &&
+                    viewModel.messages.contains {
+                        $0.idempotencyKey == "\(firstRawID):user"
+                    }
+            }
+        }
+        #expect(await transport.state.dispatchedIDs().isEmpty)
+
+        viewModel.input = "optimistic second"
+        viewModel.send()
+        try await waitUntil("successor is persisted and optimistically projected behind the head") {
+            guard let rows = try? await relaunchedStore.loadUnresolved(), rows.count == 2 else {
+                return false
+            }
+            return await MainActor.run {
+                viewModel.messages.filter {
+                    $0.role.lowercased() == "user" &&
+                        $0.idempotencyKey?.hasSuffix(":user") == true
+                }.count == 2
+            }
+        }
+
+        let parkedRows = try await relaunchedStore.loadUnresolved()
+        let secondRawID = try #require(parkedRows.last?.rawCommandID)
+        #expect(parkedRows.map(\.outcome) == [.ambiguous, .notDispatched])
+        #expect(await transport.state.dispatchedIDs().isEmpty)
+        let negativeHistoryOffsets = await transport.state.requestedHistoryOffsets()
+        #expect(!negativeHistoryOffsets.isEmpty)
+        #expect(negativeHistoryOffsets.allSatisfy { $0 == 0 })
+
+        await transport.state.setHistoryMessages([
+            s3HistoryMessage(role: "user", idempotencyKey: "\(firstRawID):user", text: "restored first"),
+        ])
+        try await owner.wake()
+        try await waitUntil("canonical identity releases the successor exactly once") {
+            await transport.state.dispatchedIDs() == [secondRawID]
+        }
+        try await waitUntil("accepted successor is owned by the view model") {
+            await MainActor.run { viewModel.pendingRunCount == 1 }
+        }
+
+        let releasedRows = try await relaunchedStore.loadUnresolved()
+        let finalDispatchedIDs = await transport.state.dispatchedIDs()
+        #expect(releasedRows.map(\.rawCommandID) == [secondRawID])
+        #expect(releasedRows.first?.outcome == .accepted)
+        #expect(finalDispatchedIDs.filter { $0 == firstRawID }.isEmpty)
+        #expect(finalDispatchedIDs.filter { $0 == secondRawID }.count == 1)
+
+        // Canonical history may retire the visible pending state before the
+        // run/final stream arrives. Diagnostic ownership must survive that
+        // ordering so the later receipts remain attributable to this FIFO.
+        await transport.state.setHistoryMessages([
+            s3HistoryMessage(role: "user", idempotencyKey: "\(firstRawID):user", text: "restored first"),
+            s3HistoryMessage(role: "user", idempotencyKey: "\(secondRawID):user", text: "optimistic second"),
+        ])
+        try await owner.wake()
+        try await waitUntil("canonical confirmation precedes terminal stream") {
+            let rows = try? await relaunchedStore.loadUnresolved()
+            let pendingCleared = await MainActor.run { viewModel.pendingRunCount == 0 }
+            return rows?.isEmpty == true && pendingCleared
+        }
+
+        transport.emit(.sessionMessage(OpenClawSessionMessageEventPayload(
+            sessionKey: "main",
+            message: OpenClawChatMessage(
+                role: "user",
+                content: [OpenClawChatMessageContent(
+                    type: "text",
+                    text: "optimistic second",
+                    thinking: nil,
+                    thinkingSignature: nil,
+                    mimeType: nil,
+                    fileName: nil,
+                    content: nil)],
+                timestamp: Date().timeIntervalSince1970 * 1000,
+                idempotencyKey: "\(secondRawID):user"),
+            messageId: "canonical-second-message",
+            messageSeq: 1)))
+        transport.emit(.agent(OpenClawAgentEventPayload(
+            runId: secondRawID,
+            seq: 2,
+            stream: "assistant",
+            ts: Int(Date().timeIntervalSince1970 * 1000),
+            data: ["text": AnyCodable("private streaming reply")])))
+        transport.emit(.chat(OpenClawChatEventPayload(
+            runId: secondRawID,
+            sessionKey: "main",
+            state: "final",
+            message: s3HistoryMessage(
+                role: "assistant",
+                idempotencyKey: "assistant-\(secondRawID)",
+                text: "private final reply"),
+            errorMessage: nil)))
+        try await waitUntil("owned canonical, run, and reply receipts are recorded") {
+            diagnosticLines.withLock { lines in
+                let states = Set(lines.compactMap(OpenClawDiagnosticRecorder.decodeRecord).map(\.state))
+                return states.isSuperset(of: [
+                    "outbox_canonical_user_receipt",
+                    "outbox_run_receipt",
+                    "outbox_reply_receipt",
+                ])
+            }
+        }
+
+        let diagnostics = diagnosticLines.withLock { lines in
+            lines.compactMap(OpenClawDiagnosticRecorder.decodeRecord)
+        }
+        let states = Set(diagnostics.map(\.state))
+        for requiredState in [
+            "outbox_snapshot_loaded",
+            "outbox_health_observed",
+            "outbox_enqueue_persisted",
+            "outbox_local_echo_projected",
+            "outbox_route_gate_evaluated",
+            "outbox_canonical_check_started",
+            "outbox_canonical_check_completed",
+            "outbox_fifo_head_blocked",
+            "outbox_canonical_receipt_persisted",
+            "outbox_row_claimed",
+            "outbox_dispatch_started",
+            "outbox_dispatch_completed",
+            "outbox_dispatch_outcome_persisted",
+            "outbox_canonical_user_receipt",
+            "outbox_run_receipt",
+            "outbox_reply_receipt",
+        ] {
+            #expect(states.contains(requiredState), "missing diagnostic state \(requiredState)")
+        }
+        let expectedSecondHash = OpenClawDiagnosticEvent(
+            kind: .chat,
+            state: "expected",
+            outboxCommandIdentifier: secondRawID).outboxCommandHash
+        let claimed = try #require(diagnostics.last(where: { $0.state == "outbox_row_claimed" }))
+        #expect(claimed.outboxCommandHash == expectedSecondHash)
+        #expect(claimed.connectionRole == .operator)
+        #expect(claimed.socketGeneration == 41)
+        #expect(claimed.routeGeneration == 43)
+        let encodedDiagnostics = String(
+            decoding: try JSONEncoder().encode(diagnostics),
+            as: UTF8.self)
+        for privateValue in [
+            firstRawID,
+            secondRawID,
+            "restored first",
+            "optimistic second",
+            "private streaming reply",
+            "private final reply",
+        ] {
+            #expect(!encodedDiagnostics.contains(privateValue))
+        }
+
+        viewModel.shutdown()
+        await owner.retire()
+        try await relaunchedDatabase.close()
     }
 
     @Test func `owner retry self wakes after caller disappears`() async throws {
