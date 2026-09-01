@@ -31,8 +31,8 @@ permissions:
 env:
   AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build115-outbound-send-boundary-release-executor-20260901
   AIES_RELEASE_SOURCE_BRANCH: aies/ios-build115-outbound-send-boundary-20260901
-  AIES_RELEASE_SOURCE_SHA: 0be3c14e0ad43059929e072453c373bd3135f716
-  AIES_RELEASE_SOURCE_TREE: d28c642ea34303b1fa71c6085f0894a8691b1099
+  AIES_RELEASE_SOURCE_SHA: 103bc931085de4c41350e23f5a79a1ef5df8917b
+  AIES_RELEASE_SOURCE_TREE: ff119ed0cf21fcf8d08e8b1c545ceff9cedc785a
 
 jobs:
   dispatch-gate:
