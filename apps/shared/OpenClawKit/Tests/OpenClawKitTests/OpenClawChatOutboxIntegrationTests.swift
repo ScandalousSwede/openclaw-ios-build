@@ -1569,6 +1569,9 @@ struct OpenClawChatOutboxIntegrationTests {
         #expect(refusedRows.count == 1)
         #expect(tokenAfterRefusal == captureAdmission.destructiveSessionAdmissionToken)
 
+        try await waitUntil("refused reset captured row dispatches exactly once") {
+            await transport.state.dispatchedIDs() == ["talk-before-reset"]
+        }
         try await waitUntil("refused reset leaves captured row safely cancellable") {
             (try? await owner.currentOutcome(rawCommandID: "talk-before-reset")) == .notDispatched
         }
