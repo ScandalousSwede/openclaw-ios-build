@@ -817,6 +817,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "playback_submission_accepted",
         "playback_submission_started",
         "player_instance_created",
+        "player_instance_deallocated",
         "provider_request_started",
         "provider_response_received",
         "provider_resolved",

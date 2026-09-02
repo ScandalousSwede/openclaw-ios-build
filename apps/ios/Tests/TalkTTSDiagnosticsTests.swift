@@ -588,6 +588,7 @@ private final class TestGenerationState {
         let deallocation = try #require(records.last)
         #expect(deallocation.state == "tts_player_instance_deallocated")
         #expect(deallocation.playbackGeneration == 42)
+        #expect(deallocation.providerStage == "player_instance_deallocated")
         #expect(deallocation.resultClass == nil)
         #expect(flushes.count() == 3)
     }
@@ -1469,6 +1470,33 @@ private final class TestGenerationState {
 
         #expect(!manager.isSpeaking)
         #expect(manager.ttsState == .completed)
+        #expect(restoreCount == 1)
+    }
+
+    @Test func explicitStopRestoresOwnedAudioSessionExactlyOnce() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let system = SuspendedSystemSpeech()
+        manager.systemSpeech = system
+        manager.pcmPlayer = TestPCMPlayer()
+        manager.mp3Player = TestMP3Player()
+        var restoreCount = 0
+        manager._test_setTTSAudioHooks(
+            prepare: { Self.routeEvidence },
+            restore: { restoreCount += 1 })
+
+        let speech = Task { @MainActor in
+            await manager.speakSystemNotificationText("owned speech")
+        }
+        await system.waitForCallCount(1)
+        #expect(manager.isSpeaking)
+        #expect(restoreCount == 0)
+
+        manager._test_stopSpeaking()
+        #expect(!manager.isSpeaking)
+        #expect(restoreCount == 1)
+
+        system.complete(callID: 1)
+        await speech.value
         #expect(restoreCount == 1)
     }
 

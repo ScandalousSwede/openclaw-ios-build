@@ -308,9 +308,9 @@ final class TalkModeManager: NSObject {
                         reasonValue: reasonValue,
                         previousPortTypes: previousPortTypes,
                         // AVAudioSession does not expose the operation that emitted a
-                        // notification. Attribute it only while one exact generation
-                        // owns the session; never relabel it from the active UI task.
-                        callbackGeneration: self.audioSessionOwnerGeneration)
+                        // notification. Preserve active/owner state separately, but do
+                        // not fabricate a causal callback generation.
+                        callbackGeneration: nil)
                 }
             })
         self.audioInterruptionObserver = NotificationCenter.default.addObserver(
@@ -324,7 +324,7 @@ final class TalkModeManager: NSObject {
                         typeValue: (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 2,
                         reasonValue: notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt,
                         optionValue: (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0,
-                        callbackGeneration: self.audioSessionOwnerGeneration)
+                        callbackGeneration: nil)
                 }
             })
         self.audioMediaServicesLostObserver = NotificationCenter.default.addObserver(
@@ -336,7 +336,7 @@ final class TalkModeManager: NSObject {
                     guard let self else { return }
                     self.handleAudioMediaServicesNotification(
                         reset: false,
-                        callbackGeneration: self.audioSessionOwnerGeneration)
+                        callbackGeneration: nil)
                 }
             })
         self.audioMediaServicesResetObserver = NotificationCenter.default.addObserver(
@@ -348,7 +348,7 @@ final class TalkModeManager: NSObject {
                     guard let self else { return }
                     self.handleAudioMediaServicesNotification(
                         reset: true,
-                        callbackGeneration: self.audioSessionOwnerGeneration)
+                        callbackGeneration: nil)
                 }
             })
     }
@@ -3326,6 +3326,9 @@ final class TalkModeManager: NSObject {
         origin: OpenClawDiagnosticTTSCancellationOrigin,
         storeInterruption: Bool = true)
     {
+        let stoppedGeneration = self.activeTTSGeneration
+        let stoppedGenerationOwnedAudioSession = stoppedGeneration != nil &&
+            self.audioSessionOwnerGeneration == stoppedGeneration
         TalkAudioSessionDiagnostics.recordStopRequested(
             origin: origin,
             generation: self.activeTTSGeneration,
@@ -3360,6 +3363,9 @@ final class TalkModeManager: NSObject {
         self.systemSpeech.stop()
         self.cancelIncrementalSpeech()
         self.isSpeaking = false
+        if let stoppedGeneration, stoppedGenerationOwnedAudioSession {
+            self.restoreAudioSessionAfterLocalSpeech(ownerGeneration: stoppedGeneration)
+        }
         self.restoreConfiguredVoiceModeDescriptor()
     }
 

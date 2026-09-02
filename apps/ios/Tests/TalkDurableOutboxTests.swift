@@ -466,6 +466,44 @@ private final class DurableTalkBlockingSystemSpeech: TalkSystemSpeechProviding {
     }
 }
 
+private final class DurableTalkMultiCallSystemSpeech: TalkSystemSpeechProviding {
+    private var nextCallID = 0
+    private var pendingCalls: [Int: CheckedContinuation<Void, Error>] = [:]
+    private var callWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private(set) var stopCount = 0
+
+    var callCount: Int { self.nextCallID }
+
+    func speak(text _: String, language _: String?, onStart: (() -> Void)?) async throws {
+        self.nextCallID += 1
+        let callID = self.nextCallID
+        onStart?()
+        for target in Array(self.callWaiters.keys).filter({ $0 <= callID }) {
+            self.callWaiters.removeValue(forKey: target)?.resume()
+        }
+        try await withCheckedThrowingContinuation { continuation in
+            self.pendingCalls[callID] = continuation
+        }
+    }
+
+    func stop() {
+        // Retain every admitted call so tests can deliver late completion after
+        // cancellation and prove that its exact generation cannot own a successor.
+        self.stopCount += 1
+    }
+
+    func waitForCallCount(_ expected: Int) async {
+        guard self.nextCallID < expected else { return }
+        await withCheckedContinuation { continuation in
+            self.callWaiters[expected] = continuation
+        }
+    }
+
+    func complete(callID: Int) {
+        self.pendingCalls.removeValue(forKey: callID)?.resume()
+    }
+}
+
 private struct DurableTalkOutboxFixture {
     let directory: URL
     let database: OpenClawChatOutboxDatabase
@@ -2156,6 +2194,70 @@ struct TalkDurableOutboxTests {
         try await waitForDurableTalk("retired durable response exits") {
             responseExits.count() == 1
         }
+        gatewayEvents.finish()
+        try await fixture.close()
+    }
+
+    @Test func retiredDurableSpeechGenerationCannotStopReplacementManualVoiceGeneration() async throws {
+        let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
+        let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
+        let gatewayEvents = DurableTalkEventSource()
+        let speech = DurableTalkMultiCallSystemSpeech()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager.systemSpeech = speech
+        manager._test_setTTSAudioHooks(
+            prepare: { durableTalkSpeakerRoute },
+            restore: {})
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: {
+                durableTalkCaptureAdmission(
+                    token: try await fixture.owner.destructiveSessionAdmissionToken())
+            },
+            persist: { request in
+                try await persistDurableTalk(
+                    request,
+                    owner: fixture.owner,
+                    gatewayEvents: gatewayEvents.stream)
+            })
+        manager.updateMainSessionKey("session-a")
+        manager.updateGatewayConnected(true)
+        _ = try await manager._test_prepareActivePTT(transcript: "bind exact speech")
+        let rawID = try #require(manager._test_durableCaptureIdentity()?.rawCommandID)
+        #expect((await manager.endPushToTalk()).status == "queued")
+        try await waitForDurableTalk("response observer starts") {
+            await MainActor.run { manager._test_hasDurableResponseTask() }
+        }
+
+        gatewayEvents.sendChatFinal(runID: rawID, text: "durable generation")
+        await speech.waitForCallCount(1)
+        let durableGeneration = manager._test_ttsGeneration()
+        #expect(manager.isSpeaking)
+
+        let manualVoice = Task { @MainActor in await manager.testSystemVoice() }
+        await speech.waitForCallCount(2)
+        let replacementGeneration = manager._test_ttsGeneration()
+        let stopsAfterReplacementAdmission = speech.stopCount
+        #expect(replacementGeneration != durableGeneration)
+        #expect(manager.isSpeaking)
+
+        try await fixture.owner.performDestructiveSessionAction {}
+        try await waitForDurableTalk("retired durable generation releases response ownership") {
+            await MainActor.run { !manager._test_hasDurableResponseTask() }
+        }
+
+        #expect(speech.stopCount == stopsAfterReplacementAdmission)
+        #expect(manager._test_ttsGeneration() == replacementGeneration)
+        #expect(manager.isSpeaking)
+
+        speech.complete(callID: 1)
+        await Task.yield()
+        #expect(manager._test_ttsGeneration() == replacementGeneration)
+        #expect(manager.isSpeaking)
+
+        speech.complete(callID: 2)
+        await manualVoice.value
+        #expect(!manager.isSpeaking)
         gatewayEvents.finish()
         try await fixture.close()
     }
