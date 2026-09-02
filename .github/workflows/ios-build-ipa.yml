@@ -28,10 +28,10 @@ permissions:
 # Workflow-only Release qualification executor. Every credential-free checkout
 # and provenance field is bound to the immutable source candidate below.
 env:
-  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build126-audio-lifecycle-release-executor-v4-20260902
+  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build126-audio-lifecycle-release-executor-v5-20260902
   AIES_RELEASE_SOURCE_BRANCH: aies/ios-build126-audio-lifecycle-20260902
-  AIES_RELEASE_SOURCE_SHA: 3c3e99c743fcbe4eca42774d3b768bd348e853de
-  AIES_RELEASE_SOURCE_TREE: 4de5696dea55ea83b24aad01c5fd41bbd20b5bef
+  AIES_RELEASE_SOURCE_SHA: 959b6743c6a269744e701908135eff1ce10d4322
+  AIES_RELEASE_SOURCE_TREE: 963c8c351d4c0dde9fe878689b2f87d42b94d975
 
 jobs:
   dispatch-gate:
