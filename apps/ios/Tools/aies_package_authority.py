@@ -242,7 +242,7 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
     if provenance["schema"] != "aies.ios.package-source-patch.v1":
         raise AuthorityError("unsupported ElevenLabsKit source-patch provenance schema")
     if provenance["packageIdentity"] != "elevenlabskit" or provenance["purpose"] != (
-        "diagnostic_playback_observability_and_pcm_stream_integrity"
+        "diagnostic_playback_observability_pcm_stream_integrity_and_teardown_ownership"
     ):
         raise AuthorityError("ElevenLabsKit source-patch purpose or identity differs")
     expected_original = {
@@ -255,8 +255,8 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         raise AuthorityError("ElevenLabsKit original 0.1.1 provenance differs")
     expected_patch = {
         "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-        "revision": "d9292db014b8df5037cc12762208f17482e90007",
-        "tree": "2ba03b357ae383ba0afd61d0d0ce57e48966667d",
+        "revision": "e8d1d2d663a4302aca82d28fc87fad0343fa0bde",
+        "tree": "b95a2ccf5abcfc44e7470f55bf246034ec7f4a34",
         "changedPaths": [
             "Sources/ElevenLabsKit/PCMPlayerNode.swift",
             "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
@@ -943,7 +943,7 @@ def validate_source_patch_checkout(
     if manifest_sha256 != "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431":
         raise AuthorityError("ElevenLabsKit dependency Package.swift hash differs from 0.1.1")
     binary_diff_sha256 = sha256_bytes(binary_diff)
-    if binary_diff_sha256 != "7bfacd5bf4650bf7960cf8a36991a2e320a3df8556fc6e039f9ce8b4ab3526ac":
+    if binary_diff_sha256 != "cac0a890ee88be89b3b3956030c330453f4edbef03d9f3d81797b57be884ab5a":
         raise AuthorityError("ElevenLabsKit binary patch digest differs from reviewed delta")
 
     return {

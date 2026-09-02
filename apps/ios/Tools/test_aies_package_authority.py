@@ -70,7 +70,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                 )
 
     def source_patch_checkout_fixture(
-        self, parent: pathlib.Path, *, head: str = "d9292db014b8df5037cc12762208f17482e90007"
+        self, parent: pathlib.Path, *, head: str = "e8d1d2d663a4302aca82d28fc87fad0343fa0bde"
     ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, object]:
         root = self.make_root(parent, "root")
         source_packages = parent / "source-packages"
@@ -173,20 +173,20 @@ class AIESPackageAuthorityTests(unittest.TestCase):
         self.assertEqual(patch["packageIdentity"], "elevenlabskit")
         self.assertEqual(
             patch["sha256"],
-            "c7da3bd37a3d41f2900ce3c7644e1a358f2fc7c6413cd9b5310e36b21a84816e",
+            "dfe7848bf10c56f908e3bbc69402305b76589458b379d04af4538984de90f6ec",
         )
         self.assertEqual(
             pin["location"], "https://github.com/ScandalousSwede/ElevenLabsKit.git"
         )
         self.assertIsNone(pin["version"])
         self.assertEqual(
-            pin["revision"], "d9292db014b8df5037cc12762208f17482e90007"
+            pin["revision"], "e8d1d2d663a4302aca82d28fc87fad0343fa0bde"
         )
         self.assertEqual(
             pin["requirement"],
             {
                 "kind": "revision",
-                "revision": "d9292db014b8df5037cc12762208f17482e90007",
+                "revision": "e8d1d2d663a4302aca82d28fc87fad0343fa0bde",
             },
         )
 
@@ -200,7 +200,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                 if data == b"package-manifest":
                     return "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431"
                 if data == b"reviewed-binary-diff":
-                    return "7bfacd5bf4650bf7960cf8a36991a2e320a3df8556fc6e039f9ce8b4ab3526ac"
+                    return "cac0a890ee88be89b3b3956030c330453f4edbef03d9f3d81797b57be884ab5a"
                 return hashlib.sha256(data).hexdigest()
 
             with mock.patch.object(authority.subprocess, "run", side_effect=run_git), mock.patch.object(
@@ -212,9 +212,9 @@ class AIESPackageAuthorityTests(unittest.TestCase):
 
             self.assertEqual(report["status"], "verified")
             self.assertEqual(
-                report["head"], "d9292db014b8df5037cc12762208f17482e90007"
+                report["head"], "e8d1d2d663a4302aca82d28fc87fad0343fa0bde"
             )
-            self.assertEqual(report["tree"], "2ba03b357ae383ba0afd61d0d0ce57e48966667d")
+            self.assertEqual(report["tree"], "b95a2ccf5abcfc44e7470f55bf246034ec7f4a34")
             self.assertEqual(len(report["changedPaths"]), 9)
 
     def test_strict_checkout_rejects_wrong_patch_head(self) -> None:
@@ -230,7 +230,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                 side_effect=lambda data: (
                     "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431"
                     if data == b"package-manifest"
-                    else "7bfacd5bf4650bf7960cf8a36991a2e320a3df8556fc6e039f9ce8b4ab3526ac"
+                    else "cac0a890ee88be89b3b3956030c330453f4edbef03d9f3d81797b57be884ab5a"
                 ),
             ):
                 with self.assertRaisesRegex(
