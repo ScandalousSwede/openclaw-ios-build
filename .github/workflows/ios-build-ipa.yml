@@ -90,13 +90,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify immutable ElevenLabsKit observability patch
+      - name: Verify immutable ElevenLabsKit observability and PCM integrity patch
         run: |
           set -euo pipefail
           original_revision="0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b"
           original_tree="3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6"
-          patch_revision="0d166e7c2f41614ee5d98fd89d03314dace7848f"
-          patch_tree="7b2f18911713ead34d640923d09f1f705143ccf0"
+          patch_revision="a1a9601a84bfc1b91940f766fd2343db198774e9"
+          patch_tree="4027461f11a3ee76f921c69c80727cc281358d8d"
           dependency_root="${RUNNER_TEMP}/elevenlabskit-observability"
           evidence_root="${RUNNER_TEMP}/elevenlabskit-observability-evidence"
           mkdir -p "${evidence_root}"
@@ -128,10 +128,13 @@ jobs:
           root = pathlib.Path(sys.argv[1])
           output = pathlib.Path(sys.argv[2])
           expected = [
+              "Sources/ElevenLabsKit/PCMPlayerNode.swift",
               "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
               "Sources/ElevenLabsKit/PlaybackObservation.swift",
               "Sources/ElevenLabsKit/StreamingAudioPlayback.swift",
               "Sources/ElevenLabsKit/StreamingAudioPlayer.swift",
+              "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerFinishTests.swift",
+              "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerTests.swift",
               "Tests/ElevenLabsKitTests/PlaybackObservationTests.swift",
               "Tests/ElevenLabsKitTests/StreamingAudioPlaybackTests.swift",
           ]
@@ -152,8 +155,8 @@ jobs:
               "status": "verified",
               "original_revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
               "original_tree": "3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6",
-              "patch_revision": "0d166e7c2f41614ee5d98fd89d03314dace7848f",
-              "patch_tree": "7b2f18911713ead34d640923d09f1f705143ccf0",
+              "patch_revision": "a1a9601a84bfc1b91940f766fd2343db198774e9",
+              "patch_tree": "4027461f11a3ee76f921c69c80727cc281358d8d",
               "changed_paths": observed,
           }
           output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
@@ -193,7 +196,7 @@ jobs:
           )
           exit "${swift_test_status}"
 
-      - name: Retain ElevenLabsKit observability patch evidence
+      - name: Retain ElevenLabsKit observability and PCM integrity patch evidence
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -462,6 +465,8 @@ jobs:
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/openclawkit-resolved.json"
           swift build --package-path "${shared_package}" --force-resolved-versions
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ElevenLabsTTSValidationTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ElevenLabsTTSResponseValidationTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
@@ -1035,6 +1040,8 @@ jobs:
             --output "${RUNNER_TEMP}/aies-signed-package/evidence/openclawkit-resolved.json"
           swift build --package-path "${shared_package}" --force-resolved-versions
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawDiagnosticEventTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ElevenLabsTTSValidationTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ElevenLabsTTSResponseValidationTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests

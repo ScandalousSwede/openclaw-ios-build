@@ -84,7 +84,7 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
     def test_release_workflow_verifies_exact_elevenlabskit_patch_and_tests(self) -> None:
         workflow = RELEASE.read_text(encoding="utf-8")
         step = workflow.split(
-            "      - name: Verify immutable ElevenLabsKit observability patch\n",
+            "      - name: Verify immutable ElevenLabsKit observability and PCM integrity patch\n",
             maxsplit=1,
         )[1].split(
             "      - name: Install pinned credential-free release tooling\n",
@@ -94,8 +94,8 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertIn("https://github.com/ScandalousSwede/ElevenLabsKit.git", step)
         self.assertIn("0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b", step)
         self.assertIn("3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6", step)
-        self.assertIn("0d166e7c2f41614ee5d98fd89d03314dace7848f", step)
-        self.assertIn("7b2f18911713ead34d640923d09f1f705143ccf0", step)
+        self.assertIn("a1a9601a84bfc1b91940f766fd2343db198774e9", step)
+        self.assertIn("4027461f11a3ee76f921c69c80727cc281358d8d", step)
         self.assertIn('git -C "${dependency_root}" diff --exit-code', step)
         self.assertIn('swift test --package-path "${dependency_root}"', step)
         self.assertIn("elevenlabskit-observability.patch", step)
@@ -106,9 +106,16 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("secrets.", step)
         self.assertNotIn("--branch", step)
         self.assertEqual(
-            workflow.count("Retain ElevenLabsKit observability patch evidence"), 1
+            workflow.count(
+                "Retain ElevenLabsKit observability and PCM integrity patch evidence"
+            ),
+            1,
         )
         self.assertIn("if: always() && !cancelled()", workflow)
+        self.assertEqual(workflow.count("--filter ElevenLabsTTSValidationTests"), 2)
+        self.assertEqual(
+            workflow.count("--filter ElevenLabsTTSResponseValidationTests"), 2
+        )
 
     def test_package_talk_outputs_share_one_temporary_custody_root(self) -> None:
         workflow = QUALIFICATION.read_text(encoding="utf-8")

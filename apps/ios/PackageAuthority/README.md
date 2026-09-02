@@ -13,12 +13,13 @@ graph roles, governed source-patch provenance, and the WebRTC binary-artifact
 checksum. Its hashes fail closed if `project.yml`, either local `Package.swift`,
 or a governed source-patch record changes without a reviewed graph update.
 
-`elevenlabskit-observability-patch.json` binds the diagnostic-only
-ElevenLabsKit 0.1.1 observer patch to its original tag/revision/tree and its
-immutable fork revision/tree. It records the exact six changed paths, the
-no-op/behavior-neutral semantic contract, truthful observation limits, and the
-exact rollback to upstream 0.1.1. The aggregate graph pins this revision
-directly; a mutable branch is never package authority.
+`elevenlabskit-observability-patch.json` binds the cumulative ElevenLabsKit
+0.1.1 observability and PCM-stream-integrity patch to its original
+tag/revision/tree and its immutable fork revision/tree. It records the exact
+nine changed paths, the optional no-op observer contract, the narrowly governed
+PCM buffering/cancellation/error semantic delta, truthful observation limits,
+and the exact rollback to upstream 0.1.1. The aggregate graph pins this
+revision directly; a mutable branch is never package authority.
 
 After strict resolution, package preparation locates the ElevenLabsKit checkout
 through SwiftPM's workspace-state `subpath` and verifies its HEAD, tree, sole

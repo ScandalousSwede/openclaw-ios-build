@@ -242,7 +242,7 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
     if provenance["schema"] != "aies.ios.package-source-patch.v1":
         raise AuthorityError("unsupported ElevenLabsKit source-patch provenance schema")
     if provenance["packageIdentity"] != "elevenlabskit" or provenance["purpose"] != (
-        "diagnostic_playback_lifecycle_observability_only"
+        "diagnostic_playback_observability_and_pcm_stream_integrity"
     ):
         raise AuthorityError("ElevenLabsKit source-patch purpose or identity differs")
     expected_original = {
@@ -255,13 +255,16 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         raise AuthorityError("ElevenLabsKit original 0.1.1 provenance differs")
     expected_patch = {
         "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-        "revision": "0d166e7c2f41614ee5d98fd89d03314dace7848f",
-        "tree": "7b2f18911713ead34d640923d09f1f705143ccf0",
+        "revision": "a1a9601a84bfc1b91940f766fd2343db198774e9",
+        "tree": "4027461f11a3ee76f921c69c80727cc281358d8d",
         "changedPaths": [
+            "Sources/ElevenLabsKit/PCMPlayerNode.swift",
             "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
             "Sources/ElevenLabsKit/PlaybackObservation.swift",
             "Sources/ElevenLabsKit/StreamingAudioPlayback.swift",
             "Sources/ElevenLabsKit/StreamingAudioPlayer.swift",
+            "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerFinishTests.swift",
+            "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerTests.swift",
             "Tests/ElevenLabsKitTests/PlaybackObservationTests.swift",
             "Tests/ElevenLabsKitTests/StreamingAudioPlaybackTests.swift",
         ],
@@ -272,14 +275,14 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         "observerOptional": True,
         "observerDefault": "no_op",
         "applicationBehaviorDependsOnObserver": False,
-        "playbackBehaviorChanged": False,
+        "playbackBehaviorChanged": True,
         "networkingBehaviorChanged": False,
         "decodingBehaviorChanged": False,
-        "bufferingBehaviorChanged": False,
+        "bufferingBehaviorChanged": True,
         "routingBehaviorChanged": False,
-        "cancellationBehaviorChanged": False,
+        "cancellationBehaviorChanged": True,
         "fallbackBehaviorChanged": False,
-        "errorBehaviorChanged": False,
+        "errorBehaviorChanged": True,
         "transitiveDependenciesAdded": [],
     }
     if provenance["semanticDelta"] != expected_semantic_delta:
@@ -940,7 +943,7 @@ def validate_source_patch_checkout(
     if manifest_sha256 != "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431":
         raise AuthorityError("ElevenLabsKit dependency Package.swift hash differs from 0.1.1")
     binary_diff_sha256 = sha256_bytes(binary_diff)
-    if binary_diff_sha256 != "5949b29e8c9d2bba6e4d0317b6cf7cf86b14d21aef246796d671d8cb18e4c8ab":
+    if binary_diff_sha256 != "8c4b1159081a88e52ffcc167ada7a263f4b53cc77505e9b1bcbd23e6dd1f882b":
         raise AuthorityError("ElevenLabsKit binary patch digest differs from reviewed delta")
 
     return {

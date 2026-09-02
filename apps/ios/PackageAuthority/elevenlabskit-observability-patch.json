@@ -1,7 +1,7 @@
 {
   "schema": "aies.ios.package-source-patch.v1",
   "packageIdentity": "elevenlabskit",
-  "purpose": "diagnostic_playback_lifecycle_observability_only",
+  "purpose": "diagnostic_playback_observability_and_pcm_stream_integrity",
   "original": {
     "repository": "https://github.com/steipete/ElevenLabsKit.git",
     "tag": "0.1.1",
@@ -10,13 +10,16 @@
   },
   "patch": {
     "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-    "revision": "0d166e7c2f41614ee5d98fd89d03314dace7848f",
-    "tree": "7b2f18911713ead34d640923d09f1f705143ccf0",
+    "revision": "a1a9601a84bfc1b91940f766fd2343db198774e9",
+    "tree": "4027461f11a3ee76f921c69c80727cc281358d8d",
     "changedPaths": [
+      "Sources/ElevenLabsKit/PCMPlayerNode.swift",
       "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
       "Sources/ElevenLabsKit/PlaybackObservation.swift",
       "Sources/ElevenLabsKit/StreamingAudioPlayback.swift",
       "Sources/ElevenLabsKit/StreamingAudioPlayer.swift",
+      "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerFinishTests.swift",
+      "Tests/ElevenLabsKitTests/PCMStreamingAudioPlayerTests.swift",
       "Tests/ElevenLabsKitTests/PlaybackObservationTests.swift",
       "Tests/ElevenLabsKitTests/StreamingAudioPlaybackTests.swift"
     ]
@@ -25,14 +28,14 @@
     "observerOptional": true,
     "observerDefault": "no_op",
     "applicationBehaviorDependsOnObserver": false,
-    "playbackBehaviorChanged": false,
+    "playbackBehaviorChanged": true,
     "networkingBehaviorChanged": false,
     "decodingBehaviorChanged": false,
-    "bufferingBehaviorChanged": false,
+    "bufferingBehaviorChanged": true,
     "routingBehaviorChanged": false,
-    "cancellationBehaviorChanged": false,
+    "cancellationBehaviorChanged": true,
     "fallbackBehaviorChanged": false,
-    "errorBehaviorChanged": false,
+    "errorBehaviorChanged": true,
     "transitiveDependenciesAdded": []
   },
   "truthfulObservationLimits": [
