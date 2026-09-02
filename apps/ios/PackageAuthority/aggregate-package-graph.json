@@ -13,7 +13,7 @@
     },
     {
       "path": "apps/shared/OpenClawKit/Package.swift",
-      "sha256": "d455af604f87cb25acf4f8c04341dcfedf2e95476e2c80cb8766320448d55a97"
+      "sha256": "c29f14eabf4135eb26b81bd13557aeea2023d948e018455dabebef754a352507"
     },
     {
       "path": "apps/swabble/Package.swift",
@@ -24,7 +24,7 @@
     {
       "packageIdentity": "elevenlabskit",
       "path": "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json",
-      "sha256": "abef5b643a49f9d800d5c92b00a90909794523262676dfe1f2ee8c1571f0eeb9"
+      "sha256": "2251cb6ed0c542c57c0e3bc00d496fd3e6982365779d31b9169a1d421d3d7914"
     }
   ],
   "standaloneLocks": [
@@ -106,7 +106,7 @@
       "kind": "remoteSourceControl",
       "location": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
       "version": null,
-      "revision": "661d37276cda0d9e416a4966d63de4d42e72c72b",
+      "revision": "44a108904cbb652a876bfdb838362746631b8987",
       "branch": null,
       "checksum": null,
       "aggregateRole": "transitive",
@@ -114,7 +114,7 @@
       "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:21",
       "requirement": {
         "kind": "revision",
-        "revision": "661d37276cda0d9e416a4966d63de4d42e72c72b"
+        "revision": "44a108904cbb652a876bfdb838362746631b8987"
       }
     },
     {

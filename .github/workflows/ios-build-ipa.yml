@@ -95,8 +95,8 @@ jobs:
           set -euo pipefail
           original_revision="0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b"
           original_tree="3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6"
-          patch_revision="661d37276cda0d9e416a4966d63de4d42e72c72b"
-          patch_tree="71b15c636307301515d6d1a9c158d2e98c7f1722"
+          patch_revision="44a108904cbb652a876bfdb838362746631b8987"
+          patch_tree="72003ce50bc475c2defba379f0a62184c3e86161"
           dependency_root="${RUNNER_TEMP}/elevenlabskit-observability"
           evidence_root="${RUNNER_TEMP}/elevenlabskit-observability-evidence"
           mkdir -p "${evidence_root}"
@@ -155,8 +155,8 @@ jobs:
               "status": "verified",
               "original_revision": "0f1e4c039bd0e22b03c0cb7f43c00c1865858f0b",
               "original_tree": "3a8eeeb4938a2ec30c46f3a90762187b2ca40fa6",
-              "patch_revision": "661d37276cda0d9e416a4966d63de4d42e72c72b",
-              "patch_tree": "71b15c636307301515d6d1a9c158d2e98c7f1722",
+              "patch_revision": "44a108904cbb652a876bfdb838362746631b8987",
+              "patch_tree": "72003ce50bc475c2defba379f0a62184c3e86161",
               "changed_paths": observed,
           }
           output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
