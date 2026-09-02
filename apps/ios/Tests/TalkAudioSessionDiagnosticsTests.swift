@@ -45,6 +45,25 @@ extension TalkTTSDiagnosticsTests {
         #expect(event.currentAudioOutputRouteClasses == [.bluetooth])
     }
 
+    @Test func unattributedSystemNotificationDoesNotBorrowActiveOwnerGeneration() throws {
+        let lines = AudioSessionDiagnosticLines()
+        OpenClawDiagnosticRecorder.installSink { lines.append($0) }
+        defer { OpenClawDiagnosticRecorder.clearSink() }
+
+        TalkAudioSessionDiagnostics.recordRouteChange(
+            reasonValue: 8,
+            previousPortTypes: ["BluetoothA2DP"],
+            currentPortTypes: ["BluetoothA2DP"],
+            context: .init(callbackGeneration: nil, activeGeneration: 7, ownerGeneration: 7),
+            flush: {})
+
+        let event = try #require(lines.events().only)
+        #expect(event.callbackPlaybackGeneration == nil)
+        #expect(event.activePlaybackGeneration == 7)
+        #expect(event.audioSessionOwnerGeneration == 7)
+        #expect(event.resultClass == "unattributed_callback")
+    }
+
     @Test func interruptionAndMediaServiceNotificationsRetainOnlyAllowlistedCustody() throws {
         let lines = AudioSessionDiagnosticLines()
         OpenClawDiagnosticRecorder.installSink { lines.append($0) }
