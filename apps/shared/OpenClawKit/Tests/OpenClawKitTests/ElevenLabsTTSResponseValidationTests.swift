@@ -42,10 +42,13 @@ private final class ElevenLabsResponseURLProtocol: URLProtocol {
 private final class ElevenLabsRequestRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var value: URLRequest?
+    private var bodyValue: Data?
 
     func record(_ request: URLRequest) {
+        let body = Self.bodyData(from: request)
         self.lock.lock()
         self.value = request
+        self.bodyValue = body
         self.lock.unlock()
     }
 
@@ -53,6 +56,32 @@ private final class ElevenLabsRequestRecorder: @unchecked Sendable {
         self.lock.lock()
         defer { self.lock.unlock() }
         return self.value
+    }
+
+    var body: Data? {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.bodyValue
+    }
+
+    private static func bodyData(from request: URLRequest) -> Data? {
+        if let body = request.httpBody {
+            return body
+        }
+        guard let stream = request.httpBodyStream else {
+            return nil
+        }
+
+        stream.open()
+        defer { stream.close() }
+        var body = Data()
+        var buffer = [UInt8](repeating: 0, count: 4_096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count >= 0 else { return nil }
+            guard count > 0 else { return body }
+            body.append(contentsOf: buffer.prefix(count))
+        }
     }
 }
 
@@ -62,6 +91,7 @@ final class ElevenLabsTTSResponseValidationTests: XCTestCase {
         let error: NSError?
         let metadata: ElevenLabsTTSResponseMetadata?
         let request: URLRequest?
+        let requestBody: Data?
     }
 
     func testPCMFormatIsSentAsQueryAndNotUnsupportedBodyProperty() async throws {
@@ -79,7 +109,7 @@ final class ElevenLabsTTSResponseValidationTests: XCTestCase {
         XCTAssertEqual(query["output_format"]!, "pcm_44100")
         XCTAssertEqual(query["optimize_streaming_latency"]!, "2")
         XCTAssertEqual((components.queryItems ?? []).filter { $0.name == "output_format" }.count, 1)
-        let body = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(result.requestBody)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertNil(object["output_format"])
     }
@@ -287,7 +317,8 @@ final class ElevenLabsTTSResponseValidationTests: XCTestCase {
             chunks: chunks,
             error: caught,
             metadata: evidence.snapshot,
-            request: recorder.request)
+            request: recorder.request,
+            requestBody: recorder.body)
     }
 }
 #endif
