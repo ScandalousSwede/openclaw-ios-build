@@ -2094,7 +2094,7 @@ struct TalkDurableOutboxTests {
         try await fixture.close()
     }
 
-    @Test func cancelledDurableResponseCannotStopReplacementManualVoiceGeneration() async throws {
+    @Test func retiredDurableAdmissionCannotStopReplacementManualVoiceGeneration() async throws {
         let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
         let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
         let gatewayEvents = DurableTalkEventSource()
@@ -2142,8 +2142,10 @@ struct TalkDurableOutboxTests {
         }
         let stopsAfterManualAdmission = speech.stopCount
 
-        manager.updateMainSessionKey("session-b")
-        await Task.yield()
+        try await fixture.owner.performDestructiveSessionAction {}
+        try await waitForDurableTalk("retired admission cancels durable response ownership") {
+            await MainActor.run { !manager._test_hasDurableResponseTask() }
+        }
 
         #expect(speech.stopCount == stopsAfterManualAdmission)
         #expect(manager.isSpeaking)
