@@ -98,7 +98,7 @@ final class TalkModeManager: NSObject {
     var canUseBackgroundTalkOptIn: Bool {
         !self.isStarting && self.pttStartReservationID == nil && self.pendingDurableChat == nil &&
             !self.isPushToTalkActive && self.activePTTCaptureId == nil && self.pttEndTask == nil &&
-            self.durableResponseTask == nil && !self.durableResponseOwnsSpeech &&
+            self.durableResponseTask == nil && self.durableResponseSpeechGeneration == nil &&
             !self.isPersistingDurableMessage
     }
 
@@ -237,7 +237,7 @@ final class TalkModeManager: NSObject {
     var isPersistingDurableMessage = false
     private var durableDeliveryGeneration: UInt64 = 0
     private var durableResponseGeneration: UInt64 = 0
-    private var durableResponseOwnsSpeech = false
+    private var durableResponseSpeechGeneration: UInt64?
     @ObservationIgnored private nonisolated(unsafe) var durableResponseTask: Task<Void, Never>?
     #if DEBUG
     private var pttMicrophonePermissionOverride: (() async -> Bool)?
@@ -1806,8 +1806,6 @@ final class TalkModeManager: NSObject {
         }
         defer { admissionMonitor.cancel() }
         let shouldIncremental = self.shouldUseIncrementalTTS()
-        self.durableResponseOwnsSpeech = true
-        defer { self.durableResponseOwnsSpeech = false }
         let presentationValidator: SpeechPresentationValidator = { [weak self] in
             guard let self else { return false }
             return await self.isDurablePresentationAuthorized(
@@ -1885,11 +1883,13 @@ final class TalkModeManager: NSObject {
         if shouldIncremental {
             await self.handleIncrementalAssistantFinal(
                 text: assistantText,
-                presentationValidator: presentationValidator)
+                presentationValidator: presentationValidator,
+                durableResponseGeneration: responseGeneration)
         } else {
             await self.playAssistant(
                 text: assistantText,
-                presentationValidator: presentationValidator)
+                presentationValidator: presentationValidator,
+                durableResponseGeneration: responseGeneration)
         }
         await self.restartAfterDurableResponseIfNeeded(
             responseGeneration,
@@ -1981,9 +1981,14 @@ final class TalkModeManager: NSObject {
         self.durableResponseGeneration &+= 1
         self.durableResponseTask?.cancel()
         self.durableResponseTask = nil
-        if self.durableResponseOwnsSpeech {
-            self.durableResponseOwnsSpeech = false
+        let speechGeneration = self.durableResponseSpeechGeneration
+        self.durableResponseSpeechGeneration = nil
+        if let speechGeneration, speechGeneration == self.ttsGeneration {
             self.stopSpeaking(storeInterruption: false)
+        } else {
+            // Incremental Talk playback already carries exact generation ownership.
+            // Retiring its worker cannot stop a newer manual generation.
+            self.cancelIncrementalSpeech()
         }
     }
 
@@ -2476,7 +2481,8 @@ final class TalkModeManager: NSObject {
 
     private func playAssistant(
         text: String,
-        presentationValidator: @escaping SpeechPresentationValidator) async
+        presentationValidator: @escaping SpeechPresentationValidator,
+        durableResponseGeneration: UInt64? = nil) async
     {
         guard await self.isSpeechPresentationAuthorized(presentationValidator) else { return }
         let parsed = TalkDirectiveParser.parse(text)
@@ -2538,6 +2544,14 @@ final class TalkModeManager: NSObject {
         }
         self.startSpeechInterruptionRecognitionIfNeeded()
         let generation = self.beginTTSGeneration()
+        if durableResponseGeneration != nil {
+            self.durableResponseSpeechGeneration = generation
+        }
+        defer {
+            if self.durableResponseSpeechGeneration == generation {
+                self.durableResponseSpeechGeneration = nil
+            }
+        }
         self.currentPlaybackProvider = attempts.initial == nil ? .system : .elevenLabs
         self.lastPlaybackWasPCM = attempts.initial.flatMap {
             TalkTTSValidation.pcmSampleRate(from: $0.outputFormat)
@@ -3555,7 +3569,8 @@ final class TalkModeManager: NSObject {
 
     private func handleIncrementalAssistantFinal(
         text: String,
-        presentationValidator: @escaping SpeechPresentationValidator) async
+        presentationValidator: @escaping SpeechPresentationValidator,
+        durableResponseGeneration: UInt64) async
     {
         guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
             self.cancelIncrementalSpeech()
@@ -3586,7 +3601,8 @@ final class TalkModeManager: NSObject {
         if !self.incrementalSpeechUsed {
             await self.playAssistant(
                 text: text,
-                presentationValidator: presentationValidator)
+                presentationValidator: presentationValidator,
+                durableResponseGeneration: durableResponseGeneration)
         }
     }
 

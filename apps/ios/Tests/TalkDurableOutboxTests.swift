@@ -2094,6 +2094,70 @@ struct TalkDurableOutboxTests {
         try await fixture.close()
     }
 
+    @Test func cancelledDurableResponseCannotStopReplacementManualVoiceGeneration() async throws {
+        let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
+        let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
+        let gatewayEvents = DurableTalkEventSource()
+        let playbackGate = DurableTalkGate()
+        let speech = DurableTalkBlockingSystemSpeech()
+        let responseExits = DurableTalkResponseExitObservation()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager.systemSpeech = speech
+        manager._test_setTTSAudioHooks(
+            prepare: { durableTalkSpeakerRoute },
+            restore: {})
+        manager._test_setDurableResponseExitedHook { responseExits.record($0) }
+        manager._test_setDurablePresentationBeforePlaybackHook {
+            await playbackGate.wait()
+        }
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: {
+                durableTalkCaptureAdmission(
+                    token: try await fixture.owner.destructiveSessionAdmissionToken())
+            },
+            persist: { request in
+                try await persistDurableTalk(
+                    request,
+                    owner: fixture.owner,
+                    gatewayEvents: gatewayEvents.stream)
+            })
+        manager.updateMainSessionKey("session-a")
+        manager.updateGatewayConnected(true)
+        _ = try await manager._test_prepareActivePTT(transcript: "prepare exact speech")
+        let rawID = try #require(manager._test_durableCaptureIdentity()?.rawCommandID)
+        #expect((await manager.endPushToTalk()).status == "queued")
+        try await waitForDurableTalk("response observer starts before final preparation") {
+            await MainActor.run { manager._test_hasDurableResponseTask() }
+        }
+
+        gatewayEvents.sendChatFinal(runID: rawID, text: "retired durable reply")
+        try await waitForDurableTalk("durable response pauses before owning playback") {
+            await playbackGate.waiterCount() == 1
+        }
+
+        let manualVoice = Task { @MainActor in await manager.testSystemVoice() }
+        try await waitForDurableTalk("replacement manual voice starts") {
+            await MainActor.run { speech.spokenTexts.count == 1 && manager.isSpeaking }
+        }
+        let stopsAfterManualAdmission = speech.stopCount
+
+        manager.updateMainSessionKey("session-b")
+        await Task.yield()
+
+        #expect(speech.stopCount == stopsAfterManualAdmission)
+        #expect(manager.isSpeaking)
+
+        manager._test_stopSpeaking()
+        await manualVoice.value
+        await playbackGate.open()
+        try await waitForDurableTalk("retired durable response exits") {
+            responseExits.count() == 1
+        }
+        gatewayEvents.finish()
+        try await fixture.close()
+    }
+
     @Test func sessionSwitchAfterPersistenceFencesExactOldRunSpeech() async throws {
         let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
         let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
