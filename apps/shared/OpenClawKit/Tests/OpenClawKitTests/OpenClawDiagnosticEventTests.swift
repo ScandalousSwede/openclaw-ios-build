@@ -764,6 +764,71 @@ struct OpenClawDiagnosticEventTests {
         #expect(captured.withLock { $0.isEmpty })
     }
 
+    @Test func codecResponseMetadataRoundTripsAndRejectsPartialOrInconsistentRecords() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "provider_response_received",
+            provider: "elevenlabs",
+            providerStage: "provider_response_received",
+            codec: "pcm",
+            playbackPath: "pcm",
+            resultClass: "codec_validated",
+            requestedOutputFormat: "pcm_44100",
+            httpStatus: 200,
+            contentType: "audio/pcm; rate=44100",
+            contentEncoding: "identity",
+            declaredByteCount: 4,
+            receivedByteCount: 4,
+            byteCountParity: .even,
+            audioMagicType: .rawNoKnownHeader,
+            byteCount: 4,
+            observedAt: Date(timeIntervalSince1970: 0))
+        let data = try JSONEncoder().encode(event)
+        let record = "aies_diagnostic=" + data.base64EncodedString()
+        let decoded = try #require(OpenClawDiagnosticRecorder.decodeRecord(record))
+
+        #expect(decoded.requestedOutputFormat == "pcm_44100")
+        #expect(decoded.httpStatus == 200)
+        #expect(decoded.contentType == "audio/pcm; rate=44100")
+        #expect(decoded.contentEncoding == "identity")
+        #expect(decoded.declaredByteCount == 4)
+        #expect(decoded.receivedByteCount == 4)
+        #expect(decoded.byteCountParity == .even)
+        #expect(decoded.audioMagicType == .rawNoKnownHeader)
+
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for required in [
+            "requested_output_format", "http_status", "content_type", "content_encoding",
+            "received_byte_count", "byte_count_parity", "audio_magic_type",
+        ] {
+            var partial = object
+            partial.removeValue(forKey: required)
+            let malformed = try JSONSerialization.data(withJSONObject: partial)
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + malformed.base64EncodedString()) == nil)
+        }
+        let mutations: [[String: Any]] = [
+            ["kind": "chat"],
+            ["provider": "system"],
+            ["provider_stage": "decoder_selected"],
+            ["received_byte_count": 3],
+            ["byte_count_parity": "odd"],
+            ["audio_magic_type": "empty"],
+            ["result_class": "empty_payload"],
+            ["audio_magic_type": "id3_mpeg"],
+            ["requested_output_format": "mp3_44100_128", "audio_magic_type": "raw_no_known_header"],
+            ["content_type": "audio/mpeg\r\nauthorization: secret"],
+            ["requested_output_format": "pcm_secret"],
+        ]
+        for mutation in mutations {
+            var malformed = object
+            malformed.merge(mutation) { _, replacement in replacement }
+            let encoded = try JSONSerialization.data(withJSONObject: malformed)
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(
+                "aies_diagnostic=" + encoded.base64EncodedString()) == nil)
+        }
+    }
+
     @Test func initializerDropsSafeCharacterSecretsFromClosedV2Metadata() {
         let event = OpenClawDiagnosticEvent(
             kind: .tts,

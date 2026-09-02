@@ -55,6 +55,82 @@ public struct ElevenLabsTTSRequest: Sendable {
     }
 }
 
+public enum ElevenLabsAudioMagicType: String, Codable, Sendable {
+    case id3MPEG = "id3_mpeg"
+    case mpegFrameSync = "mpeg_frame_sync"
+    case riffWave = "riff_wave"
+    case oggContainer = "ogg_container"
+    case oggOpus = "ogg_opus"
+    case rawNoKnownHeader = "raw_no_known_header"
+    case empty
+}
+
+public enum ElevenLabsAudioByteParity: String, Codable, Sendable {
+    case even
+    case odd
+}
+
+public enum ElevenLabsAudioValidationResult: String, Codable, Sendable {
+    case codecValidated = "codec_validated"
+    case codecMismatch = "codec_mismatch"
+    case frameAlignmentInvalid = "frame_alignment_invalid"
+    case emptyPayload = "empty_payload"
+    case httpError = "http_error"
+}
+
+public struct ElevenLabsTTSResponseMetadata: Codable, Equatable, Sendable {
+    public let requestedOutputFormat: String
+    public let httpStatus: Int
+    public let contentType: String
+    public let contentEncoding: String
+    public let declaredByteCount: Int?
+    public let receivedByteCount: Int
+    public let byteCountParity: ElevenLabsAudioByteParity
+    public let audioMagicType: ElevenLabsAudioMagicType
+    public let validationResult: ElevenLabsAudioValidationResult
+
+    public init(
+        requestedOutputFormat: String,
+        httpStatus: Int,
+        contentType: String,
+        contentEncoding: String,
+        declaredByteCount: Int?,
+        receivedByteCount: Int,
+        byteCountParity: ElevenLabsAudioByteParity,
+        audioMagicType: ElevenLabsAudioMagicType,
+        validationResult: ElevenLabsAudioValidationResult)
+    {
+        self.requestedOutputFormat = requestedOutputFormat
+        self.httpStatus = httpStatus
+        self.contentType = contentType
+        self.contentEncoding = contentEncoding
+        self.declaredByteCount = declaredByteCount
+        self.receivedByteCount = receivedByteCount
+        self.byteCountParity = byteCountParity
+        self.audioMagicType = audioMagicType
+        self.validationResult = validationResult
+    }
+}
+
+public final class ElevenLabsTTSResponseEvidence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ElevenLabsTTSResponseMetadata?
+
+    public init() {}
+
+    public func record(_ metadata: ElevenLabsTTSResponseMetadata) {
+        self.lock.lock()
+        self.value = metadata
+        self.lock.unlock()
+    }
+
+    public var snapshot: ElevenLabsTTSResponseMetadata? {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.value
+    }
+}
+
 public struct ElevenLabsTTSClient: Sendable {
     public var apiKey: String
     public var requestTimeoutSeconds: TimeInterval
@@ -104,48 +180,69 @@ public struct ElevenLabsTTSClient: Sendable {
     }
 
     public func synthesize(voiceId: String, request: ElevenLabsTTSRequest) async throws -> Data {
+        try await self.synthesize(voiceId: voiceId, request: request, responseEvidence: nil)
+    }
+
+    private func synthesize(
+        voiceId: String,
+        request: ElevenLabsTTSRequest,
+        responseEvidence: ElevenLabsTTSResponseEvidence?) async throws -> Data
+    {
+        let outputFormat = try Self.resolvedOutputFormat(request.outputFormat)
         var url = baseUrl
         url.appendPathComponent("v1")
         url.appendPathComponent("text-to-speech")
         url.appendPathComponent(voiceId)
+        url = Self.addSynthesisQuery(
+            outputFormat: outputFormat,
+            latencyTier: request.latencyTier,
+            to: url)
 
         let body = try JSONSerialization.data(withJSONObject: Self.buildPayload(request), options: [])
-        var urlRequest = Self.buildSynthesizeRequest(
+        let urlRequest = Self.buildSynthesizeRequest(
             url: url,
             apiKey: apiKey,
             body: body,
             timeoutSeconds: requestTimeoutSeconds,
-            outputFormat: request.outputFormat)
-
-        if let latencyTier = request.latencyTier {
-            urlRequest.url = Self.addLatencyTier(latencyTier, to: url)
-        }
+            outputFormat: outputFormat)
 
         let (data, response) = try await urlSession.data(for: urlRequest)
         if let http = response as? HTTPURLResponse {
-            let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "unknown").lowercased()
+            let metadata = Self.responseMetadata(
+                http: http,
+                data: data,
+                requestedOutputFormat: outputFormat)
+            responseEvidence?.record(metadata)
             if http.statusCode >= 400 {
                 throw NSError(domain: "ElevenLabsTTS", code: http.statusCode, userInfo: [
-                    NSLocalizedDescriptionKey: "ElevenLabs failed: \(http.statusCode) ct=\(contentType) \(Self.truncatedErrorBody(data))",
+                    NSLocalizedDescriptionKey: "ElevenLabs failed: \(http.statusCode) ct=\(metadata.contentType) \(Self.truncatedErrorBody(data))",
                 ])
             }
-            if !Self.isAudioContentType(contentType, outputFormat: request.outputFormat) {
-                throw NSError(domain: "ElevenLabsTTS", code: 415, userInfo: [
-                    NSLocalizedDescriptionKey: "ElevenLabs returned non-audio ct=\(contentType) \(Self.truncatedErrorBody(data))",
+            if metadata.validationResult != .codecValidated {
+                throw NSError(domain: "ElevenLabsAudioValidation", code: 415, userInfo: [
+                    NSLocalizedDescriptionKey: "ElevenLabs response did not match output_format=\(metadata.requestedOutputFormat) validation=\(metadata.validationResult.rawValue)",
                 ])
             }
+        } else {
+            throw NSError(domain: "ElevenLabsAudioValidation", code: 415, userInfo: [
+                NSLocalizedDescriptionKey: "ElevenLabs response did not include HTTP metadata",
+            ])
         }
         return data
     }
 
     public func streamSynthesize(
         voiceId: String,
-        request: ElevenLabsTTSRequest
+        request: ElevenLabsTTSRequest,
+        responseEvidence: ElevenLabsTTSResponseEvidence? = nil
     ) -> AsyncThrowingStream<Data, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let data = try await synthesize(voiceId: voiceId, request: request)
+                    let data = try await synthesize(
+                        voiceId: voiceId,
+                        request: request,
+                        responseEvidence: responseEvidence)
                     continuation.yield(data)
                     continuation.finish()
                 } catch {
@@ -182,8 +279,26 @@ public struct ElevenLabsTTSClient: Sendable {
     public static func validatedOutputFormat(_ value: String?) -> String? {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        guard trimmed.hasPrefix("mp3_") || trimmed.hasPrefix("pcm_") else { return nil }
+        let pcmFormats: Set<String> = [
+            "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_44100", "pcm_48000",
+        ]
+        let mp3Formats: Set<String> = [
+            "mp3_22050_32",
+            "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192",
+        ]
+        guard pcmFormats.contains(trimmed) || mp3Formats.contains(trimmed) else { return nil }
         return trimmed
+    }
+
+    private static func resolvedOutputFormat(_ value: String?) throws -> String? {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let outputFormat = validatedOutputFormat(trimmed) else {
+            throw NSError(domain: "ElevenLabsAudioValidation", code: 400, userInfo: [
+                NSLocalizedDescriptionKey: "Unsupported ElevenLabs output format",
+            ])
+        }
+        return outputFormat
     }
 
     public static func validatedLanguage(_ value: String?) -> String? {
@@ -202,9 +317,6 @@ public struct ElevenLabsTTSClient: Sendable {
         var payload: [String: Any] = ["text": request.text]
         if let modelId = request.modelId?.trimmingCharacters(in: .whitespacesAndNewlines), !modelId.isEmpty {
             payload["model_id"] = modelId
-        }
-        if let outputFormat = request.outputFormat?.trimmingCharacters(in: .whitespacesAndNewlines), !outputFormat.isEmpty {
-            payload["output_format"] = outputFormat
         }
         if let seed = request.seed {
             payload["seed"] = seed
@@ -247,13 +359,26 @@ public struct ElevenLabsTTSClient: Sendable {
         return request
     }
 
-    private static func addLatencyTier(_ latencyTier: Int, to url: URL) -> URL {
+    private static func addSynthesisQuery(
+        outputFormat: String?,
+        latencyTier: Int?,
+        to url: URL) -> URL
+    {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return url
         }
-        components.queryItems = (components.queryItems ?? []) + [
-            URLQueryItem(name: "optimize_streaming_latency", value: String(latencyTier)),
-        ]
+        var queryItems = (components.queryItems ?? []).filter {
+            $0.name != "output_format" && $0.name != "optimize_streaming_latency"
+        }
+        if let outputFormat {
+            queryItems.append(URLQueryItem(name: "output_format", value: outputFormat))
+        }
+        if let latencyTier {
+            queryItems.append(URLQueryItem(
+                name: "optimize_streaming_latency",
+                value: String(latencyTier)))
+        }
+        components.queryItems = queryItems
         return components.url ?? url
     }
 
@@ -264,14 +389,115 @@ public struct ElevenLabsTTSClient: Sendable {
         return nil
     }
 
-    private static func isAudioContentType(_ contentType: String, outputFormat: String?) -> Bool {
-        if contentType.hasPrefix("audio/") || contentType == "application/octet-stream" {
-            return true
+    private static func responseMetadata(
+        http: HTTPURLResponse,
+        data: Data,
+        requestedOutputFormat: String?) -> ElevenLabsTTSResponseMetadata
+    {
+        let outputFormat = validatedOutputFormat(requestedOutputFormat) ?? "unspecified"
+        let contentType = sanitizedHeaderValue(
+            http.value(forHTTPHeaderField: "Content-Type"),
+            fallback: "absent")
+        let contentEncoding = sanitizedHeaderValue(
+            http.value(forHTTPHeaderField: "Content-Encoding"),
+            fallback: "identity")
+        let declaredByteCount = http.value(forHTTPHeaderField: "Content-Length")
+            .flatMap(Int.init)
+            .flatMap { $0 >= 0 ? $0 : nil }
+        let magicType = classifyAudioMagic(data)
+        let parity: ElevenLabsAudioByteParity = data.count.isMultiple(of: 2) ? .even : .odd
+        let validationResult = validateAudioResponse(
+            outputFormat: outputFormat,
+            contentType: contentType,
+            data: data,
+            magicType: magicType)
+        return ElevenLabsTTSResponseMetadata(
+            requestedOutputFormat: outputFormat,
+            httpStatus: http.statusCode,
+            contentType: contentType,
+            contentEncoding: contentEncoding,
+            declaredByteCount: declaredByteCount,
+            receivedByteCount: data.count,
+            byteCountParity: parity,
+            audioMagicType: magicType,
+            validationResult: http.statusCode >= 400 ? .httpError : validationResult)
+    }
+
+    private static func validateAudioResponse(
+        outputFormat: String,
+        contentType: String,
+        data: Data,
+        magicType: ElevenLabsAudioMagicType) -> ElevenLabsAudioValidationResult
+    {
+        guard !data.isEmpty else { return .emptyPayload }
+        let baseContentType = contentType.split(separator: ";", maxSplits: 1)
+            .first.map(String.init) ?? contentType
+        if outputFormat.hasPrefix("pcm_") {
+            guard magicType == .rawNoKnownHeader else { return .codecMismatch }
+            let acceptedPCMTypes: Set<String> = [
+                "application/octet-stream", "audio/l16", "audio/pcm", "audio/x-pcm", "binary/octet-stream",
+            ]
+            guard acceptedPCMTypes.contains(baseContentType) else { return .codecMismatch }
+            return data.count.isMultiple(of: 2) ? .codecValidated : .frameAlignmentInvalid
         }
-        if outputFormat?.hasPrefix("pcm_") == true, contentType == "binary/octet-stream" {
-            return true
+        if outputFormat == "unspecified" || outputFormat.hasPrefix("mp3_") {
+            let acceptedMP3Types: Set<String> = [
+                "application/octet-stream", "audio/mp3", "audio/mpeg", "binary/octet-stream",
+            ]
+            guard acceptedMP3Types.contains(baseContentType) else { return .codecMismatch }
+            return [.id3MPEG, .mpegFrameSync].contains(magicType) ? .codecValidated : .codecMismatch
         }
-        return false
+        return .codecMismatch
+    }
+
+    private static func classifyAudioMagic(_ data: Data) -> ElevenLabsAudioMagicType {
+        guard !data.isEmpty else { return .empty }
+        let prefix = Array(data.prefix(64))
+        if prefix.count >= 10,
+           prefix.starts(with: [0x49, 0x44, 0x33]),
+           (2...4).contains(prefix[3]),
+           prefix[4] != 0xFF,
+           prefix[6...9].allSatisfy({ $0 & 0x80 == 0 })
+        {
+            return .id3MPEG
+        }
+        if prefix.count >= 12,
+           prefix.starts(with: [0x52, 0x49, 0x46, 0x46]),
+           Array(prefix[8...11]) == [0x57, 0x41, 0x56, 0x45]
+        {
+            return .riffWave
+        }
+        if prefix.starts(with: [0x4F, 0x67, 0x67, 0x53]) {
+            let opusHeader = Data("OpusHead".utf8)
+            return data.prefix(64).range(of: opusHeader) == nil ? .oggContainer : .oggOpus
+        }
+        if prefix.count >= 4,
+           prefix[0] == 0xFF,
+           prefix[1] & 0xE0 == 0xE0,
+           ((prefix[1] >> 3) & 0x03) != 0x01,
+           ((prefix[1] >> 1) & 0x03) != 0,
+           (prefix[2] >> 4) != 0,
+           (prefix[2] >> 4) != 0x0F,
+           ((prefix[2] >> 2) & 0x03) != 0x03
+        {
+            return .mpegFrameSync
+        }
+        return .rawNoKnownHeader
+    }
+
+    private static func sanitizedHeaderValue(_ value: String?, fallback: String) -> String {
+        guard let value else { return fallback }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized.utf8.count <= 128 else { return "redacted" }
+        let permitted = normalized.utf8.allSatisfy { byte in
+            switch byte {
+            case 32, 43...59, 61, 65...90, 95, 97...122:
+                true
+            default:
+                false
+            }
+        }
+        return permitted ? normalized : "redacted"
     }
 
     private static func truncatedErrorBody(_ data: Data) -> String {

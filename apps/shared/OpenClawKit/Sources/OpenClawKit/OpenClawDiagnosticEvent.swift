@@ -62,6 +62,21 @@ public enum OpenClawDiagnosticAPNsTransport: String, Codable, Equatable, Sendabl
     case relay
 }
 
+public enum OpenClawDiagnosticAudioByteParity: String, Codable, Equatable, Sendable {
+    case even
+    case odd
+}
+
+public enum OpenClawDiagnosticAudioMagicType: String, Codable, Equatable, Sendable {
+    case id3MPEG = "id3_mpeg"
+    case mpegFrameSync = "mpeg_frame_sync"
+    case riffWave = "riff_wave"
+    case oggContainer = "ogg_container"
+    case oggOpus = "ogg_opus"
+    case rawNoKnownHeader = "raw_no_known_header"
+    case empty
+}
+
 public enum OpenClawDiagnosticOutboxOutcome: String, Codable, Equatable, Sendable {
     case notDispatched = "not_dispatched"
     case dispatchRejected = "dispatch_rejected"
@@ -189,6 +204,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let codec: String?
     public let playbackPath: String?
     public let resultClass: String?
+    public let requestedOutputFormat: String?
+    public let httpStatus: Int?
+    public let contentType: String?
+    public let contentEncoding: String?
+    public let declaredByteCount: Int?
+    public let receivedByteCount: Int?
+    public let byteCountParity: OpenClawDiagnosticAudioByteParity?
+    public let audioMagicType: OpenClawDiagnosticAudioMagicType?
     public let deviceIdentityHash: String?
     public let configuredGatewayIdentityHash: String?
     public let observedGatewayIdentityHash: String?
@@ -275,6 +298,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         codec: String? = nil,
         playbackPath: String? = nil,
         resultClass: String? = nil,
+        requestedOutputFormat: String? = nil,
+        httpStatus: Int? = nil,
+        contentType: String? = nil,
+        contentEncoding: String? = nil,
+        declaredByteCount: Int? = nil,
+        receivedByteCount: Int? = nil,
+        byteCountParity: OpenClawDiagnosticAudioByteParity? = nil,
+        audioMagicType: OpenClawDiagnosticAudioMagicType? = nil,
         deviceIdentityIdentifier: String? = nil,
         configuredGatewayIdentityIdentifier: String? = nil,
         observedGatewayIdentityIdentifier: String? = nil,
@@ -377,6 +408,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.codec = Self.allowlistedToken(codec, allowed: Self.allowedCodecs)
         self.playbackPath = Self.allowlistedToken(playbackPath, allowed: Self.allowedPlaybackPaths)
         self.resultClass = Self.allowlistedToken(resultClass, allowed: Self.allowedResultClasses)
+        self.requestedOutputFormat = Self.sanitizedOutputFormat(requestedOutputFormat)
+        self.httpStatus = httpStatus.flatMap { (100...599).contains($0) ? $0 : nil }
+        self.contentType = Self.sanitizedHTTPHeaderValue(contentType, maximumLength: 128)
+        self.contentEncoding = Self.sanitizedHTTPHeaderValue(contentEncoding, maximumLength: 64)
+        self.declaredByteCount = Self.boundedAudioByteCount(declaredByteCount)
+        self.receivedByteCount = Self.boundedAudioByteCount(receivedByteCount)
+        self.byteCountParity = byteCountParity
+        self.audioMagicType = audioMagicType
         self.deviceIdentityHash = Self.hashedIdentifier(deviceIdentityIdentifier)
         self.configuredGatewayIdentityHash = Self.hashedIdentifier(
             configuredGatewayIdentityIdentifier)
@@ -471,6 +510,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case codec
         case playbackPath = "playback_path"
         case resultClass = "result_class"
+        case requestedOutputFormat = "requested_output_format"
+        case httpStatus = "http_status"
+        case contentType = "content_type"
+        case contentEncoding = "content_encoding"
+        case declaredByteCount = "declared_byte_count"
+        case receivedByteCount = "received_byte_count"
+        case byteCountParity = "byte_count_parity"
+        case audioMagicType = "audio_magic_type"
         case deviceIdentityHash = "device_identity_hash"
         case configuredGatewayIdentityHash = "configured_gateway_identity_hash"
         case observedGatewayIdentityHash = "observed_gateway_identity_hash"
@@ -530,6 +577,36 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
 
     private static func boundedOutboxCount(_ value: Int?) -> Int? {
         value.flatMap { $0 >= 0 ? min($0, 50) : nil }
+    }
+
+    private static func boundedAudioByteCount(_ value: Int?) -> Int? {
+        value.flatMap { (0...100_000_000).contains($0) ? $0 : nil }
+    }
+
+    private static func sanitizedOutputFormat(_ value: String?) -> String? {
+        guard let value = Self.sanitizedToken(value, maximumLength: 48) else { return nil }
+        let allowed: Set<String> = [
+            "unspecified",
+            "pcm_8000", "pcm_16000", "pcm_22050", "pcm_24000", "pcm_44100", "pcm_48000",
+            "mp3_22050_32",
+            "mp3_44100_32", "mp3_44100_64", "mp3_44100_96", "mp3_44100_128", "mp3_44100_192",
+        ]
+        return allowed.contains(value) ? value : nil
+    }
+
+    private static func sanitizedHTTPHeaderValue(_ value: String?, maximumLength: Int) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized.utf8.count <= maximumLength else { return nil }
+        let permitted = normalized.utf8.allSatisfy { byte in
+            switch byte {
+            case 32, 43...59, 61, 65...90, 95, 97...122:
+                true
+            default:
+                false
+            }
+        }
+        return permitted ? normalized : nil
     }
 
     private static func validBuildNumber(_ value: String?) -> String? {
@@ -702,17 +779,22 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "canonical_confirmed",
         "canonical_not_found_bounded",
         "coalesced_request",
+        "codec_mismatch",
+        "codec_validated",
         "connection_owner_unavailable",
         "configuration_generation_changed",
         "direct",
         "dispatch_rejected",
         "encoding_failed",
+        "empty_payload",
         "failed",
         "fifo_blocked",
+        "frame_alignment_invalid",
         "finished",
         "gateway_rejected",
         "http_4xx",
         "http_5xx",
+        "http_error",
         "incomplete",
         "interrupted",
         "local_direct_registration_match",
@@ -761,6 +843,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "route_or_configuration_changed_after_payload",
         "route_or_configuration_changed_after_transport_write",
         "route_or_configuration_changed_before_payload",
+        "semantic_audio_failed",
         "success",
         "system_error",
         "stable_gateway_identity_unavailable",
@@ -944,6 +1027,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
                   self.playbackPath, allowed: Self.allowedPlaybackPaths),
               self.resultClass == Self.allowlistedToken(
                   self.resultClass, allowed: Self.allowedResultClasses),
+              self.requestedOutputFormat == Self.sanitizedOutputFormat(self.requestedOutputFormat),
+              self.httpStatus.map({ (100...599).contains($0) }) ?? true,
+              self.contentType == Self.sanitizedHTTPHeaderValue(
+                  self.contentType, maximumLength: 128),
+              self.contentEncoding == Self.sanitizedHTTPHeaderValue(
+                  self.contentEncoding, maximumLength: 64),
+              self.declaredByteCount == Self.boundedAudioByteCount(self.declaredByteCount),
+              self.receivedByteCount == Self.boundedAudioByteCount(self.receivedByteCount),
               self.topic == Self.allowlistedToken(self.topic, allowed: Self.allowedTopics),
               self.environment == Self.allowlistedToken(
                   self.environment, allowed: Self.allowedEnvironments),
@@ -986,6 +1077,64 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
            (self.schema != Self.schemaName || self.kind != .apns)
         {
             return false
+        }
+        let hasAudioResponseMetadata = self.requestedOutputFormat != nil || self.httpStatus != nil ||
+            self.contentType != nil || self.contentEncoding != nil || self.declaredByteCount != nil ||
+            self.receivedByteCount != nil || self.byteCountParity != nil || self.audioMagicType != nil
+        if hasAudioResponseMetadata, (self.schema != Self.schemaName || self.kind != .tts) {
+            return false
+        }
+        if hasAudioResponseMetadata {
+            guard self.provider == "elevenlabs",
+                  ["provider_response_received", "audio_payload_validated"].contains(self.state),
+                  self.providerStage == self.state,
+                  self.requestedOutputFormat != nil,
+                  let httpStatus = self.httpStatus,
+                  self.contentType != nil,
+                  self.contentEncoding != nil,
+                  let receivedByteCount = self.receivedByteCount,
+                  let byteCountParity = self.byteCountParity,
+                  let audioMagicType = self.audioMagicType,
+                  let resultClass = self.resultClass,
+                  [
+                      "codec_validated", "codec_mismatch", "frame_alignment_invalid",
+                      "empty_payload", "http_error",
+                  ].contains(resultClass),
+                  (receivedByteCount.isMultiple(of: 2) ? .even : .odd) == byteCountParity,
+                  (receivedByteCount == 0) == (audioMagicType == .empty),
+                  (httpStatus >= 400) == (resultClass == "http_error")
+            else {
+                return false
+            }
+            if self.state == "audio_payload_validated", resultClass != "codec_validated" {
+                return false
+            }
+            if resultClass == "codec_validated" {
+                if self.requestedOutputFormat?.hasPrefix("pcm_") == true {
+                    guard audioMagicType == .rawNoKnownHeader,
+                          byteCountParity == .even
+                    else {
+                        return false
+                    }
+                } else if self.requestedOutputFormat == "unspecified" ||
+                    self.requestedOutputFormat?.hasPrefix("mp3_") == true
+                {
+                    guard [.id3MPEG, .mpegFrameSync].contains(audioMagicType) else {
+                        return false
+                    }
+                } else {
+                    return false
+                }
+            }
+            if (resultClass == "empty_payload") != (receivedByteCount == 0) {
+                return false
+            }
+            if resultClass == "frame_alignment_invalid",
+               (self.requestedOutputFormat?.hasPrefix("pcm_") != true ||
+                   byteCountParity != .odd || audioMagicType != .rawNoKnownHeader)
+            {
+                return false
+            }
         }
         let hasOutboxMetadata = self.outboxOutcome != nil || self.outboxCommandHash != nil ||
             self.outboxDeliveryGate != nil ||
@@ -1352,6 +1501,14 @@ public enum OpenClawDiagnosticRecorder {
         "codec",
         "playback_path",
         "result_class",
+        "requested_output_format",
+        "http_status",
+        "content_type",
+        "content_encoding",
+        "declared_byte_count",
+        "received_byte_count",
+        "byte_count_parity",
+        "audio_magic_type",
         "device_identity_hash",
         "configured_gateway_identity_hash",
         "observed_gateway_identity_hash",
