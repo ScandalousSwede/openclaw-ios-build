@@ -141,6 +141,85 @@ struct OpenClawDiagnosticEventTests {
         #expect(decoded.state == "tts_audio_session_restore_started")
     }
 
+    @Test func audioSessionLifecycleEvidenceIsTypedBoundedAndGenerationConsistent() throws {
+        let route = OpenClawDiagnosticEvent(
+            kind: .route,
+            state: "tts_route_changed",
+            connectionRole: .operator,
+            playbackGeneration: 6,
+            cancellationGeneration: 7,
+            resultClass: "stale_callback",
+            callbackPlaybackGeneration: 6,
+            activePlaybackGeneration: 7,
+            audioSessionOwnerGeneration: 7,
+            audioRouteChangeReason: .categoryChange,
+            previousAudioOutputRouteClasses: [.builtInSpeaker],
+            currentAudioOutputRouteClasses: [.bluetooth],
+            observedAt: Date(timeIntervalSince1970: 0))
+        let interruption = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_audio_session_interruption_ended",
+            playbackGeneration: 7,
+            cancellationGeneration: 7,
+            resultClass: "current_callback",
+            callbackPlaybackGeneration: 7,
+            activePlaybackGeneration: 7,
+            audioSessionOwnerGeneration: 7,
+            currentAudioOutputRouteClasses: [.bluetooth],
+            audioInterruptionType: .ended,
+            audioInterruptionReason: .defaultReason,
+            audioInterruptionOptions: [.shouldResume],
+            observedAt: Date(timeIntervalSince1970: 1))
+        let restored = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_audio_session_restore_completed",
+            playbackGeneration: 7,
+            cancellationGeneration: 7,
+            resultClass: "restored",
+            activePlaybackGeneration: 7,
+            audioSessionOwnerGeneration: 7,
+            currentAudioOutputRouteClasses: [.bluetooth],
+            observedAt: Date(timeIntervalSince1970: 2))
+        let stop = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "tts_stop_requested",
+            playbackGeneration: 7,
+            cancellationGeneration: 7,
+            resultClass: "requested",
+            activePlaybackGeneration: 7,
+            audioSessionOwnerGeneration: 7,
+            currentAudioOutputRouteClasses: [.bluetooth],
+            ttsCancellationOrigin: .speechRecognitionBargeIn,
+            observedAt: Date(timeIntervalSince1970: 3))
+
+        for event in [route, interruption, restored, stop] {
+            let data = try JSONEncoder().encode(event)
+            let record = "aies_diagnostic=" + data.base64EncodedString()
+            #expect(OpenClawDiagnosticRecorder.decodeRecord(record) == event)
+        }
+
+        var wrongGenerationResult = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(route)) as? [String: Any])
+        wrongGenerationResult["result_class"] = "current_callback"
+        let wrongGenerationData = try JSONSerialization.data(withJSONObject: wrongGenerationResult)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + wrongGenerationData.base64EncodedString()) == nil)
+
+        var duplicateRoutes = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(route)) as? [String: Any])
+        duplicateRoutes["current_audio_output_route_classes"] = ["bluetooth", "bluetooth"]
+        let duplicateRoutesData = try JSONSerialization.data(withJSONObject: duplicateRoutes)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + duplicateRoutesData.base64EncodedString()) == nil)
+
+        var untypedStop = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(stop)) as? [String: Any])
+        untypedStop.removeValue(forKey: "tts_cancellation_origin")
+        let untypedStopData = try JSONSerialization.data(withJSONObject: untypedStop)
+        #expect(OpenClawDiagnosticRecorder.decodeRecord(
+            "aies_diagnostic=" + untypedStopData.base64EncodedString()) == nil)
+    }
+
     @Test func rpcDiagnosticsRetainOnlyAllowlistedIdentityAndParameterShape() throws {
         let event = OpenClawDiagnosticEvent(
             kind: .socket,

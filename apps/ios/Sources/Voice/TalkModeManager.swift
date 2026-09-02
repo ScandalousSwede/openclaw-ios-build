@@ -193,7 +193,11 @@ final class TalkModeManager: NSObject {
     private var ttsGeneration: UInt64 = 0
     private var activeTTSGeneration: UInt64?
     private var currentAudioActivation: TalkAudioRouteEvidence.Activation = .unknown
+    private var audioSessionOwnerGeneration: UInt64?
     private var audioRouteObserver: NSObjectProtocol?
+    private var audioInterruptionObserver: NSObjectProtocol?
+    private var audioMediaServicesLostObserver: NSObjectProtocol?
+    private var audioMediaServicesResetObserver: NSObjectProtocol?
     private var durableChatGatewayOwnerID: (@MainActor () -> String?)?
     private var durableChatCaptureAdmission:
         (@MainActor () async throws -> OpenClawChatOutboxCaptureAdmission)?
@@ -293,9 +297,55 @@ final class TalkModeManager: NSObject {
             object: nil,
             queue: .main,
             using: { [weak self] notification in
-                let reasonValue = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
-                Task { @MainActor in
-                    self?.handleAudioRouteChange(reasonValue: reasonValue)
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let reasonValue = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+                    let previousPortTypes = (
+                        notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey]
+                            as? AVAudioSessionRouteDescription
+                    )?.outputs.map { $0.portType.rawValue }
+                    self.handleAudioRouteChange(
+                        reasonValue: reasonValue,
+                        previousPortTypes: previousPortTypes,
+                        callbackGeneration: self.activeTTSGeneration)
+                }
+            })
+        self.audioInterruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil,
+            queue: .main,
+            using: { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.handleAudioSessionInterruption(
+                        typeValue: (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 2,
+                        reasonValue: notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt,
+                        optionValue: (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0,
+                        callbackGeneration: self.activeTTSGeneration)
+                }
+            })
+        self.audioMediaServicesLostObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereLostNotification,
+            object: nil,
+            queue: .main,
+            using: { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.handleAudioMediaServicesNotification(
+                        reset: false,
+                        callbackGeneration: self.activeTTSGeneration)
+                }
+            })
+        self.audioMediaServicesResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: nil,
+            queue: .main,
+            using: { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.handleAudioMediaServicesNotification(
+                        reset: true,
+                        callbackGeneration: self.activeTTSGeneration)
                 }
             })
     }
@@ -303,6 +353,15 @@ final class TalkModeManager: NSObject {
     @MainActor deinit {
         if let audioRouteObserver {
             NotificationCenter.default.removeObserver(audioRouteObserver)
+        }
+        if let audioInterruptionObserver {
+            NotificationCenter.default.removeObserver(audioInterruptionObserver)
+        }
+        if let audioMediaServicesLostObserver {
+            NotificationCenter.default.removeObserver(audioMediaServicesLostObserver)
+        }
+        if let audioMediaServicesResetObserver {
+            NotificationCenter.default.removeObserver(audioMediaServicesResetObserver)
         }
     }
 
@@ -654,7 +713,7 @@ final class TalkModeManager: NSObject {
         self.stopSilenceMonitor()
         self.stopRealtimeSession()
         self.stopRecognition()
-        self.stopSpeaking()
+        self.stopSpeaking(origin: .lifecycleOrManagerStop)
         self.cancelDurableResponse()
         self.lastInterruptedAtSeconds = nil
         let pendingPTT = self.pttCompletion != nil
@@ -714,7 +773,7 @@ final class TalkModeManager: NSObject {
 
         self.stopRealtimeSession()
         self.stopRecognition()
-        self.stopSpeaking()
+        self.stopSpeaking(origin: .lifecycleOrManagerStop)
         self.cancelDurableResponse()
         self.lastInterruptedAtSeconds = nil
         self.cancelTTSGeneration()
@@ -761,7 +820,7 @@ final class TalkModeManager: NSObject {
             realtimeSession.cancelResponse()
         }
         self.realtimeRelaySession?.cancelOutput()
-        self.stopSpeaking()
+        self.stopSpeaking(origin: .userOrb)
     }
 
     func beginPushToTalk() async throws -> OpenClawTalkPTTStartPayload {
@@ -812,7 +871,7 @@ final class TalkModeManager: NSObject {
             throw CancellationError()
         }
 
-        self.stopSpeaking(storeInterruption: false)
+        self.stopSpeaking(origin: .pttAdmission, storeInterruption: false)
         self.cancelPendingStart()
         self.cancelPTTTimeout()
         self.pttAutoStopEnabled = false
@@ -1336,7 +1395,7 @@ final class TalkModeManager: NSObject {
         let ttsActive = self.isSpeechOutputActive
         if ttsActive, self.interruptOnSpeech {
             if self.shouldInterrupt(with: trimmed) {
-                self.stopSpeaking()
+                self.stopSpeaking(origin: .speechRecognitionBargeIn)
             }
             return
         }
@@ -1984,7 +2043,7 @@ final class TalkModeManager: NSObject {
         let speechGeneration = self.durableResponseSpeechGeneration
         self.durableResponseSpeechGeneration = nil
         if let speechGeneration, speechGeneration == self.ttsGeneration {
-            self.stopSpeaking(storeInterruption: false)
+            self.stopSpeaking(origin: .durableResponseOwner, storeInterruption: false)
         } else {
             // Incremental Talk playback already carries exact generation ownership.
             // Retiring its worker cannot stop a newer manual generation.
@@ -2756,7 +2815,7 @@ final class TalkModeManager: NSObject {
                 guard let self else {
                     throw NSError(domain: "TalkTTS", code: 1)
                 }
-                return try self.prepareAudioSessionForLocalSpeech()
+                return try self.prepareAudioSessionForLocalSpeech(ownerGeneration: generation)
             },
             isCurrent: { [weak self] in self?.ttsGeneration == generation },
             report: { [weak self] progress in
@@ -2775,6 +2834,12 @@ final class TalkModeManager: NSObject {
 
     private func beginTTSGeneration() -> UInt64 {
         if let activeTTSGeneration {
+            TalkAudioSessionDiagnostics.recordStopRequested(
+                origin: .providerReplacement,
+                generation: activeTTSGeneration,
+                activeGeneration: self.activeTTSGeneration,
+                ownerGeneration: self.audioSessionOwnerGeneration,
+                currentPortTypes: self.currentAudioPortTypes)
             self.recordTTSBreadcrumb(
                 TalkTTSBreadcrumb(stage: .generationCancelled, detail: "replaced"),
                 generation: activeTTSGeneration)
@@ -2829,7 +2894,7 @@ final class TalkModeManager: NSObject {
         self.recordTTSBreadcrumb(
             TalkTTSBreadcrumb(stage: .audioSessionRestoreStarted),
             generation: generation)
-        self.restoreAudioSessionAfterLocalSpeech()
+        self.restoreAudioSessionAfterLocalSpeech(ownerGeneration: generation)
         self.restoreConfiguredVoiceModeDescriptor()
         self.recordTTSBreadcrumb(
             TalkTTSBreadcrumb(stage: .generationFinalized),
@@ -3086,13 +3151,28 @@ final class TalkModeManager: NSObject {
             provider: Self.diagnosticProviderToken(config.provider)))
     }
 
-    private func prepareAudioSessionForLocalSpeech() throws -> TalkAudioRouteEvidence {
+    private func prepareAudioSessionForLocalSpeech(ownerGeneration: UInt64) throws -> TalkAudioRouteEvidence {
+        self.audioSessionOwnerGeneration = ownerGeneration
         #if DEBUG
         if let ttsPrepareAudioOverride {
-            return try ttsPrepareAudioOverride()
+            do {
+                return try ttsPrepareAudioOverride()
+            } catch {
+                if self.audioSessionOwnerGeneration == ownerGeneration {
+                    self.audioSessionOwnerGeneration = nil
+                }
+                throw error
+            }
         }
         #endif
-        try Self.configureLocalSpeechAudioSession()
+        do {
+            try Self.configureLocalSpeechAudioSession()
+        } catch {
+            if self.audioSessionOwnerGeneration == ownerGeneration {
+                self.audioSessionOwnerGeneration = nil
+            }
+            throw error
+        }
         self.currentAudioActivation = .active
         let evidence = self.currentAudioRouteEvidence
         self.ttsDiagnostics.route = evidence
@@ -3107,18 +3187,33 @@ final class TalkModeManager: NSObject {
         return evidence
     }
 
-    private func restoreAudioSessionAfterLocalSpeech() {
+    private func restoreAudioSessionAfterLocalSpeech(ownerGeneration: UInt64) {
+        TalkAudioSessionDiagnostics.recordRestore(
+            .requested,
+            ownerGeneration: ownerGeneration,
+            activeGeneration: self.activeTTSGeneration,
+            currentPortTypes: self.currentAudioPortTypes)
         #if DEBUG
         if let ttsRestoreAudioOverride {
             ttsRestoreAudioOverride()
+            TalkAudioSessionDiagnostics.recordRestore(
+                .completed,
+                ownerGeneration: ownerGeneration,
+                activeGeneration: self.activeTTSGeneration,
+                currentPortTypes: self.currentAudioPortTypes)
+            if self.audioSessionOwnerGeneration == ownerGeneration {
+                self.audioSessionOwnerGeneration = nil
+            }
             return
         }
         #endif
+        var restoreSucceeded = true
         if self.hasActiveAudioCapture {
             do {
                 try Self.configureAudioSession()
                 self.currentAudioActivation = .active
             } catch {
+                restoreSucceeded = false
                 self.currentAudioActivation = .unknown
                 GatewayDiagnostics.log("talk tts capture restore failed")
             }
@@ -3127,24 +3222,72 @@ final class TalkModeManager: NSObject {
                 try AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
                 self.currentAudioActivation = .inactive
             } catch {
+                restoreSucceeded = false
                 self.currentAudioActivation = .unknown
                 GatewayDiagnostics.log("talk tts audio deactivation failed")
             }
         }
         self.ttsDiagnostics.route = self.currentAudioRouteEvidence
+        TalkAudioSessionDiagnostics.recordRestore(
+            restoreSucceeded ? .completed : .failed,
+            ownerGeneration: ownerGeneration,
+            activeGeneration: self.activeTTSGeneration,
+            currentPortTypes: self.currentAudioPortTypes)
+        if self.audioSessionOwnerGeneration == ownerGeneration {
+            self.audioSessionOwnerGeneration = nil
+        }
     }
 
-    private func handleAudioRouteChange(reasonValue: UInt) {
-        guard self.isSpeechOutputActive else { return }
-        self.ttsDiagnostics.route = self.currentAudioRouteEvidence
-        GatewayDiagnostics.log(
-            "talk tts route changed reason=\(reasonValue) "
-                + "outputs=\(self.ttsDiagnostics.route.outputPortTypes.joined(separator: ","))")
-        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
-            kind: .route,
-            state: "tts_route_changed",
-            connectionRole: .operator,
-            sequence: Int(reasonValue)))
+    private var currentAudioPortTypes: [String] {
+        AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }
+    }
+
+    private func audioSessionCallbackContext(
+        callbackGeneration: UInt64?
+    ) -> TalkAudioSessionDiagnostics.CallbackContext {
+        TalkAudioSessionDiagnostics.CallbackContext(
+            callbackGeneration: callbackGeneration,
+            activeGeneration: self.activeTTSGeneration,
+            ownerGeneration: self.audioSessionOwnerGeneration)
+    }
+
+    private func handleAudioRouteChange(
+        reasonValue: UInt,
+        previousPortTypes: [String]?,
+        callbackGeneration: UInt64?)
+    {
+        if self.isSpeechOutputActive {
+            self.ttsDiagnostics.route = self.currentAudioRouteEvidence
+        }
+        TalkAudioSessionDiagnostics.recordRouteChange(
+            reasonValue: reasonValue,
+            previousPortTypes: previousPortTypes,
+            currentPortTypes: self.currentAudioPortTypes,
+            context: self.audioSessionCallbackContext(callbackGeneration: callbackGeneration))
+    }
+
+    private func handleAudioSessionInterruption(
+        typeValue: UInt,
+        reasonValue: UInt?,
+        optionValue: UInt,
+        callbackGeneration: UInt64?)
+    {
+        TalkAudioSessionDiagnostics.recordInterruption(
+            typeValue: typeValue,
+            reasonValue: reasonValue,
+            optionValue: optionValue,
+            currentPortTypes: self.currentAudioPortTypes,
+            context: self.audioSessionCallbackContext(callbackGeneration: callbackGeneration))
+    }
+
+    private func handleAudioMediaServicesNotification(
+        reset: Bool,
+        callbackGeneration: UInt64?)
+    {
+        TalkAudioSessionDiagnostics.recordMediaServices(
+            reset: reset,
+            currentPortTypes: self.currentAudioPortTypes,
+            context: self.audioSessionCallbackContext(callbackGeneration: callbackGeneration))
     }
 
     private static func diagnosticProviderToken(_ raw: String) -> String {
@@ -3175,7 +3318,16 @@ final class TalkModeManager: NSObject {
         }
     }
 
-    private func stopSpeaking(storeInterruption: Bool = true) {
+    private func stopSpeaking(
+        origin: OpenClawDiagnosticTTSCancellationOrigin,
+        storeInterruption: Bool = true)
+    {
+        TalkAudioSessionDiagnostics.recordStopRequested(
+            origin: origin,
+            generation: self.activeTTSGeneration,
+            activeGeneration: self.activeTTSGeneration,
+            ownerGeneration: self.audioSessionOwnerGeneration,
+            currentPortTypes: self.currentAudioPortTypes)
         let hasIncremental = self.incrementalSpeechActive ||
             self.incrementalSpeechTask != nil ||
             !self.incrementalSpeechQueue.isEmpty
@@ -3393,7 +3545,7 @@ final class TalkModeManager: NSObject {
         _ = self.mp3Player.stop()
         self.systemSpeech.stop()
         self.isSpeaking = false
-        self.restoreAudioSessionAfterLocalSpeech()
+        self.restoreAudioSessionAfterLocalSpeech(ownerGeneration: playbackGeneration)
         self.restoreConfiguredVoiceModeDescriptor()
     }
 
@@ -4984,7 +5136,7 @@ extension TalkModeManager {
     }
 
     func _test_stopSpeaking() {
-        self.stopSpeaking()
+        self.stopSpeaking(origin: .unknown)
     }
 
     func _test_lastInterruptedAtSeconds() -> Double? {

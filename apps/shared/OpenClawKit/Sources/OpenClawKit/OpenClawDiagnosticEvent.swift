@@ -77,6 +77,59 @@ public enum OpenClawDiagnosticAudioMagicType: String, Codable, Equatable, Sendab
     case empty
 }
 
+public enum OpenClawDiagnosticAudioOutputRouteClass: String, Codable, Equatable, Hashable, Sendable {
+    case airPlay = "airplay"
+    case bluetooth
+    case builtInReceiver = "built_in_receiver"
+    case builtInSpeaker = "built_in_speaker"
+    case carAudio = "car_audio"
+    case headphones
+    case hdmi
+    case lineOut = "line_out"
+    case noOutput = "no_output"
+    case other
+    case unknown
+    case usb
+}
+
+public enum OpenClawDiagnosticAudioRouteChangeReason: String, Codable, Equatable, Sendable {
+    case categoryChange = "category_change"
+    case newDeviceAvailable = "new_device_available"
+    case noSuitableRoute = "no_suitable_route"
+    case oldDeviceUnavailable = "old_device_unavailable"
+    case override
+    case routeConfigurationChange = "route_configuration_change"
+    case unknown
+    case wakeFromSleep = "wake_from_sleep"
+}
+
+public enum OpenClawDiagnosticAudioInterruptionType: String, Codable, Equatable, Sendable {
+    case began
+    case ended
+    case unknown
+}
+
+public enum OpenClawDiagnosticAudioInterruptionReason: String, Codable, Equatable, Sendable {
+    case appWasSuspended = "app_was_suspended"
+    case builtInMicMuted = "built_in_mic_muted"
+    case defaultReason = "default"
+    case unknown
+}
+
+public enum OpenClawDiagnosticAudioInterruptionOption: String, Codable, Equatable, Hashable, Sendable {
+    case shouldResume = "should_resume"
+}
+
+public enum OpenClawDiagnosticTTSCancellationOrigin: String, Codable, Equatable, Sendable {
+    case durableResponseOwner = "durable_response_owner"
+    case lifecycleOrManagerStop = "lifecycle_or_manager_stop"
+    case providerReplacement = "provider_replacement"
+    case pttAdmission = "ptt_admission"
+    case speechRecognitionBargeIn = "speech_recognition_barge_in"
+    case unknown
+    case userOrb = "user_orb"
+}
+
 public enum OpenClawDiagnosticOutboxOutcome: String, Codable, Equatable, Sendable {
     case notDispatched = "not_dispatched"
     case dispatchRejected = "dispatch_rejected"
@@ -212,6 +265,16 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
     public let receivedByteCount: Int?
     public let byteCountParity: OpenClawDiagnosticAudioByteParity?
     public let audioMagicType: OpenClawDiagnosticAudioMagicType?
+    public let callbackPlaybackGeneration: UInt64?
+    public let activePlaybackGeneration: UInt64?
+    public let audioSessionOwnerGeneration: UInt64?
+    public let audioRouteChangeReason: OpenClawDiagnosticAudioRouteChangeReason?
+    public let previousAudioOutputRouteClasses: [OpenClawDiagnosticAudioOutputRouteClass]?
+    public let currentAudioOutputRouteClasses: [OpenClawDiagnosticAudioOutputRouteClass]?
+    public let audioInterruptionType: OpenClawDiagnosticAudioInterruptionType?
+    public let audioInterruptionReason: OpenClawDiagnosticAudioInterruptionReason?
+    public let audioInterruptionOptions: [OpenClawDiagnosticAudioInterruptionOption]?
+    public let ttsCancellationOrigin: OpenClawDiagnosticTTSCancellationOrigin?
     public let deviceIdentityHash: String?
     public let configuredGatewayIdentityHash: String?
     public let observedGatewayIdentityHash: String?
@@ -306,6 +369,16 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         receivedByteCount: Int? = nil,
         byteCountParity: OpenClawDiagnosticAudioByteParity? = nil,
         audioMagicType: OpenClawDiagnosticAudioMagicType? = nil,
+        callbackPlaybackGeneration: UInt64? = nil,
+        activePlaybackGeneration: UInt64? = nil,
+        audioSessionOwnerGeneration: UInt64? = nil,
+        audioRouteChangeReason: OpenClawDiagnosticAudioRouteChangeReason? = nil,
+        previousAudioOutputRouteClasses: [OpenClawDiagnosticAudioOutputRouteClass]? = nil,
+        currentAudioOutputRouteClasses: [OpenClawDiagnosticAudioOutputRouteClass]? = nil,
+        audioInterruptionType: OpenClawDiagnosticAudioInterruptionType? = nil,
+        audioInterruptionReason: OpenClawDiagnosticAudioInterruptionReason? = nil,
+        audioInterruptionOptions: [OpenClawDiagnosticAudioInterruptionOption]? = nil,
+        ttsCancellationOrigin: OpenClawDiagnosticTTSCancellationOrigin? = nil,
         deviceIdentityIdentifier: String? = nil,
         configuredGatewayIdentityIdentifier: String? = nil,
         observedGatewayIdentityIdentifier: String? = nil,
@@ -416,6 +489,20 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         self.receivedByteCount = Self.boundedAudioByteCount(receivedByteCount)
         self.byteCountParity = byteCountParity
         self.audioMagicType = audioMagicType
+        self.callbackPlaybackGeneration = callbackPlaybackGeneration
+        self.activePlaybackGeneration = activePlaybackGeneration
+        self.audioSessionOwnerGeneration = audioSessionOwnerGeneration
+        self.audioRouteChangeReason = audioRouteChangeReason
+        self.previousAudioOutputRouteClasses = Self.boundedAudioRouteClasses(
+            previousAudioOutputRouteClasses)
+        self.currentAudioOutputRouteClasses = Self.boundedAudioRouteClasses(
+            currentAudioOutputRouteClasses)
+        self.audioInterruptionType = audioInterruptionType
+        self.audioInterruptionReason = audioInterruptionReason
+        self.audioInterruptionOptions = audioInterruptionOptions.map { options in
+            Array(Set(options).sorted { $0.rawValue < $1.rawValue }.prefix(2))
+        }
+        self.ttsCancellationOrigin = ttsCancellationOrigin
         self.deviceIdentityHash = Self.hashedIdentifier(deviceIdentityIdentifier)
         self.configuredGatewayIdentityHash = Self.hashedIdentifier(
             configuredGatewayIdentityIdentifier)
@@ -518,6 +605,16 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         case receivedByteCount = "received_byte_count"
         case byteCountParity = "byte_count_parity"
         case audioMagicType = "audio_magic_type"
+        case callbackPlaybackGeneration = "callback_playback_generation"
+        case activePlaybackGeneration = "active_playback_generation"
+        case audioSessionOwnerGeneration = "audio_session_owner_generation"
+        case audioRouteChangeReason = "audio_route_change_reason"
+        case previousAudioOutputRouteClasses = "previous_audio_output_route_classes"
+        case currentAudioOutputRouteClasses = "current_audio_output_route_classes"
+        case audioInterruptionType = "audio_interruption_type"
+        case audioInterruptionReason = "audio_interruption_reason"
+        case audioInterruptionOptions = "audio_interruption_options"
+        case ttsCancellationOrigin = "tts_cancellation_origin"
         case deviceIdentityHash = "device_identity_hash"
         case configuredGatewayIdentityHash = "configured_gateway_identity_hash"
         case observedGatewayIdentityHash = "observed_gateway_identity_hash"
@@ -581,6 +678,14 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
 
     private static func boundedAudioByteCount(_ value: Int?) -> Int? {
         value.flatMap { (0...100_000_000).contains($0) ? $0 : nil }
+    }
+
+    private static func boundedAudioRouteClasses(
+        _ value: [OpenClawDiagnosticAudioOutputRouteClass]?
+    ) -> [OpenClawDiagnosticAudioOutputRouteClass]? {
+        value.map { classes in
+            Array(Set(classes).sorted { $0.rawValue < $1.rawValue }.prefix(8))
+        }
     }
 
     private static func sanitizedOutputFormat(_ value: String?) -> String? {
@@ -783,6 +888,7 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
         "codec_validated",
         "connection_owner_unavailable",
         "configuration_generation_changed",
+        "current_callback",
         "direct",
         "dispatch_rejected",
         "encoding_failed",
@@ -1035,6 +1141,15 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
                   self.contentEncoding, maximumLength: 64),
               self.declaredByteCount == Self.boundedAudioByteCount(self.declaredByteCount),
               self.receivedByteCount == Self.boundedAudioByteCount(self.receivedByteCount),
+              self.previousAudioOutputRouteClasses == Self.boundedAudioRouteClasses(
+                  self.previousAudioOutputRouteClasses),
+              self.currentAudioOutputRouteClasses == Self.boundedAudioRouteClasses(
+                  self.currentAudioOutputRouteClasses),
+              self.audioInterruptionOptions.map({ options in
+                  options.count <= 2 && options == Array(Set(options).sorted {
+                      $0.rawValue < $1.rawValue
+                  })
+              }) ?? true,
               self.topic == Self.allowlistedToken(self.topic, allowed: Self.allowedTopics),
               self.environment == Self.allowlistedToken(
                   self.environment, allowed: Self.allowedEnvironments),
@@ -1135,6 +1250,96 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
             {
                 return false
             }
+        }
+        let hasAudioSessionMetadata = self.callbackPlaybackGeneration != nil ||
+            self.activePlaybackGeneration != nil || self.audioSessionOwnerGeneration != nil ||
+            self.audioRouteChangeReason != nil || self.previousAudioOutputRouteClasses != nil ||
+            self.currentAudioOutputRouteClasses != nil || self.audioInterruptionType != nil ||
+            self.audioInterruptionReason != nil || self.audioInterruptionOptions != nil
+        if hasAudioSessionMetadata,
+           (self.schema != Self.schemaName || ![Kind.route, .tts].contains(self.kind))
+        {
+            return false
+        }
+        let callbackStates: Set<String> = [
+            "tts_route_changed",
+            "tts_audio_session_interruption_began",
+            "tts_audio_session_interruption_ended",
+            "tts_media_services_lost",
+            "tts_media_services_reset",
+        ]
+        if callbackStates.contains(self.state) {
+            let expectedResult: String = if let callback = self.callbackPlaybackGeneration {
+                callback == self.activePlaybackGeneration ? "current_callback" : "stale_callback"
+            } else {
+                "unattributed_callback"
+            }
+            guard hasAudioSessionMetadata,
+                  self.resultClass == expectedResult,
+                  self.currentAudioOutputRouteClasses != nil
+            else { return false }
+        }
+        if self.state == "tts_route_changed" {
+            guard self.kind == .route,
+                  self.audioRouteChangeReason != nil,
+                  self.previousAudioOutputRouteClasses != nil,
+                  self.audioInterruptionType == nil,
+                  self.audioInterruptionReason == nil,
+                  self.audioInterruptionOptions == nil
+            else { return false }
+        }
+        if [
+            "tts_audio_session_interruption_began",
+            "tts_audio_session_interruption_ended",
+        ].contains(self.state) {
+            let expectedType: OpenClawDiagnosticAudioInterruptionType =
+                self.state.hasSuffix("_began") ? .began : .ended
+            guard self.kind == .tts,
+                  self.audioInterruptionType == expectedType,
+                  self.audioInterruptionReason != nil,
+                  self.audioInterruptionOptions != nil,
+                  self.audioRouteChangeReason == nil,
+                  self.previousAudioOutputRouteClasses == nil
+            else { return false }
+        }
+        if ["tts_media_services_lost", "tts_media_services_reset"].contains(self.state) {
+            guard self.kind == .tts,
+                  self.audioRouteChangeReason == nil,
+                  self.previousAudioOutputRouteClasses == nil,
+                  self.audioInterruptionType == nil,
+                  self.audioInterruptionReason == nil,
+                  self.audioInterruptionOptions == nil
+            else { return false }
+        }
+        let restoreStates: Set<String> = [
+            "tts_audio_session_restore_requested",
+            "tts_audio_session_restore_completed",
+            "tts_audio_session_restore_failed",
+        ]
+        if restoreStates.contains(self.state) {
+            let expectedResult = switch self.state {
+            case "tts_audio_session_restore_requested": "requested"
+            case "tts_audio_session_restore_completed": "restored"
+            default: "failed"
+            }
+            guard self.kind == .tts,
+                  let owner = self.audioSessionOwnerGeneration,
+                  self.playbackGeneration == owner,
+                  self.resultClass == expectedResult,
+                  self.audioRouteChangeReason == nil,
+                  self.previousAudioOutputRouteClasses == nil,
+                  self.audioInterruptionType == nil,
+                  self.audioInterruptionReason == nil,
+                  self.audioInterruptionOptions == nil
+            else { return false }
+        }
+        if (self.state == "tts_stop_requested") != (self.ttsCancellationOrigin != nil) {
+            return false
+        }
+        if self.state == "tts_stop_requested",
+           (self.kind != .tts || self.resultClass != "requested")
+        {
+            return false
         }
         let hasOutboxMetadata = self.outboxOutcome != nil || self.outboxCommandHash != nil ||
             self.outboxDeliveryGate != nil ||
@@ -1509,6 +1714,16 @@ public enum OpenClawDiagnosticRecorder {
         "received_byte_count",
         "byte_count_parity",
         "audio_magic_type",
+        "callback_playback_generation",
+        "active_playback_generation",
+        "audio_session_owner_generation",
+        "audio_route_change_reason",
+        "previous_audio_output_route_classes",
+        "current_audio_output_route_classes",
+        "audio_interruption_type",
+        "audio_interruption_reason",
+        "audio_interruption_options",
+        "tts_cancellation_origin",
         "device_identity_hash",
         "configured_gateway_identity_hash",
         "observed_gateway_identity_hash",
