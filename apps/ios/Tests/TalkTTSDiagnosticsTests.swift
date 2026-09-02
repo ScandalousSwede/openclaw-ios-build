@@ -1500,6 +1500,59 @@ private final class TestGenerationState {
         #expect(restoreCount == 1)
     }
 
+    @Test func unattributedAudioNotificationsDoNotCancelReplacementGeneration() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let system = SuspendedSystemSpeech()
+        manager.systemSpeech = system
+        manager.pcmPlayer = TestPCMPlayer()
+        manager.mp3Player = TestMP3Player()
+        var restoreCount = 0
+        manager._test_setTTSAudioHooks(
+            prepare: { Self.routeEvidence },
+            restore: { restoreCount += 1 })
+
+        let first = Task { @MainActor in
+            await manager.speakSystemNotificationText("first")
+        }
+        await system.waitForCallCount(1)
+
+        let replacement = Task { @MainActor in
+            await manager.speakSystemNotificationText("replacement")
+        }
+        await system.waitForCallCount(2)
+        let replacementGeneration = manager._test_ttsGeneration()
+        let stopCountBeforeNotifications = system.stopCount
+        let restoreCountBeforeNotifications = restoreCount
+
+        // AVAudioSession notifications do not identify a causal playback generation.
+        // Observing a Bluetooth route change or interruption must not cancel the current owner.
+        manager._test_handleAudioRouteChange(
+            reasonValue: 8,
+            previousPortTypes: [AVAudioSession.Port.bluetoothA2DP.rawValue],
+            callbackGeneration: nil)
+        manager._test_handleAudioSessionInterruption(
+            typeValue: 1,
+            reasonValue: 0,
+            optionValue: 0,
+            callbackGeneration: nil)
+
+        #expect(manager._test_ttsGeneration() == replacementGeneration)
+        #expect(manager.isSpeaking)
+        #expect(manager.ttsState == .speaking)
+        #expect(system.stopCount == stopCountBeforeNotifications)
+        #expect(restoreCount == restoreCountBeforeNotifications)
+
+        system.complete(callID: 1)
+        await first.value
+        #expect(manager._test_ttsGeneration() == replacementGeneration)
+        #expect(manager.isSpeaking)
+
+        system.complete(callID: 2)
+        await replacement.value
+        #expect(!manager.isSpeaking)
+        #expect(restoreCount == restoreCountBeforeNotifications + 1)
+    }
+
     @Test func replacedIncrementalTaskCannotStartOrTearDownReplacementSpeech() async throws {
         let manager = TalkModeManager(allowSimulatorCapture: true)
         let system = SuspendedSystemSpeech()

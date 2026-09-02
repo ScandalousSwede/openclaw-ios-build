@@ -5152,6 +5152,30 @@ extension TalkModeManager {
     func _test_lastInterruptedAtSeconds() -> Double? {
         self.lastInterruptedAtSeconds
     }
+
+    func _test_handleAudioRouteChange(
+        reasonValue: UInt,
+        previousPortTypes: [String]?,
+        callbackGeneration: UInt64?)
+    {
+        self.handleAudioRouteChange(
+            reasonValue: reasonValue,
+            previousPortTypes: previousPortTypes,
+            callbackGeneration: callbackGeneration)
+    }
+
+    func _test_handleAudioSessionInterruption(
+        typeValue: UInt,
+        reasonValue: UInt?,
+        optionValue: UInt,
+        callbackGeneration: UInt64?)
+    {
+        self.handleAudioSessionInterruption(
+            typeValue: typeValue,
+            reasonValue: reasonValue,
+            optionValue: optionValue,
+            callbackGeneration: callbackGeneration)
+    }
 }
 #endif
 
