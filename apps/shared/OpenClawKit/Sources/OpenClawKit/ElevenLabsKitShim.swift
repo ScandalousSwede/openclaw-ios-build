@@ -576,6 +576,7 @@ public enum StreamingPlaybackPath: String, Sendable {
 public enum StreamingPlaybackObservationStage: String, Sendable {
     case decoderCreated = "decoder_created"
     case playerInstanceCreated = "player_instance_created"
+    case playerInstanceDeallocated = "player_instance_deallocated"
     case playbackSubmissionStarted = "playback_submission_started"
     case playbackSubmissionAccepted = "playback_submission_accepted"
     case firstRenderCallbackObserved = "first_render_callback_observed"
@@ -597,6 +598,7 @@ public struct StreamingPlaybackObservation: Equatable, Sendable {
         self.stage = switch observation.stage {
         case .decoderCreated: .decoderCreated
         case .playerInstanceCreated: .playerInstanceCreated
+        case .playerInstanceDeallocated: .playerInstanceDeallocated
         case .playbackSubmissionStarted: .playbackSubmissionStarted
         case .playbackSubmissionAccepted: .playbackSubmissionAccepted
         case .firstRenderCallbackObserved: .firstRenderCallbackObserved

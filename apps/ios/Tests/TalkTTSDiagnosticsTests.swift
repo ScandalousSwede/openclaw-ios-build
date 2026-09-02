@@ -561,9 +561,13 @@ private final class TestGenerationState {
             StreamingPlaybackObservation(stage: .playbackSubmissionAccepted, path: .pcm),
             generation: 42,
             flush: { flushes.increment() })
+        TalkModeManager.recordTTSPlaybackObservation(
+            StreamingPlaybackObservation(stage: .playerInstanceDeallocated, path: .pcm),
+            generation: 42,
+            flush: { flushes.increment() })
 
         let records = lines.lines().compactMap(OpenClawDiagnosticRecorder.decodeRecord)
-        #expect(records.count == 2)
+        #expect(records.count == 3)
         let response = try #require(records.first)
         #expect(response.state == "provider_response_received")
         #expect(response.processInstanceID != nil)
@@ -576,12 +580,16 @@ private final class TestGenerationState {
         #expect(response.playbackPath == "pcm")
         #expect(response.byteCount == 4096)
         #expect(response.resultClass == "success")
-        let submission = try #require(records.last)
+        let submission = records[1]
         #expect(submission.state == "tts_playback_submission_accepted")
         #expect(submission.playbackGeneration == 42)
         #expect(submission.cancellationGeneration == 42)
         #expect(submission.operationID == submission.diagnosticAttemptID)
-        #expect(flushes.count() == 2)
+        let deallocation = try #require(records.last)
+        #expect(deallocation.state == "tts_player_instance_deallocated")
+        #expect(deallocation.playbackGeneration == 42)
+        #expect(deallocation.resultClass == nil)
+        #expect(flushes.count() == 3)
     }
 
     @Test func diagnosticVoiceTestsUseFixedNonSensitivePhrases() {
