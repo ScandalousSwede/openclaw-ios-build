@@ -2133,8 +2133,12 @@ struct TalkDurableOutboxTests {
     }
 
     @Test func retiredDurableAdmissionCannotStopReplacementManualVoiceGeneration() async throws {
-        let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
-        let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
+        let transport = DurableTalkAcceptedTransport(
+            stableGatewayID: "gateway-talk",
+            autoConfirmHistory: true)
+        let fixture = try await DurableTalkOutboxFixture.make(
+            transport: transport,
+            confirmationDelaysNanoseconds: [0, 0])
         let gatewayEvents = DurableTalkEventSource()
         let playbackGate = DurableTalkGate()
         let speech = DurableTalkBlockingSystemSpeech()
@@ -2180,6 +2184,9 @@ struct TalkDurableOutboxTests {
         }
         let stopsAfterManualAdmission = speech.stopCount
 
+        try await waitForDurableTalk("canonical history clears the admitted Talk row") {
+            (try? await fixture.store.loadUnresolved().isEmpty) == true
+        }
         try await fixture.owner.performDestructiveSessionAction {}
         try await waitForDurableTalk("retired admission cancels durable response ownership") {
             await MainActor.run { !manager._test_hasDurableResponseTask() }
@@ -2199,8 +2206,12 @@ struct TalkDurableOutboxTests {
     }
 
     @Test func retiredDurableSpeechGenerationCannotStopReplacementManualVoiceGeneration() async throws {
-        let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk")
-        let fixture = try await DurableTalkOutboxFixture.make(transport: transport)
+        let transport = DurableTalkAcceptedTransport(
+            stableGatewayID: "gateway-talk",
+            autoConfirmHistory: true)
+        let fixture = try await DurableTalkOutboxFixture.make(
+            transport: transport,
+            confirmationDelaysNanoseconds: [0, 0])
         let gatewayEvents = DurableTalkEventSource()
         let speech = DurableTalkMultiCallSystemSpeech()
         let manager = TalkModeManager(allowSimulatorCapture: true)
@@ -2241,6 +2252,9 @@ struct TalkDurableOutboxTests {
         #expect(replacementGeneration != durableGeneration)
         #expect(manager.isSpeaking)
 
+        try await waitForDurableTalk("canonical history clears the speaking Talk row") {
+            (try? await fixture.store.loadUnresolved().isEmpty) == true
+        }
         try await fixture.owner.performDestructiveSessionAction {}
         try await waitForDurableTalk("retired durable generation releases response ownership") {
             await MainActor.run { !manager._test_hasDurableResponseTask() }

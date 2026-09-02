@@ -552,6 +552,9 @@ struct AIESAPNsDiagnosticsTests {
         let talk = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Voice/TalkModeManager.swift"),
             encoding: .utf8)
+        let audioSessionDiagnostics = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Voice/TalkAudioSessionDiagnostics.swift"),
+            encoding: .utf8)
         let share = try String(
             contentsOf: iosRoot.appendingPathComponent("ShareExtension/ShareViewController.swift"),
             encoding: .utf8)
@@ -591,9 +594,12 @@ struct AIESAPNsDiagnosticsTests {
         #expect(model.contains("GatewayNodeSession(connectionRole: .operator)"))
         #expect(share.contains("GatewayNodeSession(connectionRole: .node)"))
         #expect(!talk.contains("connectionRole: .unknown"))
-        for state in ["tts_route_prepared", "tts_route_changed"] {
-            let stateRange = try #require(talk.range(of: "state: \"\(state)\""))
-            let emission = talk[stateRange.lowerBound...].prefix(180)
+        for (source, state) in [
+            (talk, "tts_route_prepared"),
+            (audioSessionDiagnostics, "tts_route_changed"),
+        ] {
+            let stateRange = try #require(source.range(of: "state: \"\(state)\""))
+            let emission = source[stateRange.lowerBound...].prefix(180)
             #expect(emission.contains("connectionRole: .operator"))
         }
         #expect(app.contains("recordOSRegistrationRequested(source: \"application_launch\")"))
