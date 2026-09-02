@@ -255,8 +255,8 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         raise AuthorityError("ElevenLabsKit original 0.1.1 provenance differs")
     expected_patch = {
         "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-        "revision": "f22fd9d225b70c57d74cc915c020dd70ccc53ec2",
-        "tree": "6d820dfb13715ba3daf75a54b554fa8b18dcaa01",
+        "revision": "661d37276cda0d9e416a4966d63de4d42e72c72b",
+        "tree": "71b15c636307301515d6d1a9c158d2e98c7f1722",
         "changedPaths": [
             "Sources/ElevenLabsKit/PCMPlayerNode.swift",
             "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
@@ -943,7 +943,7 @@ def validate_source_patch_checkout(
     if manifest_sha256 != "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431":
         raise AuthorityError("ElevenLabsKit dependency Package.swift hash differs from 0.1.1")
     binary_diff_sha256 = sha256_bytes(binary_diff)
-    if binary_diff_sha256 != "270ed53c274d2773c6a96ab0084c595e354e52122bac33416315e86b07101c40":
+    if binary_diff_sha256 != "6ca1cd3acb1c8d87c3fe625812578442a2f4ea99fb63c3babdcfd91b10005bf9":
         raise AuthorityError("ElevenLabsKit binary patch digest differs from reviewed delta")
 
     return {
