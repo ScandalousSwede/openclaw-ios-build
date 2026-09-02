@@ -110,6 +110,7 @@ enum TalkTTSProviderOutcome: String, Sendable {
     case http5xx = "http_5xx"
     case timeout
     case transportError = "transport_error"
+    case semanticAudioFailed = "semantic_audio_failed"
     case playbackFailed = "playback_failed"
     case zeroAudio = "zero_audio"
     case interrupted
@@ -207,23 +208,18 @@ struct TalkTTSPlaybackResult: Equatable, Sendable {
     let outcome: TalkTTSProviderOutcome
 }
 
-enum TalkTTSPayloadValidationEvidence: Equatable, Sendable {
-    case notObserved
-    case providerContentTypeValidated
-}
-
 struct TalkTTSProviderAttempt {
     let outputFormat: String?
-    let payloadValidation: TalkTTSPayloadValidationEvidence
+    let responseEvidence: ElevenLabsTTSResponseEvidence?
     let makeStream: @MainActor () -> AsyncThrowingStream<Data, Error>
 
     init(
         outputFormat: String?,
-        payloadValidation: TalkTTSPayloadValidationEvidence = .notObserved,
+        responseEvidence: ElevenLabsTTSResponseEvidence? = nil,
         makeStream: @escaping @MainActor () -> AsyncThrowingStream<Data, Error>)
     {
         self.outputFormat = outputFormat
-        self.payloadValidation = payloadValidation
+        self.responseEvidence = responseEvidence
         self.makeStream = makeStream
     }
 }
@@ -303,6 +299,14 @@ struct TalkTTSLifecycleObservation: Equatable, Sendable {
     var providerStage: String? = nil
     var byteCount: Int? = nil
     var resultClass: String? = nil
+    var requestedOutputFormat: String? = nil
+    var httpStatus: Int? = nil
+    var contentType: String? = nil
+    var contentEncoding: String? = nil
+    var declaredByteCount: Int? = nil
+    var receivedByteCount: Int? = nil
+    var byteCountParity: ElevenLabsAudioByteParity? = nil
+    var audioMagicType: ElevenLabsAudioMagicType? = nil
 }
 
 extension TalkTTSDiagnosticSnapshot {
@@ -401,6 +405,9 @@ enum TalkTTSFailureClassification {
                 if (400...499).contains(error.code) { return .http4xx }
                 if (500...599).contains(error.code) { return .http5xx }
             }
+            if error.domain == "ElevenLabsAudioValidation" {
+                return .semanticAudioFailed
+            }
             return .transportError
         }
         return playback.finished ? .success : .playbackFailed
@@ -408,6 +415,7 @@ enum TalkTTSFailureClassification {
 
     static func isPCMFormatRejected(_ error: Error?) -> Bool {
         guard let error = error as NSError? else { return false }
+        if error.domain == "ElevenLabsAudioValidation" { return true }
         guard error.domain == "ElevenLabsTTS", error.code >= 400 else { return false }
         let message = (error.userInfo[NSLocalizedDescriptionKey] as? String ?? "").lowercased()
         return message.contains("output_format")
@@ -699,13 +707,15 @@ final class TalkTTSPlaybackPipeline {
             isCurrent: self.isCurrent,
             onFirstStreamChunk: { [weak self] firstChunkBytes in
                 guard let self, self.isCurrent(), !Task.isCancelled else { return }
+                let metadata = attempt.responseEvidence?.snapshot
                 self.observe(
                     .providerResponseReceived,
                     provider: "elevenlabs",
                     codec: codec,
                     playbackPath: decoder,
                     byteCount: firstChunkBytes,
-                    resultClass: "success")
+                    resultClass: metadata?.validationResult.rawValue ?? "success",
+                    responseMetadata: metadata)
                 self.observe(
                     .streamFirstChunkReceived,
                     provider: "elevenlabs",
@@ -765,13 +775,17 @@ final class TalkTTSPlaybackPipeline {
             error: evidence.error,
             byteCount: byteCount,
             playback: playback)
-        if byteCount == 0, outcome == .http4xx || outcome == .http5xx {
+        let responseMetadata = attempt.responseEvidence?.snapshot
+        if byteCount == 0,
+           responseMetadata != nil || outcome == .http4xx || outcome == .http5xx
+        {
             self.observe(
                 .providerResponseReceived,
                 attempt: attempt,
-                resultClass: outcome.rawValue)
+                resultClass: responseMetadata?.validationResult.rawValue ?? outcome.rawValue,
+                responseMetadata: responseMetadata)
         }
-        if attempt.payloadValidation == .providerContentTypeValidated,
+        if responseMetadata?.validationResult == .codecValidated,
            evidence.error == nil,
            byteCount > 0
         {
@@ -779,7 +793,8 @@ final class TalkTTSPlaybackPipeline {
                 .audioPayloadValidated,
                 attempt: attempt,
                 byteCount: byteCount,
-                resultClass: "provider_content_type_validated_nonempty")
+                resultClass: ElevenLabsAudioValidationResult.codecValidated.rawValue,
+                responseMetadata: responseMetadata)
         }
         self.breadcrumb(TalkTTSBreadcrumb(
             stage: .providerResult,
@@ -953,7 +968,8 @@ final class TalkTTSPlaybackPipeline {
         playbackPath: String? = nil,
         providerStage: String? = nil,
         byteCount: Int? = nil,
-        resultClass: String? = nil)
+        resultClass: String? = nil,
+        responseMetadata: ElevenLabsTTSResponseMetadata? = nil)
     {
         let inferredPath: String
         if let attempt {
@@ -972,7 +988,15 @@ final class TalkTTSPlaybackPipeline {
             playbackPath: playbackPath ?? inferredPath,
             providerStage: providerStage ?? stage.rawValue,
             byteCount: byteCount.map { max(0, $0) },
-            resultClass: resultClass))
+            resultClass: resultClass,
+            requestedOutputFormat: responseMetadata?.requestedOutputFormat,
+            httpStatus: responseMetadata?.httpStatus,
+            contentType: responseMetadata?.contentType,
+            contentEncoding: responseMetadata?.contentEncoding,
+            declaredByteCount: responseMetadata?.declaredByteCount,
+            receivedByteCount: responseMetadata?.receivedByteCount,
+            byteCountParity: responseMetadata?.byteCountParity,
+            audioMagicType: responseMetadata?.audioMagicType))
     }
 
     private func stopProviderPlayer(for attempt: TalkTTSProviderAttempt) {

@@ -353,6 +353,44 @@ struct AIESCrashDiagnosticExporterTests {
         #expect(decoded.redactionPolicy == "metadata_allowlist_v2")
     }
 
+    @Test func exportRetainsOnlySanitizedCodecMetadataAndNeverAudioOrSpeechPayload() throws {
+        let event = OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "provider_response_received",
+            provider: "elevenlabs",
+            providerStage: "provider_response_received",
+            codec: "pcm",
+            playbackPath: "pcm",
+            resultClass: "codec_mismatch",
+            requestedOutputFormat: "pcm_44100",
+            httpStatus: 200,
+            contentType: "audio/mpeg",
+            contentEncoding: "identity",
+            declaredByteCount: 10,
+            receivedByteCount: 10,
+            byteCountParity: .even,
+            audioMagicType: .id3MPEG,
+            byteCount: 0,
+            observedAt: Date(timeIntervalSince1970: 1))
+        let data = try AIESCrashDiagnosticExporter.makeData(
+            buildManifest: self.fixtureManifest(),
+            device: .init(model: "iPhone", osName: "iOS", osVersion: "26.0"),
+            events: [event],
+            generatedAt: Date(timeIntervalSince1970: 2),
+            maximumBytes: 16 * 1024)
+        let decoded = try JSONDecoder().decode(AIESCrashDiagnosticExporter.Export.self, from: data)
+        let retained = try #require(decoded.diagnosticEvents.first)
+        let text = String(decoding: data, as: UTF8.self)
+
+        #expect(retained.requestedOutputFormat == "pcm_44100")
+        #expect(retained.contentType == "audio/mpeg")
+        #expect(retained.audioMagicType == .id3MPEG)
+        #expect(retained.receivedByteCount == 10)
+        #expect(!text.contains("spoken text"))
+        #expect(!text.contains("api-key"))
+        #expect(!text.contains("SUQz"))
+    }
+
     @Test func exportMakesIncompleteDiagnosticLogDrainExplicit() throws {
         let data = try AIESCrashDiagnosticExporter.makeData(
             buildManifest: self.fixtureManifest(),

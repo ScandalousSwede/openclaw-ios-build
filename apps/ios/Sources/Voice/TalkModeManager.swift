@@ -2688,10 +2688,14 @@ final class TalkModeManager: NSObject {
             modelId: modelID,
             outputFormat: outputFormat,
             language: language)
+        let initialResponseEvidence = ElevenLabsTTSResponseEvidence()
         let initial = TalkTTSProviderAttempt(
             outputFormat: outputFormat,
-            payloadValidation: .providerContentTypeValidated) {
-            client.streamSynthesize(voiceId: voiceID, request: initialRequest)
+            responseEvidence: initialResponseEvidence) {
+            client.streamSynthesize(
+                voiceId: voiceID,
+                request: initialRequest,
+                responseEvidence: initialResponseEvidence)
         }
         guard TalkTTSValidation.pcmSampleRate(from: outputFormat) != nil else {
             return TTSProviderAttempts(initial: initial, mp3: nil)
@@ -2703,10 +2707,14 @@ final class TalkModeManager: NSObject {
             modelId: modelID,
             outputFormat: mp3Format,
             language: language)
+        let mp3ResponseEvidence = ElevenLabsTTSResponseEvidence()
         let mp3 = TalkTTSProviderAttempt(
             outputFormat: mp3Format,
-            payloadValidation: .providerContentTypeValidated) {
-            client.streamSynthesize(voiceId: voiceID, request: mp3Request)
+            responseEvidence: mp3ResponseEvidence) {
+            client.streamSynthesize(
+                voiceId: voiceID,
+                request: mp3Request,
+                responseEvidence: mp3ResponseEvidence)
         }
         return TTSProviderAttempts(initial: initial, mp3: mp3)
     }
@@ -2940,6 +2948,18 @@ final class TalkModeManager: NSObject {
             codec: observation.codec,
             playbackPath: observation.playbackPath,
             resultClass: observation.resultClass,
+            requestedOutputFormat: observation.requestedOutputFormat,
+            httpStatus: observation.httpStatus,
+            contentType: observation.contentType,
+            contentEncoding: observation.contentEncoding,
+            declaredByteCount: observation.declaredByteCount,
+            receivedByteCount: observation.receivedByteCount,
+            byteCountParity: observation.byteCountParity.flatMap {
+                OpenClawDiagnosticAudioByteParity(rawValue: $0.rawValue)
+            },
+            audioMagicType: observation.audioMagicType.flatMap {
+                OpenClawDiagnosticAudioMagicType(rawValue: $0.rawValue)
+            },
             byteCount: observation.byteCount))
         flush()
     }
@@ -3424,8 +3444,12 @@ final class TalkModeManager: NSObject {
             context: context,
             outputFormat: prefetchOutputFormat)
         let id = UUID()
+        let responseEvidence = ElevenLabsTTSResponseEvidence()
         let task = Task { [weak self] in
-            let stream = ElevenLabsTTSClient(apiKey: apiKey).streamSynthesize(voiceId: voiceId, request: request)
+            let stream = ElevenLabsTTSClient(apiKey: apiKey).streamSynthesize(
+                voiceId: voiceId,
+                request: request,
+                responseEvidence: responseEvidence)
             var chunks: [Data] = []
             do {
                 for try await chunk in stream {
@@ -3444,6 +3468,7 @@ final class TalkModeManager: NSObject {
             segment: segment,
             context: context,
             outputFormat: prefetchOutputFormat,
+            responseEvidence: responseEvidence,
             chunks: nil,
             task: task)
     }
@@ -3489,7 +3514,10 @@ final class TalkModeManager: NSObject {
             return nil
         }
         if let chunks = prefetch.chunks, !chunks.isEmpty {
-            let prefetched = IncrementalPrefetchedAudio(chunks: chunks, outputFormat: prefetch.outputFormat)
+            let prefetched = IncrementalPrefetchedAudio(
+                chunks: chunks,
+                outputFormat: prefetch.outputFormat,
+                responseEvidence: prefetch.responseEvidence)
             self.incrementalSpeechPrefetch = nil
             return prefetched
         }
@@ -3498,7 +3526,10 @@ final class TalkModeManager: NSObject {
         guard let completed = incrementalSpeechPrefetch else { return nil }
         guard completed.context == context, completed.segment == segment else { return nil }
         guard let chunks = completed.chunks, !chunks.isEmpty else { return nil }
-        let prefetched = IncrementalPrefetchedAudio(chunks: chunks, outputFormat: completed.outputFormat)
+        let prefetched = IncrementalPrefetchedAudio(
+            chunks: chunks,
+            outputFormat: completed.outputFormat,
+            responseEvidence: completed.responseEvidence)
         self.incrementalSpeechPrefetch = nil
         return prefetched
     }
@@ -3735,13 +3766,18 @@ final class TalkModeManager: NSObject {
                 text: text,
                 context: context,
                 outputFormat: playbackFormat)
+            let initialResponseEvidence = prefetchedAudio?.responseEvidence
+                ?? ElevenLabsTTSResponseEvidence()
             initialAttempt = TalkTTSProviderAttempt(
                 outputFormat: playbackFormat,
-                payloadValidation: .providerContentTypeValidated) {
+                responseEvidence: initialResponseEvidence) {
                 if let prefetchedAudio, !prefetchedAudio.chunks.isEmpty {
                     return Self.makeBufferedAudioStream(chunks: prefetchedAudio.chunks)
                 }
-                return client.streamSynthesize(voiceId: voiceID, request: initialRequest)
+                return client.streamSynthesize(
+                    voiceId: voiceID,
+                    request: initialRequest,
+                    responseEvidence: initialResponseEvidence)
             }
             if TalkTTSValidation.pcmSampleRate(from: playbackFormat) != nil {
                 let mp3Format = ElevenLabsTTSClient.validatedOutputFormat("mp3_44100_128")
@@ -3749,10 +3785,14 @@ final class TalkModeManager: NSObject {
                     text: text,
                     context: context,
                     outputFormat: mp3Format)
+                let mp3ResponseEvidence = ElevenLabsTTSResponseEvidence()
                 mp3Attempt = TalkTTSProviderAttempt(
                     outputFormat: mp3Format,
-                    payloadValidation: .providerContentTypeValidated) {
-                    client.streamSynthesize(voiceId: voiceID, request: mp3Request)
+                    responseEvidence: mp3ResponseEvidence) {
+                    client.streamSynthesize(
+                        voiceId: voiceID,
+                        request: mp3Request,
+                        responseEvidence: mp3ResponseEvidence)
                 }
             }
         }
@@ -4952,6 +4992,7 @@ private struct IncrementalSpeechPrefetchState {
     let segment: String
     let context: IncrementalSpeechContext
     let outputFormat: String?
+    let responseEvidence: ElevenLabsTTSResponseEvidence
     var chunks: [Data]?
     let task: Task<Void, Never>
 }
@@ -4959,6 +5000,7 @@ private struct IncrementalSpeechPrefetchState {
 private struct IncrementalPrefetchedAudio {
     let chunks: [Data]
     let outputFormat: String?
+    let responseEvidence: ElevenLabsTTSResponseEvidence
 }
 
 private struct TTSProviderAttempts {

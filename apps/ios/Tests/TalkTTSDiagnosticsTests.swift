@@ -100,6 +100,7 @@ private final class TestPCMPlayer: PCMStreamingAudioPlaying {
     var afterPlay: (() -> Void)?
     private(set) var playCount = 0
     private(set) var receivedBytes = 0
+    private(set) var receivedData = Data()
     private(set) var stopCount = 0
 
     func play(stream: AsyncThrowingStream<Data, Error>, sampleRate _: Double) async -> StreamingPlaybackResult {
@@ -107,6 +108,7 @@ private final class TestPCMPlayer: PCMStreamingAudioPlaying {
         do {
             for try await chunk in stream {
                 self.receivedBytes += chunk.count
+                self.receivedData.append(chunk)
             }
         } catch {
             self.afterPlay?()
@@ -731,6 +733,92 @@ private final class TestGenerationState {
         #expect(fixture.progress.values.contains { $0.state == .mp3Retry })
     }
 
+    @Test func codecMismatchNeverFeedsMPEGBytesToPCMAndUsesExistingMP3Retry() async {
+        let fixture = Self.makeFixture()
+        let mpeg = Data([0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0, 0, 0, 0])
+        let pcmEvidence = Self.responseEvidence(
+            format: "pcm_44100",
+            contentType: "audio/mpeg",
+            data: mpeg,
+            magic: .id3MPEG,
+            validation: .codecMismatch)
+        let mp3Evidence = Self.responseEvidence(
+            format: "mp3_44100_128",
+            contentType: "audio/mpeg",
+            data: mpeg,
+            magic: .id3MPEG,
+            validation: .codecValidated)
+        let mismatch = NSError(domain: "ElevenLabsAudioValidation", code: 415)
+
+        let result = await fixture.pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(
+                format: "pcm_44100",
+                chunks: [],
+                error: mismatch,
+                responseEvidence: pcmEvidence),
+            mp3Retry: Self.attempt(
+                format: "mp3_44100_128",
+                chunks: [mpeg],
+                responseEvidence: mp3Evidence))
+
+        #expect(result.succeeded)
+        #expect(result.provider == .elevenLabs)
+        #expect(fixture.pcm.receivedBytes == 0)
+        #expect(fixture.mp3.receivedBytes == mpeg.count)
+        #expect(fixture.progress.values.contains { $0.providerAttemptOutcome == .semanticAudioFailed })
+        #expect(fixture.lifecycle.values.contains {
+            $0.stage == .providerResponseReceived &&
+                $0.requestedOutputFormat == "pcm_44100" &&
+                $0.resultClass == "codec_mismatch"
+        })
+        #expect(!fixture.lifecycle.values.contains {
+            $0.codec == "pcm" && [
+                TalkTTSLifecycleObservationStage.streamFirstChunkReceived,
+                .streamCompleted,
+                .audioPayloadValidated,
+            ].contains($0.stage)
+        })
+    }
+
+    @Test func validatedPCMBytesReachPlayerUnchangedRegardlessOfBluetoothOutputRoute() async {
+        let pcm = TestPCMPlayer()
+        let bytes = Data([0x00, 0x80, 0xFF, 0x7F])
+        let pipeline = TalkTTSPlaybackPipeline(
+            pcmPlayer: pcm,
+            mp3Player: TestMP3Player(),
+            systemSpeech: TestSystemSpeech(),
+            prepareAudio: {
+                TalkAudioRouteEvidence(
+                    outputPortTypes: [AVAudioSession.Port.bluetoothA2DP.rawValue],
+                    outputNames: ["Bluetooth"],
+                    speakerphonePreferred: true,
+                    category: AVAudioSession.Category.playAndRecord.rawValue,
+                    mode: AVAudioSession.Mode.spokenAudio.rawValue,
+                    activation: .active)
+            },
+            report: { _ in })
+        let evidence = Self.responseEvidence(
+            format: "pcm_44100",
+            contentType: "audio/pcm",
+            data: bytes,
+            magic: .rawNoKnownHeader,
+            validation: .codecValidated)
+
+        let result = await pipeline.speak(
+            text: "authoritative text",
+            language: nil,
+            providerAttempt: Self.attempt(
+                format: "pcm_44100",
+                chunks: [bytes],
+                responseEvidence: evidence),
+            mp3Retry: nil)
+
+        #expect(result.succeeded)
+        #expect(pcm.receivedData == bytes)
+    }
+
     @Test func PCMAndMP3FailureFallsBackToSystemVoice() async {
         let fixture = Self.makeFixture()
         fixture.pcm.result = StreamingPlaybackResult(finished: false, interruptedAt: nil)
@@ -983,7 +1071,12 @@ private final class TestGenerationState {
             lifecycleObserver: { lifecycle.record($0) })
         let attempt = TalkTTSProviderAttempt(
             outputFormat: "pcm_44100",
-            payloadValidation: .providerContentTypeValidated) {
+            responseEvidence: Self.responseEvidence(
+                format: "pcm_44100",
+                contentType: "audio/pcm",
+                data: Data([1, 2, 3, 4]),
+                magic: .rawNoKnownHeader,
+                validation: .codecValidated)) {
             Self.attempt(format: "pcm_44100").makeStream()
         }
 
@@ -996,7 +1089,12 @@ private final class TestGenerationState {
         #expect(result.succeeded)
         let validation = lifecycle.values.first { $0.stage == .audioPayloadValidated }
         #expect(validation?.byteCount == 4)
-        #expect(validation?.resultClass == "provider_content_type_validated_nonempty")
+        #expect(validation?.resultClass == "codec_validated")
+        #expect(validation?.requestedOutputFormat == "pcm_44100")
+        #expect(validation?.contentType == "audio/pcm")
+        #expect(validation?.receivedByteCount == 4)
+        #expect(validation?.byteCountParity == .even)
+        #expect(validation?.audioMagicType == .rawNoKnownHeader)
     }
 
     @Test func zeroByteResponseCompletesWithoutPayloadValidation() async {
@@ -1010,7 +1108,12 @@ private final class TestGenerationState {
             lifecycleObserver: { lifecycle.record($0) })
         let attempt = TalkTTSProviderAttempt(
             outputFormat: "pcm_44100",
-            payloadValidation: .providerContentTypeValidated) {
+            responseEvidence: Self.responseEvidence(
+                format: "pcm_44100",
+                contentType: "audio/pcm",
+                data: Data(),
+                magic: .empty,
+                validation: .emptyPayload)) {
             Self.attempt(format: "pcm_44100", chunks: [Data()]).makeStream()
         }
 
@@ -1038,7 +1141,13 @@ private final class TestGenerationState {
         let failure = NSError(domain: "ElevenLabsTTS", code: 503)
         let attempt = TalkTTSProviderAttempt(
             outputFormat: "pcm_44100",
-            payloadValidation: .providerContentTypeValidated) {
+            responseEvidence: Self.responseEvidence(
+                format: "pcm_44100",
+                contentType: "application/json",
+                data: Data(),
+                magic: .empty,
+                validation: .httpError,
+                status: 503)) {
             Self.attempt(format: "pcm_44100", chunks: [], error: failure).makeStream()
         }
 
@@ -1049,7 +1158,7 @@ private final class TestGenerationState {
             mp3Retry: nil)
 
         let response = lifecycle.values.first { $0.stage == .providerResponseReceived }
-        #expect(response?.resultClass == TalkTTSProviderOutcome.http5xx.rawValue)
+        #expect(response?.resultClass == ElevenLabsAudioValidationResult.httpError.rawValue)
         let stages = lifecycle.values.map(\.stage)
         #expect(!stages.contains(.streamCompleted))
         #expect(!stages.contains(.audioPayloadValidated))
@@ -1600,13 +1709,15 @@ private final class TestGenerationState {
             mp3: TestMP3Player,
             system: TestSystemSpeech,
             progress: TestTTSProgressRecorder,
-            breadcrumbs: TestTTSBreadcrumbRecorder)
+            breadcrumbs: TestTTSBreadcrumbRecorder,
+            lifecycle: TestTTSLifecycleObservationRecorder)
     {
         let pcm = TestPCMPlayer()
         let mp3 = TestMP3Player()
         let system = TestSystemSpeech()
         let progress = TestTTSProgressRecorder()
         let breadcrumbs = TestTTSBreadcrumbRecorder()
+        let lifecycle = TestTTSLifecycleObservationRecorder()
         let pipeline = TalkTTSPlaybackPipeline(
             pcmPlayer: pcm,
             mp3Player: mp3,
@@ -1622,8 +1733,9 @@ private final class TestGenerationState {
             },
             isCurrent: isCurrent,
             report: { progress.record($0) },
-            breadcrumb: { breadcrumbs.record($0) })
-        return (pipeline, pcm, mp3, system, progress, breadcrumbs)
+            breadcrumb: { breadcrumbs.record($0) },
+            lifecycleObserver: { lifecycle.record($0) })
+        return (pipeline, pcm, mp3, system, progress, breadcrumbs, lifecycle)
     }
 
     private static var routeEvidence: TalkAudioRouteEvidence {
@@ -1639,9 +1751,10 @@ private final class TestGenerationState {
     private static func attempt(
         format: String,
         chunks: [Data] = [Data([1, 2, 3, 4])],
-        error: Error? = nil) -> TalkTTSProviderAttempt
+        error: Error? = nil,
+        responseEvidence: ElevenLabsTTSResponseEvidence? = nil) -> TalkTTSProviderAttempt
     {
-        TalkTTSProviderAttempt(outputFormat: format) {
+        TalkTTSProviderAttempt(outputFormat: format, responseEvidence: responseEvidence) {
             AsyncThrowingStream { continuation in
                 for chunk in chunks { continuation.yield(chunk) }
                 if let error {
@@ -1651,5 +1764,27 @@ private final class TestGenerationState {
                 }
             }
         }
+    }
+
+    private static func responseEvidence(
+        format: String,
+        contentType: String,
+        data: Data,
+        magic: ElevenLabsAudioMagicType,
+        validation: ElevenLabsAudioValidationResult,
+        status: Int = 200) -> ElevenLabsTTSResponseEvidence
+    {
+        let evidence = ElevenLabsTTSResponseEvidence()
+        evidence.record(ElevenLabsTTSResponseMetadata(
+            requestedOutputFormat: format,
+            httpStatus: status,
+            contentType: contentType,
+            contentEncoding: "identity",
+            declaredByteCount: data.count,
+            receivedByteCount: data.count,
+            byteCountParity: data.count.isMultiple(of: 2) ? .even : .odd,
+            audioMagicType: magic,
+            validationResult: validation))
+        return evidence
     }
 }
