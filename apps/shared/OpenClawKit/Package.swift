@@ -20,7 +20,7 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-            revision: "050366b0edf34f73690f9ab2d9dce40c49d57360"),
+            revision: "f22fd9d225b70c57d74cc915c020dd70ccc53ec2"),
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
         .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
     ],
