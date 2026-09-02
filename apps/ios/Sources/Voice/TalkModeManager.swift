@@ -297,13 +297,14 @@ final class TalkModeManager: NSObject {
             object: nil,
             queue: .main,
             using: { [weak self] notification in
+                let reasonValue =
+                    (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
+                let previousPortTypes = (
+                    notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey]
+                        as? AVAudioSessionRouteDescription
+                )?.outputs.map { $0.portType.rawValue }
                 MainActor.assumeIsolated {
                     guard let self else { return }
-                    let reasonValue = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt) ?? 0
-                    let previousPortTypes = (
-                        notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey]
-                            as? AVAudioSessionRouteDescription
-                    )?.outputs.map { $0.portType.rawValue }
                     self.handleAudioRouteChange(
                         reasonValue: reasonValue,
                         previousPortTypes: previousPortTypes,
@@ -318,12 +319,18 @@ final class TalkModeManager: NSObject {
             object: nil,
             queue: .main,
             using: { [weak self] notification in
+                let typeValue =
+                    (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 2
+                let reasonValue =
+                    notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt
+                let optionValue =
+                    (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.handleAudioSessionInterruption(
-                        typeValue: (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 2,
-                        reasonValue: notification.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt,
-                        optionValue: (notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0,
+                        typeValue: typeValue,
+                        reasonValue: reasonValue,
+                        optionValue: optionValue,
                         callbackGeneration: nil)
                 }
             })
