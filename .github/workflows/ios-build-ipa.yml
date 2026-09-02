@@ -28,10 +28,10 @@ permissions:
 # Workflow-only Release qualification executor. Every credential-free checkout
 # and provenance field is bound to the immutable source candidate below.
 env:
-  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build122-elevenlabs-codec-release-executor-v2-20260902
+  AIES_RELEASE_EXECUTOR_BRANCH: aies/ios-build122-elevenlabs-codec-release-executor-v3-20260902
   AIES_RELEASE_SOURCE_BRANCH: aies/ios-build122-elevenlabs-codec-boundary-20260902
-  AIES_RELEASE_SOURCE_SHA: ba9fa9d00b93e0ae966c31a802be062f14a61182
-  AIES_RELEASE_SOURCE_TREE: 8eead377d92009ac5a75752e1609148f988e1ac3
+  AIES_RELEASE_SOURCE_SHA: 5d6d6b0d1e518a18074a73f14d98821a089447dc
+  AIES_RELEASE_SOURCE_TREE: 6845f2085902242c9e8ec6d3c8863020e0dc3380
 
 jobs:
   dispatch-gate:
