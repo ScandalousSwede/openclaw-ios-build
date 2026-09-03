@@ -1618,8 +1618,26 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("read_only_apple_profile_fetch", fastfile)
         self.assertIn("Spaceship::ConnectAPI::BundleId.all", fastfile)
         self.assertIn("Spaceship::ConnectAPI::Profile.all", fastfile)
+        profile_fetch = fastfile.split(
+            "\ndef fetch_install_aies_reusable_development_profiles!", maxsplit=1
+        )[1].split("\ndef remove_aies_installed_development_profiles!", maxsplit=1)[0]
+        self.assertLess(
+            profile_fetch.index("suppress_aies_spaceship_response_body_logging!"),
+            profile_fetch.index("Spaceship::ConnectAPI::Profile.all"),
+        )
+        self.assertIn("request_logger.level = [request_logger.level, Logger::WARN].max", fastfile)
+        self.assertIn("response_body_logging_suppressed: true", fastfile)
+        self.assertIn("spaceship_response_body_logging_suppressed:", profile_fetch)
         self.assertNotIn("Spaceship::ConnectAPI::Profile.create", fastfile)
         self.assertNotIn("remote_profile.delete!", fastfile)
+        for forbidden_mutation in (
+            "post_profiles(",
+            "delete_profile(",
+            "get_provisioning_profile(",
+            "match(",
+            "sigh(",
+        ):
+            self.assertNotIn(forbidden_mutation, profile_fetch)
         self.assertIn("DeveloperCertificates", fastfile)
         self.assertIn("certificate_sha256.include?(expected_sha256)", fastfile)
         self.assertIn("archive_allows_provisioning_updates: false", fastfile)
@@ -1628,7 +1646,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         )
         self.assertIn('"--profile-import-receipt"', fastfile)
         self.assertIn("aies-development-profile-cleanup.json", signed_job)
-        self.assertIn("Library\"\n                  / \"Developer", signed_job)
+        self.assertIn('"Developer",\n              "Xcode",', signed_job)
         self.assertIn(
             '"${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${IOS_DEVELOPMENT_TEAM}"',
             signed_job,
@@ -1641,6 +1659,18 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('rm -f -- "${p12_path}"', signed_job)
         self.assertIn('security delete-keychain "${keychain_path}"', signed_job)
         self.assertIn('exit "${cleanup_status}"', signed_job)
+        self.assertIn("os.O_NOFOLLOW", signed_job)
+        self.assertIn("if journal.is_symlink():", signed_job)
+        self.assertIn('("Library", "MobileDevice", "Provisioning Profiles")', signed_job)
+        self.assertIn('(".mobileprovision", ".provisionprofile")', signed_job)
+        self.assertIn("development_profile_caches_empty", signed_job)
+        self.assertNotIn(
+            'journal = (runner_temp / "aies-development-profile-cleanup.json").resolve()',
+            signed_job,
+        )
+        self.assertIn("name: Upload Apple signing cleanup receipt", signed_job)
+        self.assertIn("aies.signing-security-cleanup.v1", signed_job)
+        self.assertIn("ephemeral_signing_material_removed", signed_job)
 
     def test_aies_export_is_single_source_and_archive_evidence_is_failure_safe(
         self,

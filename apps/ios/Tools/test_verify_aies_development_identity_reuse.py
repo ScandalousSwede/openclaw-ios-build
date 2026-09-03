@@ -116,6 +116,14 @@ def profile_import_receipt(source_report: dict[str, object] | None = None) -> di
         "schema": "aies.apple-development-profile-import.v1",
         "status": "five_governed_profiles_installed_for_offline_archive",
         "source_operation": "read_only_apple_profile_fetch",
+        "spaceship_minimum_log_level": "WARN",
+        "spaceship_request_clients": [
+            "provisioning_request_client",
+            "test_flight_request_client",
+            "tunes_request_client",
+            "users_request_client",
+        ],
+        "spaceship_response_body_logging_suppressed": True,
         "archive_allows_provisioning_updates": False,
         "archive_receives_apple_authentication_arguments": False,
         "team_id": TEAM_ID,
@@ -138,6 +146,21 @@ class DevelopmentIdentityReuseTests(unittest.TestCase):
         self.assertEqual(receipt["bundle_count"], 5)
         self.assertEqual(len(receipt["profiles"]), 5)
         self.assertEqual(receipt["auxiliary_code_object_count"], 1)
+        self.assertTrue(receipt["prefetched_profile_binding_verified"])
+
+    def test_rejects_profile_receipt_without_response_body_log_suppression(self) -> None:
+        imported = profile_import_receipt()
+        imported["spaceship_response_body_logging_suppressed"] = False
+        with self.assertRaisesRegex(
+            verifier.VerificationError, "profile import receipt custody is invalid"
+        ):
+            verifier.verify_report(
+                report(),
+                profile_import_receipt=imported,
+                expected_sha256=CERTIFICATE_SHA256,
+                expected_team_id=TEAM_ID,
+                expected_main_bundle_id=MAIN_BUNDLE_ID,
+            )
 
     def test_rejects_wrong_leaf_missing_profile_binding_and_partial_coverage(self) -> None:
         cases: list[dict[str, object]] = []

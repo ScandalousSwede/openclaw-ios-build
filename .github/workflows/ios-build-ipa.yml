@@ -1305,6 +1305,16 @@ jobs:
               or profiles.get("archive_allows_provisioning_updates") is not False
               or profiles.get("archive_receives_apple_authentication_arguments")
               is not False
+              or profiles.get("spaceship_response_body_logging_suppressed")
+              is not True
+              or profiles.get("spaceship_minimum_log_level") != "WARN"
+              or profiles.get("spaceship_request_clients")
+              != [
+                  "provisioning_request_client",
+                  "test_flight_request_client",
+                  "tunes_request_client",
+                  "users_request_client",
+              ]
           ):
               raise SystemExit(
                   "Apple Development profile receipt lacks exact offline five-target custody"
@@ -1643,8 +1653,8 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      # Keep key deletion last: any archive/symbol evidence that exists is retained
-      # before cleanup can fail, including the post-upload validation failure path.
+      # Retain archive/symbol evidence before cleanup can fail. Only the sanitized
+      # post-cleanup receipt upload follows key/profile/keychain removal.
       - name: Remove ephemeral Apple signing material
         if: always()
         run: |
@@ -1669,54 +1679,170 @@ jobs:
           esac
           python3 - "${RUNNER_TEMP}" <<'PY' || cleanup_status=1
           import json
+          import os
           import pathlib
           import re
           import shutil
+          import stat
           import sys
 
-          runner_temp = pathlib.Path(sys.argv[1]).resolve()
-          staging = (runner_temp / "aies-development-profiles").resolve()
-          journal = (runner_temp / "aies-development-profile-cleanup.json").resolve()
-          if staging != runner_temp / "aies-development-profiles":
-              raise SystemExit("refusing unexpected development-profile staging path")
-          if journal.exists():
-              payload = json.loads(journal.read_text(encoding="utf-8"))
-              if payload.get("schema") != "aies.apple-development-profile-cleanup.v1":
-                  raise SystemExit("development-profile cleanup journal is malformed")
-              uuids = payload.get("profile_uuids")
-              if not isinstance(uuids, list) or len(uuids) != 5 or len(set(uuids)) != 5:
-                  raise SystemExit(
-                      "development-profile cleanup journal lacks five unique profiles"
+          errors = []
+          runner_temp_input = pathlib.Path(sys.argv[1])
+          if runner_temp_input.is_symlink():
+              raise SystemExit("refusing symlinked runner temporary directory")
+          runner_temp = runner_temp_input.resolve()
+          staging = runner_temp / "aies-development-profiles"
+          journal = runner_temp / "aies-development-profile-cleanup.json"
+          if staging.parent != runner_temp or journal.parent != runner_temp:
+              raise SystemExit("refusing unexpected development-profile cleanup paths")
+
+          xcode_profile_components = (
+              "Library",
+              "Developer",
+              "Xcode",
+              "UserData",
+              "Provisioning Profiles",
+          )
+          legacy_profile_components = (
+              "Library",
+              "MobileDevice",
+              "Provisioning Profiles",
+          )
+
+          def open_profile_cache(components, *, required):
+              flags = os.O_RDONLY
+              if hasattr(os, "O_DIRECTORY"):
+                  flags |= os.O_DIRECTORY
+              if hasattr(os, "O_NOFOLLOW"):
+                  flags |= os.O_NOFOLLOW
+              opened = []
+              try:
+                  current = os.open(pathlib.Path.home(), flags)
+                  opened.append(current)
+                  for component in components:
+                      current = os.open(component, flags, dir_fd=current)
+                      opened.append(current)
+                  return opened
+              except FileNotFoundError:
+                  for descriptor in reversed(opened):
+                      os.close(descriptor)
+                  if required:
+                      raise
+                  return []
+              except Exception:
+                  for descriptor in reversed(opened):
+                      os.close(descriptor)
+                  raise
+
+          try:
+              if journal.is_symlink():
+                  raise ValueError("symlink")
+              if journal.exists():
+                  flags = os.O_RDONLY
+                  if hasattr(os, "O_NOFOLLOW"):
+                      flags |= os.O_NOFOLLOW
+                  fd = os.open(journal, flags)
+                  opened = os.fstat(fd)
+                  if not stat.S_ISREG(opened.st_mode) or opened.st_size > 16_384:
+                      os.close(fd)
+                      raise ValueError("not a bounded regular file")
+                  with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                      payload = json.load(handle)
+                  current = os.lstat(journal)
+                  if (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
+                      raise ValueError("journal changed")
+                  if payload.get("schema") != "aies.apple-development-profile-cleanup.v1":
+                      raise ValueError("schema")
+                  uuids = payload.get("profile_uuids")
+                  if (
+                      not isinstance(uuids, list)
+                      or len(uuids) != 5
+                      or len(set(uuids)) != 5
+                  ):
+                      raise ValueError("profile coverage")
+                  uuid_pattern = re.compile(
+                      r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
                   )
-              uuid_pattern = re.compile(
-                  r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
-              )
-              profile_root = (
-                  pathlib.Path.home()
-                  / "Library"
-                  / "Developer"
-                  / "Xcode"
-                  / "UserData"
-                  / "Provisioning Profiles"
-              )
-              for uuid in uuids:
-                  if not isinstance(uuid, str) or not uuid_pattern.fullmatch(uuid):
-                      raise SystemExit("development-profile cleanup UUID is malformed")
-                  profile_path = profile_root / f"{uuid}.mobileprovision"
-                  if profile_path.is_symlink():
-                      raise SystemExit(
-                          "refusing symlinked development-profile cleanup target"
-                      )
-                  profile_path.unlink(missing_ok=True)
-                  if profile_path.exists():
-                      raise SystemExit("ephemeral development-profile cleanup failed")
-              journal.unlink()
-          if staging.exists():
-              if staging.is_symlink() or not staging.is_dir():
-                  raise SystemExit(
-                      "refusing unexpected development-profile staging object"
+                  profile_cache_descriptors = open_profile_cache(
+                      xcode_profile_components,
+                      required=True,
                   )
-              shutil.rmtree(staging)
+                  try:
+                      profile_cache_fd = profile_cache_descriptors[-1]
+                      for uuid in uuids:
+                          if (
+                              not isinstance(uuid, str)
+                              or not uuid_pattern.fullmatch(uuid)
+                          ):
+                              raise ValueError("profile UUID")
+                          profile_name = f"{uuid}.mobileprovision"
+                          try:
+                              profile_stat = os.stat(
+                                  profile_name,
+                                  dir_fd=profile_cache_fd,
+                                  follow_symlinks=False,
+                              )
+                          except FileNotFoundError:
+                              continue
+                          if not stat.S_ISREG(profile_stat.st_mode):
+                              raise ValueError("profile path")
+                          os.unlink(profile_name, dir_fd=profile_cache_fd)
+                          try:
+                              os.stat(
+                                  profile_name,
+                                  dir_fd=profile_cache_fd,
+                                  follow_symlinks=False,
+                              )
+                          except FileNotFoundError:
+                              continue
+                          raise ValueError("profile removal")
+                  finally:
+                      for descriptor in reversed(profile_cache_descriptors):
+                          os.close(descriptor)
+                  journal.unlink()
+                  if journal.exists() or journal.is_symlink():
+                      raise ValueError("journal removal")
+          except (OSError, ValueError, TypeError, json.JSONDecodeError):
+              errors.append("development-profile cleanup journal was rejected")
+
+          try:
+              if staging.is_symlink():
+                  raise ValueError("symlink")
+              if staging.exists():
+                  if not staging.is_dir():
+                      raise ValueError("not a directory")
+                  shutil.rmtree(staging)
+              if staging.exists() or staging.is_symlink():
+                  raise ValueError("staging removal")
+          except (OSError, ValueError):
+              errors.append("development-profile staging cleanup failed")
+
+          remaining_profiles = []
+          for cache_name, components in (
+              ("xcode", xcode_profile_components),
+              ("legacy", legacy_profile_components),
+          ):
+              cache_descriptors = []
+              try:
+                  cache_descriptors = open_profile_cache(
+                      components,
+                      required=False,
+                  )
+                  if cache_descriptors:
+                      for entry in os.listdir(cache_descriptors[-1]):
+                          if entry.endswith((".mobileprovision", ".provisionprofile")):
+                              remaining_profiles.append(f"{cache_name}:{entry}")
+              except OSError:
+                  errors.append(
+                      f"{cache_name} development-profile cache root was rejected"
+                  )
+              finally:
+                  for descriptor in reversed(cache_descriptors):
+                      os.close(descriptor)
+          if remaining_profiles:
+              errors.append("development-profile caches are not empty after cleanup")
+          if errors:
+              raise SystemExit("; ".join(errors))
           PY
           if [[ ! "${FL_SETUP_CI_KEYCHAIN_NAME}" =~ ^aies_development_[0-9]+_[0-9]+$ ]]; then
             echo "Refusing unexpected development keychain name." >&2
@@ -1740,4 +1866,130 @@ jobs:
             echo "Ephemeral Apple Development keychain cleanup failed." >&2
             cleanup_status=1
           }
+          AIES_SIGNING_CLEANUP_STATUS="${cleanup_status}" \
+            python3 - "${RUNNER_TEMP}" "${FL_SETUP_CI_KEYCHAIN_NAME}" "${ASC_KEY_ID:-}" <<'PY' || cleanup_status=1
+          import json
+          import os
+          import pathlib
+          import re
+          import sys
+
+          runner_temp_input = pathlib.Path(sys.argv[1])
+          if runner_temp_input.is_symlink():
+              raise SystemExit("refusing symlinked runner temporary directory")
+          runner_temp = runner_temp_input.resolve()
+          keychain_name = sys.argv[2]
+          asc_key_id = sys.argv[3]
+
+          def inspect_profile_cache(components):
+              flags = os.O_RDONLY
+              if hasattr(os, "O_DIRECTORY"):
+                  flags |= os.O_DIRECTORY
+              if hasattr(os, "O_NOFOLLOW"):
+                  flags |= os.O_NOFOLLOW
+              opened = []
+              try:
+                  current = os.open(pathlib.Path.home(), flags)
+                  opened.append(current)
+                  for component in components:
+                      current = os.open(component, flags, dir_fd=current)
+                      opened.append(current)
+                  entries = [
+                      entry
+                      for entry in os.listdir(opened[-1])
+                      if entry.endswith((".mobileprovision", ".provisionprofile"))
+                  ]
+                  return True, entries
+              except FileNotFoundError:
+                  return True, []
+              except OSError:
+                  return False, []
+              finally:
+                  for descriptor in reversed(opened):
+                      os.close(descriptor)
+
+          xcode_profile_cache_safe, xcode_profile_files = inspect_profile_cache(
+              (
+                  "Library",
+                  "Developer",
+                  "Xcode",
+                  "UserData",
+                  "Provisioning Profiles",
+              )
+          )
+          legacy_profile_cache_safe, legacy_profile_files = inspect_profile_cache(
+              ("Library", "MobileDevice", "Provisioning Profiles")
+          )
+          profile_files = [
+              *(f"xcode:{entry}" for entry in xcode_profile_files),
+              *(f"legacy:{entry}" for entry in legacy_profile_files),
+          ]
+          keychain_name_valid = bool(
+              re.fullmatch(r"aies_development_[0-9]+_[0-9]+", keychain_name)
+          )
+          keychain_path = (
+              pathlib.Path.home()
+              / "Library"
+              / "Keychains"
+              / f"{keychain_name}-db"
+          )
+          fastlane_key = (
+              pathlib.Path.home()
+              / ".appstoreconnect"
+              / "private_keys"
+              / f"AuthKey_{asc_key_id}.p8"
+          )
+          asc_runner_key = runner_temp / "aies-app-store-connect-key.p8"
+          development_p12 = runner_temp / "aies-apple-development-identity.p12"
+          profile_journal = runner_temp / "aies-development-profile-cleanup.json"
+          profile_staging = runner_temp / "aies-development-profiles"
+          checks = {
+              "asc_runner_key_absent": not asc_runner_key.exists()
+              and not asc_runner_key.is_symlink(),
+              "development_p12_absent": not development_p12.exists()
+              and not development_p12.is_symlink(),
+              "development_profile_caches_empty": xcode_profile_cache_safe
+              and legacy_profile_cache_safe
+              and not profile_files,
+              "development_profile_journal_absent": not profile_journal.exists()
+              and not profile_journal.is_symlink(),
+              "development_profile_staging_absent": not profile_staging.exists()
+              and not profile_staging.is_symlink(),
+              "fastlane_asc_key_absent": not fastlane_key.exists()
+              and not fastlane_key.is_symlink(),
+              "temporary_keychain_absent": keychain_name_valid
+              and not keychain_path.exists()
+              and not keychain_path.is_symlink(),
+          }
+          prior_status = int(os.environ["AIES_SIGNING_CLEANUP_STATUS"])
+          cleanup_complete = prior_status == 0 and all(checks.values())
+          receipt = {
+              "schema": "aies.signing-security-cleanup.v1",
+              "status": (
+                  "ephemeral_signing_material_removed"
+                  if cleanup_complete
+                  else "cleanup_incomplete"
+              ),
+              "checks": checks,
+              "private_key_retained": False if cleanup_complete else None,
+              "jwt_retained": False if cleanup_complete else None,
+              "profile_cache_entry_count": len(profile_files),
+          }
+          receipt_path = runner_temp / "aies-signing-security-cleanup.json"
+          receipt_path.write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          if not cleanup_complete:
+              raise SystemExit("ephemeral signing cleanup is incomplete")
+          PY
           exit "${cleanup_status}"
+
+      - name: Upload Apple signing cleanup receipt
+        if: always() && !cancelled()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-AIES-signing-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aies-signing-security-cleanup.json
+          retention-days: 90
+          if-no-files-found: error

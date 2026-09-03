@@ -9,6 +9,7 @@ require "spaceship"
 require "gym"
 require "tmpdir"
 require "base64"
+require "logger"
 
 default_platform(:ios)
 
@@ -445,6 +446,43 @@ def aies_profile_certificate_der(raw_certificate)
   UI.user_error!("Development profile contains an unreadable certificate value.")
 end
 
+def suppress_aies_spaceship_response_body_logging!(connect_client = nil)
+  client = connect_client || Spaceship::ConnectAPI.client
+  UI.user_error!("App Store Connect client is unavailable for guarded logging.") if client.nil?
+
+  request_client_names = [
+    :provisioning_request_client,
+    :test_flight_request_client,
+    :tunes_request_client,
+    :users_request_client
+  ]
+  suppressed = []
+  request_client_names.each do |name|
+    next unless client.respond_to?(name)
+
+    request_client = client.public_send(name)
+    next if request_client.nil?
+    unless request_client.respond_to?(:logger)
+      UI.user_error!("App Store Connect #{name} logger is unavailable.")
+    end
+    request_logger = request_client.logger
+    unless request_logger.is_a?(Logger) && request_logger.level.is_a?(Integer)
+      UI.user_error!("App Store Connect #{name} logger is not governed.")
+    end
+    request_logger.level = [request_logger.level, Logger::WARN].max
+    suppressed << name.to_s
+  end
+  unless suppressed.include?("provisioning_request_client")
+    UI.user_error!("Provisioning response-body logging could not be suppressed.")
+  end
+
+  {
+    minimum_log_level: "WARN",
+    request_clients: suppressed.sort,
+    response_body_logging_suppressed: true
+  }
+end
+
 def aies_xcode_development_profile_root
   File.expand_path(
     File.join(
@@ -583,6 +621,7 @@ def fetch_install_aies_reusable_development_profiles!(release_context, expected_
   validated = []
   installed_paths = []
   begin
+    logging_boundary = suppress_aies_spaceship_response_body_logging!
     development_profiles = Spaceship::ConnectAPI::Profile.all(
       filter: {
         profileType: Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT
@@ -691,6 +730,11 @@ def fetch_install_aies_reusable_development_profiles!(release_context, expected_
       source_operation: "read_only_apple_profile_fetch",
       archive_allows_provisioning_updates: false,
       archive_receives_apple_authentication_arguments: false,
+      spaceship_minimum_log_level: logging_boundary.fetch(:minimum_log_level),
+      spaceship_request_clients: logging_boundary.fetch(:request_clients),
+      spaceship_response_body_logging_suppressed: logging_boundary.fetch(
+        :response_body_logging_suppressed
+      ),
       team_id: release_context.fetch(:team_id),
       certificate_sha256: expected_sha256,
       profile_count: validated.length,
@@ -1228,6 +1272,34 @@ platform :ios do
 
   desc "Credential-free regression for the AIES archive/export signing boundary"
   lane :verify_aies_export_command do
+    require "stringio"
+    logging_output = StringIO.new
+    logging_fixture = Struct.new(:logger).new(Logger.new(logging_output))
+    logging_fixture.logger.level = Logger::DEBUG
+    connect_logging_fixture = Struct.new(
+      :provisioning_request_client,
+      :test_flight_request_client,
+      :tunes_request_client,
+      :users_request_client
+    ).new(logging_fixture, nil, nil, nil)
+    logging_result = suppress_aies_spaceship_response_body_logging!(
+      connect_logging_fixture
+    )
+    logging_fixture.logger.debug("PROFILE_CONTENT_SENTINEL")
+    logging_fixture.logger.info("PROFILE_REQUEST_SENTINEL")
+    logging_fixture.logger.warn("GENERIC_WARNING_SENTINEL")
+    logging_fixture.logger.close
+    unless logging_result == {
+      minimum_log_level: "WARN",
+      request_clients: ["provisioning_request_client"],
+      response_body_logging_suppressed: true
+    } &&
+        !logging_output.string.include?("PROFILE_CONTENT_SENTINEL") &&
+        !logging_output.string.include?("PROFILE_REQUEST_SENTINEL") &&
+        logging_output.string.include?("GENERIC_WARNING_SENTINEL")
+      UI.user_error!("Spaceship profile response-body logging suppression regressed.")
+    end
+
     fixture_certificate = "credential-free-development-certificate-fixture".b
     fixture_certificate_sha256 = Digest::SHA256.hexdigest(fixture_certificate)
     remote_profile_type = Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT

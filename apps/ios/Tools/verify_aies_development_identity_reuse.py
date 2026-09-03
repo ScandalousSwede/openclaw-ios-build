@@ -74,6 +74,16 @@ def verify_report(
         != "five_governed_profiles_installed_for_offline_archive"
         or profile_import.get("source_operation")
         != "read_only_apple_profile_fetch"
+        or profile_import.get("spaceship_response_body_logging_suppressed")
+        is not True
+        or profile_import.get("spaceship_minimum_log_level") != "WARN"
+        or profile_import.get("spaceship_request_clients")
+        != [
+            "provisioning_request_client",
+            "test_flight_request_client",
+            "tunes_request_client",
+            "users_request_client",
+        ]
         or profile_import.get("archive_allows_provisioning_updates") is not False
         or profile_import.get("archive_receives_apple_authentication_arguments")
         is not False
