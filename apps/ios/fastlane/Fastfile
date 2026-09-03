@@ -173,6 +173,22 @@ def shell_join(parts)
   Shellwords.join(parts.compact)
 end
 
+def aies_forbidden_archive_arguments(arguments)
+  setting_pattern = /\A(?:CODE_SIGN_IDENTITY|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER)(?:\[[^\]\r\n]+\])?=/
+  forbidden_flags = [
+    "-allowProvisioningUpdates",
+    "-allowProvisioningDeviceRegistration",
+    "-authenticationKeyPath",
+    "-authenticationKeyID",
+    "-authenticationKeyIssuerID"
+  ]
+  Array(arguments).select do |argument|
+    !argument.is_a?(String) ||
+      argument.match?(setting_pattern) ||
+      forbidden_flags.include?(argument)
+  end
+end
+
 def monotonic_beta_build_number(latest_build:, minimum_build_number: nil)
   minimum = nil
   if env_present?(minimum_build_number)
@@ -289,9 +305,17 @@ def aies_export_options(context)
 end
 
 def aies_archive_build_options(context, archive_path)
+  # Product signing comes from the generated BetaRelease xcconfig and project.
+  # Identity/profile overrides are intentionally omitted: a global override makes
+  # codeless SwiftPM resource bundles enter Xcode's signing evaluation.
   xcode_arguments = context.fetch(:archive_xcode_arguments, []) +
-    context.fetch(:provenance_arguments, []) +
-    context.fetch(:archive_signing_arguments, [])
+    context.fetch(:provenance_arguments, [])
+  unless aies_forbidden_archive_arguments(xcode_arguments).empty?
+    UI.user_error!(
+      "AIES archive arguments must not override identity/profile selection " \
+      "or authorize Apple provisioning mutation."
+    )
+  end
   {
     project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
@@ -395,6 +419,65 @@ def import_aies_reusable_development_identity!(release_context)
     UI.user_error!("Imported Apple Development private-key identity set is not exact.")
   end
 
+  _isolate_output, isolate_error, isolate_status = Open3.capture3(
+    "security", "list-keychains", "-d", "user", "-s", keychain_path
+  )
+  unless isolate_status.success?
+    UI.user_error!("Unable to isolate the Apple Development keychain: #{isolate_error.to_s.strip}")
+  end
+  _default_output, default_error, default_status = Open3.capture3(
+    "security", "default-keychain", "-d", "user", "-s", keychain_path
+  )
+  unless default_status.success?
+    UI.user_error!("Unable to select the ephemeral Apple Development keychain: #{default_error.to_s.strip}")
+  end
+
+  search_list_output, search_list_error, search_list_status = Open3.capture3(
+    "security", "list-keychains", "-d", "user"
+  )
+  unless search_list_status.success?
+    UI.user_error!("Unable to verify the isolated user keychain search list: #{search_list_error.to_s.strip}")
+  end
+  begin
+    user_keychain_search_list = Shellwords.split(search_list_output).map do |path|
+      File.expand_path(path)
+    end
+  rescue ArgumentError
+    UI.user_error!("Active user keychain search list is malformed.")
+  end
+  unless user_keychain_search_list == [keychain_path]
+    UI.user_error!("Ephemeral Apple Development keychain search list is not exclusive.")
+  end
+  selected_default_output, selected_default_error, selected_default_status = Open3.capture3(
+    "security", "default-keychain", "-d", "user"
+  )
+  unless selected_default_status.success?
+    UI.user_error!("Unable to verify the default Apple Development keychain: #{selected_default_error.to_s.strip}")
+  end
+  begin
+    selected_default_keychains = Shellwords.split(selected_default_output).map do |path|
+      File.expand_path(path)
+    end
+  rescue ArgumentError
+    UI.user_error!("Default user keychain response is malformed.")
+  end
+  unless selected_default_keychains == [keychain_path]
+    UI.user_error!("Ephemeral Apple Development keychain is not the exclusive default.")
+  end
+
+  global_identity_output, global_identity_error, global_identity_status = Open3.capture3(
+    "security", "find-identity", "-v", "-p", "codesigning"
+  )
+  unless global_identity_status.success?
+    UI.user_error!("Unable to verify archive-visible signing identities: #{global_identity_error.to_s.strip}")
+  end
+  global_identity_hashes = global_identity_output.scan(
+    /^\s*\d+\)\s+([0-9A-F]{40})\s+"/i
+  ).flatten.map(&:upcase)
+  unless global_identity_hashes == [actual_sha1]
+    UI.user_error!("Archive-visible private-key identity set is not exact.")
+  end
+
   Dir.mktmpdir("aies-codesign-probe-", runner_temp) do |directory|
     probe = File.join(directory, "true")
     FileUtils.cp("/usr/bin/true", probe)
@@ -426,7 +509,11 @@ def import_aies_reusable_development_identity!(release_context)
     team_id: team_id,
     private_key_matches_certificate: true,
     private_key_use_verified: true,
-    keychain_valid_identity_count: identity_hashes.length
+    keychain_valid_identity_count: identity_hashes.length,
+    ephemeral_keychain_search_list_exclusive: true,
+    ephemeral_keychain_is_default: true,
+    archive_visible_valid_identity_count: global_identity_hashes.length,
+    archive_visible_identity_set_exact: true
   }) + "\n")
 
   {
@@ -1386,14 +1473,24 @@ platform :ios do
       beta_xcconfig = File.join(directory, "AIES-Beta.xcconfig")
       FileUtils.mkdir_p(output_directory)
       File.write(beta_xcconfig, "// credential-free command-rendering fixture\n")
-      test_development_identity = "A" * 40
       archive_context = context.merge(
         beta_xcconfig: beta_xcconfig,
-        provenance_arguments: [],
-        archive_signing_arguments: [
-          "CODE_SIGN_IDENTITY=#{test_development_identity}"
-        ]
+        provenance_arguments: []
       )
+      forbidden_archive_fixtures = [
+        "CODE_SIGN_IDENTITY=#{"A" * 40}",
+        "CODE_SIGN_IDENTITY[sdk=iphoneos*]=Apple Development",
+        "PROVISIONING_PROFILE=00000000-0000-0000-0000-000000000000",
+        "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]=AIES Development",
+        "-allowProvisioningUpdates",
+        "-authenticationKeyPath"
+      ]
+      unless aies_forbidden_archive_arguments(forbidden_archive_fixtures) == forbidden_archive_fixtures
+        UI.user_error!("Archive signing-argument guard regression failed.")
+      end
+      unless aies_forbidden_archive_arguments(archive_context[:provenance_arguments]).empty?
+        UI.user_error!("Archive signing-argument guard rejected provenance settings.")
+      end
       archive_options = aies_archive_build_options(archive_context, archive_path)
       Gym.config = FastlaneCore::Configuration.create(
         Gym::Options.available_options,
@@ -1402,13 +1499,18 @@ platform :ios do
       Gym.project = FastlaneCore::Project.new(Gym.config)
       Gym.cache.clear
       archive_argv = Shellwords.split(Gym::BuildCommandGenerator.generate.join(" "))
-      identity_argument = "CODE_SIGN_IDENTITY=#{test_development_identity}"
-      unless archive_argv.count(identity_argument) == 1 && !archive_argv.include?("-exportArchive")
-        UI.user_error!("Rendered archive command did not select the exact reusable development identity once.")
+      if archive_argv.include?("-exportArchive")
+        UI.user_error!("Rendered archive command unexpectedly selected the export path.")
       end
       forbidden_archive_arguments = test_auth + ["-allowProvisioningDeviceRegistration"]
-      if forbidden_archive_arguments.any? { |argument| archive_argv.include?(argument) }
-        UI.user_error!("Rendered archive command retained an Apple provisioning-mutation or authentication argument.")
+      forbidden_archive_prefixes = [
+        "CODE_SIGN_IDENTITY=",
+        "PROVISIONING_PROFILE=",
+        "PROVISIONING_PROFILE_SPECIFIER="
+      ]
+      if forbidden_archive_arguments.any? { |argument| archive_argv.include?(argument) } ||
+          forbidden_archive_prefixes.any? { |prefix| archive_argv.any? { |argument| argument.start_with?(prefix) } }
+        UI.user_error!("Rendered archive command retained a manual signing, provisioning-mutation, or authentication argument.")
       end
 
       FileUtils.mkdir_p(archive_path)
@@ -1424,9 +1526,8 @@ platform :ios do
       UI.user_error!("Gym retained an unexpected export_xcargs source.") if env_present?(Gym.config[:export_xcargs])
       argv = Shellwords.split(Gym::PackageCommandGenerator.generate.join(" "))
       UI.user_error!("Gym regression did not render an export command.") unless argv.include?("-exportArchive")
-      if argv.any? { |argument| argument.start_with?("CODE_SIGN_IDENTITY=") } ||
-          argv.any? { |argument| argument.include?(test_development_identity) }
-        UI.user_error!("Archive-only Apple Development identity contaminated export.")
+      if forbidden_archive_prefixes.any? { |prefix| argv.any? { |argument| argument.start_with?(prefix) } }
+        UI.user_error!("Manual archive signing settings contaminated export.")
       end
       unless argv.count("-allowProvisioningUpdates") == 1
         UI.user_error!("Rendered export command must contain -allowProvisioningUpdates exactly once.")
@@ -1523,9 +1624,6 @@ platform :ios do
     )
     installed_development_profiles = development_profiles.fetch(:installed_paths)
     context[:aies_internal] = true
-    context[:archive_signing_arguments] = [
-      "CODE_SIGN_IDENTITY=#{development_identity.fetch(:certificate_sha1)}"
-    ]
     context[:output_directory] = release_context[:output_directory]
     context[:provenance_arguments] = aies_provenance_arguments(release_context)
     context[:team_id] = release_context[:team_id]

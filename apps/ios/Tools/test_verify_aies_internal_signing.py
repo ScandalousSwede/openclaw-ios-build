@@ -1569,12 +1569,15 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             release_lane.index("verify_aies_reusable_development_identity!"),
             release_lane.index("export_aies_beta_archive"),
         )
-        self.assertIn("context.fetch(:archive_signing_arguments, [])", archive_options)
+        self.assertNotIn("archive_signing_arguments", archive_options)
         self.assertIn("context.fetch(:archive_xcode_arguments, [])", archive_options)
         self.assertNotIn("aies_xcode_auth_arguments", archive_options)
         self.assertNotIn("archive_signing_arguments", export_options)
         self.assertIn("context.fetch(:export_xcode_arguments)", export_options)
-        self.assertIn('"CODE_SIGN_IDENTITY=#{development_identity.fetch(', release_lane)
+        self.assertNotIn("archive_signing_arguments", release_lane)
+        self.assertNotIn(
+            'CODE_SIGN_IDENTITY=#{development_identity.fetch(', release_lane
+        )
         self.assertIn("fetch_install_aies_reusable_development_profiles!", release_lane)
         self.assertLess(
             release_lane.index("fetch_install_aies_reusable_development_profiles!"),
@@ -1599,9 +1602,56 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('keychain_name == expected_keychain_name', fastfile)
         self.assertIn('keychain_name.match?(/\\Aaies_development_', fastfile)
         self.assertIn('identity_hashes == [actual_sha1]', fastfile)
-        self.assertIn("Gym::BuildCommandGenerator.generate", fastfile)
+        self.assertIn('"security", "list-keychains", "-d", "user"', fastfile)
         self.assertIn(
-            "Archive-only Apple Development identity contaminated export.", fastfile
+            '"security", "list-keychains", "-d", "user", "-s", keychain_path',
+            fastfile,
+        )
+        self.assertIn(
+            '"security", "default-keychain", "-d", "user", "-s", keychain_path',
+            fastfile,
+        )
+        self.assertIn('user_keychain_search_list == [keychain_path]', fastfile)
+        self.assertIn('selected_default_keychains == [keychain_path]', fastfile)
+        self.assertIn(
+            '"security", "find-identity", "-v", "-p", "codesigning"',
+            fastfile,
+        )
+        self.assertIn("global_identity_hashes == [actual_sha1]", fastfile)
+        self.assertIn("ephemeral_keychain_search_list_exclusive: true", fastfile)
+        self.assertIn("ephemeral_keychain_is_default: true", fastfile)
+        self.assertIn("archive_visible_identity_set_exact: true", fastfile)
+        self.assertIn(
+            'imported.get("ephemeral_keychain_search_list_exclusive") is not True',
+            signed_job,
+        )
+        self.assertIn(
+            'imported.get("ephemeral_keychain_is_default") is not True',
+            signed_job,
+        )
+        self.assertIn(
+            'imported.get("archive_visible_identity_set_exact") is not True',
+            signed_job,
+        )
+        self.assertIn("Gym::BuildCommandGenerator.generate", fastfile)
+        self.assertIn("def aies_forbidden_archive_arguments(arguments)", fastfile)
+        self.assertIn(
+            "CODE_SIGN_IDENTITY|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER",
+            fastfile,
+        )
+        self.assertIn("CODE_SIGN_IDENTITY[sdk=iphoneos*]=Apple Development", fastfile)
+        self.assertIn(
+            "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]=AIES Development",
+            fastfile,
+        )
+        self.assertIn("Archive signing-argument guard regression failed.", fastfile)
+        self.assertIn("CODE_SIGN_IDENTITY=", fastfile)
+        self.assertIn("PROVISIONING_PROFILE=", fastfile)
+        self.assertIn("PROVISIONING_PROFILE_SPECIFIER=", fastfile)
+        self.assertIn(
+            "Rendered archive command retained a manual signing, "
+            "provisioning-mutation, or authentication argument.",
+            fastfile,
         )
         self.assertIn('"/usr/bin/codesign"', fastfile)
         self.assertIn("FileUtils.rm_f(expected_path)", fastfile)
