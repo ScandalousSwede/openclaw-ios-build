@@ -1381,7 +1381,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             all(path.is_dir() or path.suffix == ".json" for path in fixture_files)
         )
 
-    def test_workflow_pins_third_party_actions_and_defers_private_key(self) -> None:
+    def test_workflow_pins_actions_and_defers_protected_signing_material(self) -> None:
         workflow = (
             REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
         ).read_text(encoding="utf-8")
@@ -1419,6 +1419,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("name: Verify exact release checkout", workflow)
         self.assertGreaterEqual(
             workflow.count("test_verify_aies_internal_signing.py"), 2
+        )
+        self.assertEqual(
+            workflow.count("test_verify_aies_development_identity_reuse.py"), 2
         )
         self.assertEqual(
             workflow.count("test_aies_macho_signature_equivalence.py"), 2
@@ -1493,6 +1496,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertEqual(workflow.count("TalkDurableOutboxTests"), 2)
         self.assertEqual(workflow.count("TalkModeIncrementalSpeechBufferTests"), 2)
         self.assertGreaterEqual(workflow.count("TalkTTSDiagnosticsTests"), 2)
+        development_key_step = workflow.index(
+            "name: Materialize governed reusable Apple Development identity"
+        )
         key_step = workflow.index("name: Materialize ephemeral App Store Connect key")
         fastlane_parse = workflow.index(
             "name: Parse Fastlane release configuration without credentials"
@@ -1501,10 +1507,11 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         release = workflow.index(
             "name: Build, verify, and upload internal TestFlight diagnostic"
         )
-        self.assertLess(fastlane_parse, key_step)
-        self.assertLess(ios_tests, key_step)
+        self.assertLess(fastlane_parse, development_key_step)
+        self.assertLess(ios_tests, development_key_step)
+        self.assertLess(development_key_step, key_step)
         self.assertLess(key_step, release)
-        cleanup = workflow.index("name: Remove ephemeral App Store Connect key")
+        cleanup = workflow.index("name: Remove ephemeral Apple signing material")
         for artifact_step in (
             "name: Upload signed IPA",
             "name: Upload signed xcarchive",
@@ -1514,6 +1521,85 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             self.assertLess(workflow.index(artifact_step), cleanup)
         self.assertGreaterEqual(workflow.count("if: always() && !cancelled()"), 4)
         self.assertIn("${ASC_KEY_ID:-}", workflow)
+
+    def test_reusable_development_identity_is_archive_only_and_fail_closed(
+        self,
+    ) -> None:
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "ios-build-ipa.yml"
+        ).read_text(encoding="utf-8")
+        fastfile = (REPO_ROOT / "apps" / "ios" / "fastlane" / "Fastfile").read_text(
+            encoding="utf-8"
+        )
+        signed_job = workflow.split(
+            "\n  signed-internal-testflight:\n", maxsplit=1
+        )[1]
+        unsigned_prefix = workflow.split(
+            "\n  signed-internal-testflight:\n", maxsplit=1
+        )[0]
+        release_lane = fastfile.split(
+            'lane :aies_internal_testflight do', maxsplit=1
+        )[1].split("\n  ensure", maxsplit=1)[0]
+        archive_options = fastfile.split(
+            "\ndef aies_archive_build_options", maxsplit=1
+        )[1].split("\ndef import_aies_reusable_development_identity!", maxsplit=1)[0]
+        export_options = fastfile.split(
+            "\ndef aies_export_build_options", maxsplit=1
+        )[1].split("\ndef build_aies_beta_archive", maxsplit=1)[0]
+
+        self.assertNotIn("AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64", unsigned_prefix)
+        self.assertNotIn("AIES_DEVELOPMENT_CERTIFICATE_PASSWORD", unsigned_prefix)
+        self.assertIn("${{ secrets.AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64 }}", signed_job)
+        self.assertIn("${{ secrets.AIES_DEVELOPMENT_CERTIFICATE_PASSWORD }}", signed_job)
+        self.assertIn("${{ vars.AIES_DEVELOPMENT_CERTIFICATE_SHA256 }}", signed_job)
+        self.assertIn("FL_SETUP_CI_KEYCHAIN_NAME:", signed_job)
+        self.assertNotIn("MATCH_KEYCHAIN_NAME:", signed_job)
+        self.assertLess(release_lane.index("setup_ci"), release_lane.index(
+            "import_aies_reusable_development_identity!"
+        ))
+        self.assertLess(
+            release_lane.index("import_aies_reusable_development_identity!"),
+            release_lane.index("build_aies_beta_archive"),
+        )
+        self.assertLess(
+            release_lane.index("package_aies_archive_evidence!"),
+            release_lane.index("verify_aies_reusable_development_identity!"),
+        )
+        self.assertLess(
+            release_lane.index("verify_aies_reusable_development_identity!"),
+            release_lane.index("export_aies_beta_archive"),
+        )
+        self.assertIn("context.fetch(:archive_signing_arguments, [])", archive_options)
+        self.assertNotIn("archive_signing_arguments", export_options)
+        self.assertIn('"CODE_SIGN_IDENTITY=#{development_identity.fetch(', release_lane)
+        self.assertIn("certificate.check_private_key(private_key)", fastfile)
+        self.assertIn('"security", "find-identity"', fastfile)
+        self.assertIn('keychain_name == expected_keychain_name', fastfile)
+        self.assertIn('keychain_name.match?(/\\Aaies_development_', fastfile)
+        self.assertIn('identity_hashes == [actual_sha1]', fastfile)
+        self.assertIn("Gym::BuildCommandGenerator.generate", fastfile)
+        self.assertIn(
+            "Archive-only Apple Development identity contaminated export.", fastfile
+        )
+        self.assertIn('"/usr/bin/codesign"', fastfile)
+        self.assertIn("FileUtils.rm_f(expected_path)", fastfile)
+        self.assertIn("delete_keychain(name: development_keychain_name)", fastfile)
+        self.assertIn("OpenClaw-development-signing-import.json", signed_job)
+        self.assertIn("OpenClaw-development-signing-identity.json", signed_job)
+        self.assertIn("reusable_private_key_identity_imported", signed_job)
+        self.assertIn("reusable_development_identity_verified", signed_job)
+        self.assertIn("archive identity-reuse receipt lacks five-target coverage", signed_job)
+        self.assertIn(
+            '"${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${IOS_DEVELOPMENT_TEAM}"',
+            signed_job,
+        )
+        self.assertNotIn(
+            '"${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${APPLE_TEAM_ID}"',
+            signed_job,
+        )
+        self.assertIn("name: Remove ephemeral Apple signing material", signed_job)
+        self.assertIn('rm -f -- "${p12_path}"', signed_job)
+        self.assertIn('security delete-keychain "${keychain_path}"', signed_job)
 
     def test_aies_export_is_single_source_and_archive_evidence_is_failure_safe(
         self,
@@ -1598,7 +1684,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         )
         self.assertLess(
             signed_job.index("name: Upload signed release evidence"),
-            signed_job.index("name: Remove ephemeral App Store Connect key"),
+            signed_job.index("name: Remove ephemeral Apple signing material"),
         )
         lane_step = signed_job.split(
             "name: Build, verify, and upload internal TestFlight diagnostic",

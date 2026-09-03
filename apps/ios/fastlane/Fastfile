@@ -2,6 +2,8 @@ require "shellwords"
 require "open3"
 require "json"
 require "fileutils"
+require "digest"
+require "openssl"
 require "time"
 require "spaceship"
 require "gym"
@@ -277,7 +279,9 @@ def aies_export_options(context)
 end
 
 def aies_archive_build_options(context, archive_path)
-  xcode_arguments = context.fetch(:xcode_arguments) + context.fetch(:provenance_arguments, [])
+  xcode_arguments = context.fetch(:xcode_arguments) +
+    context.fetch(:provenance_arguments, []) +
+    context.fetch(:archive_signing_arguments, [])
   {
     project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
@@ -290,6 +294,139 @@ def aies_archive_build_options(context, archive_path)
     include_symbols: true,
     xcargs: shell_join(xcode_arguments)
   }
+end
+
+def import_aies_reusable_development_identity!(release_context)
+  runner_temp = File.expand_path(required_env!("RUNNER_TEMP"))
+  expected_path = File.join(runner_temp, "aies-apple-development-identity.p12")
+  p12_path = File.expand_path(required_env!("AIES_DEVELOPMENT_CERTIFICATE_PATH"))
+  UI.user_error!("Apple Development PKCS#12 must use the bounded runner path.") unless p12_path == expected_path
+  UI.user_error!("Apple Development PKCS#12 must be a regular private file.") unless File.file?(p12_path) && !File.symlink?(p12_path)
+  file_stat = File.stat(p12_path)
+  unless file_stat.size.positive? && file_stat.size <= 1_500_000 && (file_stat.mode & 0o077).zero?
+    UI.user_error!("Apple Development PKCS#12 size or permissions are invalid.")
+  end
+
+  password = ENV["AIES_DEVELOPMENT_CERTIFICATE_PASSWORD"]
+  unless password.is_a?(String) && !password.empty? && password.bytesize <= 1_024
+    UI.user_error!("Protected Apple Development PKCS#12 password is unavailable.")
+  end
+  expected_sha256 = required_env!("AIES_DEVELOPMENT_CERTIFICATE_SHA256").downcase
+  unless expected_sha256.match?(/\A[0-9a-f]{64}\z/)
+    UI.user_error!("AIES_DEVELOPMENT_CERTIFICATE_SHA256 must be lowercase SHA-256 hex.")
+  end
+
+  begin
+    pkcs12 = OpenSSL::PKCS12.new(File.binread(p12_path), password)
+  rescue OpenSSL::PKCS12::PKCS12Error
+    UI.user_error!("Protected Apple Development PKCS#12 could not be decoded.")
+  end
+  certificate = pkcs12.certificate
+  private_key = pkcs12.key
+  UI.user_error!("Protected PKCS#12 has no leaf certificate.") if certificate.nil?
+  UI.user_error!("Protected PKCS#12 has no private key.") if private_key.nil?
+  unless certificate.check_private_key(private_key)
+    UI.user_error!("Protected PKCS#12 private key does not match its certificate.")
+  end
+
+  actual_sha256 = Digest::SHA256.hexdigest(certificate.to_der)
+  actual_sha1 = Digest::SHA1.hexdigest(certificate.to_der).upcase
+  unless actual_sha256 == expected_sha256
+    UI.user_error!("Protected Apple Development identity fingerprint mismatch.")
+  end
+  subject = certificate.subject.to_a.to_h { |name, value, _type| [name, value] }
+  common_name = subject["CN"].to_s
+  team_id = subject["OU"].to_s
+  unless common_name.start_with?("Apple Development:")
+    UI.user_error!("Protected identity is not an Apple Development certificate.")
+  end
+  unless team_id == release_context.fetch(:team_id)
+    UI.user_error!("Protected Apple Development identity belongs to another Team.")
+  end
+  unless certificate.issuer.to_s.include?("Apple Worldwide Developer Relations")
+    UI.user_error!("Protected Apple Development identity has an unexpected issuer.")
+  end
+  now = Time.now
+  unless certificate.not_before <= now && certificate.not_after > now + 86_400
+    UI.user_error!("Protected Apple Development identity is not currently usable for at least 24 hours.")
+  end
+
+  keychain_name = required_env!("MATCH_KEYCHAIN_NAME")
+  expected_keychain_name = required_env!("FL_SETUP_CI_KEYCHAIN_NAME")
+  unless keychain_name == expected_keychain_name &&
+      keychain_name.match?(/\Aaies_development_[0-9]+_[0-9]+\z/)
+    UI.user_error!("Fastlane setup_ci did not create the bounded AIES development keychain.")
+  end
+  keychain_password = ENV.fetch("MATCH_KEYCHAIN_PASSWORD", "")
+  import_certificate(
+    certificate_path: p12_path,
+    certificate_password: password,
+    keychain_name: keychain_name,
+    keychain_password: keychain_password,
+    log_output: false
+  )
+  keychain_path = File.expand_path(FastlaneCore::Helper.keychain_path(keychain_name))
+  expected_keychain_path = File.expand_path(
+    File.join(Dir.home, "Library", "Keychains", "#{keychain_name}-db")
+  )
+  unless keychain_path == expected_keychain_path && File.file?(keychain_path)
+    UI.user_error!("Fastlane setup_ci development keychain path is invalid.")
+  end
+  identity_output, identity_error, identity_status = Open3.capture3(
+    "security", "find-identity", "-v", "-p", "codesigning", keychain_path
+  )
+  unless identity_status.success?
+    UI.user_error!("Unable to verify imported Apple Development identity: #{identity_error.to_s.strip}")
+  end
+  identity_hashes = identity_output.scan(
+    /^\s*\d+\)\s+([0-9A-F]{40})\s+"/i
+  ).flatten.map(&:upcase)
+  unless identity_hashes == [actual_sha1]
+    UI.user_error!("Imported Apple Development private-key identity set is not exact.")
+  end
+
+  Dir.mktmpdir("aies-codesign-probe-", runner_temp) do |directory|
+    probe = File.join(directory, "true")
+    FileUtils.cp("/usr/bin/true", probe)
+    _probe_output, _probe_error, probe_status = Open3.capture3(
+      "/usr/bin/codesign",
+      "--force",
+      "--sign", actual_sha1,
+      "--keychain", keychain_path,
+      "--timestamp=none",
+      probe
+    )
+    UI.user_error!("Imported Apple Development private key failed a bounded signing probe.") unless probe_status.success?
+  end
+
+  receipt = File.join(
+    release_context.fetch(:output_directory),
+    "OpenClaw-development-signing-import.json"
+  )
+  FileUtils.mkdir_p(File.dirname(receipt))
+  File.write(receipt, JSON.pretty_generate({
+    schema: "aies.apple-development-identity-import.v1",
+    status: "reusable_private_key_identity_imported",
+    certificate_sha1: actual_sha1.downcase,
+    certificate_sha256: actual_sha256,
+    certificate_serial: certificate.serial.to_s(16).downcase,
+    certificate_common_name: common_name,
+    certificate_not_before: certificate.not_before.utc.iso8601,
+    certificate_not_after: certificate.not_after.utc.iso8601,
+    team_id: team_id,
+    private_key_matches_certificate: true,
+    private_key_use_verified: true,
+    keychain_valid_identity_count: identity_hashes.length
+  }) + "\n")
+
+  {
+    certificate_sha1: actual_sha1,
+    certificate_sha256: actual_sha256,
+    receipt: receipt
+  }
+ensure
+  ENV.delete("AIES_DEVELOPMENT_CERTIFICATE_PASSWORD")
+  FileUtils.rm_f(expected_path) if defined?(expected_path) && p12_path == expected_path
 end
 
 def aies_export_build_options(context, archive_path, output_directory)
@@ -518,6 +655,31 @@ def package_aies_archive_evidence!(build, release_context)
   }
 end
 
+def verify_aies_reusable_development_identity!(archive_evidence, release_context)
+  expected_sha256 = required_env!("AIES_DEVELOPMENT_CERTIFICATE_SHA256").downcase
+  unless expected_sha256.match?(/\A[0-9a-f]{64}\z/)
+    UI.user_error!("AIES_DEVELOPMENT_CERTIFICATE_SHA256 must be lowercase SHA-256 hex.")
+  end
+
+  receipt = File.join(
+    release_context[:output_directory],
+    "OpenClaw-development-signing-identity.json"
+  )
+  verifier = File.join(ios_root, "Tools", "verify_aies_development_identity_reuse.py")
+  FileUtils.rm_f(receipt)
+  sh(shell_join([
+    "python3", verifier,
+    "--archive-signing-report", archive_evidence.fetch(:signing_report),
+    "--expected-certificate-sha256", expected_sha256,
+    "--expected-team-id", release_context.fetch(:team_id),
+    "--expected-main-bundle-id", release_context.fetch(:main_bundle_id),
+    "--output", receipt
+  ]))
+  UI.user_error!("Reusable Apple Development identity receipt was not produced.") unless File.file?(receipt)
+  archive_evidence[:development_identity_receipt] = receipt
+  receipt
+end
+
 def package_aies_internal_evidence!(build, release_context, archive_evidence)
   output_directory = release_context[:output_directory]
   archive_path = File.expand_path(build[:archive_path], ios_root)
@@ -532,6 +694,7 @@ def package_aies_internal_evidence!(build, release_context, archive_evidence)
   UI.user_error!("Signed IPA was not produced.") unless File.file?(ipa_path)
   UI.user_error!("Signed archive evidence is incomplete.") unless [
     archive_evidence[:archive_zip],
+    archive_evidence[:development_identity_receipt],
     archive_evidence[:dsym_zip],
     archive_evidence[:signing_report],
     archive_evidence[:build_manifest]
@@ -753,7 +916,7 @@ platform :ios do
     }
   end
 
-  desc "Credential-free regression for the rendered AIES export command"
+  desc "Credential-free regression for the AIES archive/export signing boundary"
   lane :verify_aies_export_command do
     test_auth = aies_xcode_auth_arguments(
       key_path: "/tmp/aies-regression-key.p8",
@@ -768,7 +931,31 @@ platform :ios do
     Dir.mktmpdir("aies-export-regression") do |directory|
       archive_path = File.join(directory, "OpenClaw.xcarchive")
       output_directory = File.join(directory, "export")
-      FileUtils.mkdir_p([archive_path, output_directory])
+      beta_xcconfig = File.join(directory, "AIES-Beta.xcconfig")
+      FileUtils.mkdir_p(output_directory)
+      File.write(beta_xcconfig, "// credential-free command-rendering fixture\n")
+      test_development_identity = "A" * 40
+      archive_context = context.merge(
+        beta_xcconfig: beta_xcconfig,
+        provenance_arguments: [],
+        archive_signing_arguments: [
+          "CODE_SIGN_IDENTITY=#{test_development_identity}"
+        ]
+      )
+      archive_options = aies_archive_build_options(archive_context, archive_path)
+      Gym.config = FastlaneCore::Configuration.create(
+        Gym::Options.available_options,
+        archive_options
+      )
+      Gym.project = FastlaneCore::Project.new(Gym.config)
+      Gym.cache.clear
+      archive_argv = Shellwords.split(Gym::BuildCommandGenerator.generate.join(" "))
+      identity_argument = "CODE_SIGN_IDENTITY=#{test_development_identity}"
+      unless archive_argv.count(identity_argument) == 1 && !archive_argv.include?("-exportArchive")
+        UI.user_error!("Rendered archive command did not select the exact reusable development identity once.")
+      end
+
+      FileUtils.mkdir_p(archive_path)
       options = aies_export_build_options(context, archive_path, output_directory)
       UI.user_error!("AIES export must use the canonical xcargs source.") unless options.key?(:xcargs)
       UI.user_error!("AIES export must not use export_xcargs.") if options.key?(:export_xcargs)
@@ -781,6 +968,10 @@ platform :ios do
       UI.user_error!("Gym retained an unexpected export_xcargs source.") if env_present?(Gym.config[:export_xcargs])
       argv = Shellwords.split(Gym::PackageCommandGenerator.generate.join(" "))
       UI.user_error!("Gym regression did not render an export command.") unless argv.include?("-exportArchive")
+      if argv.any? { |argument| argument.start_with?("CODE_SIGN_IDENTITY=") } ||
+          argv.any? { |argument| argument.include?(test_development_identity) }
+        UI.user_error!("Archive-only Apple Development identity contaminated export.")
+      end
       unless argv.count("-allowProvisioningUpdates") == 1
         UI.user_error!("Rendered export command must contain -allowProvisioningUpdates exactly once.")
       end
@@ -858,8 +1049,11 @@ platform :ios do
 
   desc "Build, verify, and upload an exact-SHA AIES internal TestFlight diagnostic"
   lane :aies_internal_testflight do
+    development_keychain_name = nil
     release_context = prepare_aies_internal_context!
     setup_ci
+    development_keychain_name = ENV["MATCH_KEYCHAIN_NAME"]
+    development_identity = import_aies_reusable_development_identity!(release_context)
     context = prepare_beta_context(
       require_api_key: true,
       minimum_build_number: required_env!("GITHUB_RUN_NUMBER"),
@@ -867,6 +1061,9 @@ platform :ios do
       push_mode: "direct"
     )
     context[:aies_internal] = true
+    context[:archive_signing_arguments] = [
+      "CODE_SIGN_IDENTITY=#{development_identity.fetch(:certificate_sha1)}"
+    ]
     context[:output_directory] = release_context[:output_directory]
     context[:provenance_arguments] = aies_provenance_arguments(release_context)
     context[:team_id] = release_context[:team_id]
@@ -874,6 +1071,7 @@ platform :ios do
 
     build = build_aies_beta_archive(context)
     archive_evidence = package_aies_archive_evidence!(build, release_context)
+    verify_aies_reusable_development_identity!(archive_evidence, release_context)
     build = export_aies_beta_archive(context, build)
     evidence = package_aies_internal_evidence!(
       build,
@@ -908,6 +1106,16 @@ platform :ios do
       "version=#{build[:version]} short=#{build[:short_version]} build=#{build[:build_number]}"
     )
   ensure
+    if env_present?(development_keychain_name)
+      expected_keychain_name = ENV["FL_SETUP_CI_KEYCHAIN_NAME"]
+      if development_keychain_name == expected_keychain_name &&
+          development_keychain_name.match?(/\Aaies_development_[0-9]+_[0-9]+\z/)
+        delete_keychain(name: development_keychain_name)
+      else
+        UI.error("Refusing to delete an unexpected development keychain.")
+      end
+    end
+    ENV.delete("AIES_DEVELOPMENT_CERTIFICATE_PASSWORD")
     ENV.delete("XCODE_XCCONFIG_FILE")
   end
 

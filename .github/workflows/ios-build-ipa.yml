@@ -399,6 +399,7 @@ jobs:
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
+            test_verify_aies_development_identity_reuse.py \
             test_verify_aies_internal_signing.py
 
       - name: Verify canonical unsigned AIES build settings
@@ -788,6 +789,7 @@ jobs:
       cancel-in-progress: false
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      FL_SETUP_CI_KEYCHAIN_NAME: aies_development_${{ github.run_id }}_${{ github.run_attempt }}
       OPENCLAW_SKIP_SOURCE_LINT: "YES"
     steps:
       - name: Select Xcode 26.2
@@ -911,6 +913,7 @@ jobs:
           APP_BUNDLE_ID_VALUE: ${{ vars.APP_BUNDLE_ID }}
           APP_STORE_CONNECT_APP_ID_VALUE: ${{ vars.APP_STORE_CONNECT_APP_ID }}
           APPLE_TEAM_ID_VALUE: ${{ vars.APPLE_TEAM_ID }}
+          AIES_DEVELOPMENT_CERTIFICATE_SHA256_VALUE: ${{ vars.AIES_DEVELOPMENT_CERTIFICATE_SHA256 }}
           ASC_ISSUER_ID_VALUE: ${{ vars.ASC_ISSUER_ID }}
           ASC_KEY_ID_VALUE: ${{ vars.ASC_KEY_ID }}
         run: |
@@ -925,6 +928,10 @@ jobs:
           }
           [[ "${APPLE_TEAM_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
             echo "APPLE_TEAM_ID is missing or malformed." >&2
+            exit 1
+          }
+          [[ "${AIES_DEVELOPMENT_CERTIFICATE_SHA256_VALUE}" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "AIES_DEVELOPMENT_CERTIFICATE_SHA256 is missing or malformed." >&2
             exit 1
           }
           [[ "${ASC_KEY_ID_VALUE}" =~ ^[A-Z0-9]{10}$ ]] || {
@@ -999,6 +1006,7 @@ jobs:
             test_write_build_manifest.py \
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
+            test_verify_aies_development_identity_reuse.py \
             test_verify_aies_internal_signing.py
 
       - name: Parse Fastlane release configuration without credentials
@@ -1115,6 +1123,49 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
 
+      - name: Materialize governed reusable Apple Development identity
+        env:
+          AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64: ${{ secrets.AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64 }}
+          AIES_DEVELOPMENT_CERTIFICATE_SHA256: ${{ vars.AIES_DEVELOPMENT_CERTIFICATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          [[ "${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "The governed Apple Development certificate fingerprint is malformed." >&2
+            exit 1
+          }
+          p12_path="${RUNNER_TEMP}/aies-apple-development-identity.p12"
+          case "${p12_path}" in
+            "${RUNNER_TEMP}"/*) ;;
+            *) echo "Refusing unexpected PKCS#12 path." >&2; exit 1 ;;
+          esac
+          umask 077
+          python3 - "${p12_path}" <<'PY'
+          import base64
+          import os
+          import pathlib
+          import sys
+
+          encoded = os.environ.get("AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64", "")
+          compact = "".join(encoded.split())
+          if not compact or len(compact) > 2_000_000:
+              raise SystemExit("protected PKCS#12 encoding is empty or exceeds its bound")
+          try:
+              payload = base64.b64decode(compact, validate=True)
+          except ValueError as exc:
+              raise SystemExit("protected PKCS#12 encoding is invalid") from exc
+          if not payload or len(payload) > 1_500_000:
+              raise SystemExit("decoded protected PKCS#12 is empty or exceeds its bound")
+          path = pathlib.Path(sys.argv[1])
+          descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "wb") as handle:
+              handle.write(payload)
+          PY
+          unset AIES_DEVELOPMENT_CERTIFICATE_P12_BASE64
+          {
+            echo "AIES_DEVELOPMENT_CERTIFICATE_PATH=${p12_path}"
+            echo "AIES_DEVELOPMENT_CERTIFICATE_SHA256=${AIES_DEVELOPMENT_CERTIFICATE_SHA256}"
+          } >> "${GITHUB_ENV}"
+
       - name: Materialize ephemeral App Store Connect key
         env:
           ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
@@ -1137,6 +1188,8 @@ jobs:
           unset ASC_PRIVATE_KEY_P8
 
       - name: Build, verify, and upload internal TestFlight diagnostic
+        env:
+          AIES_DEVELOPMENT_CERTIFICATE_PASSWORD: ${{ secrets.AIES_DEVELOPMENT_CERTIFICATE_PASSWORD }}
         run: |
           set -uo pipefail
           cd "${AIES_BUILD_ROOT}/apps/ios"
@@ -1192,15 +1245,45 @@ jobs:
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json"
           test -s "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-build-manifest.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
+          python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}" "${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${IOS_DEVELOPMENT_TEAM}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          expected_fingerprint = sys.argv[2]
+          expected_team = sys.argv[3]
+          imported = json.loads(
+              (root / "OpenClaw-development-signing-import.json").read_text()
+          )
+          verified = json.loads(
+              (root / "OpenClaw-development-signing-identity.json").read_text()
+          )
+          if imported.get("status") != "reusable_private_key_identity_imported":
+              raise SystemExit("Apple Development identity import receipt is not successful")
+          if verified.get("status") != "reusable_development_identity_verified":
+              raise SystemExit("archive identity-reuse receipt is not successful")
+          for receipt in (imported, verified):
+              if receipt.get("certificate_sha256") != expected_fingerprint:
+                  raise SystemExit("Apple Development identity receipt fingerprint mismatch")
+              if receipt.get("team_id") != expected_team:
+                  raise SystemExit("Apple Development identity receipt Team mismatch")
+          if verified.get("bundle_count") != 5 or len(verified.get("profiles", [])) != 5:
+              raise SystemExit("archive identity-reuse receipt lacks five-target coverage")
+          PY
           if grep -q "BEGIN PRIVATE KEY" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
             echo "Retained export log contains a private-key marker." >&2
             exit 1
@@ -1480,6 +1563,8 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-signing-entitlements.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-manifest.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-entitlements.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-identity.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-import.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-release-lane-status.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
@@ -1527,7 +1612,7 @@ jobs:
 
       # Keep key deletion last: any archive/symbol evidence that exists is retained
       # before cleanup can fail, including the post-upload validation failure path.
-      - name: Remove ephemeral App Store Connect key
+      - name: Remove ephemeral Apple signing material
         if: always()
         run: |
           set -euo pipefail
@@ -1543,3 +1628,28 @@ jobs:
               *) echo "Refusing to remove unexpected Fastlane key path." >&2; exit 1 ;;
             esac
           fi
+          p12_path="${RUNNER_TEMP}/aies-apple-development-identity.p12"
+          case "${p12_path}" in
+            "${RUNNER_TEMP}"/*) rm -f -- "${p12_path}" ;;
+            *) echo "Refusing to remove unexpected PKCS#12 path." >&2; exit 1 ;;
+          esac
+          if [[ ! "${FL_SETUP_CI_KEYCHAIN_NAME}" =~ ^aies_development_[0-9]+_[0-9]+$ ]]; then
+            echo "Refusing unexpected development keychain name." >&2
+            exit 1
+          fi
+          keychain_path="${HOME}/Library/Keychains/${FL_SETUP_CI_KEYCHAIN_NAME}-db"
+          case "${keychain_path}" in
+            "${HOME}/Library/Keychains/aies_development_"*-db) ;;
+            *) echo "Refusing unexpected development keychain path." >&2; exit 1 ;;
+          esac
+          if [[ -e "${keychain_path}" ]]; then
+            security delete-keychain "${keychain_path}"
+          fi
+          [[ ! -e "${p12_path}" ]] || {
+            echo "Ephemeral Apple Development PKCS#12 cleanup failed." >&2
+            exit 1
+          }
+          [[ ! -e "${keychain_path}" ]] || {
+            echo "Ephemeral Apple Development keychain cleanup failed." >&2
+            exit 1
+          }
