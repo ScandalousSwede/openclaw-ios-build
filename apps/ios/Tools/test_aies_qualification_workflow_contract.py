@@ -176,9 +176,39 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
             unsigned,
         )
         self.assertEqual(
-            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 3
+            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 5
         )
         self.assertIn("build_settings_topology_report", unsigned)
+        signing_settings = unsigned.split(
+            "      - name: Verify credential-free Release archive signing dispositions\n",
+            maxsplit=1,
+        )[1].split(
+            "      - name: Build OpenClawKit and run S0-S3 reliability tests\n",
+            maxsplit=1,
+        )[0]
+        self.assertIn("-configuration Release", signing_settings)
+        self.assertIn("-showBuildSettings", signing_settings)
+        self.assertIn("-showBuildSettingsForIndex", signing_settings)
+        self.assertIn("archive-action-signing-build-settings.json", signing_settings)
+        self.assertIn("archive-index-signing-build-settings.json", signing_settings)
+        self.assertEqual(signing_settings.count("            archive \\\n"), 2)
+        self.assertIn("verify_aies_archive_signing_settings.py", signing_settings)
+        self.assertIn("--expected-team-id J76B47MZ6V", signing_settings)
+        self.assertNotIn("CODE_SIGN_IDENTITY=", signing_settings)
+        self.assertNotIn("PROVISIONING_PROFILE=", signing_settings)
+        self.assertNotIn("PROVISIONING_PROFILE_SPECIFIER=", signing_settings)
+        self.assertNotIn("CODE_SIGNING_ALLOWED=", signing_settings)
+        self.assertNotIn("CODE_SIGNING_REQUIRED=", signing_settings)
+        self.assertEqual(unsigned.count("-configuration Release"), 2)
+        self.assertGreaterEqual(unsigned.count("-configuration Debug"), 3)
+        self.assertIn("OPENCLAW_BUILD_CONFIGURATION=Debug", unsigned)
+        self.assertIn("--configuration Debug", unsigned)
+        self.assertIn(
+            "--archive /tmp/OpenClaw.xcarchive", unsigned
+        )
+        self.assertEqual(
+            unsigned.count("verify_aies_archive_signing_settings.py"), 3
+        )
         self.assertIn('"ai.openclaw.client.J76B47MZ6V"', unsigned)
         self.assertGreaterEqual(unsigned.count("CODE_SIGNING_ALLOWED=NO"), 3)
         self.assertGreaterEqual(unsigned.count("CODE_SIGNING_REQUIRED=NO"), 3)

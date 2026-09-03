@@ -259,7 +259,8 @@ jobs:
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
-            test_verify_aies_unsigned_archive.py
+            test_verify_aies_unsigned_archive.py \
+            test_verify_aies_archive_signing_settings.py
 
       - name: Verify pinned Fastlane version
         run: |
@@ -400,6 +401,7 @@ jobs:
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
             test_verify_aies_development_identity_reuse.py \
+            test_verify_aies_archive_signing_settings.py \
             test_verify_aies_internal_signing.py
 
       - name: Verify canonical unsigned AIES build settings
@@ -448,6 +450,48 @@ jobs:
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
             --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-build-settings-verification.json"
+          [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
+
+      - name: Verify credential-free Release archive signing dispositions
+        run: |
+          set -euo pipefail
+          strict_package_args=()
+          while IFS= read -r argument; do
+            strict_package_args+=("${argument}")
+          done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
+          archive_settings="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-action-signing-build-settings.json"
+          index_settings="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-index-signing-build-settings.json"
+          report="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-signing-target-dispositions.json"
+          cd "${AIES_BUILD_ROOT}/apps/ios"
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -showBuildSettings \
+            -json \
+            "${strict_package_args[@]}" \
+            archive \
+            > "${archive_settings}"
+          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+            -project OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -showBuildSettingsForIndex \
+            -json \
+            "${strict_package_args[@]}" \
+            archive \
+            > "${index_settings}"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_archive_signing_settings.py" \
+            --input "${archive_settings}" \
+            --input "${index_settings}" \
+            --output "${report}" \
+            --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+            --expected-team-id J76B47MZ6V
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
+            --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
+            --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-archive-settings-verification.json"
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Build OpenClawKit and run S0-S3 reliability tests
@@ -673,6 +717,13 @@ jobs:
           set -euo pipefail
           evidence_root="${RUNNER_TEMP}/openclaw-aies-unsigned-evidence"
           mkdir -p "${evidence_root}"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_archive_signing_settings.py" \
+            --input "${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-action-signing-build-settings.json" \
+            --input "${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-index-signing-build-settings.json" \
+            --archive /tmp/OpenClaw.xcarchive \
+            --output "${evidence_root}/OpenClaw-archive-signing-target-dispositions.json" \
+            --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
+            --expected-team-id J76B47MZ6V
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_unsigned_archive.py" \
             --archive /tmp/OpenClaw.xcarchive \
             --ipa /tmp/OpenClaw.ipa \
@@ -1007,6 +1058,7 @@ jobs:
             test_aies_macho_signature_equivalence.py \
             test_aies_release_gate_behavior.py \
             test_verify_aies_development_identity_reuse.py \
+            test_verify_aies_archive_signing_settings.py \
             test_verify_aies_internal_signing.py
 
       - name: Parse Fastlane release configuration without credentials
@@ -1279,6 +1331,16 @@ jobs:
           )
           if imported.get("status") != "reusable_private_key_identity_imported":
               raise SystemExit("Apple Development identity import receipt is not successful")
+          if (
+              imported.get("keychain_valid_identity_count") != 1
+              or imported.get("ephemeral_keychain_search_list_exclusive") is not True
+              or imported.get("ephemeral_keychain_is_default") is not True
+              or imported.get("archive_visible_valid_identity_count") != 1
+              or imported.get("archive_visible_identity_set_exact") is not True
+          ):
+              raise SystemExit(
+                  "Apple Development identity import receipt lacks exclusive keychain custody"
+              )
           if verified.get("status") != "reusable_development_identity_verified":
               raise SystemExit("archive identity-reuse receipt is not successful")
           if profiles.get("status") != "five_governed_profiles_installed_for_offline_archive":
