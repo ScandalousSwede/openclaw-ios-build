@@ -1247,6 +1247,7 @@ jobs:
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-profile-import.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json"
           test -s "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
@@ -1255,6 +1256,7 @@ jobs:
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-manifest.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-profile-import.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
@@ -1269,6 +1271,9 @@ jobs:
           imported = json.loads(
               (root / "OpenClaw-development-signing-import.json").read_text()
           )
+          profiles = json.loads(
+              (root / "OpenClaw-development-profile-import.json").read_text()
+          )
           verified = json.loads(
               (root / "OpenClaw-development-signing-identity.json").read_text()
           )
@@ -1276,12 +1281,39 @@ jobs:
               raise SystemExit("Apple Development identity import receipt is not successful")
           if verified.get("status") != "reusable_development_identity_verified":
               raise SystemExit("archive identity-reuse receipt is not successful")
-          for receipt in (imported, verified):
+          if profiles.get("status") != "five_governed_profiles_installed_for_offline_archive":
+              raise SystemExit("Apple Development profile import receipt is not successful")
+          for receipt in (imported, profiles, verified):
               if receipt.get("certificate_sha256") != expected_fingerprint:
                   raise SystemExit("Apple Development identity receipt fingerprint mismatch")
               if receipt.get("team_id") != expected_team:
                   raise SystemExit("Apple Development identity receipt Team mismatch")
-          if verified.get("bundle_count") != 5 or len(verified.get("profiles", [])) != 5:
+          expected_bundles = {
+              "ai.openclaw.client.J76B47MZ6V",
+              "ai.openclaw.client.J76B47MZ6V.share",
+              "ai.openclaw.client.J76B47MZ6V.activitywidget",
+              "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+              "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+          }
+          profile_records = profiles.get("profiles")
+          if (
+              profiles.get("profile_count") != 5
+              or not isinstance(profile_records, list)
+              or len(profile_records) != 5
+              or {item.get("bundle_id") for item in profile_records}
+              != expected_bundles
+              or profiles.get("archive_allows_provisioning_updates") is not False
+              or profiles.get("archive_receives_apple_authentication_arguments")
+              is not False
+          ):
+              raise SystemExit(
+                  "Apple Development profile receipt lacks exact offline five-target custody"
+              )
+          if (
+              verified.get("bundle_count") != 5
+              or len(verified.get("profiles", [])) != 5
+              or verified.get("prefetched_profile_binding_verified") is not True
+          ):
               raise SystemExit("archive identity-reuse receipt lacks five-target coverage")
           PY
           if grep -q "BEGIN PRIVATE KEY" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
@@ -1565,6 +1597,7 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-entitlements.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-identity.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-import.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-profile-import.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-release-lane-status.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
@@ -1615,41 +1648,96 @@ jobs:
       - name: Remove ephemeral Apple signing material
         if: always()
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          cleanup_status=0
           key_path="${RUNNER_TEMP}/aies-app-store-connect-key.p8"
           case "${key_path}" in
-            "${RUNNER_TEMP}"/*) rm -f -- "${key_path}" ;;
-            *) echo "Refusing to remove unexpected key path." >&2; exit 1 ;;
+            "${RUNNER_TEMP}"/*) rm -f -- "${key_path}" || cleanup_status=1 ;;
+            *) echo "Refusing to remove unexpected key path." >&2; cleanup_status=1 ;;
           esac
           if [[ -n "${ASC_KEY_ID:-}" ]]; then
             fastlane_key_path="${HOME}/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
             case "${fastlane_key_path}" in
-              "${HOME}/.appstoreconnect/private_keys/"*) rm -f -- "${fastlane_key_path}" ;;
-              *) echo "Refusing to remove unexpected Fastlane key path." >&2; exit 1 ;;
+              "${HOME}/.appstoreconnect/private_keys/"*) rm -f -- "${fastlane_key_path}" || cleanup_status=1 ;;
+              *) echo "Refusing to remove unexpected Fastlane key path." >&2; cleanup_status=1 ;;
             esac
           fi
           p12_path="${RUNNER_TEMP}/aies-apple-development-identity.p12"
           case "${p12_path}" in
-            "${RUNNER_TEMP}"/*) rm -f -- "${p12_path}" ;;
-            *) echo "Refusing to remove unexpected PKCS#12 path." >&2; exit 1 ;;
+            "${RUNNER_TEMP}"/*) rm -f -- "${p12_path}" || cleanup_status=1 ;;
+            *) echo "Refusing unexpected PKCS#12 path." >&2; cleanup_status=1 ;;
           esac
+          python3 - "${RUNNER_TEMP}" <<'PY' || cleanup_status=1
+          import json
+          import pathlib
+          import re
+          import shutil
+          import sys
+
+          runner_temp = pathlib.Path(sys.argv[1]).resolve()
+          staging = (runner_temp / "aies-development-profiles").resolve()
+          journal = (runner_temp / "aies-development-profile-cleanup.json").resolve()
+          if staging != runner_temp / "aies-development-profiles":
+              raise SystemExit("refusing unexpected development-profile staging path")
+          if journal.exists():
+              payload = json.loads(journal.read_text(encoding="utf-8"))
+              if payload.get("schema") != "aies.apple-development-profile-cleanup.v1":
+                  raise SystemExit("development-profile cleanup journal is malformed")
+              uuids = payload.get("profile_uuids")
+              if not isinstance(uuids, list) or len(uuids) != 5 or len(set(uuids)) != 5:
+                  raise SystemExit(
+                      "development-profile cleanup journal lacks five unique profiles"
+                  )
+              uuid_pattern = re.compile(
+                  r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+              )
+              profile_root = (
+                  pathlib.Path.home()
+                  / "Library"
+                  / "Developer"
+                  / "Xcode"
+                  / "UserData"
+                  / "Provisioning Profiles"
+              )
+              for uuid in uuids:
+                  if not isinstance(uuid, str) or not uuid_pattern.fullmatch(uuid):
+                      raise SystemExit("development-profile cleanup UUID is malformed")
+                  profile_path = profile_root / f"{uuid}.mobileprovision"
+                  if profile_path.is_symlink():
+                      raise SystemExit(
+                          "refusing symlinked development-profile cleanup target"
+                      )
+                  profile_path.unlink(missing_ok=True)
+                  if profile_path.exists():
+                      raise SystemExit("ephemeral development-profile cleanup failed")
+              journal.unlink()
+          if staging.exists():
+              if staging.is_symlink() or not staging.is_dir():
+                  raise SystemExit(
+                      "refusing unexpected development-profile staging object"
+                  )
+              shutil.rmtree(staging)
+          PY
           if [[ ! "${FL_SETUP_CI_KEYCHAIN_NAME}" =~ ^aies_development_[0-9]+_[0-9]+$ ]]; then
             echo "Refusing unexpected development keychain name." >&2
-            exit 1
+            cleanup_status=1
+            keychain_path=""
+          else
+            keychain_path="${HOME}/Library/Keychains/${FL_SETUP_CI_KEYCHAIN_NAME}-db"
+            case "${keychain_path}" in
+              "${HOME}/Library/Keychains/aies_development_"*-db) ;;
+              *) echo "Refusing unexpected development keychain path." >&2; cleanup_status=1; keychain_path="" ;;
+            esac
           fi
-          keychain_path="${HOME}/Library/Keychains/${FL_SETUP_CI_KEYCHAIN_NAME}-db"
-          case "${keychain_path}" in
-            "${HOME}/Library/Keychains/aies_development_"*-db) ;;
-            *) echo "Refusing unexpected development keychain path." >&2; exit 1 ;;
-          esac
-          if [[ -e "${keychain_path}" ]]; then
-            security delete-keychain "${keychain_path}"
+          if [[ -n "${keychain_path}" && -e "${keychain_path}" ]]; then
+            security delete-keychain "${keychain_path}" || cleanup_status=1
           fi
           [[ ! -e "${p12_path}" ]] || {
             echo "Ephemeral Apple Development PKCS#12 cleanup failed." >&2
-            exit 1
+            cleanup_status=1
           }
-          [[ ! -e "${keychain_path}" ]] || {
+          [[ -z "${keychain_path}" || ! -e "${keychain_path}" ]] || {
             echo "Ephemeral Apple Development keychain cleanup failed." >&2
-            exit 1
+            cleanup_status=1
           }
+          exit "${cleanup_status}"

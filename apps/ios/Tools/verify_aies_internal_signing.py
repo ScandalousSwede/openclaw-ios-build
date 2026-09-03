@@ -398,6 +398,9 @@ def verify_bundle(
         raise ValueError(f"code-signing identity metadata mismatch for {bundle_id}")
     raw_profile = read_profile(path, security)
     profile = selected_profile_fields(raw_profile, bundle_id)
+    profile["embedded_profile_sha256"] = sha256_bytes(
+        (path / "embedded.mobileprovision").read_bytes()
+    )
     if profile["team_identifiers"] != [expected_team_id]:
         raise ValueError(f"profile team mismatch for {bundle_id}")
     if not isinstance(

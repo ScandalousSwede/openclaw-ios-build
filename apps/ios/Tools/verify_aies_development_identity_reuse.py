@@ -13,6 +13,9 @@ from typing import Any
 
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 TEAM_ID_RE = re.compile(r"^[A-Z0-9]{10}$")
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+)
 
 
 class VerificationError(ValueError):
@@ -34,6 +37,7 @@ def _text(value: object, label: str) -> str:
 def verify_report(
     report: object,
     *,
+    profile_import_receipt: object,
     expected_sha256: str,
     expected_team_id: str,
     expected_main_bundle_id: str,
@@ -62,6 +66,67 @@ def verify_report(
             "OpenClawWatchExtension.appex"
         ),
     }
+    profile_import = _mapping(profile_import_receipt, "profile import receipt")
+    if (
+        profile_import.get("schema")
+        != "aies.apple-development-profile-import.v1"
+        or profile_import.get("status")
+        != "five_governed_profiles_installed_for_offline_archive"
+        or profile_import.get("source_operation")
+        != "read_only_apple_profile_fetch"
+        or profile_import.get("archive_allows_provisioning_updates") is not False
+        or profile_import.get("archive_receives_apple_authentication_arguments")
+        is not False
+        or profile_import.get("team_id") != expected_team_id
+        or profile_import.get("certificate_sha256") != expected_sha256
+        or profile_import.get("profile_count") != 5
+    ):
+        raise VerificationError("profile import receipt custody is invalid")
+    imported_profiles = profile_import.get("profiles")
+    if not isinstance(imported_profiles, list) or len(imported_profiles) != 5:
+        raise VerificationError("profile import receipt must contain five profiles")
+    imported_by_bundle: dict[str, dict[str, Any]] = {}
+    for index, raw_profile in enumerate(imported_profiles):
+        imported = _mapping(raw_profile, f"imported profile[{index}]")
+        bundle_id = _text(imported.get("bundle_id"), f"imported profile[{index}].bundle_id")
+        if bundle_id in imported_by_bundle:
+            raise VerificationError(f"duplicate imported profile: {bundle_id}")
+        profile_uuid = _text(
+            imported.get("profile_uuid"), f"imported profile[{index}].profile_uuid"
+        )
+        source_sha256 = _text(
+            imported.get("source_sha256"),
+            f"imported profile[{index}].source_sha256",
+        )
+        if not UUID_RE.fullmatch(profile_uuid) or not SHA256_RE.fullmatch(source_sha256):
+            raise VerificationError(f"imported profile identity is malformed: {bundle_id}")
+        imported_certificates = imported.get("developer_certificate_sha256")
+        expected_imported_aps = (
+            "development" if bundle_id == expected_main_bundle_id else None
+        )
+        if (
+            imported.get("profile_type") != "IOS_APP_DEVELOPMENT"
+            or imported.get("profile_state") != "ACTIVE"
+            or imported.get("application_identifier")
+            != f"{expected_team_id}.{bundle_id}"
+            or imported.get("get_task_allow") is not True
+            or imported.get("aps_environment") != expected_imported_aps
+            or not isinstance(imported_certificates, list)
+            or not 1 <= len(imported_certificates) <= 50
+            or len(set(imported_certificates)) != len(imported_certificates)
+            or not all(
+                isinstance(value, str) and SHA256_RE.fullmatch(value)
+                for value in imported_certificates
+            )
+            or expected_sha256 not in imported_certificates
+            or type(imported.get("provisioned_device_count")) is not int
+            or imported["provisioned_device_count"] < 1
+            or type(imported.get("xcode_managed")) is not bool
+        ):
+            raise VerificationError(f"imported profile semantics are invalid: {bundle_id}")
+        imported_by_bundle[bundle_id] = imported
+    if set(imported_by_bundle) != set(expected_paths):
+        raise VerificationError("imported profile bundle topology does not match AIES")
     current_time = now or dt.datetime.now(dt.timezone.utc)
     if current_time.tzinfo is None:
         raise VerificationError("verification time must be timezone-aware")
@@ -161,6 +226,15 @@ def verify_report(
             ) from exc
         if expiration.tzinfo is None or expiration <= current_time:
             raise VerificationError(f"profile is expired: {bundle_id}")
+        imported = imported_by_bundle[bundle_id]
+        if (
+            profile_uuid.lower() != imported.get("profile_uuid")
+            or profile.get("embedded_profile_sha256")
+            != imported.get("source_sha256")
+        ):
+            raise VerificationError(
+                f"archive did not embed the exact governed profile: {bundle_id}"
+            )
         verified_bundle_ids.append(bundle_id)
         profiles.append(
             {
@@ -205,6 +279,7 @@ def verify_report(
         "bundle_count": len(verified_bundle_ids),
         "bundle_ids": sorted(verified_bundle_ids),
         "profiles": sorted(profiles, key=lambda item: item["bundle_id"]),
+        "prefetched_profile_binding_verified": True,
         "auxiliary_code_object_count": len(auxiliaries),
     }
 
@@ -212,6 +287,7 @@ def verify_report(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive-signing-report", required=True, type=pathlib.Path)
+    parser.add_argument("--profile-import-receipt", required=True, type=pathlib.Path)
     parser.add_argument("--expected-certificate-sha256", required=True)
     parser.add_argument("--expected-team-id", required=True)
     parser.add_argument("--expected-main-bundle-id", required=True)
@@ -223,8 +299,12 @@ def main() -> int:
     args = parse_args()
     try:
         report = json.loads(args.archive_signing_report.read_text(encoding="utf-8"))
+        profile_import_receipt = json.loads(
+            args.profile_import_receipt.read_text(encoding="utf-8")
+        )
         receipt = verify_report(
             report,
+            profile_import_receipt=profile_import_receipt,
             expected_sha256=args.expected_certificate_sha256,
             expected_team_id=args.expected_team_id,
             expected_main_bundle_id=args.expected_main_bundle_id,

@@ -8,10 +8,19 @@ require "time"
 require "spaceship"
 require "gym"
 require "tmpdir"
+require "base64"
 
 default_platform(:ios)
 
 BETA_APP_IDENTIFIER = "ai.openclaw.client.J76B47MZ6V"
+
+AIES_DEVELOPMENT_PROFILE_SPECS = [
+  { target: "main", bundle_id: BETA_APP_IDENTIFIER },
+  { target: "share", bundle_id: "#{BETA_APP_IDENTIFIER}.share" },
+  { target: "activity_widget", bundle_id: "#{BETA_APP_IDENTIFIER}.activitywidget" },
+  { target: "watch_app", bundle_id: "#{BETA_APP_IDENTIFIER}.watchkitapp" },
+  { target: "watch_extension", bundle_id: "#{BETA_APP_IDENTIFIER}.watchkitapp.extension" }
+].freeze
 
 def load_env_file(path)
   return unless File.exist?(path)
@@ -279,7 +288,7 @@ def aies_export_options(context)
 end
 
 def aies_archive_build_options(context, archive_path)
-  xcode_arguments = context.fetch(:xcode_arguments) +
+  xcode_arguments = context.fetch(:archive_xcode_arguments, []) +
     context.fetch(:provenance_arguments, []) +
     context.fetch(:archive_signing_arguments, [])
   {
@@ -429,6 +438,305 @@ ensure
   FileUtils.rm_f(expected_path) if defined?(expected_path) && p12_path == expected_path
 end
 
+def aies_profile_certificate_der(raw_certificate)
+  return raw_certificate if raw_certificate.is_a?(String)
+  return raw_certificate.string if raw_certificate.respond_to?(:string)
+
+  UI.user_error!("Development profile contains an unreadable certificate value.")
+end
+
+def aies_xcode_development_profile_root
+  File.expand_path(
+    File.join(
+      Dir.home,
+      "Library",
+      "Developer",
+      "Xcode",
+      "UserData",
+      "Provisioning Profiles"
+    )
+  )
+end
+
+def assert_empty_aies_profile_caches!
+  roots = [
+    aies_xcode_development_profile_root,
+    File.expand_path(
+      File.join(Dir.home, "Library", "MobileDevice", "Provisioning Profiles")
+    )
+  ]
+  roots.each do |root|
+    UI.user_error!("Refusing a symlinked provisioning profile cache.") if File.symlink?(root)
+  end
+  present = roots.flat_map do |root|
+    Dir.glob(File.join(root, "*.{mobileprovision,provisionprofile}"))
+  end
+  unless present.empty?
+    UI.user_error!("Ephemeral runner profile caches must be empty before governed installation.")
+  end
+end
+
+def validate_aies_development_profile!(profile, parsed, release_context, expected_sha256)
+  bundle_id = profile.fetch(:bundle_id)
+  target = profile.fetch(:target)
+  remote = profile.fetch(:remote)
+  UI.user_error!("Development profile resource ID is malformed for #{target}.") unless remote.id.to_s.match?(/\A[A-Za-z0-9-]{1,128}\z/)
+  unless remote.profile_type == Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT
+    UI.user_error!("Development profile type is invalid for #{target}.")
+  end
+  unless remote.profile_state == Spaceship::ConnectAPI::Profile::ProfileState::ACTIVE
+    UI.user_error!("Development profile is not ACTIVE for #{target}.")
+  end
+
+  uuid = parsed["UUID"].to_s
+  name = parsed["Name"].to_s
+  unless uuid.match?(/\A[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z/) &&
+      remote.uuid.to_s.casecmp?(uuid)
+    UI.user_error!("Development profile UUID is invalid for #{target}.")
+  end
+  unless name.bytesize.between?(1, 256) && remote.name.to_s == name
+    UI.user_error!("Development profile name is invalid for #{target}.")
+  end
+
+  expiration_value = parsed["ExpirationDate"]
+  expiration = if expiration_value.respond_to?(:to_time)
+                 expiration_value.to_time
+               else
+                 Time.parse(expiration_value.to_s)
+               end
+  expiration = expiration.utc
+  unless expiration > Time.now.utc + 86_400
+    UI.user_error!("Development profile expires too soon for #{target}.")
+  end
+
+  team_id = release_context.fetch(:team_id)
+  unless parsed["TeamIdentifier"] == [team_id] &&
+      parsed["ApplicationIdentifierPrefix"] == [team_id]
+    UI.user_error!("Development profile Team identity is invalid for #{target}.")
+  end
+  platforms = parsed["Platform"]
+  unless platforms.is_a?(Array) && platforms.include?("iOS") &&
+      platforms.all? { |value| value.is_a?(String) }
+    UI.user_error!("Development profile platform is invalid for #{target}.")
+  end
+
+  entitlements = parsed["Entitlements"]
+  UI.user_error!("Development profile entitlements are malformed for #{target}.") unless entitlements.is_a?(Hash)
+  application_identifier = "#{team_id}.#{bundle_id}"
+  unless entitlements["application-identifier"] == application_identifier &&
+      entitlements["com.apple.developer.team-identifier"] == team_id &&
+      entitlements["get-task-allow"] == true
+    UI.user_error!("Development profile application identity is invalid for #{target}.")
+  end
+  expected_aps = bundle_id == release_context.fetch(:main_bundle_id) ? "development" : nil
+  unless entitlements["aps-environment"] == expected_aps
+    UI.user_error!("Development profile APS entitlement is invalid for #{target}.")
+  end
+
+  devices = parsed["ProvisionedDevices"]
+  unless devices.is_a?(Array) && devices.length.between?(1, 1_000) &&
+      devices.all? { |value| value.is_a?(String) && value.bytesize.between?(1, 256) } &&
+      parsed["ProvisionsAllDevices"] != true
+    UI.user_error!("Development profile device scope is invalid for #{target}.")
+  end
+  certificates = parsed["DeveloperCertificates"]
+  unless certificates.is_a?(Array) && certificates.length.between?(1, 50)
+    UI.user_error!("Development profile certificate set is missing for #{target}.")
+  end
+  certificate_sha256 = certificates.map do |certificate|
+    Digest::SHA256.hexdigest(aies_profile_certificate_der(certificate))
+  end.sort
+  unless certificate_sha256.uniq == certificate_sha256 &&
+      certificate_sha256.include?(expected_sha256)
+    UI.user_error!("Development profile does not authorize the governed identity for #{target}.")
+  end
+
+  {
+    apple_resource_id: remote.id.to_s,
+    bundle_id: bundle_id,
+    target: target,
+    profile_uuid: uuid.downcase,
+    profile_name: name,
+    profile_expiration_at: expiration.iso8601,
+    profile_type: remote.profile_type,
+    profile_state: remote.profile_state,
+    application_identifier: application_identifier,
+    get_task_allow: true,
+    aps_environment: expected_aps,
+    provisioned_device_count: devices.length,
+    developer_certificate_sha256: certificate_sha256,
+    xcode_managed: parsed["IsXcodeManaged"] == true
+  }
+rescue ArgumentError => e
+  UI.user_error!("Development profile metadata is malformed for #{target}: #{e.message}")
+end
+
+def fetch_install_aies_reusable_development_profiles!(release_context, expected_sha256)
+  runner_temp = File.expand_path(required_env!("RUNNER_TEMP"))
+  download_directory = File.join(runner_temp, "aies-development-profiles")
+  cleanup_journal = File.join(runner_temp, "aies-development-profile-cleanup.json")
+  UI.user_error!("Development profile staging path already exists.") if File.exist?(download_directory)
+  UI.user_error!("Development profile cleanup journal already exists.") if File.exist?(cleanup_journal) || File.symlink?(cleanup_journal)
+  assert_empty_aies_profile_caches!
+  FileUtils.mkdir(download_directory, mode: 0o700)
+
+  validated = []
+  installed_paths = []
+  begin
+    development_profiles = Spaceship::ConnectAPI::Profile.all(
+      filter: {
+        profileType: Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT
+      },
+      includes: "bundleId"
+    )
+    AIES_DEVELOPMENT_PROFILE_SPECS.each do |spec|
+      bundle_records = Spaceship::ConnectAPI::BundleId.all(
+        filter: { identifier: spec.fetch(:bundle_id) }
+      ).select { |record| record.identifier == spec.fetch(:bundle_id) }
+      unless bundle_records.length == 1
+        UI.user_error!("Expected one Apple Bundle ID resource for #{spec.fetch(:target)}; found #{bundle_records.length}.")
+      end
+      bundle_record = bundle_records.first
+      unless bundle_record.id.to_s.match?(/\A[A-Za-z0-9-]{1,128}\z/)
+        UI.user_error!("Apple Bundle ID resource is malformed for #{spec.fetch(:target)}.")
+      end
+
+      candidates = development_profiles.select do |profile|
+        profile.bundle_id&.identifier == spec.fetch(:bundle_id) &&
+          profile.bundle_id&.id.to_s == bundle_record.id.to_s &&
+          profile.profile_state == Spaceship::ConnectAPI::Profile::ProfileState::ACTIVE
+      end
+      matches = []
+      candidates.each_with_index do |remote_profile, index|
+        encoded = remote_profile.profile_content.to_s.gsub(/\s+/, "")
+        UI.user_error!("Development profile content is missing or oversized for #{spec.fetch(:target)}.") unless encoded.bytesize.between?(1, 7_000_000)
+        begin
+          content = Base64.strict_decode64(encoded)
+        rescue ArgumentError
+          UI.user_error!("Development profile content is not valid base64 for #{spec.fetch(:target)}.")
+        end
+        UI.user_error!("Decoded development profile is missing or oversized for #{spec.fetch(:target)}.") unless content.bytesize.between?(1, 5_000_000)
+        path = File.join(download_directory, "#{spec.fetch(:target)}-#{index}.mobileprovision")
+        File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |handle|
+          handle.binmode
+          handle.write(content)
+        end
+        parsed = FastlaneCore::ProvisioningProfile.parse(path)
+        certificate_values = parsed["DeveloperCertificates"]
+        next unless certificate_values.is_a?(Array)
+        fingerprints = certificate_values.map do |certificate|
+          Digest::SHA256.hexdigest(aies_profile_certificate_der(certificate))
+        end
+        next unless fingerprints.include?(expected_sha256)
+
+        summary = validate_aies_development_profile!(
+          spec.merge(remote: remote_profile),
+          parsed,
+          release_context,
+          expected_sha256
+        )
+        summary[:source_path] = path
+        summary[:source_sha256] = Digest::SHA256.file(path).hexdigest
+        summary[:bundle_resource_id] = bundle_record.id.to_s
+        matches << summary
+      end
+      unless matches.length == 1
+        UI.user_error!("Expected one ACTIVE governed development profile for #{spec.fetch(:target)}; found #{matches.length}.")
+      end
+      validated << matches.first
+    end
+
+    journal_payload = {
+      schema: "aies.apple-development-profile-cleanup.v1",
+      profile_uuids: validated.map { |item| item.fetch(:profile_uuid) }.sort
+    }
+    File.open(cleanup_journal, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |handle|
+      handle.write(JSON.generate(journal_payload) + "\n")
+    end
+
+    profile_root = aies_xcode_development_profile_root
+    UI.user_error!("Refusing a symlinked Xcode profile cache.") if File.symlink?(profile_root)
+    FileUtils.mkdir_p(profile_root, mode: 0o700)
+    validated.each do |item|
+      source_path = item.fetch(:source_path)
+      expected_destination = File.join(
+        profile_root,
+        "#{item.fetch(:profile_uuid)}.mobileprovision"
+      )
+      if File.exist?(expected_destination) || File.symlink?(expected_destination)
+        UI.user_error!("Refusing to overwrite an existing development profile installation.")
+      end
+      installed_path = File.expand_path(expected_destination)
+      installed_paths << installed_path
+      File.open(installed_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |handle|
+        handle.binmode
+        handle.write(File.binread(source_path))
+      end
+      installed_parsed = FastlaneCore::ProvisioningProfile.parse(installed_path)
+      unless File.file?(installed_path) && !File.symlink?(installed_path) &&
+          Digest::SHA256.file(installed_path).hexdigest == item.fetch(:source_sha256) &&
+          installed_parsed["UUID"].to_s.casecmp?(item.fetch(:profile_uuid))
+        UI.user_error!("Installed development profile verification failed for #{item.fetch(:target)}.")
+      end
+    end
+
+    receipt = File.join(
+      release_context.fetch(:output_directory),
+      "OpenClaw-development-profile-import.json"
+    )
+    FileUtils.mkdir_p(File.dirname(receipt))
+    File.write(receipt, JSON.pretty_generate({
+      schema: "aies.apple-development-profile-import.v1",
+      status: "five_governed_profiles_installed_for_offline_archive",
+      source_operation: "read_only_apple_profile_fetch",
+      archive_allows_provisioning_updates: false,
+      archive_receives_apple_authentication_arguments: false,
+      team_id: release_context.fetch(:team_id),
+      certificate_sha256: expected_sha256,
+      profile_count: validated.length,
+      profiles: validated.map do |item|
+        item.reject { |key, _value| [:source_path].include?(key) }
+      end.sort_by { |item| item.fetch(:bundle_id) }
+    }) + "\n")
+
+    {
+      installed_paths: installed_paths,
+      receipt: receipt
+    }
+  rescue StandardError
+    remove_aies_installed_development_profiles!(installed_paths)
+    raise
+  ensure
+    FileUtils.rm_rf(download_directory) if File.expand_path(download_directory).start_with?("#{runner_temp}#{File::SEPARATOR}")
+  end
+end
+
+def remove_aies_installed_development_profiles!(paths)
+  profile_root = aies_xcode_development_profile_root
+  Array(paths).each do |raw_path|
+    path = File.expand_path(raw_path.to_s)
+    unless File.dirname(path) == profile_root &&
+        File.basename(path).match?(/\A[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\.mobileprovision\z/)
+      UI.user_error!("Refusing to remove an unexpected development profile path.")
+    end
+    FileUtils.rm_f(path)
+    UI.user_error!("Ephemeral development profile cleanup failed.") if File.exist?(path) || File.symlink?(path)
+  end
+  runner_temp = ENV["RUNNER_TEMP"]
+  if env_present?(runner_temp)
+    runner_temp = File.expand_path(runner_temp)
+    journal = File.expand_path(
+      File.join(runner_temp, "aies-development-profile-cleanup.json")
+    )
+    unless File.dirname(journal) == runner_temp &&
+        File.basename(journal) == "aies-development-profile-cleanup.json"
+      UI.user_error!("Refusing an unexpected development profile cleanup journal path.")
+    end
+    UI.user_error!("Refusing a symlinked development profile cleanup journal.") if File.symlink?(journal)
+    FileUtils.rm_f(journal)
+  end
+end
+
 def aies_export_build_options(context, archive_path, output_directory)
   {
     project: File.join(ios_root, "OpenClaw.xcodeproj"),
@@ -441,7 +749,7 @@ def aies_export_build_options(context, archive_path, output_directory)
     output_directory: output_directory,
     output_name: "OpenClaw.ipa",
     include_symbols: true,
-    xcargs: shell_join(context.fetch(:xcode_arguments)),
+    xcargs: shell_join(context.fetch(:export_xcode_arguments)),
     export_options: aies_export_options(context)
   }
 end
@@ -670,6 +978,7 @@ def verify_aies_reusable_development_identity!(archive_evidence, release_context
   sh(shell_join([
     "python3", verifier,
     "--archive-signing-report", archive_evidence.fetch(:signing_report),
+    "--profile-import-receipt", archive_evidence.fetch(:development_profile_receipt),
     "--expected-certificate-sha256", expected_sha256,
     "--expected-team-id", release_context.fetch(:team_id),
     "--expected-main-bundle-id", release_context.fetch(:main_bundle_id),
@@ -695,6 +1004,7 @@ def package_aies_internal_evidence!(build, release_context, archive_evidence)
   UI.user_error!("Signed archive evidence is incomplete.") unless [
     archive_evidence[:archive_zip],
     archive_evidence[:development_identity_receipt],
+    archive_evidence[:development_profile_receipt],
     archive_evidence[:dsym_zip],
     archive_evidence[:signing_report],
     archive_evidence[:build_manifest]
@@ -918,6 +1228,75 @@ platform :ios do
 
   desc "Credential-free regression for the AIES archive/export signing boundary"
   lane :verify_aies_export_command do
+    fixture_certificate = "credential-free-development-certificate-fixture".b
+    fixture_certificate_sha256 = Digest::SHA256.hexdigest(fixture_certificate)
+    remote_profile_type = Spaceship::ConnectAPI::Profile::ProfileType::IOS_APP_DEVELOPMENT
+    remote_profile_state = Spaceship::ConnectAPI::Profile::ProfileState::ACTIVE
+    remote_profile = Struct.new(
+      :id,
+      :profile_type,
+      :profile_state,
+      :uuid,
+      :name
+    ).new(
+      "PROFILEFIXTURE1",
+      remote_profile_type,
+      remote_profile_state,
+      "00000000-0000-0000-0000-000000000001",
+      "AIES credential-free development profile fixture"
+    )
+    parsed_profile = {
+      "UUID" => remote_profile.uuid,
+      "Name" => remote_profile.name,
+      "ExpirationDate" => Time.now.utc + 172_800,
+      "TeamIdentifier" => ["TEAMID1234"],
+      "ApplicationIdentifierPrefix" => ["TEAMID1234"],
+      "Platform" => ["iOS", "xrOS", "visionOS"],
+      "Entitlements" => {
+        "application-identifier" => "TEAMID1234.#{BETA_APP_IDENTIFIER}",
+        "com.apple.developer.team-identifier" => "TEAMID1234",
+        "get-task-allow" => true,
+        "aps-environment" => "development"
+      },
+      "ProvisionedDevices" => ["SANITIZED-DEVICE-FIXTURE"],
+      "DeveloperCertificates" => [fixture_certificate]
+    }
+    fixture_release_context = {
+      team_id: "TEAMID1234",
+      main_bundle_id: BETA_APP_IDENTIFIER
+    }
+    validated_profile = validate_aies_development_profile!(
+      {
+        target: "main",
+        bundle_id: BETA_APP_IDENTIFIER,
+        remote: remote_profile
+      },
+      parsed_profile,
+      fixture_release_context,
+      fixture_certificate_sha256
+    )
+    unless validated_profile[:developer_certificate_sha256] == [fixture_certificate_sha256]
+      UI.user_error!("Credential-free development profile validation regression failed.")
+    end
+    wrong_certificate_rejected = false
+    begin
+      validate_aies_development_profile!(
+        {
+          target: "main",
+          bundle_id: BETA_APP_IDENTIFIER,
+          remote: remote_profile
+        },
+        parsed_profile.merge("DeveloperCertificates" => ["wrong-certificate".b]),
+        fixture_release_context,
+        fixture_certificate_sha256
+      )
+    rescue StandardError
+      wrong_certificate_rejected = true
+    end
+    unless wrong_certificate_rejected
+      UI.user_error!("Development profile validator accepted an unrelated certificate.")
+    end
+
     test_auth = aies_xcode_auth_arguments(
       key_path: "/tmp/aies-regression-key.p8",
       key_id: "TESTKEY123",
@@ -926,7 +1305,8 @@ platform :ios do
     context = {
       output_directory: "/tmp/aies-export-regression",
       team_id: "TEAMID1234",
-      xcode_arguments: test_auth
+      archive_xcode_arguments: [],
+      export_xcode_arguments: test_auth
     }
     Dir.mktmpdir("aies-export-regression") do |directory|
       archive_path = File.join(directory, "OpenClaw.xcarchive")
@@ -953,6 +1333,10 @@ platform :ios do
       identity_argument = "CODE_SIGN_IDENTITY=#{test_development_identity}"
       unless archive_argv.count(identity_argument) == 1 && !archive_argv.include?("-exportArchive")
         UI.user_error!("Rendered archive command did not select the exact reusable development identity once.")
+      end
+      forbidden_archive_arguments = test_auth + ["-allowProvisioningDeviceRegistration"]
+      if forbidden_archive_arguments.any? { |argument| archive_argv.include?(argument) }
+        UI.user_error!("Rendered archive command retained an Apple provisioning-mutation or authentication argument.")
       end
 
       FileUtils.mkdir_p(archive_path)
@@ -1050,6 +1434,7 @@ platform :ios do
   desc "Build, verify, and upload an exact-SHA AIES internal TestFlight diagnostic"
   lane :aies_internal_testflight do
     development_keychain_name = nil
+    installed_development_profiles = []
     release_context = prepare_aies_internal_context!
     setup_ci
     development_keychain_name = ENV["MATCH_KEYCHAIN_NAME"]
@@ -1060,6 +1445,11 @@ platform :ios do
       team_id: release_context[:team_id],
       push_mode: "direct"
     )
+    development_profiles = fetch_install_aies_reusable_development_profiles!(
+      release_context,
+      development_identity.fetch(:certificate_sha256)
+    )
+    installed_development_profiles = development_profiles.fetch(:installed_paths)
     context[:aies_internal] = true
     context[:archive_signing_arguments] = [
       "CODE_SIGN_IDENTITY=#{development_identity.fetch(:certificate_sha1)}"
@@ -1067,11 +1457,15 @@ platform :ios do
     context[:output_directory] = release_context[:output_directory]
     context[:provenance_arguments] = aies_provenance_arguments(release_context)
     context[:team_id] = release_context[:team_id]
-    context[:xcode_arguments] = aies_xcode_auth_arguments
+    context[:archive_xcode_arguments] = []
+    context[:export_xcode_arguments] = aies_xcode_auth_arguments
 
     build = build_aies_beta_archive(context)
     archive_evidence = package_aies_archive_evidence!(build, release_context)
+    archive_evidence[:development_profile_receipt] = development_profiles.fetch(:receipt)
     verify_aies_reusable_development_identity!(archive_evidence, release_context)
+    remove_aies_installed_development_profiles!(installed_development_profiles)
+    installed_development_profiles = []
     build = export_aies_beta_archive(context, build)
     evidence = package_aies_internal_evidence!(
       build,
@@ -1106,17 +1500,29 @@ platform :ios do
       "version=#{build[:version]} short=#{build[:short_version]} build=#{build[:build_number]}"
     )
   ensure
-    if env_present?(development_keychain_name)
-      expected_keychain_name = ENV["FL_SETUP_CI_KEYCHAIN_NAME"]
-      if development_keychain_name == expected_keychain_name &&
-          development_keychain_name.match?(/\Aaies_development_[0-9]+_[0-9]+\z/)
-        delete_keychain(name: development_keychain_name)
-      else
-        UI.error("Refusing to delete an unexpected development keychain.")
-      end
+    cleanup_errors = []
+    begin
+      remove_aies_installed_development_profiles!(installed_development_profiles)
+    rescue StandardError => e
+      cleanup_errors << "development profile cleanup failed (#{e.class})"
     end
-    ENV.delete("AIES_DEVELOPMENT_CERTIFICATE_PASSWORD")
-    ENV.delete("XCODE_XCCONFIG_FILE")
+    begin
+      if env_present?(development_keychain_name)
+        expected_keychain_name = ENV["FL_SETUP_CI_KEYCHAIN_NAME"]
+        if development_keychain_name == expected_keychain_name &&
+            development_keychain_name.match?(/\Aaies_development_[0-9]+_[0-9]+\z/)
+          delete_keychain(name: development_keychain_name)
+        else
+          cleanup_errors << "refused unexpected development keychain"
+        end
+      end
+    rescue StandardError => e
+      cleanup_errors << "development keychain cleanup failed (#{e.class})"
+    ensure
+      ENV.delete("AIES_DEVELOPMENT_CERTIFICATE_PASSWORD")
+      ENV.delete("XCODE_XCCONFIG_FILE")
+    end
+    UI.user_error!(cleanup_errors.join("; ")) unless cleanup_errors.empty?
   end
 
   desc "Upload App Store metadata (and optionally screenshots)"

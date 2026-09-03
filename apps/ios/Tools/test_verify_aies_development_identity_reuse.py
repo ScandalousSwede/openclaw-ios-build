@@ -54,7 +54,7 @@ def report() -> dict[str, object]:
                     ),
                     "signing_identity": signing_identity(),
                     "profile": {
-                        "uuid": f"profile-{index}",
+                        "uuid": f"00000000-0000-0000-0000-{index + 1:012x}",
                         "name": f"AIES fixture profile {index}",
                         "profile_type": "development",
                         "application_identifier": f"{TEAM_ID}.{bundle_id}",
@@ -67,6 +67,7 @@ def report() -> dict[str, object]:
                         "expiration_at": "2099-01-01T00:00:00Z",
                         "developer_certificate_sha256": [CERTIFICATE_SHA256],
                         "team_identifiers": [TEAM_ID],
+                        "embedded_profile_sha256": f"{index + 1:064x}",
                     },
                 }
                 for index, (bundle_id, bundle_path) in enumerate(bundle_paths.items())
@@ -85,10 +86,50 @@ def report() -> dict[str, object]:
     }
 
 
+def profile_import_receipt(source_report: dict[str, object] | None = None) -> dict[str, object]:
+    source_report = source_report or report()
+    bundles = source_report["archive"]["bundles"]
+    profiles = []
+    for index, bundle in enumerate(bundles):
+        source = bundle["profile"]
+        profiles.append(
+            {
+                "apple_resource_id": f"RESOURCE{index}",
+                "bundle_id": bundle["bundle_id"],
+                "target": f"target-{index}",
+                "profile_uuid": source["uuid"],
+                "profile_name": source["name"],
+                "profile_expiration_at": source["expiration_at"],
+                "profile_type": "IOS_APP_DEVELOPMENT",
+                "profile_state": "ACTIVE",
+                "application_identifier": f"{TEAM_ID}.{bundle['bundle_id']}",
+                "get_task_allow": True,
+                "aps_environment": source["aps_environment"],
+                "provisioned_device_count": 1,
+                "developer_certificate_sha256": [CERTIFICATE_SHA256],
+                "xcode_managed": True,
+                "source_sha256": source["embedded_profile_sha256"],
+                "bundle_resource_id": f"BUNDLE{index}",
+            }
+        )
+    return {
+        "schema": "aies.apple-development-profile-import.v1",
+        "status": "five_governed_profiles_installed_for_offline_archive",
+        "source_operation": "read_only_apple_profile_fetch",
+        "archive_allows_provisioning_updates": False,
+        "archive_receives_apple_authentication_arguments": False,
+        "team_id": TEAM_ID,
+        "certificate_sha256": CERTIFICATE_SHA256,
+        "profile_count": 5,
+        "profiles": profiles,
+    }
+
+
 class DevelopmentIdentityReuseTests(unittest.TestCase):
     def test_accepts_exact_identity_for_all_five_profiles_and_auxiliary_code(self) -> None:
         receipt = verifier.verify_report(
             report(),
+            profile_import_receipt=profile_import_receipt(),
             expected_sha256=CERTIFICATE_SHA256,
             expected_team_id=TEAM_ID,
             expected_main_bundle_id=MAIN_BUNDLE_ID,
@@ -153,23 +194,56 @@ class DevelopmentIdentityReuseTests(unittest.TestCase):
                 with self.assertRaises(verifier.VerificationError):
                     verifier.verify_report(
                         candidate,
+                        profile_import_receipt=profile_import_receipt(candidate),
                         expected_sha256=CERTIFICATE_SHA256,
                         expected_team_id=TEAM_ID,
                         expected_main_bundle_id=MAIN_BUNDLE_ID,
                     )
 
+    def test_rejects_archive_profile_not_identical_to_prefetched_profile(self) -> None:
+        source_report = report()
+        imported = profile_import_receipt(source_report)
+        imported["profiles"][0]["source_sha256"] = "f" * 64
+        with self.assertRaises(verifier.VerificationError):
+            verifier.verify_report(
+                source_report,
+                profile_import_receipt=imported,
+                expected_sha256=CERTIFICATE_SHA256,
+                expected_team_id=TEAM_ID,
+                expected_main_bundle_id=MAIN_BUNDLE_ID,
+            )
+
+        imported = profile_import_receipt(source_report)
+        imported["profiles"][0]["profile_uuid"] = (
+            "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        )
+        with self.assertRaises(verifier.VerificationError):
+            verifier.verify_report(
+                source_report,
+                profile_import_receipt=imported,
+                expected_sha256=CERTIFICATE_SHA256,
+                expected_team_id=TEAM_ID,
+                expected_main_bundle_id=MAIN_BUNDLE_ID,
+            )
+
     def test_cli_writes_deterministic_nonsecret_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             temp = pathlib.Path(raw_temp)
             source = temp / "archive.json"
+            profile_source = temp / "profiles.json"
             output = temp / "receipt.json"
             source.write_text(json.dumps(report()), encoding="utf-8")
+            profile_source.write_text(
+                json.dumps(profile_import_receipt()), encoding="utf-8"
+            )
             with unittest.mock.patch(
                 "sys.argv",
                 [
                     "verify_aies_development_identity_reuse.py",
                     "--archive-signing-report",
                     str(source),
+                    "--profile-import-receipt",
+                    str(profile_source),
                     "--expected-certificate-sha256",
                     CERTIFICATE_SHA256,
                     "--expected-team-id",
@@ -188,6 +262,8 @@ class DevelopmentIdentityReuseTests(unittest.TestCase):
                     "verify_aies_development_identity_reuse.py",
                     "--archive-signing-report",
                     str(source),
+                    "--profile-import-receipt",
+                    str(profile_source),
                     "--expected-certificate-sha256",
                     CERTIFICATE_SHA256,
                     "--expected-team-id",

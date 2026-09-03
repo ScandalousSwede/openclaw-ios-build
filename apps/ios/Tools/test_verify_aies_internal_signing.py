@@ -1570,8 +1570,30 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             release_lane.index("export_aies_beta_archive"),
         )
         self.assertIn("context.fetch(:archive_signing_arguments, [])", archive_options)
+        self.assertIn("context.fetch(:archive_xcode_arguments, [])", archive_options)
+        self.assertNotIn("aies_xcode_auth_arguments", archive_options)
         self.assertNotIn("archive_signing_arguments", export_options)
+        self.assertIn("context.fetch(:export_xcode_arguments)", export_options)
         self.assertIn('"CODE_SIGN_IDENTITY=#{development_identity.fetch(', release_lane)
+        self.assertIn("fetch_install_aies_reusable_development_profiles!", release_lane)
+        self.assertLess(
+            release_lane.index("fetch_install_aies_reusable_development_profiles!"),
+            release_lane.index("build_aies_beta_archive"),
+        )
+        self.assertIn("context[:archive_xcode_arguments] = []", release_lane)
+        self.assertIn(
+            "context[:export_xcode_arguments] = aies_xcode_auth_arguments",
+            release_lane,
+        )
+        self.assertNotIn("context[:xcode_arguments] = aies_xcode_auth_arguments", release_lane)
+        self.assertLess(
+            release_lane.index("verify_aies_reusable_development_identity!"),
+            release_lane.index("remove_aies_installed_development_profiles!"),
+        )
+        self.assertLess(
+            release_lane.index("remove_aies_installed_development_profiles!"),
+            release_lane.index("export_aies_beta_archive"),
+        )
         self.assertIn("certificate.check_private_key(private_key)", fastfile)
         self.assertIn('"security", "find-identity"', fastfile)
         self.assertIn('keychain_name == expected_keychain_name', fastfile)
@@ -1585,10 +1607,28 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("FileUtils.rm_f(expected_path)", fastfile)
         self.assertIn("delete_keychain(name: development_keychain_name)", fastfile)
         self.assertIn("OpenClaw-development-signing-import.json", signed_job)
+        self.assertIn("OpenClaw-development-profile-import.json", signed_job)
         self.assertIn("OpenClaw-development-signing-identity.json", signed_job)
         self.assertIn("reusable_private_key_identity_imported", signed_job)
         self.assertIn("reusable_development_identity_verified", signed_job)
         self.assertIn("archive identity-reuse receipt lacks five-target coverage", signed_job)
+        self.assertIn(
+            "five_governed_profiles_installed_for_offline_archive", signed_job
+        )
+        self.assertIn("read_only_apple_profile_fetch", fastfile)
+        self.assertIn("Spaceship::ConnectAPI::BundleId.all", fastfile)
+        self.assertIn("Spaceship::ConnectAPI::Profile.all", fastfile)
+        self.assertNotIn("Spaceship::ConnectAPI::Profile.create", fastfile)
+        self.assertNotIn("remote_profile.delete!", fastfile)
+        self.assertIn("DeveloperCertificates", fastfile)
+        self.assertIn("certificate_sha256.include?(expected_sha256)", fastfile)
+        self.assertIn("archive_allows_provisioning_updates: false", fastfile)
+        self.assertIn(
+            "archive_receives_apple_authentication_arguments: false", fastfile
+        )
+        self.assertIn('"--profile-import-receipt"', fastfile)
+        self.assertIn("aies-development-profile-cleanup.json", signed_job)
+        self.assertIn("Library\"\n                  / \"Developer", signed_job)
         self.assertIn(
             '"${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${IOS_DEVELOPMENT_TEAM}"',
             signed_job,
@@ -1600,6 +1640,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("name: Remove ephemeral Apple signing material", signed_job)
         self.assertIn('rm -f -- "${p12_path}"', signed_job)
         self.assertIn('security delete-keychain "${keychain_path}"', signed_job)
+        self.assertIn('exit "${cleanup_status}"', signed_job)
 
     def test_aies_export_is_single_source_and_archive_evidence_is_failure_safe(
         self,
