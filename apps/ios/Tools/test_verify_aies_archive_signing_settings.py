@@ -40,7 +40,7 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         self.assertFalse(report["manual_archive_identity_override"])
         self.assertFalse(report["manual_archive_profile_override"])
         self.assertEqual(report["archive_invocation_action"], "archive")
-        self.assertEqual(report["effective_build_action"], "install")
+        self.assertEqual(report["observed_build_settings_action"], "archive")
         self.assertEqual(
             {record["target"] for record in report["targets"]},
             set(verifier.PRODUCT_TARGET_SPECS),
@@ -48,17 +48,14 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         self.assertTrue(
             all(
                 record["settings_context"]
-                == (
-                    "explicit_target_release_archive_invocation_"
-                    "effective_install_action"
-                )
+                == "explicit_target_release_archive_show_build_settings"
                 for record in report["targets"]
             )
         )
         self.assertTrue(
             all(
                 record["invocation_action"] == "archive"
-                and record["effective_build_action"] == "install"
+                and record["observed_build_settings_action"] == "archive"
                 for record in report["targets"]
             )
         )
@@ -132,6 +129,11 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
                 self.settings("OpenClawWatchExtension", payloads)[name] = value
                 with self.assertRaisesRegex(ValueError, f"{name} mismatch"):
                     verifier.build_report(payloads, MAIN_ID, TEAM_ID)
+
+    def test_rejects_install_action_from_another_archive_evaluation_context(self) -> None:
+        self.settings("OpenClaw")["ACTION"] = "install"
+        with self.assertRaisesRegex(ValueError, "ACTION mismatch"):
+            verifier.build_report(self.payloads, MAIN_ID, TEAM_ID)
 
     def test_rejects_index_metadata_object_instead_of_build_settings(self) -> None:
         payloads = copy.deepcopy(self.payloads)
@@ -285,7 +287,7 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
                 {
                     "target": target,
                     "buildSettings": {
-                        "ACTION": "install",
+                        "ACTION": "archive",
                         "CONFIGURATION": "Release",
                         "PRODUCT_BUNDLE_IDENTIFIER": bundle_id,
                         "PRODUCT_TYPE": spec["product_type"],
