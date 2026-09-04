@@ -15,13 +15,22 @@ default_platform(:ios)
 
 BETA_APP_IDENTIFIER = "ai.openclaw.client.J76B47MZ6V"
 
-AIES_DEVELOPMENT_PROFILE_SPECS = [
-  { target: "main", bundle_id: BETA_APP_IDENTIFIER },
-  { target: "share", bundle_id: "#{BETA_APP_IDENTIFIER}.share" },
-  { target: "activity_widget", bundle_id: "#{BETA_APP_IDENTIFIER}.activitywidget" },
-  { target: "watch_app", bundle_id: "#{BETA_APP_IDENTIFIER}.watchkitapp" },
-  { target: "watch_extension", bundle_id: "#{BETA_APP_IDENTIFIER}.watchkitapp.extension" }
-].freeze
+AIES_MANUAL_ARCHIVE_SIGNING_POLICY_PATH = File.expand_path(
+  "../Config/AIESManualArchiveSigning.json",
+  __dir__
+).freeze
+AIES_MANUAL_ARCHIVE_SIGNING_POLICY = JSON.parse(
+  File.read(AIES_MANUAL_ARCHIVE_SIGNING_POLICY_PATH)
+).freeze
+AIES_DEVELOPMENT_PROFILE_SPECS = AIES_MANUAL_ARCHIVE_SIGNING_POLICY.fetch("targets").map do |item|
+  {
+    target: item.fetch("logical_target"),
+    xcode_target: item.fetch("xcode_target"),
+    sdk: item.fetch("sdk"),
+    bundle_id: item.fetch("bundle_id"),
+    profile_uuid: item.fetch("profile_uuid")
+  }.freeze
+end.freeze
 
 def load_env_file(path)
   return unless File.exist?(path)
@@ -174,8 +183,9 @@ def shell_join(parts)
 end
 
 def aies_forbidden_archive_arguments(arguments)
-  setting_pattern = /\A(?:CODE_SIGN_IDENTITY|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER)(?:\[[^\]\r\n]+\])?=/
+  setting_pattern = /\A(?:CODE_SIGN_IDENTITY|CODE_SIGN_STYLE|DEVELOPMENT_TEAM|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER)(?:\[[^\]\r\n]+\])?=/
   forbidden_flags = [
+    "-xcconfig",
     "-allowProvisioningUpdates",
     "-allowProvisioningDeviceRegistration",
     "-authenticationKeyPath",
@@ -185,7 +195,7 @@ def aies_forbidden_archive_arguments(arguments)
   Array(arguments).select do |argument|
     !argument.is_a?(String) ||
       argument.match?(setting_pattern) ||
-      forbidden_flags.include?(argument)
+      forbidden_flags.any? { |flag| argument == flag || argument.start_with?("#{flag}=") }
   end
 end
 
@@ -305,17 +315,28 @@ def aies_export_options(context)
 end
 
 def aies_archive_build_options(context, archive_path)
-  # Product signing comes from the generated BetaRelease xcconfig and project.
-  # Identity/profile overrides are intentionally omitted: a global override makes
-  # codeless SwiftPM resource bundles enter Xcode's signing evaluation.
-  xcode_arguments = context.fetch(:archive_xcode_arguments, []) +
+  # Manual product signing comes from one generated archive-only xcconfig whose
+  # custom OPENCLAW_* values are dereferenced by the five native targets. Raw
+  # Xcode signing/profile settings remain forbidden because they would be global
+  # and could contaminate codeless SwiftPM resource bundles.
+  caller_arguments = context.fetch(:archive_xcode_arguments, []) +
     context.fetch(:provenance_arguments, [])
-  unless aies_forbidden_archive_arguments(xcode_arguments).empty?
+  unless aies_forbidden_archive_arguments(caller_arguments).empty?
     UI.user_error!(
       "AIES archive arguments must not override identity/profile selection " \
       "or authorize Apple provisioning mutation."
     )
   end
+  if env_present?(ENV["XCODE_XCCONFIG_FILE"])
+    UI.user_error!("AIES archive must use exactly one explicit signing xcconfig.")
+  end
+  signing_xcconfig = File.expand_path(context.fetch(:archive_signing_xcconfig))
+  output_directory = File.expand_path(context.fetch(:output_directory))
+  unless signing_xcconfig.start_with?("#{output_directory}#{File::SEPARATOR}") &&
+      File.file?(signing_xcconfig) && !File.symlink?(signing_xcconfig)
+    UI.user_error!("AIES manual archive-signing xcconfig is outside bounded custody.")
+  end
+  xcode_arguments = ["-xcconfig", signing_xcconfig] + caller_arguments
   {
     project: File.join(ios_root, "OpenClaw.xcodeproj"),
     scheme: "OpenClaw",
@@ -328,6 +349,100 @@ def aies_archive_build_options(context, archive_path)
     include_symbols: true,
     xcargs: shell_join(xcode_arguments)
   }
+end
+
+def prepare_aies_manual_archive_signing!(context, development_profiles, expected_sha256)
+  output_directory = File.expand_path(context.fetch(:output_directory))
+  signing_xcconfig = File.join(output_directory, "AIESManualArchiveSigning.xcconfig")
+  signing_receipt = File.join(output_directory, "OpenClaw-manual-archive-signing.json")
+  helper = File.join(ios_root, "Tools", "prepare_aies_manual_archive_signing.py")
+  sh(shell_join([
+    "python3", helper,
+    "--profile-import-receipt", development_profiles.fetch(:receipt),
+    "--base-xcconfig", context.fetch(:beta_xcconfig),
+    "--output-xcconfig", signing_xcconfig,
+    "--output-receipt", signing_receipt,
+    "--allowed-output-root", output_directory,
+    "--expected-certificate-sha256", expected_sha256,
+    "--policy", AIES_MANUAL_ARCHIVE_SIGNING_POLICY_PATH
+  ]))
+  unless File.file?(signing_xcconfig) && !File.symlink?(signing_xcconfig) &&
+      File.file?(signing_receipt) && !File.symlink?(signing_receipt)
+    UI.user_error!("AIES manual archive-signing preparation did not produce its receipts.")
+  end
+  {
+    xcconfig: signing_xcconfig,
+    receipt: signing_receipt
+  }
+end
+
+def aies_strict_package_arguments
+  path = File.expand_path(required_env!("AIES_STRICT_PACKAGE_ARGS_FILE"))
+  UI.user_error!("Strict package argument receipt must be a regular file.") unless File.file?(path) && !File.symlink?(path)
+  arguments = File.readlines(path, chomp: true)
+  if arguments.empty? || arguments.any? { |item| item.empty? || item.match?(/[\r\n\0]/) }
+    UI.user_error!("Strict package argument receipt is malformed.")
+  end
+  arguments
+end
+
+def write_aies_manual_archive_settings_report!(context, release_context, archive_path: nil)
+  settings_root = File.join(context.fetch(:output_directory), "archive-product-settings")
+  report = File.join(context.fetch(:output_directory), "OpenClaw-archive-signing-build-settings.json")
+  verifier_arguments = [
+    "python3", File.join(ios_root, "Tools", "verify_aies_archive_signing_settings.py")
+  ]
+  AIES_DEVELOPMENT_PROFILE_SPECS.each do |spec|
+    settings_path = File.join(settings_root, "#{spec.fetch(:xcode_target)}.json")
+    unless File.file?(settings_path) && !File.symlink?(settings_path)
+      UI.user_error!("Archive signing-settings evidence is incomplete.")
+    end
+    verifier_arguments += [
+      "--product-settings",
+      "#{spec.fetch(:xcode_target)}=#{settings_path}"
+    ]
+  end
+  verifier_arguments += [
+    "--output", report,
+    "--expected-main-bundle-id", release_context.fetch(:main_bundle_id),
+    "--expected-team-id", release_context.fetch(:team_id),
+    "--policy", AIES_MANUAL_ARCHIVE_SIGNING_POLICY_PATH
+  ]
+  verifier_arguments += ["--archive", File.expand_path(archive_path, ios_root)] unless archive_path.nil?
+  sh(shell_join(verifier_arguments))
+  UI.user_error!("Archive signing-settings receipt was not produced.") unless File.file?(report) && !File.symlink?(report)
+  expected_status = archive_path.nil? ? "product_settings_verified_resource_artifact_deferred" : "verified"
+  receipt = JSON.parse(File.read(report))
+  unless receipt["status"] == expected_status
+    UI.user_error!("Archive signing-settings receipt has the wrong evidence stage.")
+  end
+  report
+end
+
+def verify_aies_manual_archive_build_settings!(context, release_context)
+  settings_root = File.join(context.fetch(:output_directory), "archive-product-settings")
+  UI.user_error!("Archive settings evidence path already exists.") if File.exist?(settings_root) || File.symlink?(settings_root)
+  FileUtils.mkdir(settings_root, mode: 0o700)
+  strict_package_arguments = aies_strict_package_arguments
+  AIES_DEVELOPMENT_PROFILE_SPECS.each do |spec|
+    path = File.join(settings_root, "#{spec.fetch(:xcode_target)}.json")
+    arguments = [
+      "xcodebuild",
+      "-project", File.join(ios_root, "OpenClaw.xcodeproj"),
+      "-target", spec.fetch(:xcode_target),
+      "-configuration", "Release",
+      "-sdk", spec.fetch(:sdk),
+      "-xcconfig", context.fetch(:archive_signing_xcconfig),
+      "-showBuildSettings",
+      "-json"
+    ] + strict_package_arguments + context.fetch(:provenance_arguments, []) + ["archive"]
+    stdout, _stderr, status = Open3.capture3(*arguments, chdir: ios_root)
+    UI.user_error!("Archive signing-settings probe failed for #{spec.fetch(:xcode_target)}.") unless status.success?
+    File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |handle|
+      handle.write(stdout)
+    end
+  end
+  write_aies_manual_archive_settings_report!(context, release_context)
 end
 
 def import_aies_reusable_development_identity!(release_context)
@@ -615,8 +730,10 @@ def validate_aies_development_profile!(profile, parsed, release_context, expecte
 
   uuid = parsed["UUID"].to_s
   name = parsed["Name"].to_s
+  expected_uuid = profile.fetch(:profile_uuid)
   unless uuid.match?(/\A[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z/) &&
-      remote.uuid.to_s.casecmp?(uuid)
+      remote.uuid.to_s.casecmp?(uuid) &&
+      uuid.casecmp?(expected_uuid)
     UI.user_error!("Development profile UUID is invalid for #{target}.")
   end
   unless name.bytesize.between?(1, 256) && remote.name.to_s == name
@@ -730,6 +847,7 @@ def fetch_install_aies_reusable_development_profiles!(release_context, expected_
       candidates = development_profiles.select do |profile|
         profile.bundle_id&.identifier == spec.fetch(:bundle_id) &&
           profile.bundle_id&.id.to_s == bundle_record.id.to_s &&
+          profile.uuid.to_s.casecmp?(spec.fetch(:profile_uuid)) &&
           profile.profile_state == Spaceship::ConnectAPI::Profile::ProfileState::ACTIVE
       end
       matches = []
@@ -1134,8 +1252,11 @@ def package_aies_internal_evidence!(build, release_context, archive_evidence)
   UI.user_error!("Signed IPA was not produced.") unless File.file?(ipa_path)
   UI.user_error!("Signed archive evidence is incomplete.") unless [
     archive_evidence[:archive_zip],
+    archive_evidence[:archive_signing_settings_report],
     archive_evidence[:development_identity_receipt],
     archive_evidence[:development_profile_receipt],
+    archive_evidence[:manual_archive_signing_xcconfig],
+    archive_evidence[:manual_archive_signing_receipt],
     archive_evidence[:dsym_zip],
     archive_evidence[:signing_report],
     archive_evidence[:build_manifest]
@@ -1428,6 +1549,7 @@ platform :ios do
       {
         target: "main",
         bundle_id: BETA_APP_IDENTIFIER,
+        profile_uuid: remote_profile.uuid.downcase,
         remote: remote_profile
       },
       parsed_profile,
@@ -1443,6 +1565,7 @@ platform :ios do
         {
           target: "main",
           bundle_id: BETA_APP_IDENTIFIER,
+          profile_uuid: remote_profile.uuid.downcase,
           remote: remote_profile
         },
         parsed_profile.merge("DeveloperCertificates" => ["wrong-certificate".b]),
@@ -1471,17 +1594,25 @@ platform :ios do
       archive_path = File.join(directory, "OpenClaw.xcarchive")
       output_directory = File.join(directory, "export")
       beta_xcconfig = File.join(directory, "AIES-Beta.xcconfig")
+      manual_xcconfig = File.join(directory, "AIES-Manual-Archive.xcconfig")
       FileUtils.mkdir_p(output_directory)
       File.write(beta_xcconfig, "// credential-free command-rendering fixture\n")
+      File.write(manual_xcconfig, "// credential-free target-scoped signing fixture\n")
       archive_context = context.merge(
+        output_directory: directory,
         beta_xcconfig: beta_xcconfig,
+        archive_signing_xcconfig: manual_xcconfig,
         provenance_arguments: []
       )
       forbidden_archive_fixtures = [
         "CODE_SIGN_IDENTITY=#{"A" * 40}",
         "CODE_SIGN_IDENTITY[sdk=iphoneos*]=Apple Development",
+        "CODE_SIGN_STYLE=Manual",
+        "DEVELOPMENT_TEAM=TEAMID1234",
         "PROVISIONING_PROFILE=00000000-0000-0000-0000-000000000000",
         "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]=AIES Development",
+        "-xcconfig",
+        "-xcconfig=/tmp/untrusted.xcconfig",
         "-allowProvisioningUpdates",
         "-authenticationKeyPath"
       ]
@@ -1502,9 +1633,16 @@ platform :ios do
       if archive_argv.include?("-exportArchive")
         UI.user_error!("Rendered archive command unexpectedly selected the export path.")
       end
+      xcconfig_positions = archive_argv.each_index.select { |index| archive_argv[index] == "-xcconfig" }
+      unless xcconfig_positions.length == 1 &&
+          archive_argv[xcconfig_positions.first + 1] == manual_xcconfig
+        UI.user_error!("Rendered archive command must select the governed signing overlay exactly once.")
+      end
       forbidden_archive_arguments = test_auth + ["-allowProvisioningDeviceRegistration"]
       forbidden_archive_prefixes = [
         "CODE_SIGN_IDENTITY=",
+        "CODE_SIGN_STYLE=",
+        "DEVELOPMENT_TEAM=",
         "PROVISIONING_PROFILE=",
         "PROVISIONING_PROFILE_SPECIFIER="
       ]
@@ -1526,6 +1664,7 @@ platform :ios do
       UI.user_error!("Gym retained an unexpected export_xcargs source.") if env_present?(Gym.config[:export_xcargs])
       argv = Shellwords.split(Gym::PackageCommandGenerator.generate.join(" "))
       UI.user_error!("Gym regression did not render an export command.") unless argv.include?("-exportArchive")
+      UI.user_error!("Manual archive signing xcconfig contaminated export.") if argv.include?("-xcconfig")
       if forbidden_archive_prefixes.any? { |prefix| argv.any? { |argument| argument.start_with?(prefix) } }
         UI.user_error!("Manual archive signing settings contaminated export.")
       end
@@ -1629,13 +1768,33 @@ platform :ios do
     context[:team_id] = release_context[:team_id]
     context[:archive_xcode_arguments] = []
     context[:export_xcode_arguments] = aies_xcode_auth_arguments
+    manual_signing = prepare_aies_manual_archive_signing!(
+      context,
+      development_profiles,
+      development_identity.fetch(:certificate_sha256)
+    )
+    context[:archive_signing_xcconfig] = manual_signing.fetch(:xcconfig)
+    ENV.delete("XCODE_XCCONFIG_FILE")
+    archive_settings_report = verify_aies_manual_archive_build_settings!(
+      context,
+      release_context
+    )
 
     build = build_aies_beta_archive(context)
     archive_evidence = package_aies_archive_evidence!(build, release_context)
+    archive_settings_report = write_aies_manual_archive_settings_report!(
+      context,
+      release_context,
+      archive_path: build.fetch(:archive_path)
+    )
     archive_evidence[:development_profile_receipt] = development_profiles.fetch(:receipt)
+    archive_evidence[:manual_archive_signing_xcconfig] = manual_signing.fetch(:xcconfig)
+    archive_evidence[:manual_archive_signing_receipt] = manual_signing.fetch(:receipt)
+    archive_evidence[:archive_signing_settings_report] = archive_settings_report
     verify_aies_reusable_development_identity!(archive_evidence, release_context)
     remove_aies_installed_development_profiles!(installed_development_profiles)
     installed_development_profiles = []
+    ENV["XCODE_XCCONFIG_FILE"] = context.fetch(:beta_xcconfig)
     build = export_aies_beta_archive(context, build)
     evidence = package_aies_internal_evidence!(
       build,

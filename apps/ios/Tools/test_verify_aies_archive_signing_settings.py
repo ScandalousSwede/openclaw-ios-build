@@ -37,6 +37,13 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         self.assertEqual(report["codeless_resource_target_count"], 4)
         self.assertEqual(report["resource_bundle_instance_count"], 6)
         self.assertFalse(report["resource_signing_settings_claimed"])
+        self.assertEqual(report["archive_signing_model"], "target_scoped_manual")
+        self.assertEqual(
+            report["profile_selection_build_setting"],
+            "PROVISIONING_PROFILE_SPECIFIER",
+        )
+        self.assertTrue(report["target_scoped_profile_selection"])
+        self.assertFalse(report["global_archive_profile_override"])
         self.assertFalse(report["manual_archive_identity_override"])
         self.assertFalse(report["manual_archive_profile_override"])
         self.assertEqual(report["archive_invocation_action"], "archive")
@@ -62,6 +69,7 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
 
     def test_project_and_beta_config_own_all_product_signing_settings(self) -> None:
         project = (REPO_ROOT / "apps/ios/project.yml").read_text(encoding="utf-8")
+        policy = verifier.load_manual_signing_policy()
         target_names = list(verifier.expected_product_targets(MAIN_ID))
         for index, target in enumerate(target_names):
             start = project.index(f"  {target}:\n")
@@ -78,6 +86,12 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
                 self.assertIn(
                     'DEVELOPMENT_TEAM: "$(OPENCLAW_DEVELOPMENT_TEAM)"', block
                 )
+                variable = policy["targets_by_xcode_target"][target][
+                    "xcconfig_variable"
+                ]
+                self.assertIn(
+                    f'PROVISIONING_PROFILE_SPECIFIER: "$({variable})"', block
+                )
 
         beta_prepare = (REPO_ROOT / "scripts/ios-beta-prepare.sh").read_text(
             encoding="utf-8"
@@ -92,18 +106,41 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "certificate class, not a fingerprint"):
             verifier.build_report(self.payloads, MAIN_ID, TEAM_ID)
 
-    def test_rejects_manual_profile_overrides(self) -> None:
-        for name in ("PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER"):
-            with self.subTest(name=name):
-                payloads = copy.deepcopy(self.payloads)
-                self.settings("OpenClawShareExtension", payloads)[name] = "manual"
-                with self.assertRaisesRegex(ValueError, f"must not set {name}"):
-                    verifier.build_report(payloads, MAIN_ID, TEAM_ID)
+    def test_policy_rejects_a_well_formed_but_ungoverned_profile_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            policy = json.loads(verifier.DEFAULT_POLICY.read_text(encoding="utf-8"))
+            policy["targets"][0]["profile_uuid"] = (
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+            )
+            path = pathlib.Path(temporary) / "policy.json"
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "is not governed"):
+                verifier.load_manual_signing_policy(path)
+
+    def test_rejects_legacy_profile_override_or_wrong_target_specifier(self) -> None:
+        payloads = copy.deepcopy(self.payloads)
+        self.settings("OpenClawShareExtension", payloads)[
+            "PROVISIONING_PROFILE"
+        ] = "manual"
+        with self.assertRaisesRegex(ValueError, "must not set PROVISIONING_PROFILE"):
+            verifier.build_report(payloads, MAIN_ID, TEAM_ID)
+
+        payloads = copy.deepcopy(self.payloads)
+        main = self.settings("OpenClaw", payloads)["PROVISIONING_PROFILE_SPECIFIER"]
+        share = self.settings("OpenClawShareExtension", payloads)[
+            "PROVISIONING_PROFILE_SPECIFIER"
+        ]
+        self.settings("OpenClaw", payloads)["PROVISIONING_PROFILE_SPECIFIER"] = share
+        self.settings("OpenClawShareExtension", payloads)[
+            "PROVISIONING_PROFILE_SPECIFIER"
+        ] = main
+        with self.assertRaisesRegex(ValueError, "PROVISIONING_PROFILE_SPECIFIER mismatch"):
+            verifier.build_report(payloads, MAIN_ID, TEAM_ID)
 
     def test_rejects_product_team_style_or_signing_drift(self) -> None:
         cases = {
             "DEVELOPMENT_TEAM": "OTHERTEAM1",
-            "CODE_SIGN_STYLE": "Manual",
+            "CODE_SIGN_STYLE": "Automatic",
             "CODE_SIGNING_ALLOWED": "NO",
             "CODE_SIGNING_REQUIRED": "NO",
             "CODE_SIGN_IDENTITY": "iPhone Developer",
@@ -281,8 +318,10 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
     @staticmethod
     def valid_payloads() -> dict[str, list[dict[str, object]]]:
         payloads: dict[str, list[dict[str, object]]] = {}
+        policy = verifier.load_manual_signing_policy()
         for target, bundle_id in verifier.expected_product_targets(MAIN_ID).items():
             spec = verifier.PRODUCT_TARGET_SPECS[target]
+            profile_uuid = policy["targets_by_xcode_target"][target]["profile_uuid"]
             payloads[target] = [
                 {
                     "target": target,
@@ -295,11 +334,11 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
                         "PLATFORM_NAME": spec["platform_name"],
                         "CODE_SIGNING_ALLOWED": "YES",
                         "CODE_SIGNING_REQUIRED": "YES",
-                        "CODE_SIGN_STYLE": "Automatic",
+                        "CODE_SIGN_STYLE": "Manual",
                         "DEVELOPMENT_TEAM": TEAM_ID,
                         "CODE_SIGN_IDENTITY": "Apple Development",
                         "PROVISIONING_PROFILE": "",
-                        "PROVISIONING_PROFILE_SPECIFIER": "",
+                        "PROVISIONING_PROFILE_SPECIFIER": profile_uuid,
                     },
                 }
             ]

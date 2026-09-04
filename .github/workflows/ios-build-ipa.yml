@@ -256,6 +256,7 @@ jobs:
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
+            test_prepare_aies_manual_archive_signing.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -391,6 +392,7 @@ jobs:
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
+            test_prepare_aies_manual_archive_signing.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -461,16 +463,84 @@ jobs:
           done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
           settings_root="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-product-settings"
           report="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-signing-target-dispositions.json"
+          manual_root="${RUNNER_TEMP}/aies-unsigned-package/evidence/manual-archive-signing-fixture"
+          profile_receipt="${manual_root}/OpenClaw-development-profile-import.json"
+          manual_xcconfig="${manual_root}/AIESManualArchiveSigning.xcconfig"
+          manual_receipt="${manual_root}/OpenClaw-manual-archive-signing.json"
+          fixture_certificate="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
           mkdir -p "${settings_root}"
+          mkdir -p "${manual_root}"
+          python3 - \
+            "${AIES_BUILD_ROOT}/apps/ios/Config/AIESManualArchiveSigning.json" \
+            "${profile_receipt}" \
+            "${fixture_certificate}" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          policy = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          output = pathlib.Path(sys.argv[2])
+          certificate = sys.argv[3]
+          profiles = []
+          for index, target in enumerate(reversed(policy["targets"])):
+              profiles.append({
+                  "apple_resource_id": f"SANITIZED-PROFILE-{index}",
+                  "aps_environment": target["aps_environment"],
+                  "application_identifier": f"{policy['team_id']}.{target['bundle_id']}",
+                  "bundle_id": target["bundle_id"],
+                  "bundle_resource_id": f"SANITIZED-BUNDLE-{index}",
+                  "developer_certificate_sha256": [certificate],
+                  "get_task_allow": True,
+                  "profile_expiration_at": "2099-01-01T00:00:00Z",
+                  "profile_name": f"Sanitized AIES profile {index}",
+                  "profile_state": "ACTIVE",
+                  "profile_type": "IOS_APP_DEVELOPMENT",
+                  "profile_uuid": target["profile_uuid"],
+                  "provisioned_device_count": 1,
+                  "source_sha256": hashlib.sha256(target["bundle_id"].encode()).hexdigest(),
+                  "target": target["logical_target"],
+                  "xcode_managed": False,
+              })
+          receipt = {
+              "archive_allows_provisioning_updates": False,
+              "archive_receives_apple_authentication_arguments": False,
+              "certificate_sha256": certificate,
+              "profile_count": 5,
+              "profiles": profiles,
+              "schema": "aies.apple-development-profile-import.v1",
+              "source_operation": "read_only_apple_profile_fetch",
+              "spaceship_minimum_log_level": "WARN",
+              "spaceship_request_clients": [
+                  "provisioning_request_client",
+                  "test_flight_request_client",
+                  "tunes_request_client",
+                  "users_request_client",
+              ],
+              "spaceship_response_body_logging_suppressed": True,
+              "status": "five_governed_profiles_installed_for_offline_archive",
+              "team_id": policy["team_id"],
+          }
+          output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+          PY
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_manual_archive_signing.py" \
+            --profile-import-receipt "${profile_receipt}" \
+            --base-xcconfig "${AIES_UNSIGNED_XCCONFIG}" \
+            --output-xcconfig "${manual_xcconfig}" \
+            --output-receipt "${manual_receipt}" \
+            --allowed-output-root "${manual_root}" \
+            --expected-certificate-sha256 "${fixture_certificate}" \
+            --policy "${AIES_BUILD_ROOT}/apps/ios/Config/AIESManualArchiveSigning.json"
           cd "${AIES_BUILD_ROOT}/apps/ios"
           capture_product_settings() {
             local target="$1"
             local sdk="$2"
-            XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+            xcodebuild \
               -project OpenClaw.xcodeproj \
               -target "${target}" \
               -configuration Release \
               -sdk "${sdk}" \
+              -xcconfig "${manual_xcconfig}" \
               -showBuildSettings \
               -json \
               "${strict_package_args[@]}" \
@@ -490,7 +560,8 @@ jobs:
             --product-settings "OpenClawWatchExtension=${settings_root}/OpenClawWatchExtension.json" \
             --output "${report}" \
             --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
-            --expected-team-id J76B47MZ6V
+            --expected-team-id J76B47MZ6V \
+            --policy "${AIES_BUILD_ROOT}/apps/ios/Config/AIESManualArchiveSigning.json"
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/prepare_aies_package_build_root.py" verify \
             --receipt "${AIES_PACKAGE_PREPARATION_RECEIPT}" \
             --output "${RUNNER_TEMP}/aies-unsigned-package/evidence/post-archive-settings-verification.json"
@@ -603,7 +674,7 @@ jobs:
             "OPENCLAW_BUILD_XCODE_VERSION=${AIES_XCODE_VERSION}"
             "OPENCLAW_BUILD_SWIFT_VERSION=${AIES_SWIFT_VERSION}"
             "OPENCLAW_BUILD_SDK_VERSION=${AIES_SDK_VERSION}"
-            "OPENCLAW_BUILD_CONFIGURATION=Debug"
+            "OPENCLAW_BUILD_CONFIGURATION=Release"
             "OPENCLAW_BUILD_ARCHIVE_UUID=${AIES_ARCHIVE_UUID}"
             "OPENCLAW_BUILD_APS_ENVIRONMENT_IF_SIGNED=${AIES_APS_ENVIRONMENT}"
           )
@@ -611,7 +682,7 @@ jobs:
           XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
             -project OpenClaw.xcodeproj \
             -scheme OpenClaw \
-            -configuration Debug \
+            -configuration Release \
             -destination generic/platform=iOS \
             -archivePath /tmp/OpenClaw.xcarchive \
             "${strict_package_args[@]}" \
@@ -663,7 +734,7 @@ jobs:
             --xcode-version "${AIES_XCODE_VERSION}" \
             --swift-version "${AIES_SWIFT_VERSION}" \
             --sdk-version "${AIES_SDK_VERSION}" \
-            --configuration Debug \
+            --configuration Release \
             --archive-uuid "${AIES_ARCHIVE_UUID}" \
             --ipa /tmp/OpenClaw.ipa \
             --artifact-stage UNSIGNED_ARCHIVE_QUALIFICATION \
@@ -1054,6 +1125,7 @@ jobs:
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
+            test_prepare_aies_manual_archive_signing.py \
             test_prepare_aies_package_build_root.py \
             test_run_aies_qualification.py \
             test_run_aies_swift_qualification.py \
@@ -1306,6 +1378,9 @@ jobs:
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-profile-import.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/AIESManualArchiveSigning.xcconfig"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-manual-archive-signing.json"
+          test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-build-settings.json"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json"
           test -s "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"
           test -f "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json"
@@ -1315,10 +1390,13 @@ jobs:
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-identity.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-signing-import.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-development-profile-import.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-manual-archive-signing.json" >/dev/null
+          python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-build-settings.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-archive-signing-entitlements.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-release-lane-status.json" >/dev/null
           python3 -m json.tool "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-TestFlight-delivery.json" >/dev/null
           python3 - "${AIES_TESTFLIGHT_OUTPUT_DIR}" "${AIES_DEVELOPMENT_CERTIFICATE_SHA256}" "${IOS_DEVELOPMENT_TEAM}" <<'PY'
+          import hashlib
           import json
           import pathlib
           import sys
@@ -1334,6 +1412,12 @@ jobs:
           )
           verified = json.loads(
               (root / "OpenClaw-development-signing-identity.json").read_text()
+          )
+          manual = json.loads(
+              (root / "OpenClaw-manual-archive-signing.json").read_text()
+          )
+          settings = json.loads(
+              (root / "OpenClaw-archive-signing-build-settings.json").read_text()
           )
           if imported.get("status") != "reusable_private_key_identity_imported":
               raise SystemExit("Apple Development identity import receipt is not successful")
@@ -1393,6 +1477,55 @@ jobs:
               or verified.get("prefetched_profile_binding_verified") is not True
           ):
               raise SystemExit("archive identity-reuse receipt lacks five-target coverage")
+          expected_profiles = {
+              "OpenClaw": "a7ed39c2-45d7-44d5-ad05-9adc5d588d2c",
+              "OpenClawShareExtension": "b8522792-eacb-4bae-b745-7e7e1cbbfabc",
+              "OpenClawActivityWidget": "063a7a24-a4c0-4b03-88a5-c26cc3eda945",
+              "OpenClawWatchApp": "080628be-6eec-4043-ac5c-fecef0b87226",
+              "OpenClawWatchExtension": "11a8bc1a-a4b2-491b-ada2-d40d50d3ffbf",
+          }
+          manual_profiles = {
+              item.get("xcode_target"): item.get("profile_uuid")
+              for item in manual.get("targets", [])
+          }
+          settings_profiles = {
+              item.get("target"): (item.get("profile_selection") or {}).get("profile_uuid")
+              for item in settings.get("targets", [])
+              if item.get("classification") == "signed_application_product"
+          }
+          resource_verification = settings.get("archive_resource_bundle_verification")
+          resource_targets = {
+              item.get("target")
+              for item in (resource_verification or {}).get("logical_targets", [])
+              if item.get("classification")
+              == "codeless_package_resource_bundle_signing_not_applicable"
+          }
+          if (
+              manual.get("status") != "manual_archive_signing_overlay_verified"
+              or manual.get("code_sign_style") != "Manual"
+              or manual.get("code_sign_identity") != "Apple Development"
+              or manual.get("team_id") != expected_team
+              or manual.get("certificate_sha256") != expected_fingerprint
+              or manual.get("base_xcconfig_global_signing_overrides_absent") is not True
+              or manual.get("profile_bijection_verified") is not True
+              or manual.get("global_profile_override") is not False
+              or hashlib.sha256(
+                  (root / "AIESManualArchiveSigning.xcconfig").read_bytes()
+              ).hexdigest() != manual.get("overlay_sha256")
+              or manual_profiles != expected_profiles
+              or settings.get("status") != "verified"
+              or settings.get("archive_signing_model") != "target_scoped_manual"
+              or settings.get("global_archive_profile_override") is not False
+              or settings_profiles != expected_profiles
+              or settings.get("signed_product_target_count") != 5
+              or settings.get("codeless_resource_target_count") != 4
+              or settings.get("resource_bundle_instance_count") != 6
+              or (resource_verification or {}).get("status")
+              != "verified_codeless_signing_not_applicable"
+              or resource_targets
+              != {"GRDB_GRDB", "OpenClawKit_OpenClawKit", "swiftui-math_SwiftUIMath", "textual_Textual"}
+          ):
+              raise SystemExit("manual archive signing receipts lack exact target-scoped custody")
           PY
           if grep -q "BEGIN PRIVATE KEY" "${AIES_TESTFLIGHT_OUTPUT_DIR}/OpenClaw-export.log"; then
             echo "Retained export log contains a private-key marker." >&2
@@ -1676,6 +1809,9 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-identity.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-signing-import.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-development-profile-import.json
+            ${{ runner.temp }}/openclaw-aies-testflight/AIESManualArchiveSigning.xcconfig
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-manual-archive-signing.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-archive-signing-build-settings.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-release-lane-status.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json

@@ -1,0 +1,56 @@
+{
+  "archive_allows_provisioning_updates": false,
+  "archive_receives_apple_authentication_arguments": false,
+  "code_sign_identity": "Apple Development",
+  "code_sign_style": "Manual",
+  "profile_selection_build_setting": "PROVISIONING_PROFILE_SPECIFIER",
+  "schema": "aies.manual-archive-signing-policy.v1",
+  "targets": [
+    {
+      "aps_environment": "development",
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V",
+      "logical_target": "main",
+      "profile_uuid": "a7ed39c2-45d7-44d5-ad05-9adc5d588d2c",
+      "sdk": "iphoneos",
+      "xcconfig_variable": "OPENCLAW_APP_PROFILE",
+      "xcode_target": "OpenClaw"
+    },
+    {
+      "aps_environment": null,
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.share",
+      "logical_target": "share",
+      "profile_uuid": "b8522792-eacb-4bae-b745-7e7e1cbbfabc",
+      "sdk": "iphoneos",
+      "xcconfig_variable": "OPENCLAW_SHARE_PROFILE",
+      "xcode_target": "OpenClawShareExtension"
+    },
+    {
+      "aps_environment": null,
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.activitywidget",
+      "logical_target": "activity_widget",
+      "profile_uuid": "063a7a24-a4c0-4b03-88a5-c26cc3eda945",
+      "sdk": "iphoneos",
+      "xcconfig_variable": "OPENCLAW_ACTIVITY_WIDGET_PROFILE",
+      "xcode_target": "OpenClawActivityWidget"
+    },
+    {
+      "aps_environment": null,
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.watchkitapp",
+      "logical_target": "watch_app",
+      "profile_uuid": "080628be-6eec-4043-ac5c-fecef0b87226",
+      "sdk": "watchos",
+      "xcconfig_variable": "OPENCLAW_WATCH_APP_PROFILE",
+      "xcode_target": "OpenClawWatchApp"
+    },
+    {
+      "aps_environment": null,
+      "bundle_id": "ai.openclaw.client.J76B47MZ6V.watchkitapp.extension",
+      "logical_target": "watch_extension",
+      "profile_uuid": "11a8bc1a-a4b2-491b-ada2-d40d50d3ffbf",
+      "sdk": "watchos",
+      "xcconfig_variable": "OPENCLAW_WATCH_EXTENSION_PROFILE",
+      "xcode_target": "OpenClawWatchExtension"
+    }
+  ],
+  "team_id": "J76B47MZ6V"
+}

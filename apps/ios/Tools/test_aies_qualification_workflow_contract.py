@@ -176,7 +176,7 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
             unsigned,
         )
         self.assertEqual(
-            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 4
+            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 3
         )
         self.assertIn("build_settings_topology_report", unsigned)
         signing_settings = unsigned.split(
@@ -191,6 +191,9 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("-showBuildSettingsForIndex", signing_settings)
         self.assertIn("archive-product-settings", signing_settings)
         self.assertEqual(signing_settings.count("capture_product_settings "), 5)
+        self.assertIn("prepare_aies_manual_archive_signing.py", signing_settings)
+        self.assertIn('-xcconfig "${manual_xcconfig}"', signing_settings)
+        self.assertIn("AIESManualArchiveSigning.json", signing_settings)
         self.assertIn("capture_product_settings OpenClaw iphoneos", signing_settings)
         self.assertIn(
             "capture_product_settings OpenClawShareExtension iphoneos",
@@ -214,10 +217,10 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("PROVISIONING_PROFILE_SPECIFIER=", signing_settings)
         self.assertNotIn("CODE_SIGNING_ALLOWED=", signing_settings)
         self.assertNotIn("CODE_SIGNING_REQUIRED=", signing_settings)
-        self.assertEqual(unsigned.count("-configuration Release"), 1)
-        self.assertGreaterEqual(unsigned.count("-configuration Debug"), 3)
-        self.assertIn("OPENCLAW_BUILD_CONFIGURATION=Debug", unsigned)
-        self.assertIn("--configuration Debug", unsigned)
+        self.assertEqual(unsigned.count("-configuration Release"), 3)
+        self.assertGreaterEqual(unsigned.count("-configuration Debug"), 2)
+        self.assertIn("OPENCLAW_BUILD_CONFIGURATION=Release", unsigned)
+        self.assertIn("--configuration Release", unsigned)
         self.assertIn(
             "--archive /tmp/OpenClaw.xcarchive", unsigned
         )

@@ -13,7 +13,12 @@ import sys
 from typing import Any
 
 
-SCHEMA = "argus.openclaw-ios.archive-signing-build-settings.v2"
+SCHEMA = "argus.openclaw-ios.archive-signing-build-settings.v3"
+DEFAULT_POLICY = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "Config"
+    / "AIESManualArchiveSigning.json"
+)
 FINGERPRINT_PATTERN = re.compile(r"[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}")
 PRODUCT_TARGET_SPECS = {
     "OpenClaw": {
@@ -46,6 +51,13 @@ PRODUCT_TARGET_SPECS = {
         "wrapper_extension": "appex",
         "platform_name": "watchos",
     },
+}
+EXPECTED_PROFILE_UUIDS = {
+    "OpenClaw": "a7ed39c2-45d7-44d5-ad05-9adc5d588d2c",
+    "OpenClawShareExtension": "b8522792-eacb-4bae-b745-7e7e1cbbfabc",
+    "OpenClawActivityWidget": "063a7a24-a4c0-4b03-88a5-c26cc3eda945",
+    "OpenClawWatchApp": "080628be-6eec-4043-ac5c-fecef0b87226",
+    "OpenClawWatchExtension": "11a8bc1a-a4b2-491b-ada2-d40d50d3ffbf",
 }
 RESOURCE_TARGET_BUNDLES = {
     "GRDB_GRDB": (pathlib.PurePosixPath("GRDB_GRDB.bundle"),),
@@ -88,6 +100,58 @@ def expected_product_targets(main_bundle_id: str) -> dict[str, str]:
     }
 
 
+def load_manual_signing_policy(path: pathlib.Path = DEFAULT_POLICY) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("manual archive-signing policy must be a regular file")
+    try:
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError("manual archive-signing policy is malformed") from error
+    if not isinstance(policy, dict):
+        raise ValueError("manual archive-signing policy must be an object")
+    expected_scalars = {
+        "schema": "aies.manual-archive-signing-policy.v1",
+        "team_id": "J76B47MZ6V",
+        "code_sign_style": "Manual",
+        "code_sign_identity": "Apple Development",
+        "profile_selection_build_setting": "PROVISIONING_PROFILE_SPECIFIER",
+        "archive_allows_provisioning_updates": False,
+        "archive_receives_apple_authentication_arguments": False,
+    }
+    for name, expected in expected_scalars.items():
+        if policy.get(name) != expected:
+            raise ValueError(f"manual archive-signing policy {name} is invalid")
+    targets = policy.get("targets")
+    if not isinstance(targets, list) or len(targets) != len(PRODUCT_TARGET_SPECS):
+        raise ValueError("manual archive-signing policy must contain five targets")
+    indexed: dict[str, dict[str, Any]] = {}
+    profile_uuids: list[str] = []
+    for item in targets:
+        if not isinstance(item, dict):
+            raise ValueError("manual archive-signing target must be an object")
+        target = item.get("xcode_target")
+        if not isinstance(target, str) or target in indexed:
+            raise ValueError("manual archive-signing target names must be unique")
+        profile_uuid = item.get("profile_uuid")
+        if not isinstance(profile_uuid, str) or not re.fullmatch(
+            r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", profile_uuid
+        ):
+            raise ValueError(f"manual archive-signing profile UUID is invalid for {target}")
+        if EXPECTED_PROFILE_UUIDS.get(target) != profile_uuid:
+            raise ValueError(
+                f"manual archive-signing profile UUID is not governed for {target}"
+            )
+        profile_uuids.append(profile_uuid)
+        indexed[target] = item
+    if set(indexed) != set(PRODUCT_TARGET_SPECS):
+        raise ValueError("manual archive-signing policy target topology is invalid")
+    if len(set(profile_uuids)) != len(profile_uuids):
+        raise ValueError("manual archive-signing profile UUIDs must be unique")
+    policy["targets_by_xcode_target"] = indexed
+    policy["policy_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return policy
+
+
 def _canonical_settings_hash(settings: dict[str, Any]) -> str:
     encoded = json.dumps(
         settings,
@@ -127,6 +191,7 @@ def _product_record(
     settings: dict[str, Any],
     expected_bundle_id: str,
     expected_team_id: str,
+    expected_profile_uuid: str,
 ) -> dict[str, Any]:
     spec = PRODUCT_TARGET_SPECS[target]
     _require_no_fingerprint_identity(settings, target)
@@ -143,7 +208,7 @@ def _product_record(
         "PLATFORM_NAME": spec["platform_name"],
         "CODE_SIGNING_ALLOWED": "YES",
         "CODE_SIGNING_REQUIRED": "YES",
-        "CODE_SIGN_STYLE": "Automatic",
+        "CODE_SIGN_STYLE": "Manual",
         "DEVELOPMENT_TEAM": expected_team_id,
         "CODE_SIGN_IDENTITY": "Apple Development",
     }
@@ -153,11 +218,13 @@ def _product_record(
             raise ValueError(
                 f"{target} {name} mismatch: expected={expected_value!r} actual={actual!r}"
             )
-    _require_empty(
-        settings,
-        target,
-        ("PROVISIONING_PROFILE", "PROVISIONING_PROFILE_SPECIFIER"),
-    )
+    _require_empty(settings, target, ("PROVISIONING_PROFILE",))
+    profile_specifier = _setting(settings, "PROVISIONING_PROFILE_SPECIFIER")
+    if profile_specifier.lower() != expected_profile_uuid:
+        raise ValueError(
+            f"{target} PROVISIONING_PROFILE_SPECIFIER mismatch: "
+            f"expected={expected_profile_uuid!r} actual={profile_specifier!r}"
+        )
     return {
         "target": target,
         "classification": "signed_application_product",
@@ -180,6 +247,11 @@ def _product_record(
             )
         },
         "settings_context": "explicit_target_release_archive_show_build_settings",
+        "profile_selection": {
+            "build_setting": "PROVISIONING_PROFILE_SPECIFIER",
+            "profile_uuid": expected_profile_uuid,
+            "scope": "xcode_product_target",
+        },
         "full_build_settings_sha256": _canonical_settings_hash(settings),
     }
 
@@ -188,6 +260,7 @@ def _product_records(
     payloads: dict[str, Any],
     expected_main_bundle_id: str,
     expected_team_id: str,
+    policy: dict[str, Any],
 ) -> list[dict[str, Any]]:
     expected = expected_product_targets(expected_main_bundle_id)
     if set(payloads) != set(expected):
@@ -217,9 +290,23 @@ def _product_records(
             raise ValueError(
                 f"{target} settings input is not role-bound to the expected target"
             )
+        policy_target = policy["targets_by_xcode_target"][target]
+        if policy_target.get("bundle_id") != expected[target]:
+            raise ValueError(f"manual archive-signing policy bundle mismatch for {target}")
         records.append(
-            _product_record(target, settings, expected[target], expected_team_id)
+            _product_record(
+                target,
+                settings,
+                expected[target],
+                expected_team_id,
+                policy_target["profile_uuid"],
+            )
         )
+    observed_profile_uuids = [
+        record["profile_selection"]["profile_uuid"] for record in records
+    ]
+    if len(set(observed_profile_uuids)) != len(observed_profile_uuids):
+        raise ValueError("product targets do not have a one-to-one profile mapping")
     return records
 
 
@@ -314,11 +401,15 @@ def build_report(
     expected_main_bundle_id: str,
     expected_team_id: str,
     archive: pathlib.Path | None = None,
+    policy_path: pathlib.Path = DEFAULT_POLICY,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Z0-9]{10}", expected_team_id):
         raise ValueError("expected Team ID must contain ten uppercase letters or digits")
+    policy = load_manual_signing_policy(policy_path)
+    if policy["team_id"] != expected_team_id:
+        raise ValueError("expected Team ID does not match manual archive-signing policy")
     products = _product_records(
-        payloads, expected_main_bundle_id, expected_team_id
+        payloads, expected_main_bundle_id, expected_team_id, policy
     )
     resource_verification: dict[str, Any] = {
         "status": "deferred_until_archive_artifact",
@@ -346,6 +437,11 @@ def build_report(
         "resource_disposition_basis": (
             "swiftpm_synthesized_codeless_bundle_plus_archive_artifact"
         ),
+        "archive_signing_model": "target_scoped_manual",
+        "profile_selection_build_setting": "PROVISIONING_PROFILE_SPECIFIER",
+        "manual_signing_policy_sha256": policy["policy_sha256"],
+        "target_scoped_profile_selection": True,
+        "global_archive_profile_override": False,
         "manual_archive_identity_override": False,
         "manual_archive_profile_override": False,
         "archive_invocation_action": "archive",
@@ -412,6 +508,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-main-bundle-id", required=True)
     parser.add_argument("--expected-team-id", required=True)
     parser.add_argument("--archive", type=pathlib.Path)
+    parser.add_argument("--policy", type=pathlib.Path, default=DEFAULT_POLICY)
     return parser.parse_args()
 
 
@@ -440,6 +537,7 @@ def main() -> int:
             args.expected_main_bundle_id,
             args.expected_team_id,
             archive=args.archive,
+            policy_path=args.policy,
         )
     except ValueError:
         print(

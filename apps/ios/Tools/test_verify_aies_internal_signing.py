@@ -1562,6 +1562,26 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             release_lane.index("build_aies_beta_archive"),
         )
         self.assertLess(
+            release_lane.index("prepare_aies_manual_archive_signing!"),
+            release_lane.index("verify_aies_manual_archive_build_settings!"),
+        )
+        self.assertLess(
+            release_lane.index("verify_aies_manual_archive_build_settings!"),
+            release_lane.index("build_aies_beta_archive"),
+        )
+        self.assertLess(
+            release_lane.index("build_aies_beta_archive"),
+            release_lane.index("package_aies_archive_evidence!"),
+        )
+        self.assertLess(
+            release_lane.index("package_aies_archive_evidence!"),
+            release_lane.index("write_aies_manual_archive_settings_report!(\n      context,"),
+        )
+        self.assertLess(
+            release_lane.index("write_aies_manual_archive_settings_report!(\n      context,"),
+            release_lane.index("verify_aies_reusable_development_identity!"),
+        )
+        self.assertLess(
             release_lane.index("package_aies_archive_evidence!"),
             release_lane.index("verify_aies_reusable_development_identity!"),
         )
@@ -1571,6 +1591,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         )
         self.assertNotIn("archive_signing_arguments", archive_options)
         self.assertIn("context.fetch(:archive_xcode_arguments, [])", archive_options)
+        self.assertIn("context.fetch(:archive_signing_xcconfig)", archive_options)
+        self.assertIn('["-xcconfig", signing_xcconfig]', archive_options)
+        self.assertIn('ENV["XCODE_XCCONFIG_FILE"]', archive_options)
         self.assertNotIn("aies_xcode_auth_arguments", archive_options)
         self.assertNotIn("archive_signing_arguments", export_options)
         self.assertIn("context.fetch(:export_xcode_arguments)", export_options)
@@ -1584,6 +1607,12 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             release_lane.index("build_aies_beta_archive"),
         )
         self.assertIn("context[:archive_xcode_arguments] = []", release_lane)
+        self.assertIn("context[:archive_signing_xcconfig]", release_lane)
+        self.assertIn('ENV.delete("XCODE_XCCONFIG_FILE")', release_lane)
+        self.assertIn(
+            'ENV["XCODE_XCCONFIG_FILE"] = context.fetch(:beta_xcconfig)',
+            release_lane,
+        )
         self.assertIn(
             "context[:export_xcode_arguments] = aies_xcode_auth_arguments",
             release_lane,
@@ -1636,7 +1665,7 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("Gym::BuildCommandGenerator.generate", fastfile)
         self.assertIn("def aies_forbidden_archive_arguments(arguments)", fastfile)
         self.assertIn(
-            "CODE_SIGN_IDENTITY|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER",
+            "CODE_SIGN_IDENTITY|CODE_SIGN_STYLE|DEVELOPMENT_TEAM|PROVISIONING_PROFILE|PROVISIONING_PROFILE_SPECIFIER",
             fastfile,
         )
         self.assertIn("CODE_SIGN_IDENTITY[sdk=iphoneos*]=Apple Development", fastfile)
@@ -1644,6 +1673,8 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             "PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]=AIES Development",
             fastfile,
         )
+        self.assertIn("CODE_SIGN_STYLE=Manual", fastfile)
+        self.assertIn("DEVELOPMENT_TEAM=TEAMID1234", fastfile)
         self.assertIn("Archive signing-argument guard regression failed.", fastfile)
         self.assertIn("CODE_SIGN_IDENTITY=", fastfile)
         self.assertIn("PROVISIONING_PROFILE=", fastfile)
@@ -1658,6 +1689,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("delete_keychain(name: development_keychain_name)", fastfile)
         self.assertIn("OpenClaw-development-signing-import.json", signed_job)
         self.assertIn("OpenClaw-development-profile-import.json", signed_job)
+        self.assertIn("AIESManualArchiveSigning.xcconfig", signed_job)
+        self.assertIn("OpenClaw-manual-archive-signing.json", signed_job)
+        self.assertIn("OpenClaw-archive-signing-build-settings.json", signed_job)
         self.assertIn("OpenClaw-development-signing-identity.json", signed_job)
         self.assertIn("reusable_private_key_identity_imported", signed_job)
         self.assertIn("reusable_development_identity_verified", signed_job)
@@ -1690,6 +1724,9 @@ class AIESReleaseConfigurationTests(unittest.TestCase):
             self.assertNotIn(forbidden_mutation, profile_fetch)
         self.assertIn("DeveloperCertificates", fastfile)
         self.assertIn("certificate_sha256.include?(expected_sha256)", fastfile)
+        self.assertIn(
+            "profile.uuid.to_s.casecmp?(spec.fetch(:profile_uuid))", profile_fetch
+        )
         self.assertIn("archive_allows_provisioning_updates: false", fastfile)
         self.assertIn(
             "archive_receives_apple_authentication_arguments: false", fastfile
