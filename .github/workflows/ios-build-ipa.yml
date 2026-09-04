@@ -459,33 +459,35 @@ jobs:
           while IFS= read -r argument; do
             strict_package_args+=("${argument}")
           done < "${AIES_STRICT_PACKAGE_ARGS_FILE}"
-          archive_settings="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-action-signing-build-settings.json"
-          index_settings="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-index-signing-build-settings.json"
+          settings_root="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-product-settings"
           report="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-signing-target-dispositions.json"
+          mkdir -p "${settings_root}"
           cd "${AIES_BUILD_ROOT}/apps/ios"
-          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
-            -project OpenClaw.xcodeproj \
-            -scheme OpenClaw \
-            -configuration Release \
-            -destination generic/platform=iOS \
-            -showBuildSettings \
-            -json \
-            "${strict_package_args[@]}" \
-            archive \
-            > "${archive_settings}"
-          XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
-            -project OpenClaw.xcodeproj \
-            -scheme OpenClaw \
-            -configuration Release \
-            -destination generic/platform=iOS \
-            -showBuildSettingsForIndex \
-            -json \
-            "${strict_package_args[@]}" \
-            archive \
-            > "${index_settings}"
+          capture_product_settings() {
+            local target="$1"
+            local sdk="$2"
+            XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}" xcodebuild \
+              -project OpenClaw.xcodeproj \
+              -target "${target}" \
+              -configuration Release \
+              -sdk "${sdk}" \
+              -showBuildSettings \
+              -json \
+              "${strict_package_args[@]}" \
+              archive \
+              > "${settings_root}/${target}.json"
+          }
+          capture_product_settings OpenClaw iphoneos
+          capture_product_settings OpenClawShareExtension iphoneos
+          capture_product_settings OpenClawActivityWidget iphoneos
+          capture_product_settings OpenClawWatchApp watchos
+          capture_product_settings OpenClawWatchExtension watchos
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_archive_signing_settings.py" \
-            --input "${archive_settings}" \
-            --input "${index_settings}" \
+            --product-settings "OpenClaw=${settings_root}/OpenClaw.json" \
+            --product-settings "OpenClawShareExtension=${settings_root}/OpenClawShareExtension.json" \
+            --product-settings "OpenClawActivityWidget=${settings_root}/OpenClawActivityWidget.json" \
+            --product-settings "OpenClawWatchApp=${settings_root}/OpenClawWatchApp.json" \
+            --product-settings "OpenClawWatchExtension=${settings_root}/OpenClawWatchExtension.json" \
             --output "${report}" \
             --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \
             --expected-team-id J76B47MZ6V
@@ -717,9 +719,13 @@ jobs:
           set -euo pipefail
           evidence_root="${RUNNER_TEMP}/openclaw-aies-unsigned-evidence"
           mkdir -p "${evidence_root}"
+          settings_root="${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-product-settings"
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/verify_aies_archive_signing_settings.py" \
-            --input "${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-action-signing-build-settings.json" \
-            --input "${RUNNER_TEMP}/aies-unsigned-package/evidence/archive-index-signing-build-settings.json" \
+            --product-settings "OpenClaw=${settings_root}/OpenClaw.json" \
+            --product-settings "OpenClawShareExtension=${settings_root}/OpenClawShareExtension.json" \
+            --product-settings "OpenClawActivityWidget=${settings_root}/OpenClawActivityWidget.json" \
+            --product-settings "OpenClawWatchApp=${settings_root}/OpenClawWatchApp.json" \
+            --product-settings "OpenClawWatchExtension=${settings_root}/OpenClawWatchExtension.json" \
             --archive /tmp/OpenClaw.xcarchive \
             --output "${evidence_root}/OpenClaw-archive-signing-target-dispositions.json" \
             --expected-main-bundle-id ai.openclaw.client.J76B47MZ6V \

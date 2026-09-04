@@ -176,7 +176,7 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
             unsigned,
         )
         self.assertEqual(
-            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 5
+            unsigned.count('XCODE_XCCONFIG_FILE="${AIES_UNSIGNED_XCCONFIG}"'), 4
         )
         self.assertIn("build_settings_topology_report", unsigned)
         signing_settings = unsigned.split(
@@ -188,10 +188,25 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         )[0]
         self.assertIn("-configuration Release", signing_settings)
         self.assertIn("-showBuildSettings", signing_settings)
-        self.assertIn("-showBuildSettingsForIndex", signing_settings)
-        self.assertIn("archive-action-signing-build-settings.json", signing_settings)
-        self.assertIn("archive-index-signing-build-settings.json", signing_settings)
-        self.assertEqual(signing_settings.count("            archive \\\n"), 2)
+        self.assertNotIn("-showBuildSettingsForIndex", signing_settings)
+        self.assertIn("archive-product-settings", signing_settings)
+        self.assertEqual(signing_settings.count("capture_product_settings "), 5)
+        self.assertIn("capture_product_settings OpenClaw iphoneos", signing_settings)
+        self.assertIn(
+            "capture_product_settings OpenClawShareExtension iphoneos",
+            signing_settings,
+        )
+        self.assertIn(
+            "capture_product_settings OpenClawActivityWidget iphoneos",
+            signing_settings,
+        )
+        self.assertIn("capture_product_settings OpenClawWatchApp watchos", signing_settings)
+        self.assertIn(
+            "capture_product_settings OpenClawWatchExtension watchos",
+            signing_settings,
+        )
+        self.assertEqual(signing_settings.count("--product-settings "), 5)
+        self.assertEqual(signing_settings.count("              archive \\\n"), 1)
         self.assertIn("verify_aies_archive_signing_settings.py", signing_settings)
         self.assertIn("--expected-team-id J76B47MZ6V", signing_settings)
         self.assertNotIn("CODE_SIGN_IDENTITY=", signing_settings)
@@ -199,7 +214,7 @@ class AIESQualificationWorkflowContractTests(unittest.TestCase):
         self.assertNotIn("PROVISIONING_PROFILE_SPECIFIER=", signing_settings)
         self.assertNotIn("CODE_SIGNING_ALLOWED=", signing_settings)
         self.assertNotIn("CODE_SIGNING_REQUIRED=", signing_settings)
-        self.assertEqual(unsigned.count("-configuration Release"), 2)
+        self.assertEqual(unsigned.count("-configuration Release"), 1)
         self.assertGreaterEqual(unsigned.count("-configuration Debug"), 3)
         self.assertIn("OPENCLAW_BUILD_CONFIGURATION=Debug", unsigned)
         self.assertIn("--configuration Debug", unsigned)
