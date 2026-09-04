@@ -131,7 +131,10 @@ def _product_record(
     spec = PRODUCT_TARGET_SPECS[target]
     _require_no_fingerprint_identity(settings, target)
     expected = {
-        "ACTION": "archive",
+        # xcodebuild's archive operation evaluates target build settings with
+        # ACTION=install.  "archive" is the CLI operation, not the effective
+        # build-setting value.
+        "ACTION": "install",
         "CONFIGURATION": "Release",
         "PRODUCT_BUNDLE_IDENTIFIER": expected_bundle_id,
         "PRODUCT_TYPE": spec["product_type"],
@@ -159,7 +162,8 @@ def _product_record(
         "classification": "signed_application_product",
         "bundle_id": expected_bundle_id,
         "configuration": "Release",
-        "action": "archive",
+        "invocation_action": "archive",
+        "effective_build_action": "install",
         "platform_name": spec["platform_name"],
         "product_type": spec["product_type"],
         "signing": {
@@ -174,7 +178,9 @@ def _product_record(
                 "PROVISIONING_PROFILE_SPECIFIER",
             )
         },
-        "settings_context": "explicit_target_release_archive_action",
+        "settings_context": (
+            "explicit_target_release_archive_invocation_effective_install_action"
+        ),
         "full_build_settings_sha256": _canonical_settings_hash(settings),
     }
 
@@ -343,6 +349,8 @@ def build_report(
         ),
         "manual_archive_identity_override": False,
         "manual_archive_profile_override": False,
+        "archive_invocation_action": "archive",
+        "effective_build_action": "install",
         "targets": targets,
         "archive_resource_bundle_verification": resource_verification,
     }

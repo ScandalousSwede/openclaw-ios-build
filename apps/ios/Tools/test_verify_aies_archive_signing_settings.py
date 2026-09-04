@@ -39,6 +39,8 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         self.assertFalse(report["resource_signing_settings_claimed"])
         self.assertFalse(report["manual_archive_identity_override"])
         self.assertFalse(report["manual_archive_profile_override"])
+        self.assertEqual(report["archive_invocation_action"], "archive")
+        self.assertEqual(report["effective_build_action"], "install")
         self.assertEqual(
             {record["target"] for record in report["targets"]},
             set(verifier.PRODUCT_TARGET_SPECS),
@@ -46,7 +48,17 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
         self.assertTrue(
             all(
                 record["settings_context"]
-                == "explicit_target_release_archive_action"
+                == (
+                    "explicit_target_release_archive_invocation_"
+                    "effective_install_action"
+                )
+                for record in report["targets"]
+            )
+        )
+        self.assertTrue(
+            all(
+                record["invocation_action"] == "archive"
+                and record["effective_build_action"] == "install"
                 for record in report["targets"]
             )
         )
@@ -273,7 +285,7 @@ class AIESArchiveSigningSettingsTests(unittest.TestCase):
                 {
                     "target": target,
                     "buildSettings": {
-                        "ACTION": "archive",
+                        "ACTION": "install",
                         "CONFIGURATION": "Release",
                         "PRODUCT_BUNDLE_IDENTIFIER": bundle_id,
                         "PRODUCT_TYPE": spec["product_type"],
