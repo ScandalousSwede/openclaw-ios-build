@@ -126,7 +126,7 @@ private struct ArgusOperationDetailView: View {
                     if let detail {
                         Text("Evidence timeline").font(.headline).accessibilityAddTraits(.isHeader)
                         if detail.item.id != detail.requested.id {
-                            Text("A later observation supersedes the selected result.").font(.subheadline)
+                            Text("A newer observation is available for this task.").font(.subheadline)
                         }
                         ForEach(detail.timeline) { item in
                             ArgusOperationRow(item: item)
