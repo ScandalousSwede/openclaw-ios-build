@@ -9,6 +9,7 @@ import {
 } from "@openclaw/normalization-core/string-normalization";
 import type { SecretRefSource } from "../config/types.secrets.js";
 import { listOpenClawPluginManifestMetadata } from "../plugins/manifest-metadata-scan.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import { listKnownProviderEnvApiKeyNames } from "./model-auth-env-vars.js";
 
 /** @deprecated MiniMax provider-owned marker; do not use from third-party plugins. */
@@ -56,6 +57,15 @@ const LEGACY_ENV_API_KEY_MARKERS = [
 ];
 
 function listKnownEnvApiKeyMarkers(): Set<string> {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (!scope.authLookupMaps) throw new Error("Scoped auth metadata is required");
+    return new Set([
+      ...Object.values(scope.authLookupMaps.envCandidateMap).flat(),
+      ...LEGACY_ENV_API_KEY_MARKERS,
+      ...AWS_SDK_ENV_MARKERS,
+    ]);
+  }
   knownEnvApiKeyMarkersCache ??= new Set([
     ...listKnownProviderEnvApiKeyNames(),
     ...LEGACY_ENV_API_KEY_MARKERS,
@@ -66,6 +76,14 @@ function listKnownEnvApiKeyMarkers(): Set<string> {
 
 /** List non-secret auth markers known from core and bundled plugin manifests. */
 export function listKnownNonSecretApiKeyMarkers(): string[] {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (!scope.providerManifest) throw new Error("Scoped provider manifest is required");
+    return uniqueStrings([
+      ...CORE_NON_SECRET_API_KEY_MARKERS,
+      ...normalizeTrimmedStringList(scope.providerManifest.nonSecretAuthMarkers),
+    ]);
+  }
   knownNonSecretApiKeyMarkersCache ??= uniqueStrings([
     ...CORE_NON_SECRET_API_KEY_MARKERS,
     ...listOpenClawPluginManifestMetadata().flatMap((plugin) =>

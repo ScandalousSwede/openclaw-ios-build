@@ -42,7 +42,10 @@ import {
 } from "./provider-hook-runtime.js";
 import { resolveBundledProviderPolicySurface } from "./provider-public-artifacts.js";
 import type { ProviderRuntimeModel } from "./provider-runtime-model.types.js";
-import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "./provider-runtime-scope.js";
 import type { ProviderThinkingProfile } from "./provider-thinking.types.js";
 import {
   resolveCatalogHookProviderPluginIds,
@@ -895,6 +898,20 @@ export function resolveProviderSyntheticAuthWithPlugin(params: {
   context: ProviderResolveSyntheticAuthContext;
   modelApi?: string;
 }) {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    const provider = resolveExplicitScopedProvider({
+      provider: params.provider,
+      config: params.config ?? scope.config,
+    });
+    resolveExplicitScopedProvider({
+      provider: params.context.provider,
+      config: params.context.config ?? scope.config,
+    });
+    return (
+      provider?.resolveSyntheticAuth?.({ ...params.context, config: scope.config }) ?? undefined
+    );
+  }
   const providerRefs = resolveProviderHookRefs(
     params.provider,
     params.context.providerConfig,
