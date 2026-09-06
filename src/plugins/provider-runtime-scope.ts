@@ -7,6 +7,10 @@ import type { ProviderPlugin } from "./types.js";
 export type ExplicitProviderRuntimeScope = {
   config: OpenClawConfig;
   provider: ProviderPlugin;
+  manifestPlugins?: readonly Pick<
+    import("./manifest-registry.js").PluginManifestRecord,
+    "modelIdNormalization"
+  >[];
   authLookupMaps?: import("../secrets/provider-env-vars.js").ProviderAuthLookupMaps;
 };
 const scopes = new AsyncLocalStorage<Readonly<ExplicitProviderRuntimeScope>>();

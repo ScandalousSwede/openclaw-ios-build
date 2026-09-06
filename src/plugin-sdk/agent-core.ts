@@ -91,3 +91,29 @@ export function createBundledAnthropicAuthLookupMaps() {
     setupProviderFallbackRefs: [],
   };
 }
+
+/** Exact shipped model alias metadata; no registry discovery. */
+export async function createBundledAnthropicModelMetadata(
+  config: import("../config/types.openclaw.js").OpenClawConfig,
+) {
+  const { assertExplicitProviderAdmission } = await import("../plugins/provider-runtime-scope.js");
+  assertExplicitProviderAdmission(config, "anthropic");
+  const { default: manifest } = await import("../../extensions/anthropic/openclaw.plugin.json", {
+    with: { type: "json" },
+  });
+  return [{ modelIdNormalization: manifest.modelIdNormalization }];
+}
+
+/** Read and core-validate source settings without loading unrelated plugin defaults. */
+export async function loadValidatedSourceConfigForProvider() {
+  const [{ readSourceConfigStrict }, { validateConfigObjectRaw }] = await Promise.all([
+    import("../config/io.js"),
+    import("../config/validation.js"),
+  ]);
+  const config = await readSourceConfigStrict();
+  const validated = validateConfigObjectRaw(config);
+  if (!validated.ok || Object.keys(validated.config).length === 0) {
+    throw new Error("Source configuration failed core validation");
+  }
+  return validated.config;
+}

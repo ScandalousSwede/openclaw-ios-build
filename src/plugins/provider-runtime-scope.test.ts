@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { resolveSimpleCompletionSelectionForAgent } from "../agents/simple-completion-runtime.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveProviderAuthLookupMaps } from "../secrets/provider-env-vars.js";
 import { resolvePluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
@@ -167,4 +168,33 @@ it("async mutation of caller-owned config, aliases and auth maps cannot alter ad
   );
   expect(Object.isFrozen(cfg)).toBe(false);
   expect(Object.isFrozen(descriptor)).toBe(false);
+});
+
+it("resolves configured Anthropic alias before global metadata discovery", () => {
+  const cfg: OpenClawConfig = {
+    agents: {
+      defaults: {
+        model: "anthropic/sonnet",
+        models: {
+          "anthropic/claude-sonnet-5": { alias: "sonnet" },
+          "google/gemini-3-flash-preview": {},
+        },
+      },
+    },
+  };
+  const manifestPlugins = [
+    {
+      modelIdNormalization: {
+        providers: { anthropic: { aliases: { sonnet: "claude-sonnet-5" } } },
+      },
+    },
+  ];
+  withExplicitProviderRuntimeScope({ config: cfg, provider, manifestPlugins }, (admitted) => {
+    const selected = resolveSimpleCompletionSelectionForAgent({
+      cfg: admitted.config,
+      agentId: "main",
+    });
+    expect(selected?.provider).toBe("anthropic");
+    expect(selected?.modelId).toBe("claude-sonnet-5");
+  });
 });

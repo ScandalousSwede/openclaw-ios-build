@@ -2319,10 +2319,13 @@ export function createConfigIO(
     return (await readBestEffortConfigSnapshotLocal()).config;
   }
 
-  async function readSourceConfigBestEffortLocal(): Promise<OpenClawConfig> {
+  async function readSourceConfigBestEffortLocal(
+    options: { strict?: boolean } = {},
+  ): Promise<OpenClawConfig> {
     maybeLoadDotEnvForConfig(deps.env);
     const exists = deps.fs.existsSync(configPath);
     if (!exists) {
+      if (options.strict) throw new Error("Source configuration is unavailable");
       return {};
     }
 
@@ -2330,6 +2333,7 @@ export function createConfigIO(
       const raw = deps.fs.readFileSync(configPath, "utf-8");
       const parsedRes = parseConfigJson5(raw, deps.json5);
       if (!parsedRes.ok) {
+        if (options.strict) throw new Error("Source configuration is invalid");
         return {};
       }
 
@@ -2337,12 +2341,23 @@ export function createConfigIO(
       try {
         resolved = resolveConfigIncludesForRead(parsedRes.parsed, configPath, deps);
       } catch {
+        if (options.strict) throw new Error("Source configuration include could not be resolved");
         return coerceConfig(parsedRes.parsed);
       }
 
       const readResolution = resolveConfigForRead(resolved, deps.env, deps.lowerPrecedenceEnv);
-      return coerceConfig(stripShippedPluginInstallConfigRecords(readResolution.resolvedConfigRaw));
+      const config = coerceConfig(
+        stripShippedPluginInstallConfigRecords(readResolution.resolvedConfigRaw),
+      );
+      if (
+        options.strict &&
+        (readResolution.envWarnings.length > 0 || Object.keys(config).length === 0)
+      ) {
+        throw new Error("Source configuration is empty or has unresolved environment references");
+      }
+      return config;
     } catch {
+      if (options.strict) throw new Error("Strict source configuration read failed");
       return {};
     }
   }
@@ -2829,6 +2844,15 @@ export async function readBestEffortConfigSnapshot(options?: {
   return await createConfigIO(
     options?.skipPluginValidation ? { pluginValidation: "skip" } : {},
   ).readBestEffortConfigSnapshot();
+}
+
+/** Strict authored includes/env view, without runtime defaults, recovery or plugin loading. */
+export async function readSourceConfigStrict(): Promise<OpenClawConfig> {
+  return await createConfigIO({
+    observe: false,
+    shellEnvFallback: "defer",
+    pluginValidation: "skip",
+  }).readSourceConfigBestEffort({ strict: true });
 }
 
 export async function readSourceConfigBestEffort(): Promise<OpenClawConfig> {

@@ -8,6 +8,7 @@ import { getCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-snap
 import type { PluginManifestRecord } from "./manifest-registry.js";
 import type { PluginManifestModelIdNormalizationProvider } from "./manifest.js";
 import { resolvePluginMetadataSnapshot } from "./plugin-metadata-snapshot.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 import { getActivePluginRegistryWorkspaceDirFromState } from "./runtime-workspace-state.js";
 
 type ManifestModelIdNormalizationLookupParams = {
@@ -64,6 +65,13 @@ function resolveMetadataSnapshotForPolicies(
 function loadManifestModelIdNormalizationPolicies(
   params: ManifestModelIdNormalizationLookupParams = {},
 ): Map<string, PluginManifestModelIdNormalizationProvider> {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if ((params.config && params.config !== scope.config) || !scope.manifestPlugins) {
+      throw new Error("Model metadata is outside explicit provider scope");
+    }
+    return collectManifestModelIdNormalizationPolicies(scope.manifestPlugins);
+  }
   if (params.plugins) {
     return collectManifestModelIdNormalizationPolicies(params.plugins);
   }
