@@ -177,10 +177,11 @@ extension SettingsProTab {
         self.isPreparingCrashDiagnosticExport = true
         defer { self.isPreparingCrashDiagnosticExport = false }
         do {
-            self.crashDiagnosticExportURL = try AIESCrashDiagnosticExporter.writeExport()
-            self.crashDiagnosticExportStatus = "Sanitized export ready"
+            let export = try AIESCrashDiagnosticExporter.writeExport()
+            self.crashDiagnosticExport = export
+            self.crashDiagnosticExportStatus = "Snapshot generated \(export.generatedAt.formatted(date: .abbreviated, time: .standard))"
         } catch {
-            self.crashDiagnosticExportURL = nil
+            self.crashDiagnosticExport = nil
             self.crashDiagnosticExportStatus = "Export failed: \(error.localizedDescription)"
         }
     }

@@ -268,6 +268,7 @@ final class TalkModeManager: NSObject {
     private var incrementalSpeechQueue: [String] = []
     private var incrementalSpeechTask: Task<Void, Never>?
     private var incrementalSpeechTaskGeneration: UInt64 = 0
+    private var incrementalSpeechRunID: String?
     private var incrementalSpeechPlaybackGeneration: UInt64?
     private var incrementalSpeechActive = false
     private var incrementalSpeechUsed = false
@@ -1439,7 +1440,7 @@ final class TalkModeManager: NSObject {
         }
 
         guard self.isListening else { return }
-        if !trimmed.isEmpty {
+        if !trimmed.isEmpty, trimmed != self.lastTranscript {
             self.lastTranscript = trimmed
             self.lastHeard = Date()
         }
@@ -1914,6 +1915,7 @@ final class TalkModeManager: NSObject {
         var streamingTask: Task<Void, Never>?
         if shouldIncremental {
             self.resetIncrementalSpeech()
+            self.incrementalSpeechRunID = rawCommandID
             self.incrementalSpeechPresentationValidator = presentationValidator
             let incrementalEvents = persistence.incrementalEvents
             streamingTask = Task { @MainActor [weak self] in
@@ -1947,6 +1949,9 @@ final class TalkModeManager: NSObject {
             return
         }
 
+        Self.recordSpeechTextStage(
+            "speech_reply_selected", runID: rawCommandID,
+            text: completion.assistantText, result: completion.state.description)
         var assistantText = completion.assistantText
         if assistantText == nil, shouldIncremental {
             let exactRunText = self.incrementalSpeechBuffer.latestText
@@ -2506,10 +2511,11 @@ final class TalkModeManager: NSObject {
         #endif
         return await withTaskGroup(of: ChatCompletionResult.self) { group in
             group.addTask { [runId] in
-                var latestAssistantText: String?
+                var latestChatText: String?
+                var provisionalAgentText: String?
                 for await evt in stream {
                     if Task.isCancelled {
-                        return ChatCompletionResult(state: .timeout, assistantText: latestAssistantText)
+                        return ChatCompletionResult(state: .timeout, assistantText: latestChatText ?? provisionalAgentText)
                     }
                     guard let payload = evt.payload else { continue }
                     if evt.event == "chat" {
@@ -2524,11 +2530,11 @@ final class TalkModeManager: NSObject {
                         #endif
                         guard chatEvent.runId == runId else { continue }
                         if let text = OpenClawChatEventText.assistantText(from: chatEvent) {
-                            latestAssistantText = text
+                            latestChatText = text
                         }
                         switch chatEvent.state {
                         case "final":
-                            return ChatCompletionResult(state: .final, assistantText: latestAssistantText)
+                            return ChatCompletionResult(state: .final, assistantText: latestChatText ?? provisionalAgentText)
                         case "aborted":
                             return ChatCompletionResult(state: .aborted, assistantText: nil)
                         case "error":
@@ -2550,13 +2556,13 @@ final class TalkModeManager: NSObject {
                         if agentEvent.stream == "assistant",
                            let text = agentEvent.data["text"]?.value as? String
                         {
-                            latestAssistantText = text
+                            provisionalAgentText = text
                         } else if agentEvent.stream == "lifecycle" {
                             let phase = (agentEvent.data["phase"]?.value as? String)?.lowercased()
                             let status = (agentEvent.data["status"]?.value as? String)?.lowercased()
-                            if phase == "end" || status == "ok" || status == "completed" || status == "success" {
-                                return ChatCompletionResult(state: .final, assistantText: latestAssistantText)
-                            }
+                            // Agent lifecycle success precedes the gateway's canonical
+                            // chat final. It is not proof that the complete reply arrived.
+                            // Keep listening so the final tail is not silently dropped.
                             if phase == "error" || status == "error" || status == "failed" {
                                 return ChatCompletionResult(state: .error, assistantText: nil)
                             }
@@ -2566,7 +2572,7 @@ final class TalkModeManager: NSObject {
                         }
                     }
                 }
-                return ChatCompletionResult(state: .timeout, assistantText: latestAssistantText)
+                return ChatCompletionResult(state: .timeout, assistantText: latestChatText ?? provisionalAgentText)
             }
             group.addTask {
                 try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds) * 1_000_000_000)
@@ -2577,6 +2583,16 @@ final class TalkModeManager: NSObject {
             return result
         }
     }
+
+    #if DEBUG
+    func _test_waitForChatCompletion(
+        runID: String,
+        stream: AsyncStream<EventFrame>) async -> (state: String, text: String?)
+    {
+        let result = await self.waitForChatCompletion(runId: runID, stream: stream, timeoutSeconds: 1)
+        return (result.state.description, result.assistantText)
+    }
+    #endif
 
     private func playAssistant(
         text: String,
@@ -3490,9 +3506,18 @@ final class TalkModeManager: NSObject {
         self.incrementalSpeechPresentationValidator = nil
     }
 
+    private static func recordSpeechTextStage(_ state: String, runID: String?, text: String?, result: String) {
+        // Counts describe UTF-8 input bytes, never transcript contents or hashes.
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts, state: state, runIdentifier: runID,
+            resultClass: result, byteCount: text?.utf8.count))
+    }
+
     private func enqueueIncrementalSpeech(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        Self.recordSpeechTextStage(
+            "speech_segment_queued", runID: self.incrementalSpeechRunID, text: trimmed, result: "queued")
         self.incrementalSpeechQueue.append(trimmed)
         self.incrementalSpeechUsed = true
         if self.incrementalSpeechTask == nil {
@@ -3553,11 +3578,17 @@ final class TalkModeManager: NSObject {
                     self.cancelIncrementalSpeech()
                     return
                 }
+                let segmentRunID = self.incrementalSpeechRunID
+                Self.recordSpeechTextStage(
+                    "speech_segment_started", runID: segmentRunID, text: segment, result: "started")
                 await self.speakIncrementalSegment(
                     segment,
                     context: context,
                     prefetchedAudio: prefetchedAudio,
                     taskGeneration: taskGeneration)
+                Self.recordSpeechTextStage(
+                    "speech_segment_returned", runID: segmentRunID, text: segment,
+                    result: Task.isCancelled ? "cancelled" : "returned")
                 guard !Task.isCancelled, self.isCurrentIncrementalSpeechTask(taskGeneration) else { break }
                 self.cancelIncrementalPrefetchMonitor()
             }
@@ -3815,30 +3846,35 @@ final class TalkModeManager: NSObject {
         #endif
         for await evt in stream {
             if Task.isCancelled { return }
-            guard evt.event == "agent", let payload = evt.payload else { continue }
-            guard let agentEvent = try? GatewayPayloadDecoding.decode(
-                payload,
-                as: OpenClawAgentEventPayload.self)
-            else {
-                continue
-            }
+            guard evt.event == "chat", let payload = evt.payload else { continue }
+            guard let chatEvent = try? GatewayPayloadDecoding.decode(
+                payload, as: OpenClawChatEventPayload.self)
+            else { continue }
             #if DEBUG
-            durableEventObserved?(agentEvent.runId, agentEvent.runId == runId)
+            durableEventObserved?(chatEvent.runId, chatEvent.runId == runId)
             #endif
-            guard agentEvent.runId == runId, agentEvent.stream == "assistant" else { continue }
-            guard let text = agentEvent.data["text"]?.value as? String else { continue }
+            guard chatEvent.runId == runId,
+                  chatEvent.state == "delta" || chatEvent.state == "final",
+                  let text = OpenClawChatEventText.assistantText(from: chatEvent)
+            else { continue }
             guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
-                self.cancelIncrementalSpeech()
+                // A retired observer cannot clear speech now owned by the final
+                // consumer. A live observer still cancels invalid presentation.
+                if !Task.isCancelled { self.cancelIncrementalSpeech() }
                 return
-            }
-            let segments = self.incrementalSpeechBuffer.ingest(text: text, isFinal: false)
-            if let lang = incrementalSpeechBuffer.directive?.language {
-                self.incrementalSpeechLanguage = ElevenLabsTTSClient.validatedLanguage(lang)
             }
             await self.updateIncrementalContextIfNeeded()
             guard await self.isSpeechPresentationAuthorized(presentationValidator) else {
-                self.cancelIncrementalSpeech()
+                // A retired observer cannot clear speech now owned by the final
+                // consumer. A live observer still cancels invalid presentation.
+                if !Task.isCancelled { self.cancelIncrementalSpeech() }
                 return
+            }
+            // Ingest and enqueue without suspension: cancellation by the final
+            // consumer must not advance the spoken offset and then lose its tail.
+            let segments = self.incrementalSpeechBuffer.ingest(text: text, isFinal: chatEvent.state == "final")
+            if let lang = incrementalSpeechBuffer.directive?.language {
+                self.incrementalSpeechLanguage = ElevenLabsTTSClient.validatedLanguage(lang)
             }
             for segment in segments {
                 self.enqueueIncrementalSpeech(segment)
@@ -5138,6 +5174,14 @@ extension TalkModeManager {
         self.lastHeard = Date().addingTimeInterval(-seconds)
     }
 
+    func _test_lastSpeechActivity() -> Date? {
+        [self.lastHeard, self.lastAudioActivity].compactMap(\.self).max()
+    }
+
+    func _test_setAudioActivity(_ date: Date) {
+        self.lastAudioActivity = date
+    }
+
     func _test_runSilenceCheck() async {
         await self.checkSilence()
     }
@@ -5166,6 +5210,13 @@ extension TalkModeManager {
         _ hook: @escaping (UInt64) async -> Void)
     {
         self.incrementalSpeechBeforeSpeakOverride = hook
+    }
+
+    func _test_streamAssistant(
+        runID: String, stream: AsyncStream<EventFrame>,
+        validator: @escaping () async -> Bool) async
+    {
+        await self.streamAssistant(runId: runID, stream: stream, presentationValidator: validator)
     }
 
     func _test_startIncrementalSpeech(_ text: String) {

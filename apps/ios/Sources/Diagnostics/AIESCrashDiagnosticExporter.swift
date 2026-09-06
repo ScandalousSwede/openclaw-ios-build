@@ -7,6 +7,12 @@ enum AIESCrashDiagnosticExporter {
     static let maximumExportBytes = 256 * 1024
     static let maximumEventCount = 250
 
+    struct PreparedExport: Identifiable, Sendable {
+        let id: UUID
+        let url: URL
+        let generatedAt: Date
+    }
+
     struct Device: Codable, Equatable, Sendable {
         let model: String
         let osName: String
@@ -53,11 +59,12 @@ enum AIESCrashDiagnosticExporter {
     }
 
     @MainActor
-    static func writeExport() throws -> URL {
+    static func writeExport() throws -> PreparedExport {
         let device = UIDevice.current
         let diagnosticSnapshot = GatewayDiagnostics.snapshotSanitizedEvents(
             limit: self.maximumEventCount,
             timeout: 1)
+        let generatedAt = Date()
         let data = try self.makeData(
             buildManifest: .current(),
             device: Device(
@@ -65,14 +72,23 @@ enum AIESCrashDiagnosticExporter {
                 osName: device.systemName,
                 osVersion: device.systemVersion),
             events: diagnosticSnapshot.events,
-            generatedAt: Date(),
+            generatedAt: generatedAt,
             maximumBytes: self.maximumExportBytes,
             diagnosticLogFlushStatus: diagnosticSnapshot.flushResult,
             coverage: diagnosticSnapshot.coverage)
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("OpenClaw-Crash-Diagnostics.json")
+        return try self.writePreparedExport(data: data, generatedAt: generatedAt)
+    }
+
+    static func writePreparedExport(
+        data: Data,
+        generatedAt: Date,
+        directory: URL = FileManager.default.temporaryDirectory) throws -> PreparedExport
+    {
+        guard data.count <= self.maximumExportBytes else { throw ExportError.cannotFitBound }
+        let id = UUID()
+        let url = directory.appendingPathComponent("OpenClaw-Crash-Diagnostics-\(id.uuidString).json")
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-        return url
+        return PreparedExport(id: id, url: url, generatedAt: generatedAt)
     }
 
     static func makeData(

@@ -1,5 +1,16 @@
 import OpenClawKit
 import SwiftUI
+import UIKit
+
+private struct CrashDiagnosticShareSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [self.url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
 
 extension SettingsProTab {
     var settingsHeader: some View {
@@ -1013,7 +1024,7 @@ extension SettingsProTab {
                 Label("Crash Evidence", systemImage: "waveform.path.ecg.rectangle")
                     .font(.headline)
                 Text(
-                    "Prepare a bounded metadata-only export from the protected rolling log. "
+                    "Create and share a fresh bounded metadata-only snapshot on each tap. "
                         + "Messages, prompts, tool payloads, credentials, and APNs tokens are excluded.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1021,27 +1032,23 @@ extension SettingsProTab {
                     self.prepareCrashDiagnosticExport()
                 } label: {
                     Label(
-                        self.isPreparingCrashDiagnosticExport ? "Preparing…" : "Prepare Crash Export",
-                        systemImage: "doc.badge.gearshape")
+                        self.isPreparingCrashDiagnosticExport ? "Preparing…" : "Prepare and Share Crash Export",
+                        systemImage: "square.and.arrow.up")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
                 .disabled(self.isPreparingCrashDiagnosticExport)
-
-                if let crashDiagnosticExportURL {
-                    ShareLink(item: crashDiagnosticExportURL) {
-                        Label("Share Crash Export", systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
 
                 if let crashDiagnosticExportStatus {
                     Text(crashDiagnosticExportStatus)
                         .font(.caption)
-                        .foregroundStyle(crashDiagnosticExportURL == nil ? OpenClawBrand.warn : .secondary)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
+        .sheet(item: self.$crashDiagnosticExport) { export in
+            CrashDiagnosticShareSheet(url: export.url)
+        }
     }
 
     var deviceIdentityCard: some View {

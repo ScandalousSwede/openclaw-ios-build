@@ -5,6 +5,45 @@ import Testing
 
 @Suite(.serialized)
 struct AIESCrashDiagnosticExporterTests {
+    @Test func successivePreparedExportsKeepDistinctFreshSnapshots() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let baselineAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let afterTalkAt = baselineAt.addingTimeInterval(60)
+        func data(at date: Date, state: String) throws -> Data {
+            try AIESCrashDiagnosticExporter.makeData(
+                buildManifest: self.fixtureManifest(),
+                device: .init(model: "synthetic", osName: "iOS", osVersion: "test"),
+                events: [.init(kind: .tts, state: state, observedAt: date)],
+                generatedAt: date,
+                maximumBytes: AIESCrashDiagnosticExporter.maximumExportBytes)
+        }
+        let firstData = try data(at: baselineAt, state: "tts_idle")
+        let secondData = try data(at: afterTalkAt, state: "speech_recognition_started")
+        let first = try AIESCrashDiagnosticExporter.writePreparedExport(
+            data: firstData, generatedAt: baselineAt, directory: directory)
+        let second = try AIESCrashDiagnosticExporter.writePreparedExport(
+            data: secondData, generatedAt: afterTalkAt, directory: directory)
+
+        #expect(first.id != second.id)
+        #expect(first.url != second.url)
+        #expect(first.generatedAt == baselineAt)
+        #expect(second.generatedAt == afterTalkAt)
+        #expect(try Data(contentsOf: first.url) == firstData)
+        #expect(try Data(contentsOf: second.url) == secondData)
+        let secondSnapshot = try JSONDecoder().decode(
+            AIESCrashDiagnosticExporter.Export.self, from: Data(contentsOf: second.url))
+        let firstSnapshot = try JSONDecoder().decode(AIESCrashDiagnosticExporter.Export.self, from: firstData)
+        #expect(secondSnapshot.diagnosticEvents.first?.state == "speech_recognition_started")
+        #expect(secondSnapshot.generatedAt != firstSnapshot.generatedAt)
+        #expect(throws: AIESCrashDiagnosticExporter.ExportError.self) {
+            try AIESCrashDiagnosticExporter.writePreparedExport(
+                data: Data(repeating: 0, count: AIESCrashDiagnosticExporter.maximumExportBytes + 1),
+                generatedAt: afterTalkAt, directory: directory)
+        }
+    }
+
     @Test func runtimeManifestUsesExactEmbeddedProvenance() throws {
         let manifest = AIESBuildManifest.from(
             infoDictionary: [

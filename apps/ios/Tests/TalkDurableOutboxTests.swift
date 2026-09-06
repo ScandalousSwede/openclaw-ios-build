@@ -354,14 +354,14 @@ private final class DurableTalkEventSource: @unchecked Sendable {
             bufferingPolicy: .bufferingNewest(32))
     }
 
-    func sendChatFinal(runID: String, text: String) {
+    func sendChatFinal(runID: String, text: String, state: String = "final") {
         self.continuation.yield(EventFrame(
             type: "event",
             event: "chat",
             payload: AnyCodable([
                 "runId": AnyCodable(runID),
                 "sessionKey": AnyCodable("main"),
-                "state": AnyCodable("final"),
+                "state": AnyCodable(state),
                 "message": AnyCodable([
                     "role": AnyCodable("assistant"),
                     "content": AnyCodable(text),
@@ -384,6 +384,16 @@ private final class DurableTalkEventSource: @unchecked Sendable {
             ]),
             seq: sequence,
             stateversion: nil))
+    }
+
+    func sendLifecycle(runID: String, phase: String) {
+        self.continuation.yield(EventFrame(
+            type: "event", event: "agent",
+            payload: AnyCodable([
+                "runId": AnyCodable(runID), "seq": AnyCodable(2),
+                "stream": AnyCodable("lifecycle"), "ts": AnyCodable(1),
+                "data": AnyCodable(["phase": AnyCodable(phase)]),
+            ]), seq: 2, stateversion: nil))
     }
 
     func finish() {
@@ -2487,7 +2497,7 @@ struct TalkDurableOutboxTests {
         let newAdmissionToken = try await fixture.owner.destructiveSessionAdmissionToken()
         #expect(newAdmissionToken != oldAdmissionToken)
 
-        incrementalEvents.sendAgentAssistant(runID: rawID, text: "late incremental chunk.")
+        incrementalEvents.sendChatFinal(runID: rawID, text: "late incremental chunk.", state: "delta")
         gatewayEvents.sendChatFinal(runID: rawID, text: "late final reply")
         try await waitForDurableTalk("reset-fenced response task exits") {
             responseExits.count() == 1
@@ -2630,5 +2640,111 @@ struct TalkDurableOutboxTests {
         appModel.talkMode.isEnabled = false
         appModel.setScenePhase(.active)
         #expect(appModel.voiceWake._test_resumeAfterExternalAudioCaptureCallCount() == 1)
+    }
+}
+
+@MainActor
+extension TalkDurableOutboxTests {
+    @Test func cancelledStreamObserverCannotTearDownFinalSpeech() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        let validatorGate = DurableTalkGate()
+        let playbackGate = DurableTalkGate()
+        manager._test_setIncrementalSpeechBeforeSpeakHook { _ in await playbackGate.wait() }
+        let observer = Task { @MainActor in
+            await manager._test_streamAssistant(runID: "exact-run", stream: events.stream) {
+                await validatorGate.wait()
+                return true
+            }
+        }
+        events.sendChatFinal(runID: "exact-run", text: "Partial reply.", state: "delta")
+        try await waitForDurableTalkGateEntry("observer is suspended in authorization", gate: validatorGate)
+        observer.cancel()
+        manager._test_startIncrementalSpeech("Complete final reply including tail.")
+        let finalWorker = manager._test_incrementalSpeechTaskHandle()
+        let finalGeneration = manager._test_incrementalSpeechTaskGeneration()
+        await validatorGate.open()
+        await observer.value
+        #expect(manager._test_incrementalSpeechTaskGeneration() == finalGeneration)
+        #expect(manager._test_hasIncrementalSpeechTask())
+        #expect(manager._test_incrementalSpeechState().active)
+        manager._test_stopSpeaking()
+        await playbackGate.open()
+        await finalWorker?.value
+        events.finish()
+    }
+
+    @Test func unchangedRecognitionPartialDoesNotExtendQuietEndpoint() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition(transcript: "Recognized words")
+        manager._test_backdateLastHeard(seconds: 30)
+        let originalActivity = try #require(manager._test_lastSpeechActivity())
+        await manager._test_handleTranscript("Recognized words", isFinal: false)
+        #expect(manager._test_lastSpeechActivity() == originalActivity)
+        await manager._test_handleTranscript("Recognized words continued", isFinal: false)
+        #expect(try #require(manager._test_lastSpeechActivity()) > originalActivity)
+        let freshAudio = Date().addingTimeInterval(1)
+        manager._test_setAudioActivity(freshAudio)
+        await manager._test_handleTranscript("Recognized words continued", isFinal: false)
+        #expect(manager._test_lastSpeechActivity() == freshAudio)
+    }
+
+    @Test func lifecycleSuccessWaitsForCanonicalFinalTail() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        events.sendAgentAssistant(runID: "exact-run", text: "First sentence.")
+        events.sendLifecycle(runID: "exact-run", phase: "end")
+        events.sendChatFinal(runID: "other-run", text: "Unrelated reply.")
+        events.sendChatFinal(runID: "exact-run", text: "First sentence. Required final tail.")
+        events.finish()
+        let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
+        #expect(result.state == "final")
+        #expect(result.text == "First sentence. Required final tail.")
+        manager._test_incrementalReset()
+        let prefix = manager._test_incrementalIngest("First sentence.", isFinal: false)
+        let tail = manager._test_incrementalIngest(result.text ?? "", isFinal: true)
+        #expect((prefix + tail).joined(separator: " ") == "First sentence. Required final tail.")
+        #expect(manager._test_incrementalIngest(result.text ?? "", isFinal: true).isEmpty)
+    }
+
+    @Test func lifecycleSuccessAloneIsNotCanonicalCompletion() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        events.sendAgentAssistant(runID: "exact-run", text: "Provisional only.")
+        events.sendLifecycle(runID: "exact-run", phase: "end")
+        events.finish()
+        let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
+        #expect(result.state == "timeout")
+    }
+
+    @Test func canonicalChatSnapshotCannotBeOverwrittenByAgentMessage() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        events.sendChatFinal(runID: "exact-run", text: "First message. Second message.", state: "delta")
+        events.sendAgentAssistant(runID: "exact-run", text: "Second message.")
+        events.finish()
+        let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
+        #expect(result.state == "timeout")
+        #expect(result.text == "First message. Second message.")
+    }
+
+    @Test func lifecycleAbortRemainsTerminal() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        events.sendLifecycle(runID: "exact-run", phase: "aborted")
+        events.finish()
+        let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
+        #expect(result.state == "aborted")
+        #expect(result.text == nil)
+    }
+
+    @Test func lifecycleErrorRemainsTerminal() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let events = DurableTalkEventSource()
+        events.sendLifecycle(runID: "exact-run", phase: "error")
+        events.finish()
+        let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
+        #expect(result.state == "error")
+        #expect(result.text == nil)
     }
 }
