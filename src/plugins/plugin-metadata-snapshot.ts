@@ -37,6 +37,7 @@ import {
 } from "./plugin-registry.js";
 import { normalizePluginIdScope, serializePluginIdScope } from "./plugin-scope.js";
 import { fileFingerprint } from "./plugin-snapshot-fingerprint.js";
+import { assertProviderDiscoveryOutsideExplicitScope } from "./provider-runtime-scope.js";
 
 type PluginMetadataSnapshotMemo = {
   key: string;
@@ -561,6 +562,7 @@ export function listPluginOriginsFromMetadataSnapshot(
 export function loadPluginMetadataSnapshot(
   params: LoadPluginMetadataSnapshotParams,
 ): PluginMetadataSnapshot {
+  assertProviderDiscoveryOutsideExplicitScope();
   const activeTimelineSpan = getActiveDiagnosticsTimelineSpan();
   const env = params.env ?? process.env;
   const registryState = params.index
@@ -635,6 +637,7 @@ function canMemoizePluginMetadataSnapshotResult(result: {
 export function resolvePluginMetadataSnapshot(
   params: ResolvePluginMetadataSnapshotParams,
 ): PluginMetadataSnapshot {
+  assertProviderDiscoveryOutsideExplicitScope();
   const canUseCurrentSnapshot =
     params.allowCurrent !== false &&
     params.stateDir === undefined &&

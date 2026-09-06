@@ -66,3 +66,28 @@ export async function filterConfiguredPluginTools(params: {
     }),
   });
 }
+
+/** Explicit provider-only invocation, without activating a plugin registry. */
+export {
+  withExplicitProviderRuntimeScope,
+  assertExplicitProviderAdmission,
+} from "../plugins/provider-runtime-scope.js";
+/** Public descriptor adapter for the shipped Anthropic runtime implementation. */
+export async function createBundledAnthropicProviderDescriptor(
+  config: import("../config/types.openclaw.js").OpenClawConfig,
+) {
+  const { assertExplicitProviderAdmission } = await import("../plugins/provider-runtime-scope.js");
+  assertExplicitProviderAdmission(config, "anthropic");
+  const { buildAnthropicProvider } = await import("../../extensions/anthropic/register.runtime.js");
+  return buildAnthropicProvider();
+}
+
+/** Metadata accompanying the exact shipped Anthropic descriptor; contains no credentials. */
+export function createBundledAnthropicAuthLookupMaps() {
+  return {
+    aliasMap: {},
+    envCandidateMap: { anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] },
+    authEvidenceMap: {},
+    setupProviderFallbackRefs: [],
+  };
+}

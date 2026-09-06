@@ -9,6 +9,10 @@ import type {
   ProviderNormalizeConfigContext,
   ProviderResolveConfigApiKeyContext,
 } from "./provider-config-context.types.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "./provider-runtime-scope.js";
 import type {
   ProviderDefaultThinkingPolicyContext,
   ProviderThinkingProfile,
@@ -161,6 +165,15 @@ export function resolveBundledProviderPolicySurface(
   providerId: string,
   options: { manifestRegistry?: Pick<PluginManifestRegistry, "plugins"> } = {},
 ): BundledProviderPolicySurface | null {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    const provider = resolveExplicitScopedProvider({ config: scope.config, provider: providerId })!;
+    return {
+      normalizeConfig: provider.normalizeConfig,
+      applyConfigDefaults: provider.applyConfigDefaults,
+      resolveThinkingProfile: provider.resolveThinkingProfile,
+    };
+  }
   const normalizedProviderId = normalizeProviderId(providerId);
   if (!normalizedProviderId) {
     return null;

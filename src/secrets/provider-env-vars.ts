@@ -15,6 +15,7 @@ import {
   loadPluginMetadataSnapshot,
   type PluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import { listSetupProviderIds } from "../plugins/setup-descriptors.js";
 import { hasKind } from "../plugins/slots.js";
 import { appendUniqueEnvVarCandidates } from "../shared/env-var-candidates.js";
@@ -323,6 +324,13 @@ export function resolveProviderAuthEvidence(
 export function resolveProviderAuthLookupMaps(
   params?: ProviderEnvVarLookupParams,
 ): ProviderAuthLookupMaps {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if ((params?.config && params.config !== scope.config) || !scope.authLookupMaps) {
+      throw new Error("Auth metadata is outside the explicit provider runtime scope");
+    }
+    return scope.authLookupMaps;
+  }
   const snapshot = resolveProviderMetadataSnapshot(params);
   const lookupParams = {
     ...params,
