@@ -18,6 +18,7 @@ import {
   runProviderStaticCatalog,
 } from "../../plugins/provider-discovery.js";
 import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.types.js";
+import { resolveExplicitScopedProvider } from "../../plugins/provider-runtime-scope.js";
 import {
   resolveActivatableProviderOwnerPluginIds,
   resolveBundledProviderCompatPluginIds,
@@ -203,6 +204,8 @@ export function canonicalizeManifestModelCatalogProviderAlias(params: {
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
 }): string {
+  const scoped = resolveExplicitScopedProvider({ config: params.cfg, provider: params.provider });
+  if (scoped) return scoped.id;
   const provider = normalizeProviderId(params.provider);
   if (!provider) {
     return params.provider;

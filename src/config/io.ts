@@ -9,7 +9,7 @@ import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text
 import { resolveAgentWorkspaceDir, resolveDefaultAgentId } from "../agents/agent-scope-config.js";
 import { ensureOwnerDisplaySecret } from "../agents/owner-display.js";
 import { isVerbose } from "../global-state.js";
-import { loadDotEnv } from "../infra/dotenv.js";
+import { loadDotEnv, loadGlobalRuntimeDotEnvFiles } from "../infra/dotenv.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import {
   collectErrorGraphCandidates,
@@ -2322,7 +2322,12 @@ export function createConfigIO(
   async function readSourceConfigBestEffortLocal(
     options: { strict?: boolean } = {},
   ): Promise<OpenClawConfig> {
-    maybeLoadDotEnvForConfig(deps.env);
+    // Strict technical reads admit operator/global env only, never workspace .env.
+    if (options.strict) {
+      if (deps.env === process.env) loadGlobalRuntimeDotEnvFiles({ quiet: true });
+    } else {
+      maybeLoadDotEnvForConfig(deps.env);
+    }
     const exists = deps.fs.existsSync(configPath);
     if (!exists) {
       if (options.strict) throw new Error("Source configuration is unavailable");

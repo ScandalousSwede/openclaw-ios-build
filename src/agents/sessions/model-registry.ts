@@ -317,14 +317,17 @@ export class ModelRegistry {
   ) {
     this.authStorage = authStorage;
     this.modelsJsonPath = modelsJsonPath;
-    this.pluginMetadataSnapshot = resolveModelPluginMetadataSnapshot({
-      ...(options.pluginMetadataSnapshot
-        ? { pluginMetadataSnapshot: options.pluginMetadataSnapshot }
-        : {}),
-      ...(options.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
-      allowWorkspaceScopedCurrent: true,
-      useRuntimeConfig: true,
-    });
+    this.pluginMetadataSnapshot =
+      modelsJsonPath === undefined
+        ? undefined
+        : resolveModelPluginMetadataSnapshot({
+            ...(options.pluginMetadataSnapshot
+              ? { pluginMetadataSnapshot: options.pluginMetadataSnapshot }
+              : {}),
+            ...(options.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
+            allowWorkspaceScopedCurrent: true,
+            useRuntimeConfig: true,
+          });
     this.loadModels();
   }
 

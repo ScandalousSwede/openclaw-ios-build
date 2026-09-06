@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { loadDotEnv, loadGlobalRuntimeDotEnvFiles } from "../infra/dotenv.js";
 import { loadValidatedSourceConfigForProvider } from "../plugin-sdk/agent-core.js";
 import { readSourceConfigStrict } from "./io.js";
 import { withTempHome, writeOpenClawConfig } from "./test-helpers.js";
@@ -19,6 +20,16 @@ vi.mock("../plugins/plugin-metadata-snapshot.js", async (importOriginal) => ({
     throw new Error("registry discovery invoked");
   },
 }));
+vi.mock("../infra/dotenv.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../infra/dotenv.js")>();
+  return {
+    ...actual,
+    loadDotEnv: vi.fn(() => {
+      throw new Error("workspace dotenv attempted");
+    }),
+    loadGlobalRuntimeDotEnvFiles: vi.fn(actual.loadGlobalRuntimeDotEnvFiles),
+  };
+});
 afterEach(() => vi.unstubAllEnvs());
 it("preserves authored includes/env/auth and avoids runtime defaults/registry", async () => {
   await withTempHome(async (home) => {
@@ -32,6 +43,8 @@ it("preserves authored includes/env/auth and avoids runtime defaults/registry", 
       }),
     );
     const cfg = await loadValidatedSourceConfigForProvider();
+    expect(loadDotEnv).not.toHaveBeenCalled();
+    expect(loadGlobalRuntimeDotEnvFiles).toHaveBeenCalled();
     expect(cfg.agents?.defaults?.model).toEqual({ primary: "anthropic/claude-sonnet-5" });
     expect(cfg.auth?.profiles?.["anthropic:fixture"].mode).toBe("api_key");
     expect(cfg.agents?.defaults?.compaction).toBeUndefined();
