@@ -18,6 +18,8 @@ Sources/Design/AgentProNodesDestination.swift
 Sources/Design/AgentProTab.swift
 Sources/Design/ChatProTab.swift
 Sources/Design/CommandCenterTab.swift
+Sources/Design/ArgusOperationsStore.swift
+Sources/Design/ArgusOperationsView.swift
 Sources/Design/TalkProTab.swift
 Sources/Design/OpenClawProComponents.swift
 Sources/Design/OpenClawProScreens.swift

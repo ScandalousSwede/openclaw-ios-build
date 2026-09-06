@@ -588,6 +588,7 @@ jobs:
           swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatMarkdownPreprocessorTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
@@ -643,6 +644,7 @@ jobs:
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
             -only-testing:OpenClawTests/QRScannerResultHandoffTests \
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
+            -only-testing:OpenClawTests/ArgusOperationsTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
@@ -1122,6 +1124,7 @@ jobs:
           set -euo pipefail
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
+            test_cleanup_aies_export_profiles.py \
             test_aies_package_authority.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
@@ -1183,6 +1186,7 @@ jobs:
           swift test --package-path "${shared_package}" --force-resolved-versions --filter DeepLinksSecurityTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter GatewayNodeSessionTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatViewModelTests
+          swift test --package-path "${shared_package}" --force-resolved-versions --filter ChatMarkdownPreprocessorTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxStorageTests
           swift test --package-path "${shared_package}" --force-resolved-versions --filter OpenClawChatOutboxIntegrationTests
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
@@ -1238,6 +1242,7 @@ jobs:
             -only-testing:OpenClawTests/OpenClawAppDelegateTests \
             -only-testing:OpenClawTests/QRScannerResultHandoffTests \
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
+            -only-testing:OpenClawTests/ArgusOperationsTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
@@ -1881,6 +1886,11 @@ jobs:
             "${RUNNER_TEMP}"/*) rm -f -- "${p12_path}" || cleanup_status=1 ;;
             *) echo "Refusing unexpected PKCS#12 path." >&2; cleanup_status=1 ;;
           esac
+          # Authenticated export can install distribution profiles after the
+          # development journal is removed. Delete only exact verified IPA bytes.
+          python3 apps/ios/Tools/cleanup_aies_export_profiles.py \
+            --report "${RUNNER_TEMP}/openclaw-aies-testflight/OpenClaw-signing-entitlements.json" \
+            || cleanup_status=1
           python3 - "${RUNNER_TEMP}" <<'PY' || cleanup_status=1
           import json
           import os

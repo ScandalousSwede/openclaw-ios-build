@@ -38,6 +38,7 @@ struct CommandCenterTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         self.header
                         self.gatewayCard
+                        ArgusOperationsSection()
                         self.defaultChatSessionSection
                         self.recentSessions
                     }
