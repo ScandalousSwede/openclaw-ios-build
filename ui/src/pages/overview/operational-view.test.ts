@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OperationalView } from "./operational-view.ts";
 
 const item = {
@@ -53,6 +53,9 @@ async function mount(request = vi.fn().mockResolvedValue(page), connected = true
     },
   };
 }
+beforeEach(() => {
+  window.history.replaceState({}, "", "/overview");
+});
 afterEach(() => {
   document.body.replaceChildren();
   vi.restoreAllMocks();
@@ -197,4 +200,188 @@ describe("operational evidence overview", () => {
     await element.updateComplete;
     expect(request).toHaveBeenCalledTimes(2);
   });
+});
+
+describe("server filters and observation links", () => {
+  it("applies server filters with a fresh cursor and preserves explicit timezone precision", async () => {
+    const { element, request } = await mount();
+    const inputs = [...element.querySelectorAll("form input")];
+    const values = [
+      "unfamiliar-task",
+      "external-new",
+      "2026-09-06T18:00:00.000001Z",
+      "2026-09-07T00:00:00+02:00",
+    ];
+    inputs.forEach((input, index) => {
+      (input as HTMLInputElement).value = values[index];
+      input.dispatchEvent(new Event("input"));
+    });
+    const project = element.querySelector("select")!;
+    project.value = "MiKobots";
+    project.dispatchEvent(new Event("change"));
+    element.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenLastCalledWith("argus.operations.list", {
+        project: "MiKobots",
+        task_id: "unfamiliar-task",
+        source: "external-new",
+        recorded_from: values[2],
+        recorded_before: values[3],
+        limit: 30,
+      }),
+    );
+    expect(window.location.search).toContain("argus_project=MiKobots");
+    expect(window.location.search).not.toContain("argus_operation");
+  });
+
+  it("loads an unfamiliar linked observation independently of list membership and excludes auth from links", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/overview?argus_operation=external-unlisted&token=private-placeholder#secret-placeholder",
+    );
+    const requested = { ...item, operation_id: "external-unlisted", title: "Earlier evidence" };
+    const current = { ...item, operation_id: "current-observation", title: "Current evidence" };
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce({
+        item: current,
+        requested,
+        timeline: [current, requested],
+        coverage: { complete: false, has_more: true },
+      });
+    const { element } = await mount(request);
+    await vi.waitFor(() => expect(element.textContent).toContain("Requested: Earlier evidence"));
+    expect(request).toHaveBeenLastCalledWith("argus.operations.detail", {
+      operation_id: "external-unlisted",
+    });
+    const links = [...element.querySelectorAll(".argus-detail a")];
+    expect(links).toHaveLength(2);
+    expect(links[0].getAttribute("href")).toContain("argus_operation=external-unlisted");
+    expect(links[1].getAttribute("href")).toContain("argus_operation=current-observation");
+    for (const link of links) {
+      expect(link.getAttribute("href")).not.toMatch(
+        /private-placeholder|secret-placeholder|token=/,
+      );
+    }
+    expect(element.textContent).toContain("Partial history");
+    expect(element.textContent).toContain("does not dispatch work");
+  });
+
+  it("refuses invalid URL scope before any request", async () => {
+    window.history.replaceState({}, "", "/overview?argus_project=Other");
+    const request = vi.fn();
+    const element = new OperationalView();
+    Object.assign(element, {
+      context: {
+        gateway: { snapshot: { connected: true, client: { request } }, subscribe: () => () => {} },
+      },
+    });
+    document.body.append(element);
+    await element.updateComplete;
+    expect(request).not.toHaveBeenCalled();
+    expect(element.textContent).toContain("Choose a supported project");
+  });
+
+  it("rejects timezone-free filters without replacing loaded evidence", async () => {
+    const { element, request } = await mount();
+    const input = element.querySelectorAll("form input")[2] as HTMLInputElement;
+    input.value = "2026-09-06T18:00";
+    input.dispatchEvent(new Event("input"));
+    element.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+    await element.updateComplete;
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(element.textContent).toContain("Use an ISO observation time with a timezone");
+    expect(element.textContent).toContain("Reader correction");
+  });
+
+  it("refreshes once on return after a minute without a polling timer", async () => {
+    const { request } = await mount();
+    const clock = vi.spyOn(Date, "now");
+    const now = Date.now();
+    clock.mockReturnValue(now + 61_000);
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    window.dispatchEvent(new Event("focus"));
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconciles browser history scope and ignores a late previous page", async () => {
+    const { element, request } = await mount();
+    let release!: (value: typeof page) => void;
+    request.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    window.history.pushState({}, "", "/overview?argus_source=older");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    request.mockResolvedValueOnce({ ...page, items: [{ ...item, title: "New scope evidence" }] });
+    window.history.pushState({}, "", "/overview?argus_source=newer");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+    await vi.waitFor(() => expect(element.textContent).toContain("New scope evidence"));
+    release({ ...page, items: [{ ...item, title: "Stale scope evidence" }] });
+    await element.updateComplete;
+    expect(element.textContent).not.toContain("Stale scope evidence");
+  });
+});
+
+it("does not mark a failed list current when linked detail succeeds", async () => {
+  const { element, request } = await mount();
+  request.mockRejectedValueOnce(new Error("Unavailable")).mockResolvedValueOnce({
+    item,
+    requested: item,
+    timeline: [item],
+    coverage: { complete: true, has_more: false },
+  });
+  window.history.pushState({}, "", "/overview?argus_operation=external-held-out");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  await vi.waitFor(() => expect(element.querySelector(".argus-detail")).not.toBeNull());
+  expect(element.querySelector('[role="status"]')?.textContent).toContain("Evidence unavailable");
+});
+
+it("displays and submits a non-default project loaded from a deep link", async () => {
+  window.history.replaceState({}, "", "/overview?argus_project=MiKobots");
+  const { element, request } = await mount();
+  expect(element.querySelector("select")?.value).toBe("MiKobots");
+  expect(request).toHaveBeenLastCalledWith("argus.operations.list", {
+    project: "MiKobots",
+    limit: 30,
+  });
+  const task = element.querySelector("form input") as HTMLInputElement;
+  task.value = "new-task";
+  task.dispatchEvent(new Event("input"));
+  element.querySelector("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  await vi.waitFor(() =>
+    expect(request).toHaveBeenLastCalledWith("argus.operations.list", {
+      project: "MiKobots",
+      task_id: "new-task",
+      limit: 30,
+    }),
+  );
+});
+
+it("restores a user-edited project selection when browser history changes", async () => {
+  const { element, request } = await mount();
+  const select = element.querySelector("select")!;
+  select.value = "MiKobots";
+  select.dispatchEvent(new Event("change"));
+  await element.updateComplete;
+  select.value = "EPC";
+  select.dispatchEvent(new Event("change"));
+  await element.updateComplete;
+  expect(select.value).toBe("EPC");
+  window.history.pushState({}, "", "/overview?argus_project=MiKobots");
+  window.dispatchEvent(new PopStateEvent("popstate"));
+  await vi.waitFor(() =>
+    expect(request).toHaveBeenLastCalledWith("argus.operations.list", {
+      project: "MiKobots",
+      limit: 30,
+    }),
+  );
+  await element.updateComplete;
+  expect(select.value).toBe("MiKobots");
 });

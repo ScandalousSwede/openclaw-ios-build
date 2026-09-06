@@ -7,6 +7,46 @@ import {
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
 
+type EvidenceFilters = {
+  project: string;
+  task: string;
+  source: string;
+  from: string;
+  before: string;
+};
+const defaultFilters = (): EvidenceFilters => ({
+  project: "Argus",
+  task: "",
+  source: "",
+  from: "",
+  before: "",
+});
+const queryKeys = {
+  project: "argus_project",
+  task: "argus_task",
+  source: "argus_source",
+  from: "argus_from",
+  before: "argus_before",
+} as const;
+const operationKey = "argus_operation";
+const freshnessIntervalMs = 60_000;
+
+function validateFilters(filters: EvidenceFilters): string | null {
+  if (!["Argus", "MiKobots", "EPC"].includes(filters.project)) return "Choose a supported project.";
+  if (filters.task.length > 160 || filters.source.length > 160)
+    return "Task and source must be at most 160 characters.";
+  for (const value of [filters.from, filters.before]) {
+    if (
+      value &&
+      (value.length > 80 ||
+        !/^\d{4}-\d{2}-\d{2}T.+(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ||
+        !Number.isFinite(Date.parse(value)))
+    )
+      return "Use an ISO observation time with a timezone, such as 2026-09-06T18:00:00Z.";
+  }
+  return null;
+}
+
 type Artifact = { sha256: string; bytes: number };
 type Operation = {
   operation_id: string;
@@ -24,7 +64,14 @@ type Operation = {
 type Page = {
   items: Operation[];
   coverage: {
-    scope: { corpus: string; project: string; task_id?: string | null; source?: string | null };
+    scope: {
+      corpus: string;
+      project: string;
+      task_id?: string | null;
+      source?: string | null;
+      recorded_from?: string | null;
+      recorded_before?: string | null;
+    };
     complete: boolean;
     has_more: boolean;
     snapshot_sequence: number;
@@ -42,6 +89,7 @@ type Detail = Operation & {
   timeline: Operation[];
   newerObservation: boolean;
   historyComplete: boolean;
+  requestedOperation: Operation;
 };
 
 function operationTime(value: string): string {
@@ -55,10 +103,31 @@ export class OperationalView extends LitElement {
   @consume({ context: applicationContext, subscribe: false })
   private context!: ApplicationContext;
   @state() private page: Page | null = null;
+  @state() private listUnavailable = false;
   @state() private detail: Detail | null = null;
   @state() private busy = false;
   @state() private error: string | null = null;
   @state() private filter = "";
+  @state() private draftFilters: EvidenceFilters = defaultFilters();
+  private appliedFilters: EvidenceFilters = defaultFilters();
+  private selectedOperation: string | null = null;
+  private lastRefreshAttempt = 0;
+  private readonly onPopState = () => {
+    this.generation++;
+    this.busy = false;
+    this.page = null;
+    this.detail = null;
+    this.clearArtifact();
+    this.readLocation();
+    void this.refresh();
+  };
+  private readonly onReturn = () => {
+    if (
+      document.visibilityState !== "hidden" &&
+      Date.now() - this.lastRefreshAttempt >= freshnessIntervalMs
+    )
+      void this.refresh();
+  };
   @state() private artifactUrl: string | null = null;
   private unsubscribe?: () => void;
   private generation = 0;
@@ -70,6 +139,10 @@ export class OperationalView extends LitElement {
   }
   override connectedCallback() {
     super.connectedCallback();
+    this.readLocation();
+    window.addEventListener("popstate", this.onPopState);
+    window.addEventListener("focus", this.onReturn);
+    document.addEventListener("visibilitychange", this.onReturn);
     this.unsubscribe = this.context.gateway.subscribe((snapshot) => this.updateGateway(snapshot));
     this.updateGateway(this.context.gateway.snapshot);
   }
@@ -87,17 +160,92 @@ export class OperationalView extends LitElement {
       this.clearArtifact();
       this.detail = null;
       if (clientChanged) this.page = null;
-      if (ready) void this.load();
+      if (ready) void this.refresh();
     }
     this.requestUpdate();
   }
   override disconnectedCallback() {
     this.unsubscribe?.();
+    window.removeEventListener("popstate", this.onPopState);
+    window.removeEventListener("focus", this.onReturn);
+    document.removeEventListener("visibilitychange", this.onReturn);
     this.generation++;
     this.connectionReady = false;
     this.busy = false;
     this.clearArtifact();
     super.disconnectedCallback();
+  }
+  private readLocation() {
+    const query = new URLSearchParams(window.location.search);
+    const filters = defaultFilters();
+    for (const key of Object.keys(queryKeys) as (keyof EvidenceFilters)[]) {
+      filters[key] = query.get(queryKeys[key]) ?? filters[key];
+    }
+    this.draftFilters = filters;
+    this.appliedFilters = { ...filters };
+    this.selectedOperation = query.get(operationKey);
+    this.error =
+      validateFilters(filters) ??
+      (this.selectedOperation !== null &&
+      (!this.selectedOperation.trim() || this.selectedOperation.length > 300)
+        ? "The observation link has an invalid identity."
+        : null);
+  }
+  private observationLink(operationId: string): string {
+    // Only explicitly owned query fields travel in an evidence link; never auth hashes or other app query values.
+    const url = new URL(window.location.pathname, window.location.origin);
+    for (const key of Object.keys(queryKeys) as (keyof EvidenceFilters)[]) {
+      if (this.appliedFilters[key]) url.searchParams.set(queryKeys[key], this.appliedFilters[key]);
+    }
+    url.searchParams.set(operationKey, operationId);
+    return url.pathname + url.search;
+  }
+  private writeLocation() {
+    const url = new URL(window.location.href);
+    for (const key of Object.keys(queryKeys) as (keyof EvidenceFilters)[]) {
+      if (this.appliedFilters[key]) url.searchParams.set(queryKeys[key], this.appliedFilters[key]);
+      else url.searchParams.delete(queryKeys[key]);
+    }
+    if (this.selectedOperation) url.searchParams.set(operationKey, this.selectedOperation);
+    else url.searchParams.delete(operationKey);
+    window.history.replaceState(window.history.state, "", url);
+  }
+  private applyFilters(event: Event) {
+    event.preventDefault();
+    const filters = Object.fromEntries(
+      Object.entries(this.draftFilters).map(([key, value]) => [key, value.trim()]),
+    ) as EvidenceFilters;
+    const invalid = validateFilters(filters);
+    if (invalid) {
+      this.error = invalid;
+      return;
+    }
+    this.appliedFilters = filters;
+    this.draftFilters = { ...filters };
+    this.selectedOperation = null;
+    this.filter = "";
+    this.page = null;
+    this.detail = null;
+    this.clearArtifact();
+    this.writeLocation();
+    void this.refresh();
+  }
+  private async refresh() {
+    if (this.busy || !this.context.gateway.snapshot.connected) return;
+    const invalid = validateFilters(this.appliedFilters);
+    if (
+      invalid ||
+      (this.selectedOperation !== null &&
+        (!this.selectedOperation.trim() || this.selectedOperation.length > 300))
+    ) {
+      this.error = invalid ?? "The observation link has an invalid identity.";
+      return;
+    }
+    this.lastRefreshAttempt = Date.now();
+    const generation = this.generation;
+    const selected = this.selectedOperation;
+    await this.load();
+    if (generation === this.generation && selected) await this.openDetailId(selected, false);
   }
   private clearArtifact() {
     if (this.artifactUrl) URL.revokeObjectURL(this.artifactUrl);
@@ -111,7 +259,11 @@ export class OperationalView extends LitElement {
     this.error = null;
     try {
       const page = await client.request<Page>("argus.operations.list", {
-        project: "Argus",
+        project: this.appliedFilters.project,
+        ...(this.appliedFilters.task ? { task_id: this.appliedFilters.task } : {}),
+        ...(this.appliedFilters.source ? { source: this.appliedFilters.source } : {}),
+        ...(this.appliedFilters.from ? { recorded_from: this.appliedFilters.from } : {}),
+        ...(this.appliedFilters.before ? { recorded_before: this.appliedFilters.before } : {}),
         limit: 30,
         ...(more && this.page?.next_cursor ? { cursor: this.page.next_cursor } : {}),
       });
@@ -120,19 +272,25 @@ export class OperationalView extends LitElement {
       const items = new Map(previous.map((item) => [item.operation_id, item]));
       for (const item of page.items) items.set(item.operation_id, item);
       this.page = { ...page, items: [...items.values()] };
+      this.listUnavailable = false;
       if (!more) {
         this.detail = null;
         this.clearArtifact();
       }
     } catch {
-      if (generation === this.generation)
+      if (generation === this.generation) {
+        this.listUnavailable = true;
         this.error =
           "Operational evidence is unavailable. Reconnect or try Refresh. Previously loaded records are not current.";
+      }
     } finally {
       if (generation === this.generation) this.busy = false;
     }
   }
   private async openDetail(operation: Operation) {
+    await this.openDetailId(operation.operation_id, true);
+  }
+  private async openDetailId(operationId: string, updateLocation: boolean) {
     const { client, connected } = this.context.gateway.snapshot;
     if (!client || !connected || this.busy) return;
     const generation = this.generation;
@@ -140,11 +298,15 @@ export class OperationalView extends LitElement {
     this.error = null;
     this.clearArtifact();
     this.detail = null;
+    if (updateLocation) {
+      this.selectedOperation = operationId;
+      this.writeLocation();
+    }
     try {
       const detail = await client.request<DetailResponse>("argus.operations.detail", {
-        operation_id: operation.operation_id,
+        operation_id: operationId,
       });
-      if (detail.requested.operation_id !== operation.operation_id)
+      if (detail.requested.operation_id !== operationId)
         throw new Error("Operation identity mismatch");
       if (generation === this.generation) {
         this.detail = {
@@ -152,6 +314,7 @@ export class OperationalView extends LitElement {
           timeline: detail.timeline,
           newerObservation: detail.item.operation_id !== detail.requested.operation_id,
           historyComplete: detail.coverage.complete,
+          requestedOperation: detail.requested,
         };
         await this.updateComplete;
         this.querySelector<HTMLElement>(".argus-detail h3")?.focus();
@@ -252,10 +415,26 @@ export class OperationalView extends LitElement {
           font: inherit;
           min-height: 48px;
         }
+        .argus-evidence a {
+          color: inherit;
+          text-decoration: underline;
+        }
         .argus-evidence button {
           padding: 10px 18px;
           border: 1px solid color-mix(in srgb, currentColor 55%, transparent);
           white-space: normal;
+        }
+        .argus-evidence .argus-scope-fields {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+          gap: 16px;
+          margin: 16px 0;
+        }
+        .argus-evidence select {
+          font: inherit;
+          min-height: 48px;
+          width: 100%;
+          padding: 10px;
         }
         .argus-evidence input {
           width: 100%;
@@ -307,7 +486,7 @@ export class OperationalView extends LitElement {
             ? "Disconnected — reconnect to verify current work."
             : this.busy
               ? "Loading operational evidence…"
-              : this.error
+              : this.error || this.listUnavailable
                 ? "Evidence unavailable; verify freshness before acting on loaded records."
                 : this.page
                   ? `${this.page.items.length} loaded ${this.page.items.length === 1 ? "record" : "records"}. ${this.page.coverage.complete ? "Complete within the declared scope." : "Partial coverage."}`
@@ -322,11 +501,80 @@ export class OperationalView extends LitElement {
                 : ""}${this.page.coverage.scope.source
                 ? ` · Source ${this.page.coverage.scope.source}`
                 : ""}
+              ${this.page.coverage.scope.recorded_from
+                ? ` · From ${this.page.coverage.scope.recorded_from} (inclusive)`
+                : ""}
+              ${this.page.coverage.scope.recorded_before
+                ? ` · Before ${this.page.coverage.scope.recorded_before} (exclusive)`
+                : ""}
             </p>`
           : nothing}
         ${this.error ? html`<p role="alert">${this.error}</p>` : nothing}
+        <p>
+          Snapshot evidence, not a live activity feed. Refreshes on reconnect and when returning
+          after a minute.
+        </p>
+        <details>
+          <summary>Filter evidence by project, task, source or time</summary>
+          <form @submit=${(event: Event) => this.applyFilters(event)}>
+            <fieldset ?disabled=${this.busy}>
+              <legend>Find evidence on the server</legend>
+              <div class="argus-scope-fields">
+                <label
+                  >Project<select
+                    @change=${(event: Event) => {
+                      this.draftFilters = {
+                        ...this.draftFilters,
+                        project: (event.target as HTMLSelectElement).value,
+                      };
+                    }}
+                  >
+                    ${["Argus", "MiKobots", "EPC"].map(
+                      (project) =>
+                        html`<option
+                          value=${project}
+                          .selected=${project === this.draftFilters.project}
+                        >
+                          ${project}
+                        </option>`,
+                    )}
+                  </select></label
+                >
+                ${(
+                  [
+                    ["task", "Exact task ID", 160],
+                    ["source", "Exact source", 160],
+                    ["from", "Observed from (inclusive, ISO time)", 80],
+                    ["before", "Observed before (exclusive, ISO time)", 80],
+                  ] as const
+                ).map(
+                  ([key, label, max]) => html`
+                    <label
+                      >${label}<input
+                        type="text"
+                        maxlength=${max}
+                        .value=${this.draftFilters[key]}
+                        placeholder=${key === "from" || key === "before"
+                          ? "2026-09-06T18:00:00Z"
+                          : "Any"}
+                        @input=${(event: Event) => {
+                          this.draftFilters = {
+                            ...this.draftFilters,
+                            [key]: (event.target as HTMLInputElement).value,
+                          };
+                        }}
+                    /></label>
+                  `,
+                )}
+              </div>
+              <button class="btn" type="submit" ?disabled=${!connected || this.busy}>
+                Apply evidence filters
+              </button>
+            </fieldset>
+          </form>
+        </details>
         <div class="argus-toolbar">
-          <button class="btn" ?disabled=${!connected || this.busy} @click=${() => this.load()}>
+          <button class="btn" ?disabled=${!connected || this.busy} @click=${() => this.refresh()}>
             Refresh evidence
           </button>
           <label
@@ -383,10 +631,32 @@ export class OperationalView extends LitElement {
               ${this.detail.newerObservation
                 ? html`<p>
                     A newer observation is available for this task. Its evidence and artifacts are
-                    shown below.
+                    shown below. This does not establish that the earlier observation was
+                    superseded. Requested: ${this.detail.requestedOperation.title}
+                    (${operationTime(this.detail.requestedOperation.observed_at)}).
                   </p>`
                 : nothing}
               <p>${this.detail.state} · ${this.detail.source}</p>
+              <p>Task: ${this.detail.task_id}</p>
+              <p>
+                Detail follows this task and producer, including newer observations outside the
+                list's time window.
+              </p>
+              <p>
+                <a href=${this.observationLink(this.detail.requestedOperation.operation_id)}
+                  >Link to requested observation</a
+                >
+                ${this.detail.newerObservation
+                  ? html` ·
+                      <a href=${this.observationLink(this.detail.operation_id)}
+                        >Link to current observation</a
+                      >`
+                  : nothing}
+              </p>
+              <p>
+                Read-only evidence. Continuing work requires the owning workflow; opening this view
+                does not dispatch work.
+              </p>
               <p>
                 Event ${operationTime(this.detail.occurred_at)} · observed
                 ${operationTime(this.detail.observed_at)}
