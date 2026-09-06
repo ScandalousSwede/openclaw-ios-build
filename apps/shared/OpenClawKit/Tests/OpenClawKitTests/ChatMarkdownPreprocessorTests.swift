@@ -1,8 +1,43 @@
+import CoreGraphics
+import Foundation
+import ImageIO
+import OpenClawKit
 import Testing
+import UniformTypeIdentifiers
 @testable import OpenClawChatUI
 
 @Suite("ChatMarkdownPreprocessor")
 struct ChatMarkdownPreprocessorTests {
+    @Test func downsamplesLargeInlineHistoryImageBeforeLayout() throws {
+        let context = try #require(CGContext(
+            data: nil, width: 2400, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let image = try #require(context.makeImage())
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(
+            data, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        let markdown = "![wide](data:image/png;base64,\((data as Data).base64EncodedString()))"
+
+        let result = ChatMarkdownPreprocessor.preprocess(markdown: markdown)
+        let rendered = try #require(result.images.first?.image)
+        #expect(rendered.size.width <= CGFloat(ChatImageProcessor.maxLongEdgePx))
+        #expect(rendered.size.width > 0)
+        #expect(result.cleaned.isEmpty)
+    }
+
+    @Test func oversizedInlinePayloadKeepsLabelWithoutDecoding() {
+        let encoded = String(repeating: "A", count: ((ChatImageProcessor.maxPayloadBytes + 2) / 3) * 4 + 4)
+        let result = ChatMarkdownPreprocessor.preprocess(
+            markdown: "Before ![oversized](data:image/png;base64,\(encoded)) after")
+        #expect(result.cleaned == "Before  after")
+        #expect(result.images.count == 1)
+        #expect(result.images.first?.label == "oversized")
+        #expect(result.images.first?.image == nil)
+    }
+
     @Test func extractsDataURLImages() {
         let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////GQAJ+wP/2hN8NwAAAABJRU5ErkJggg=="
         let markdown = """

@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import OpenClawKit
 
 enum ChatMarkdownPreprocessor {
     /// Keep in sync with `src/auto-reply/reply/strip-inbound-meta.ts`
@@ -87,8 +89,29 @@ enum ChatMarkdownPreprocessor {
             return nil
         }
 
-        let b64 = String(trimmed[trimmed.index(after: comma)...])
-        let image = Data(base64Encoded: b64).flatMap(OpenClawPlatformImage.init(data:))
+        let encoded = trimmed[trimmed.index(after: comma)...]
+        // History is remote input. Bound both compressed bytes and decoded
+        // pixels before SwiftUI lays out a thumbnail; frame(maxHeight:) does not
+        // limit the memory allocated by UIImage/NSImage(data:).
+        let maxBytes = ChatImageProcessor.maxPayloadBytes
+        guard encoded.utf8.count <= ((maxBytes + 2) / 3) * 4,
+              let data = Data(base64Encoded: String(encoded)), data.count <= maxBytes,
+              let source = CGImageSourceCreateWithData(
+                  data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: ChatImageProcessor.maxLongEdgePx,
+                  kCGImageSourceShouldCacheImmediately: true,
+              ] as CFDictionary)
+        else {
+            return InlineImage(label: label, image: nil)
+        }
+        #if canImport(AppKit)
+        let image = OpenClawPlatformImage(cgImage: thumbnail, size: .zero)
+        #else
+        let image = OpenClawPlatformImage(cgImage: thumbnail)
+        #endif
         return InlineImage(label: label, image: image)
     }
 
