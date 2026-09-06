@@ -25,6 +25,7 @@ import { isMonitoredAuthProvider, loadModelAuthStatus } from "../../lib/model-au
 import { requestSessionUsage } from "../../lib/sessions/index.ts";
 import { loadSkillStatusReport } from "../../lib/skills/index.ts";
 import { renderOverview } from "./view.ts";
+import "./operational-view.ts";
 
 function localDateString(): string {
   const date = new Date();
@@ -392,51 +393,57 @@ class OverviewPage extends LitElement {
           <div class="page-sub">${subtitleForRoute("overview")}</div>
         </div>
       </section>
-      ${renderOverview({
-        connected: gateway.connected,
-        hello: gateway.hello,
-        settings: this.settings,
-        password: this.password,
-        lastError: gateway.lastError,
-        lastChannelsRefresh: channels.channelsLastSuccess,
-        modelAuthStatus: this.modelAuthStatus,
-        usageResult: this.usageResult,
-        sessionsResult: sessions.result,
-        skillsReport: this.skillsReport,
-        cronJobs: this.cron.cronJobs,
-        cronStatus: this.cron.cronStatus,
-        attentionItems: this.buildAttentionItems(),
-        eventLog: this.context.gateway.eventLog,
-        overviewLogLines: this.overviewLogLines,
-        showGatewayToken: this.showGatewayToken,
-        showGatewayPassword: this.showGatewayPassword,
-        onConnectionChange: (patch) => this.updateConnectionDraft(patch),
-        onLocaleChange: (locale) => this.updateLocale(locale),
-        onPasswordChange: (next) => (this.password = next),
-        onSessionKeyChange: (sessionKey) => {
-          this.sessionKeyDirty = true;
-          this.settings = {
-            ...this.settings,
-            sessionKey,
-            lastActiveSessionKey: sessionKey,
-          };
-        },
-        onToggleGatewayTokenVisibility: () => {
-          this.showGatewayToken = !this.showGatewayToken;
-        },
-        onToggleGatewayPasswordVisibility: () => {
-          this.showGatewayPassword = !this.showGatewayPassword;
-        },
-        onConnect: () => this.connect(),
-        onRefresh: () => void this.refreshOverview(true),
-        onNavigate: (routeId) => {
-          if (isRouteId(routeId)) {
-            this.context.navigate(routeId);
-          }
-        },
-        canNavigate: isRouteId,
-        onRefreshLogs: () => void this.refreshOverview(true),
-      })}
+      <argus-operational-view></argus-operational-view>
+      <details class="argus-overview-diagnostics" ?open=${!gateway.connected}>
+        <summary style="font-size:18px; padding:16px; cursor:pointer">
+          Connection and service diagnostics
+        </summary>
+        ${renderOverview({
+          connected: gateway.connected,
+          hello: gateway.hello,
+          settings: this.settings,
+          password: this.password,
+          lastError: gateway.lastError,
+          lastChannelsRefresh: channels.channelsLastSuccess,
+          modelAuthStatus: this.modelAuthStatus,
+          usageResult: this.usageResult,
+          sessionsResult: sessions.result,
+          skillsReport: this.skillsReport,
+          cronJobs: this.cron.cronJobs,
+          cronStatus: this.cron.cronStatus,
+          attentionItems: this.buildAttentionItems(),
+          eventLog: this.context.gateway.eventLog,
+          overviewLogLines: this.overviewLogLines,
+          showGatewayToken: this.showGatewayToken,
+          showGatewayPassword: this.showGatewayPassword,
+          onConnectionChange: (patch) => this.updateConnectionDraft(patch),
+          onLocaleChange: (locale) => this.updateLocale(locale),
+          onPasswordChange: (next) => (this.password = next),
+          onSessionKeyChange: (sessionKey) => {
+            this.sessionKeyDirty = true;
+            this.settings = {
+              ...this.settings,
+              sessionKey,
+              lastActiveSessionKey: sessionKey,
+            };
+          },
+          onToggleGatewayTokenVisibility: () => {
+            this.showGatewayToken = !this.showGatewayToken;
+          },
+          onToggleGatewayPasswordVisibility: () => {
+            this.showGatewayPassword = !this.showGatewayPassword;
+          },
+          onConnect: () => this.connect(),
+          onRefresh: () => void this.refreshOverview(true),
+          onNavigate: (routeId) => {
+            if (isRouteId(routeId)) {
+              this.context.navigate(routeId);
+            }
+          },
+          canNavigate: isRouteId,
+          onRefreshLogs: () => void this.refreshOverview(true),
+        })}
+      </details>
     `;
   }
 }
