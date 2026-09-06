@@ -29,19 +29,27 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             .padding(.top)
             .background(Color(uiColor: .systemBackground))
             .environment(\.dynamicTypeSize, size)
-            .preferredColorScheme(.dark)
-            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-            window.rootViewController = UIHostingController(rootView: root)
-            window.makeKeyAndVisible()
-            defer {
-                window.isHidden = true
-                window.rootViewController = nil
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390, height: 844)
+            let renderer = ImageRenderer(content: root)
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.uiImage)
+            let cgImage = try XCTUnwrap(image.cgImage)
+            var pixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
+            let hasVisibleContent = pixels.withUnsafeMutableBytes { bytes -> Bool in
+                guard let context = CGContext(
+                    data: bytes.baseAddress, width: cgImage.width, height: cgImage.height,
+                    bitsPerComponent: 8, bytesPerRow: cgImage.width * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                else { return false }
+                context.draw(cgImage, in: CGRect(
+                    x: 0, y: 0, width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
+                return stride(from: 0, to: bytes.count, by: 4).contains { offset in
+                    bytes[offset] > 32 || bytes[offset + 1] > 32 || bytes[offset + 2] > 32
+                }
             }
-            window.rootViewController?.view.setNeedsLayout()
-            window.rootViewController?.view.layoutIfNeeded()
-            let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
-                XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
-            }
+            XCTAssertTrue(hasVisibleContent, "The fixture must render visible content, not an empty black image")
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-home-simulator-fixture-\(name)"
             attachment.lifetime = .keepAlways

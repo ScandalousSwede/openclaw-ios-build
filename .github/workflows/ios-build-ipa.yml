@@ -662,6 +662,26 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
 
+      - name: Export simulator fixture screenshots
+        if: always()
+        run: |
+          set -euo pipefail
+          result="${RUNNER_TEMP}/aies-ios-reliability.xcresult"
+          if [[ -d "${result}" ]]; then
+            xcrun xcresulttool export attachments \
+              --path "${result}" \
+              --output-path "${RUNNER_TEMP}/aies-simulator-fixture-screenshots"
+          fi
+
+      - name: Upload simulator fixture screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: OpenClaw-simulator-fixture-screenshots-${{ github.run_id }}
+          path: ${{ runner.temp }}/aies-simulator-fixture-screenshots/**/*.png
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Archive iOS app
         run: |
           set -euo pipefail
