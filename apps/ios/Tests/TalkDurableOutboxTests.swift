@@ -2645,6 +2645,89 @@ struct TalkDurableOutboxTests {
 
 @MainActor
 extension TalkDurableOutboxTests {
+    #if targetEnvironment(simulator)
+    @Test func recognitionFinalCoalescesUntilConversationalSilenceOnce() async throws {
+        let recorder = DurableTalkRequestRecorder()
+        let admissionToken = UUID()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: { durableTalkCaptureAdmission(token: admissionToken) },
+            persist: { request in
+                await recorder.append(request)
+                throw DurableTalkTestError.rejected
+            })
+        manager.updateGatewayConnected(true)
+        _ = try await manager._test_prepareActivePTT(transcript: "")
+        manager._test_prepareContinuousRecognition()
+        let firstGeneration = manager._test_recognitionCallbackGeneration()
+        await manager._test_deliverRecognitionCallback(
+            transcript: "First thought", isFinal: true, generation: firstGeneration)
+        #expect(manager.isListening)
+        #expect(await recorder.snapshot().isEmpty)
+        let nextGeneration = manager._test_recognitionCallbackGeneration()
+        #expect(nextGeneration != firstGeneration)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "stale duplicate", isFinal: true, generation: firstGeneration)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "and more", isFinal: true, generation: nextGeneration)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "and the rest", isFinal: false, generation: manager._test_recognitionCallbackGeneration())
+        #expect(manager._test_lastTranscript() == "First thought and more and the rest")
+        manager._test_backdateLastHeard(seconds: 1.1)
+        await manager._test_runSilenceCheck()
+        #expect(await recorder.snapshot().isEmpty)
+        manager._test_backdateLastHeard(seconds: 3)
+        await manager._test_runSilenceCheck()
+        await manager._test_runSilenceCheck()
+        #expect(await recorder.snapshot().count == 1)
+        _ = try await manager._test_prepareActivePTT(transcript: "")
+        manager._test_prepareContinuousRecognition()
+        await manager._test_handleTranscript("New turn", isFinal: false)
+        #expect(manager._test_lastTranscript() == "New turn")
+        manager.setEnabled(false)
+    }
+
+    @Test func recognitionFinalRestartFailurePreservesTextWithoutFalseListening() async {
+        let manager = TalkModeManager(allowSimulatorCapture: false)
+        manager._test_prepareContinuousRecognition()
+        await manager._test_handleTranscript("Keep this thought", isFinal: true)
+        #expect(!manager.isListening)
+        #expect(manager._test_lastTranscript() == "Keep this thought")
+        #expect(manager.statusText.contains("Microphone unavailable"))
+        manager.setEnabled(false)
+    }
+    #endif
+
+    @Test func bargeInRequiresStableIntentAndFiltersPunctuationEcho() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let now = Date(timeIntervalSince1970: 100)
+        #expect(!manager._test_admitBargeIn("change", now: now))
+        #expect(!manager._test_admitBargeIn("change that", now: now.addingTimeInterval(0.1)))
+        #expect(manager._test_admitBargeIn("change that", now: now.addingTimeInterval(0.4)))
+        #expect(!manager._test_admitBargeIn("hello world", spoken: "Hello, world!", isFinal: true, now: now))
+        #expect(manager._test_admitBargeIn("stop", spoken: "A different reply", isFinal: true, now: now))
+    }
+
+    @Test func unrelatedBargeInFragmentsCannotShareAConfirmationWindow() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let now = Date(timeIntervalSince1970: 100)
+        #expect(!manager._test_admitBargeIn("first", now: now))
+        #expect(!manager._test_admitBargeIn("unrelated", now: now.addingTimeInterval(1)))
+        #expect(!manager._test_admitBargeIn("unrelated", now: now.addingTimeInterval(1.1)))
+        #expect(manager._test_admitBargeIn("unrelated request", now: now.addingTimeInterval(1.4)))
+    }
+
+    @Test func conversationalDefaultDoesNotOverrideConfiguredSilence() {
+        #expect(TalkDefaults.silenceTimeoutMs == 1800)
+        let parsed = TalkModeGatewayConfigParser.parse(
+            config: ["talk": ["silenceTimeoutMs": 2700]],
+            defaultProvider: "elevenlabs", defaultModelIdFallback: "eleven_v3",
+            defaultRealtimeModelIdFallback: "gpt-realtime-2",
+            defaultSilenceTimeoutMs: TalkDefaults.silenceTimeoutMs)
+        #expect(parsed.silenceTimeoutMs == 2700)
+    }
+
     @Test func cancelledStreamObserverCannotTearDownFinalSpeech() async throws {
         let manager = TalkModeManager(allowSimulatorCapture: true)
         let events = DurableTalkEventSource()

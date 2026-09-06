@@ -260,6 +260,8 @@ final class TalkModeManager: NSObject {
     private var talkConfigLoadedAt: Date?
     private var silenceWindow: TimeInterval = .init(TalkModeManager.defaultSilenceTimeoutMs) / 1000
     private var lastAudioActivity: Date?
+    private var finalizedTranscriptPrefix = ""
+    private var bargeInCandidate: (text: String, beganAt: Date)?
     private var noiseFloorSamples: [Double] = []
     private var noiseFloor: Double?
     private var noiseFloorReady: Bool = false
@@ -1294,11 +1296,12 @@ final class TalkModeManager: NSObject {
         self.recordRecognitionEvent("speech_recognition_started", result: "success")
     }
 
-    private func recordRecognitionEvent(_ state: String, result: String) {
+    private func recordRecognitionEvent(_ state: String, result: String, elapsedMilliseconds: Int? = nil) {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: state,
             operationGeneration: self.recognitionCallbackGeneration,
+            elapsedMilliseconds: elapsedMilliseconds,
             sessionGeneration: self.transcriptGeneration,
             resultClass: result))
     }
@@ -1400,6 +1403,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func stopRecognition() {
+        self.bargeInCandidate = nil
         self.recognitionCallbackGeneration &+= 1
         self.recognitionTask?.cancel()
         self.recognitionTask = nil
@@ -1433,18 +1437,39 @@ final class TalkModeManager: NSObject {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         let ttsActive = self.isSpeechOutputActive
         if ttsActive, self.interruptOnSpeech {
-            if self.shouldInterrupt(with: trimmed) {
+            if self.shouldInterrupt(with: trimmed, isFinal: isFinal) {
                 self.stopSpeaking(origin: .speechRecognitionBargeIn)
             }
             return
         }
 
         guard self.isListening else { return }
-        if !trimmed.isEmpty, trimmed != self.lastTranscript {
-            self.lastTranscript = trimmed
+        let combined = self.captureMode == .continuous && !self.finalizedTranscriptPrefix.isEmpty
+            ? [self.finalizedTranscriptPrefix, trimmed].filter { !$0.isEmpty }.joined(separator: " ")
+            : trimmed
+        if !combined.isEmpty, combined != self.lastTranscript {
+            self.lastTranscript = combined
             self.lastHeard = Date()
         }
         if isFinal {
+            if self.captureMode == .continuous, !self.isSpeechOutputActive {
+                // A recognizer segment ending is not the conversational turn ending.
+                // Keep its text, reopen recognition, and let the configured quiet
+                // interval coalesce the next segment into this same durable turn.
+                self.finalizedTranscriptPrefix = self.lastTranscript
+                self.recordRecognitionEvent("speech_final_segment_buffered", result: "success")
+                let previousAudioActivity = self.lastAudioActivity
+                do {
+                    try self.startRecognition()
+                    self.lastAudioActivity = previousAudioActivity
+                } catch {
+                    self.stopRecognition()
+                    self.isListening = false
+                    self.statusText = "Microphone unavailable — turn Talk off and on to retry"
+                    self.recordRecognitionEvent("speech_recognition_restart_failed", result: "failed")
+                }
+                return
+            }
             self.lastTranscript = trimmed
             guard !trimmed.isEmpty else { return }
             GatewayDiagnostics.log("talk speech: final transcript chars=\(trimmed.count)")
@@ -1453,9 +1478,6 @@ final class TalkModeManager: NSObject {
             if self.captureMode == .pushToTalk, self.pttAutoStopEnabled, self.isPushToTalkActive {
                 _ = await self.endPushToTalk()
                 return
-            }
-            if self.captureMode == .continuous, !self.isSpeechOutputActive {
-                await self.processTranscript(trimmed, restartAfter: true)
             }
         }
     }
@@ -1511,7 +1533,11 @@ final class TalkModeManager: NSObject {
             guard !transcript.isEmpty else { return }
             let lastActivity = [lastHeard, lastAudioActivity].compactMap(\.self).max()
             guard let lastActivity else { return }
-            if Date().timeIntervalSince(lastActivity) < self.silenceWindow { return }
+            let quietDuration = Date().timeIntervalSince(lastActivity)
+            if quietDuration < self.silenceWindow { return }
+            self.recordRecognitionEvent(
+                "speech_endpoint_silence", result: "requested",
+                elapsedMilliseconds: Int(quietDuration * 1000))
             await self.processTranscript(transcript, restartAfter: true)
             return
         }
@@ -2098,6 +2124,7 @@ final class TalkModeManager: NSObject {
 
     private func beginTranscriptCapture(context: DurableCaptureContext) {
         self.transcriptGeneration &+= 1
+        self.finalizedTranscriptPrefix = ""
         self.lastTranscript = ""
         self.lastHeard = nil
         self.durableCaptureContext = context
@@ -3422,13 +3449,39 @@ final class TalkModeManager: NSObject {
         self.restoreConfiguredVoiceModeDescriptor()
     }
 
-    private func shouldInterrupt(with transcript: String) -> Bool {
-        guard self.shouldAllowSpeechInterruptForCurrentRoute() else { return false }
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 3 else { return false }
-        if let spoken = lastSpokenText?.lowercased(), spoken.contains(trimmed.lowercased()) {
+    private func shouldInterrupt(with transcript: String, isFinal: Bool) -> Bool {
+        guard self.shouldAllowSpeechInterruptForCurrentRoute() else {
+            self.bargeInCandidate = nil
             return false
         }
+        return self.admitBargeIn(transcript: transcript, spoken: self.lastSpokenText, isFinal: isFinal, now: Date())
+    }
+
+    private func admitBargeIn(transcript: String, spoken: String?, isFinal: Bool, now: Date) -> Bool {
+        func normalized(_ text: String) -> String {
+            text.lowercased().split { !$0.isLetter && !$0.isNumber }.joined(separator: " ")
+        }
+        let candidate = normalized(transcript)
+        let echo = spoken.map(normalized) ?? ""
+        guard candidate.count >= 3,
+              echo.isEmpty || !(" " + echo + " ").contains(" " + candidate + " ")
+        else {
+            self.bargeInCandidate = nil
+            return false
+        }
+        let deliberateCommand = candidate == "stop" || candidate == "wait"
+        if isFinal, deliberateCommand {
+            self.bargeInCandidate = nil
+            return true
+        }
+        guard let pending = self.bargeInCandidate,
+              candidate.hasPrefix(pending.text) || pending.text.hasPrefix(candidate)
+        else {
+            self.bargeInCandidate = (candidate, now)
+            return false
+        }
+        guard now.timeIntervalSince(pending.beganAt) >= 0.35 else { return false }
+        self.bargeInCandidate = nil
         return true
     }
 
@@ -5155,6 +5208,10 @@ extension TalkModeManager {
             isFinal: isFinal,
             errorMessage: errorMessage,
             generation: generation)
+    }
+
+    func _test_admitBargeIn(_ text: String, spoken: String? = nil, isFinal: Bool = false, now: Date) -> Bool {
+        self.admitBargeIn(transcript: text, spoken: spoken, isFinal: isFinal, now: now)
     }
 
     func _test_prepareContinuousRecognition(transcript: String = "") {
