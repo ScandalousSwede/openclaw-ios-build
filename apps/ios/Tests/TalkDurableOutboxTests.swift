@@ -701,6 +701,74 @@ private func withBackgroundTalkOptIn<T>(
 @MainActor
 @Suite("S3.1 durable Talk outbox", .serialized)
 struct TalkDurableOutboxTests {
+    #if targetEnvironment(simulator)
+    @Test func currentRecognitionCancellationRestartsWithoutDiscardingTranscript() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition(transcript: "synthetic pending speech")
+        defer { manager.setEnabled(false) }
+        let generation = manager._test_recognitionCallbackGeneration()
+
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: false, generation: generation, errorMessage: "Recognition cancelled")
+
+        #expect(!manager.isListening)
+        #expect(manager._test_recognitionCallbackGeneration() != generation)
+        #expect(manager._test_lastTranscript() == "synthetic pending speech")
+        try await waitForDurableTalk("current cancellation restarts the recognizer") { await manager.isListening }
+        #expect(manager.statusText == "Listening")
+        #expect(manager._test_lastTranscript() == "synthetic pending speech")
+    }
+
+    @Test func failedRecognitionRestartDoesNotAdvertiseListening() async throws {
+        // Simulator capture disabled deterministically rejects startRecognition without microphone input.
+        let manager = TalkModeManager(allowSimulatorCapture: false)
+        manager._test_prepareContinuousRecognition(transcript: "synthetic retained speech")
+        defer { manager.setEnabled(false) }
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: false, generation: manager._test_recognitionCallbackGeneration(),
+            errorMessage: "No speech detected")
+
+        try await waitForDurableTalk("failed restart exposes a retry action") {
+            await manager.statusText.hasPrefix("Microphone unavailable")
+        }
+        #expect(!manager.isListening)
+        #expect(manager._test_lastTranscript() == "synthetic retained speech")
+    }
+
+    @Test func staleRecognitionCancellationCannotStopReplacementCapture() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition()
+        defer { manager.setEnabled(false) }
+        let oldGeneration = manager._test_recognitionCallbackGeneration()
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: false, generation: oldGeneration, errorMessage: "Recognition canceled")
+        try await waitForDurableTalk("replacement recognition starts") { await manager.isListening }
+        let replacementGeneration = manager._test_recognitionCallbackGeneration()
+
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: false, generation: oldGeneration, errorMessage: "Recognition cancelled")
+
+        #expect(manager.isListening)
+        #expect(manager._test_recognitionCallbackGeneration() == replacementGeneration)
+    }
+
+    @Test func disconnectDuringRecognitionRecoveryDoesNotRestartMicrophone() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition()
+        defer { manager.setEnabled(false) }
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: false, generation: manager._test_recognitionCallbackGeneration(),
+            errorMessage: "Recognition cancelled")
+        let stoppedGeneration = manager._test_recognitionCallbackGeneration()
+        manager.updateGatewayConnected(false)
+        try await Task.sleep(nanoseconds: 400_000_000)
+
+        #expect(!manager.isListening)
+        #expect(manager.statusText == "Offline")
+        #expect(manager._test_recognitionCallbackGeneration() == stoppedGeneration)
+    }
+    #endif
+
     @Test func transientChatPreparationFailureCanRetrySameOwnerWithoutLooping() {
         var retry = ChatPreparationRetryState()
         let initialTaskID = retry.taskID(owner: "gateway-a", ownerGeneration: 7)
@@ -1034,6 +1102,12 @@ struct TalkDurableOutboxTests {
         #expect(manager._test_durableCaptureIdentity()?.rawCommandID == currentRawID)
         #expect(manager.isPushToTalkActive)
         #expect(await recorder.snapshot().isEmpty)
+
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: true, generation: currentGeneration, errorMessage: "Recognition cancelled")
+        #expect(manager._test_lastTranscript() == "replacement capture")
+        #expect(manager._test_recognitionCallbackGeneration() == currentGeneration)
+        #expect(manager.isPushToTalkActive)
 
         await manager._test_deliverRecognitionCallback(
             transcript: "current capture partial",

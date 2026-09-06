@@ -494,6 +494,7 @@ enum GatewayDiagnostics {
     private static let keepLogBytes: Int64 = 256 * 1024
     private static let logSizeCheckEveryWrites = 50
     private static let logWritesSinceCheck = OSAllocatedUnfairLock(initialState: 0)
+    private static let structuredWriteFailures = OSAllocatedUnfairLock(initialState: 0)
     private static func isoTimestamp() -> String {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -594,6 +595,12 @@ enum GatewayDiagnostics {
 
     private static func logSanitizedRecord(_ record: String) {
         guard OpenClawDiagnosticRecorder.decodeRecord(record) != nil else { return }
+        if let directory = self.fileURL?.deletingLastPathComponent() {
+            self.queue.async {
+                do { try AIESStructuredDiagnosticStore.append(record: record, directory: directory) }
+                catch { self.structuredWriteFailures.withLock { $0 = min($0 + 1, 1_000_000_000) } }
+            }
+        }
         let timestamp = self.isoTimestamp()
         self.enqueueLogLine("[\(timestamp)] \(self.evidenceRecordMarker)\(record)")
     }
@@ -633,6 +640,14 @@ enum GatewayDiagnostics {
     struct SanitizedEventSnapshot: Sendable {
         let events: [OpenClawDiagnosticEvent]
         let flushResult: FlushResult
+        let coverage: AIESStructuredDiagnosticStore.Coverage?
+
+        init(events: [OpenClawDiagnosticEvent], flushResult: FlushResult,
+             coverage: AIESStructuredDiagnosticStore.Coverage? = nil) {
+            self.events = events
+            self.flushResult = flushResult
+            self.coverage = coverage
+        }
     }
 
     /// Boundedly waits for previously enqueued records to reach the protected rolling log.
@@ -658,6 +673,11 @@ enum GatewayDiagnostics {
         guard let url = fileURL else { return }
         self.queue.async {
             try? FileManager.default.removeItem(at: url)
+            for category in AIESStructuredDiagnosticStore.categories {
+                try? FileManager.default.removeItem(at: AIESStructuredDiagnosticStore.fileURL(
+                    directory: url.deletingLastPathComponent(), category: category))
+            }
+            self.structuredWriteFailures.withLock { $0 = 0 }
         }
     }
 
@@ -680,26 +700,21 @@ enum GatewayDiagnostics {
         guard DispatchQueue.getSpecific(key: self.queueMarker) == nil else {
             return SanitizedEventSnapshot(events: [], flushResult: .alreadyOnQueue)
         }
-        let result = OSAllocatedUnfairLock<[OpenClawDiagnosticEvent]?>(initialState: nil)
+        let result = OSAllocatedUnfairLock<AIESStructuredDiagnosticStore.Snapshot?>(initialState: nil)
         let completed = DispatchSemaphore(value: 0)
         self.queue.async {
-            guard let data = self.readLogTail(url: url, maximumBytes: 256 * 1024),
-                  let contents = String(data: data, encoding: .utf8)
-            else {
-                result.withLock { $0 = [] }
-                completed.signal()
-                return
-            }
-            let events = self.decodeSanitizedEvents(contents, limit: min(limit, 500))
-            result.withLock { $0 = events }
+            let snapshot = AIESStructuredDiagnosticStore.snapshot(
+                directory: url.deletingLastPathComponent(), limit: limit,
+                writeFailureCount: self.structuredWriteFailures.withLock { $0 })
+            result.withLock { $0 = snapshot }
             completed.signal()
         }
         guard completed.wait(timeout: .now() + max(0, timeout)) == .success else {
             return SanitizedEventSnapshot(events: [], flushResult: .timedOut)
         }
+        let snapshot = result.withLock { $0 }
         return SanitizedEventSnapshot(
-            events: result.withLock { $0 ?? [] },
-            flushResult: .completed)
+            events: snapshot?.events ?? [], flushResult: .completed, coverage: snapshot?.coverage)
     }
 
     static func decodeSanitizedEvents(_ contents: String, limit: Int) -> [OpenClawDiagnosticEvent] {

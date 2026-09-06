@@ -40,6 +40,7 @@ Sources/Diagnostics/AIESAPNsDiagnostics.swift
 Sources/Diagnostics/AIESBuildManifest.swift
 Sources/Diagnostics/AIESCrashDiagnosticExporter.swift
 Sources/Diagnostics/AIESDiagnosticRunContinuity.swift
+Sources/Diagnostics/AIESStructuredDiagnosticStore.swift
 Sources/Diagnostics/AIESNetworkDiagnosticMonitor.swift
 Sources/Diagnostics/AIESRuntimeMachOUUIDReader.swift
 Sources/Diagnostics/AIESRuntimeSymbolicationManifest.swift

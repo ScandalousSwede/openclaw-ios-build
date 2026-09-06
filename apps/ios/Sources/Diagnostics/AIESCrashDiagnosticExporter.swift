@@ -3,7 +3,7 @@ import OpenClawKit
 import UIKit
 
 enum AIESCrashDiagnosticExporter {
-    static let schemaName = "argus.openclaw-ios.crash-diagnostic.v2"
+    static let schemaName = "argus.openclaw-ios.crash-diagnostic.v3"
     static let maximumExportBytes = 256 * 1024
     static let maximumEventCount = 250
 
@@ -26,6 +26,7 @@ enum AIESCrashDiagnosticExporter {
         let device: Device
         let diagnosticEvents: [OpenClawDiagnosticEvent]
         let diagnosticLogFlushStatus: GatewayDiagnostics.FlushResult
+        let diagnosticCoverage: AIESStructuredDiagnosticStore.Coverage
         let redactionPolicy: String
 
         private enum CodingKeys: String, CodingKey {
@@ -35,6 +36,7 @@ enum AIESCrashDiagnosticExporter {
             case device
             case diagnosticEvents = "diagnostic_events"
             case diagnosticLogFlushStatus = "diagnostic_log_flush_status"
+            case diagnosticCoverage = "diagnostic_coverage"
             case redactionPolicy = "redaction_policy"
         }
     }
@@ -65,7 +67,8 @@ enum AIESCrashDiagnosticExporter {
             events: diagnosticSnapshot.events,
             generatedAt: Date(),
             maximumBytes: self.maximumExportBytes,
-            diagnosticLogFlushStatus: diagnosticSnapshot.flushResult)
+            diagnosticLogFlushStatus: diagnosticSnapshot.flushResult,
+            coverage: diagnosticSnapshot.coverage)
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("OpenClaw-Crash-Diagnostics.json")
         try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -78,11 +81,17 @@ enum AIESCrashDiagnosticExporter {
         events: [OpenClawDiagnosticEvent],
         generatedAt: Date,
         maximumBytes: Int,
-        diagnosticLogFlushStatus: GatewayDiagnostics.FlushResult = .completed) throws -> Data
+        diagnosticLogFlushStatus: GatewayDiagnostics.FlushResult = .completed,
+        coverage: AIESStructuredDiagnosticStore.Coverage? = nil) throws -> Data
     {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        var boundedEvents = Array(events.suffix(self.maximumEventCount))
+        var boundedEvents = AIESStructuredDiagnosticStore.select(events, limit: self.maximumEventCount)
+        var baseCoverage = coverage ?? AIESStructuredDiagnosticStore.suppliedCoverage(events)
+        if diagnosticLogFlushStatus != .completed {
+            baseCoverage.readStatus = diagnosticLogFlushStatus.rawValue
+            baseCoverage.truncated = true
+        }
         while true {
             let value = Export(
                 schema: self.schemaName,
@@ -91,11 +100,16 @@ enum AIESCrashDiagnosticExporter {
                 device: device,
                 diagnosticEvents: boundedEvents,
                 diagnosticLogFlushStatus: diagnosticLogFlushStatus,
+                diagnosticCoverage: baseCoverage.selecting(boundedEvents, additionallyOmitted: events.count - boundedEvents.count),
                 redactionPolicy: "metadata_allowlist_v2")
             let data = try encoder.encode(value)
             if data.count <= maximumBytes { return data }
             guard !boundedEvents.isEmpty else { throw ExportError.cannotFitBound }
-            boundedEvents.removeFirst()
+            // Under the byte ceiling, discard noisy non-voice metadata before voice boundaries.
+            let discard = boundedEvents.firstIndex { AIESStructuredDiagnosticStore.category(for: $0) == "other" }
+                ?? boundedEvents.firstIndex { AIESStructuredDiagnosticStore.category(for: $0) == "connection" }
+                ?? boundedEvents.startIndex
+            boundedEvents.remove(at: discard)
         }
     }
 

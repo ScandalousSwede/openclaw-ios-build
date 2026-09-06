@@ -1192,6 +1192,7 @@ final class TalkModeManager: NSObject {
         if self.allowSimulatorCapture {
             self.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
             self.recognitionRequest?.shouldReportPartialResults = true
+            self.recordRecognitionEvent("speech_recognition_started", result: "success")
             return
         }
         if !self.allowSimulatorCapture {
@@ -1289,6 +1290,16 @@ final class TalkModeManager: NSObject {
                     generation: callbackGeneration)
             }
         }
+        self.recordRecognitionEvent("speech_recognition_started", result: "success")
+    }
+
+    private func recordRecognitionEvent(_ state: String, result: String) {
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: state,
+            operationGeneration: self.recognitionCallbackGeneration,
+            sessionGeneration: self.transcriptGeneration,
+            resultClass: result))
     }
 
     private func handleRecognitionCallback(
@@ -1301,16 +1312,17 @@ final class TalkModeManager: NSObject {
         if let msg = errorMessage {
             let lowered = msg.lowercased()
             let isCancellation = lowered.contains("cancelled") || lowered.contains("canceled")
+            self.recordRecognitionEvent(
+                isCancellation ? "speech_recognition_cancelled" : "speech_recognition_error",
+                result: isCancellation ? "cancelled" : "failed")
             if isCancellation {
                 GatewayDiagnostics.log("talk speech: cancelled")
-                if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
-                    self.statusText = "Listening"
-                }
                 self.logger.debug("speech recognition cancelled")
-                return
+                guard self.captureMode == .continuous, self.isEnabled, !self.isSpeechOutputActive else { return }
+            } else {
+                GatewayDiagnostics.log("talk speech: error=\(msg)")
             }
-            GatewayDiagnostics.log("talk speech: error=\(msg)")
-            if !self.isSpeaking {
+            if !self.isSpeaking, !isCancellation {
                 if msg.localizedCaseInsensitiveContains("no speech detected") {
                     // Treat as transient silence. Don't scare users with an error banner.
                     self.statusText = self.isEnabled ? "Listening" : "Speech error: \(msg)"
@@ -1321,9 +1333,13 @@ final class TalkModeManager: NSObject {
             self.logger.debug("speech recognition error: \(msg, privacy: .public)")
             // Speech recognition can terminate on transient errors (e.g. no speech detected).
             // If talk mode is enabled and we're in continuous capture, try to restart.
-            if self.captureMode == .continuous, self.isEnabled, !self.isSpeaking {
-                // Treat the task as terminal on error so we don't get stuck with a dead recognizer.
+            if self.captureMode == .continuous, self.isEnabled, !self.isSpeechOutputActive {
+                // Intentional stop callbacks have an old generation and were rejected above.
+                // A current-generation cancellation is terminal just like other recognition errors.
                 self.stopRecognition()
+                self.isListening = false
+                self.statusText = !self.foregroundAudioCaptureAllowed ? "Paused"
+                    : self.gatewayConnected ? "Reconnecting microphone…" : "Offline"
                 let restartGeneration = self.recognitionCallbackGeneration
                 Task { @MainActor [weak self] in
                     await self?.restartRecognitionAfterError(expectedGeneration: restartGeneration)
@@ -1338,33 +1354,45 @@ final class TalkModeManager: NSObject {
             if !trimmed.isEmpty {
                 self.loggedPartialThisCycle = true
                 GatewayDiagnostics.log("talk speech: partial chars=\(trimmed.count)")
+                self.recordRecognitionEvent("speech_transcript_partial_received", result: "success")
             }
         }
         await self.handleTranscript(transcript: transcript, isFinal: isFinal)
     }
 
     private func restartRecognitionAfterError(expectedGeneration: UInt64) async {
-        guard expectedGeneration == self.recognitionCallbackGeneration,
+        guard !Task.isCancelled,
+              expectedGeneration == self.recognitionCallbackGeneration,
               self.isEnabled,
-              self.captureMode == .continuous
+              self.captureMode == .continuous,
+              self.foregroundAudioCaptureAllowed,
+              self.gatewayConnected,
+              !self.isSpeechOutputActive
         else { return }
         // Avoid thrashing the audio engine if it’s already running.
         if self.recognitionTask != nil, self.audioEngine.isRunning { return }
         try? await Task.sleep(nanoseconds: 250_000_000)
-        guard expectedGeneration == self.recognitionCallbackGeneration,
+        guard !Task.isCancelled,
+              expectedGeneration == self.recognitionCallbackGeneration,
               self.isEnabled,
-              self.captureMode == .continuous
+              self.captureMode == .continuous,
+              self.foregroundAudioCaptureAllowed,
+              self.gatewayConnected,
+              !self.isSpeechOutputActive
         else { return }
         do {
             try Self.configureAudioSession()
             self.currentAudioActivation = .active
             try self.startRecognition()
             self.isListening = true
-            if self.statusText.localizedCaseInsensitiveContains("speech error") {
-                self.statusText = "Listening"
-            }
+            self.statusText = "Listening"
+            self.recordRecognitionEvent("speech_recognition_restarted", result: "success")
             GatewayDiagnostics.log("talk speech: recognition restarted")
         } catch {
+            self.stopRecognition()
+            self.isListening = false
+            self.statusText = "Microphone unavailable — turn Talk off and on to retry"
+            self.recordRecognitionEvent("speech_recognition_restart_failed", result: "failed")
             let msg = error.localizedDescription
             GatewayDiagnostics.log("talk speech: restart failed error=\(msg)")
         }
@@ -1419,6 +1447,7 @@ final class TalkModeManager: NSObject {
             self.lastTranscript = trimmed
             guard !trimmed.isEmpty else { return }
             GatewayDiagnostics.log("talk speech: final transcript chars=\(trimmed.count)")
+            self.recordRecognitionEvent("speech_transcript_final_received", result: "success")
             self.loggedPartialThisCycle = false
             if self.captureMode == .pushToTalk, self.pttAutoStopEnabled, self.isPushToTalkActive {
                 _ = await self.endPushToTalk()
@@ -1536,6 +1565,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func processTranscript(_ transcript: String, restartAfter: Bool) async {
+        self.recordRecognitionEvent("speech_turn_finalizing", result: "requested")
         let captureContext = self.durableCaptureContext
         self.isListening = false
         self.isUserSpeechDetected = false
@@ -5081,13 +5111,23 @@ extension TalkModeManager {
     func _test_deliverRecognitionCallback(
         transcript: String,
         isFinal: Bool,
-        generation: UInt64) async
+        generation: UInt64,
+        errorMessage: String? = nil) async
     {
         await self.handleRecognitionCallback(
             transcript: transcript,
             isFinal: isFinal,
-            errorMessage: nil,
+            errorMessage: errorMessage,
             generation: generation)
+    }
+
+    func _test_prepareContinuousRecognition(transcript: String = "") {
+        self.captureMode = .continuous
+        self.isEnabled = true
+        self.gatewayConnected = true
+        self.isListening = true
+        self.statusText = "Listening"
+        self.lastTranscript = transcript
     }
 
     func _test_handleTranscript(_ transcript: String, isFinal: Bool) async {

@@ -628,6 +628,7 @@ jobs:
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
             -only-testing:OpenClawTests/AIESAPNsDiagnosticsTests \
             -only-testing:OpenClawTests/AIESDiagnosticRunContinuityTests \
+            -only-testing:OpenClawTests/AIESStructuredDiagnosticStoreTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
             -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \
@@ -1248,6 +1249,7 @@ jobs:
             -only-testing:OpenClawTests/AIESCrashDiagnosticExporterTests \
             -only-testing:OpenClawTests/AIESAPNsDiagnosticsTests \
             -only-testing:OpenClawTests/AIESDiagnosticRunContinuityTests \
+            -only-testing:OpenClawTests/AIESStructuredDiagnosticStoreTests \
             -only-testing:OpenClawTests/AppCoverageTests \
             -only-testing:OpenClawTests/DeepLinkParserTests \
             -only-testing:OpenClawTests/ExecApprovalNotificationBridgeTests \

@@ -345,7 +345,7 @@ struct AIESCrashDiagnosticExporterTests {
         let decoded = try JSONDecoder().decode(AIESCrashDiagnosticExporter.Export.self, from: data)
 
         #expect(data.count <= 16 * 1024)
-        #expect(decoded.schema == "argus.openclaw-ios.crash-diagnostic.v2")
+        #expect(decoded.schema == "argus.openclaw-ios.crash-diagnostic.v3")
         #expect(decoded.diagnosticEvents.count < AIESCrashDiagnosticExporter.maximumEventCount)
         #expect(decoded.diagnosticEvents.last?.sequence == 999)
         #expect(decoded.diagnosticEvents.allSatisfy { $0.sessionHash != "private-session" })
@@ -493,6 +493,25 @@ struct AIESCrashDiagnosticExporterTests {
 
         #expect(GatewayDiagnostics.flush(timeout: 1) == .completed)
         #expect(GatewayDiagnostics.recentSanitizedEvents(limit: 20).contains(boundary))
+    }
+
+    @Test func exportReservesVoiceAndReportsExactOmissionsAndWindow() throws {
+        let voice = OpenClawDiagnosticEvent(kind: .tts, state: "speech_recognition_started",
+            observedAt: Date(timeIntervalSince1970: 1))
+        let events = [voice] + (0..<1000).map { index in
+            OpenClawDiagnosticEvent(kind: .chat, state: "outbox_snapshot", sequence: index,
+                observedAt: Date(timeIntervalSince1970: Double(index + 2)))
+        }
+        let data = try AIESCrashDiagnosticExporter.makeData(
+            buildManifest: self.fixtureManifest(), device: .init(model: "iPhone", osName: "iOS", osVersion: "26.0"),
+            events: events, generatedAt: Date(timeIntervalSince1970: 2000), maximumBytes: 16 * 1024)
+        let decoded = try JSONDecoder().decode(AIESCrashDiagnosticExporter.Export.self, from: data)
+        #expect(data.count <= 16 * 1024)
+        #expect(decoded.diagnosticEvents.contains(voice))
+        #expect(decoded.diagnosticCoverage.omittedFromExportCount == events.count - decoded.diagnosticEvents.count)
+        #expect(decoded.diagnosticCoverage.exportedOldestAt == voice.observedAt)
+        #expect(decoded.diagnosticCoverage.exportedNewestAt == events.last?.observedAt)
+        #expect(decoded.diagnosticCoverage.truncated)
     }
 
     private func fixtureManifest() -> AIESBuildManifest {
