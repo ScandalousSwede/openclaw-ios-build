@@ -42,6 +42,7 @@ import {
 } from "./provider-hook-runtime.js";
 import { resolveBundledProviderPolicySurface } from "./provider-public-artifacts.js";
 import type { ProviderRuntimeModel } from "./provider-runtime-model.types.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 import type { ProviderThinkingProfile } from "./provider-thinking.types.js";
 import {
   resolveCatalogHookProviderPluginIds,
@@ -966,6 +967,19 @@ export function resolveExternalAuthProfilesWithPlugins(params: {
   env?: NodeJS.ProcessEnv;
   context: ProviderResolveExternalAuthProfilesContext;
 }): ProviderExternalAuthProfile[] {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (
+      (params.config && params.config !== scope.config) ||
+      (params.context.config && params.context.config !== scope.config)
+    )
+      throw new Error("External auth lookup is outside the explicit provider scope");
+    const context = { ...params.context, config: scope.config };
+    const profiles =
+      scope.provider.resolveExternalAuthProfiles?.(context) ??
+      scope.provider.resolveExternalOAuthProfiles?.(context);
+    return profiles?.length ? [...profiles] : [];
+  }
   const workspaceDir = params.workspaceDir ?? getActivePluginRegistryWorkspaceDirFromState();
   const env = params.env ?? process.env;
   const { manifestRegistry } = resolvePluginMetadataSnapshot({

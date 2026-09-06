@@ -35,7 +35,12 @@ const manifest = {
     ],
   },
 };
-const scope = { config: {}, provider: { id: "anthropic" }, providerManifest: manifest };
+const scope = {
+  manifestPlugins: [],
+  config: {},
+  provider: { id: "anthropic" },
+  providerManifest: manifest,
+};
 it("uses exact attribution metadata without global scanning", () => {
   withExplicitProviderRuntimeScope(scope, () => {
     expect(resolveProviderEndpoint("https://api.anthropic.com").endpointClass).toBe(
@@ -107,4 +112,88 @@ it("rejects manifest identity or ownership mismatch before callback", () => {
       }),
     ).toThrow("does not own");
   }
+});
+
+it("scoped external auth preserves admitted callback and rejects conflicting config", async () => {
+  const { resolveExternalAuthProfilesWithPlugins } = await import("./provider-runtime.js");
+  const returned = [];
+  let calls = 0;
+  withExplicitProviderRuntimeScope(
+    {
+      ...scope,
+      provider: {
+        id: "anthropic",
+        resolveExternalAuthProfiles(context) {
+          calls++;
+          expect(context.config).toBeDefined();
+          return returned;
+        },
+      },
+    },
+    (admitted) => {
+      const context = { env: process.env, store: { version: 1, profiles: {} } };
+      expect(resolveExternalAuthProfilesWithPlugins({ context })).toEqual(returned);
+      expect(() => resolveExternalAuthProfilesWithPlugins({ config: {}, context })).toThrow(
+        "outside",
+      );
+      expect(resolveExternalAuthProfilesWithPlugins({ config: admitted.config, context })).toEqual(
+        returned,
+      );
+    },
+  );
+  expect(calls).toBe(2);
+});
+it("scoped static catalog preserves shipped planning and fails conflicting config", async () => {
+  const { createBundledStaticCatalogModelResolver } =
+    await import("../agents/embedded-agent-runner/model.static-catalog.js");
+  withExplicitProviderRuntimeScope(
+    {
+      ...scope,
+      providerManifest: {
+        ...manifest,
+        modelCatalog: {
+          discovery: { anthropic: "static" },
+          providers: {
+            anthropic: {
+              api: "anthropic-messages",
+              baseUrl: "https://api.anthropic.com",
+              models: [{ id: "fixture", name: "Fixture", contextWindow: 4321, maxTokens: 123 }],
+            },
+          },
+        },
+      },
+    },
+    (admitted) => {
+      const resolve = createBundledStaticCatalogModelResolver({ cfg: admitted.config });
+      expect(resolve({ provider: "anthropic", modelId: "fixture" })?.contextWindow).toBe(4321);
+      expect(resolve({ provider: "other", modelId: "fixture" })).toBeUndefined();
+      expect(() => createBundledStaticCatalogModelResolver({ cfg: {} })).toThrow("outside");
+    },
+  );
+});
+
+it("external auth keeps nullish fallback preference and no-hook result", async () => {
+  const { resolveExternalAuthProfilesWithPlugins } = await import("./provider-runtime.js");
+  let fallback = 0;
+  const context = { env: process.env, store: { version: 1, profiles: {} } };
+  for (const primary of [undefined, () => []]) {
+    withExplicitProviderRuntimeScope(
+      {
+        ...scope,
+        provider: {
+          id: "anthropic",
+          resolveExternalAuthProfiles: primary,
+          resolveExternalOAuthProfiles() {
+            fallback++;
+            return [];
+          },
+        },
+      },
+      () => expect(resolveExternalAuthProfilesWithPlugins({ context })).toEqual([]),
+    );
+  }
+  expect(fallback).toBe(1);
+  withExplicitProviderRuntimeScope(scope, () =>
+    expect(resolveExternalAuthProfilesWithPlugins({ context })).toEqual([]),
+  );
 });

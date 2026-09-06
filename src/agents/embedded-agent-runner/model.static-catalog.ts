@@ -18,7 +18,10 @@ import {
   runProviderStaticCatalog,
 } from "../../plugins/provider-discovery.js";
 import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.types.js";
-import { resolveExplicitScopedProvider } from "../../plugins/provider-runtime-scope.js";
+import {
+  resolveExplicitScopedProvider,
+  getExplicitProviderRuntimeScope,
+} from "../../plugins/provider-runtime-scope.js";
 import {
   resolveActivatableProviderOwnerPluginIds,
   resolveBundledProviderCompatPluginIds,
@@ -145,6 +148,12 @@ function listBundledStaticCatalogPlugins(params: {
   cfg?: OpenClawConfig;
   env: NodeJS.ProcessEnv;
 }): StaticCatalogPlugin[] {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (scope.config !== params.cfg || !scope.providerManifest)
+      throw new Error("Static catalog lookup is outside the explicit manifest scope");
+    return [scope.providerManifest];
+  }
   const normalizedConfig = normalizePluginsConfig(params.cfg?.plugins);
   return listOpenClawPluginManifestMetadata(params.env).flatMap((record): StaticCatalogPlugin[] => {
     if (record.origin !== "bundled") {
