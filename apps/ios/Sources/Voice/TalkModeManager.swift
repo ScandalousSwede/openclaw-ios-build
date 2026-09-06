@@ -5214,7 +5214,7 @@ extension TalkModeManager {
 
     func _test_streamAssistant(
         runID: String, stream: AsyncStream<EventFrame>,
-        validator: @escaping () async -> Bool) async
+        validator: @escaping @Sendable () async -> Bool) async
     {
         await self.streamAssistant(runId: runID, stream: stream, presentationValidator: validator)
     }
