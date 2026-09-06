@@ -24,17 +24,24 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             let root = VStack(alignment: .leading, spacing: 12) {
                 Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
                     .font(.caption.bold()).padding(.horizontal)
-                ScrollView { ArgusOperationsContent(store: store, client: nil) }
+                ArgusOperationsContent(store: store, client: nil)
             }
             .padding(.top)
             .background(Color(uiColor: .systemBackground))
             .environment(\.dynamicTypeSize, size)
             .environment(\.colorScheme, .dark)
-            .frame(width: 390, height: 844)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
             let renderer = ImageRenderer(content: root)
             renderer.scale = 2
             let image = try XCTUnwrap(renderer.uiImage)
-            let cgImage = try XCTUnwrap(image.cgImage)
+            let fullImage = try XCTUnwrap(image.cgImage)
+            // Exclude the fixture warning: it must not make an empty content render pass.
+            let labelExclusionHeight = 200
+            XCTAssertGreaterThan(fullImage.height, labelExclusionHeight)
+            let cgImage = try XCTUnwrap(fullImage.cropping(to: CGRect(
+                x: 0, y: CGFloat(labelExclusionHeight), width: CGFloat(fullImage.width),
+                height: CGFloat(fullImage.height - labelExclusionHeight))))
             var pixels = [UInt8](repeating: 0, count: cgImage.width * cgImage.height * 4)
             let hasVisibleContent = pixels.withUnsafeMutableBytes { bytes -> Bool in
                 guard let context = CGContext(
@@ -45,11 +52,16 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 else { return false }
                 context.draw(cgImage, in: CGRect(
                     x: 0, y: 0, width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
-                return stride(from: 0, to: bytes.count, by: 4).contains { offset in
-                    bytes[offset] > 32 || bytes[offset + 1] > 32 || bytes[offset + 2] > 32
+                var brightPixels = 0
+                var darkPixels = 0
+                for offset in stride(from: 0, to: bytes.count, by: 4) {
+                    let brightness = (Int(bytes[offset]) + Int(bytes[offset + 1]) + Int(bytes[offset + 2])) / 3
+                    if brightness > 180 { brightPixels += 1 }
+                    if brightness < 60 { darkPixels += 1 }
                 }
+                return brightPixels > 100 && darkPixels > 100
             }
-            XCTAssertTrue(hasVisibleContent, "The fixture must render visible content, not an empty black image")
+            XCTAssertTrue(hasVisibleContent, "Evidence below the fixture label must have visible text/background contrast")
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-home-simulator-fixture-\(name)"
             attachment.lifetime = .keepAlways
