@@ -11,6 +11,11 @@ export type ExplicitProviderRuntimeScope = {
     import("./manifest-registry.js").PluginManifestRecord,
     "modelIdNormalization"
   >[];
+  providerManifest?: Pick<
+    import("./manifest-registry.js").PluginManifestRecord,
+    "id" | "providers" | "modelCatalog"
+  > &
+    Record<string, unknown>;
   authLookupMaps?: import("../secrets/provider-env-vars.js").ProviderAuthLookupMaps;
 };
 const scopes = new AsyncLocalStorage<Readonly<ExplicitProviderRuntimeScope>>();
@@ -61,6 +66,13 @@ export function withExplicitProviderRuntimeScope<T>(
   }
   const admitted = immutableCopy(scope);
   assertExplicitProviderAdmission(admitted.config, admitted.provider.id);
+  if (
+    admitted.providerManifest &&
+    (admitted.providerManifest.id !== admitted.provider.id ||
+      !admitted.providerManifest.providers?.includes(admitted.provider.id))
+  ) {
+    throw new Error("Manifest does not own the admitted provider");
+  }
   return scopes.run(admitted, () => run(admitted));
 }
 

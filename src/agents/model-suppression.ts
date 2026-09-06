@@ -11,6 +11,7 @@ import { buildManifestBuiltInModelSuppressionResolver } from "../plugins/manifes
 import { resolvePluginControlPlaneFingerprint } from "../plugins/plugin-control-plane-context.js";
 import { registerPluginMetadataProcessMemoLifecycleClear } from "../plugins/plugin-metadata-lifecycle.js";
 import { resolvePluginMetadataSnapshotMemoEnvFingerprint } from "../plugins/plugin-metadata-snapshot.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 
 type ManifestSuppressionResolver = ReturnType<typeof buildManifestBuiltInModelSuppressionResolver>;
 
@@ -38,6 +39,8 @@ function resolveCachedManifestSuppressionResolver(params: {
   env: NodeJS.ProcessEnv;
   workspaceDir?: string;
 }): ManifestSuppressionResolver {
+  if (getExplicitProviderRuntimeScope())
+    return buildManifestBuiltInModelSuppressionResolver(params);
   const cached = cachedManifestSuppressionResolver;
   const controlPlaneFingerprint = resolvePluginControlPlaneFingerprint({
     ...(params.config ? { config: params.config } : {}),

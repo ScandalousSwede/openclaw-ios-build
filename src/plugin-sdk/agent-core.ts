@@ -101,7 +101,7 @@ export async function createBundledAnthropicModelMetadata(
   const { default: manifest } = await import("../../extensions/anthropic/openclaw.plugin.json", {
     with: { type: "json" },
   });
-  return [{ modelIdNormalization: manifest.modelIdNormalization }];
+  return [manifest];
 }
 
 /** Read and core-validate source settings without loading unrelated plugin defaults. */

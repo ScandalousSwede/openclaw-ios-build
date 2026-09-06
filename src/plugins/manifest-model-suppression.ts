@@ -10,12 +10,20 @@ import {
   isManifestPluginAvailableForControlPlane,
   loadManifestMetadataSnapshot,
 } from "./manifest-contract-eligibility.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 
 function listManifestModelCatalogSuppressions(params: {
   config?: OpenClawConfig;
   workspaceDir?: string;
   env: NodeJS.ProcessEnv;
 }): readonly ManifestModelCatalogSuppressionEntry[] {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (scope.config !== params.config || !scope.providerManifest)
+      throw new Error("Suppression lookup is outside the explicit manifest scope");
+    return planManifestModelCatalogSuppressions({ registry: { plugins: [scope.providerManifest] } })
+      .suppressions;
+  }
   const snapshot = loadManifestMetadataSnapshot({
     config: params.config,
     workspaceDir: params.workspaceDir,

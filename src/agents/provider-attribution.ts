@@ -13,6 +13,7 @@ import {
 import { normalizeTrimmedStringList } from "@openclaw/normalization-core/string-normalization";
 import { listOpenClawPluginManifestMetadata } from "../plugins/manifest-metadata-scan.js";
 import { listOfficialExternalProviderEndpointManifests } from "../plugins/official-external-provider-endpoints.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import { asBoolean } from "../utils/boolean.js";
 import type { RuntimeVersionEnv } from "../version.js";
 import { resolveRuntimeServiceVersion } from "../version.js";
@@ -356,6 +357,11 @@ function collectManifestProviderRequests(): Map<string, ManifestProviderRequestC
 }
 
 function loadManifestProviderEndpointCache(): ManifestProviderEndpointCacheEntry[] {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (!scope.providerManifest) throw new Error("Scoped provider manifest is required");
+    return readManifestProviderEndpoints(scope.providerManifest);
+  }
   if (!manifestProviderEndpointCache) {
     manifestProviderEndpointCache = collectManifestProviderEndpoints();
   }
@@ -363,6 +369,11 @@ function loadManifestProviderEndpointCache(): ManifestProviderEndpointCacheEntry
 }
 
 function loadManifestProviderRequestCache(): Map<string, ManifestProviderRequestCacheEntry> {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (!scope.providerManifest) throw new Error("Scoped provider manifest is required");
+    return new Map(readManifestProviderRequests(scope.providerManifest));
+  }
   if (!manifestProviderRequestCache) {
     manifestProviderRequestCache = collectManifestProviderRequests();
   }
