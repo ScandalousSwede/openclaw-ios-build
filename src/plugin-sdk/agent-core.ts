@@ -85,7 +85,7 @@ export async function createBundledAnthropicProviderDescriptor(
 /** Metadata accompanying the exact shipped Anthropic descriptor; contains no credentials. */
 export function createBundledAnthropicAuthLookupMaps() {
   return {
-    aliasMap: {},
+    aliasMap: { "claude-cli": "anthropic" },
     envCandidateMap: { anthropic: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"] },
     authEvidenceMap: {},
     setupProviderFallbackRefs: [],

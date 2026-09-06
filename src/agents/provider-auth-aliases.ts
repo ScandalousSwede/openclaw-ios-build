@@ -16,6 +16,7 @@ import { resolvePluginControlPlaneFingerprint } from "../plugins/plugin-control-
 import { loadPluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import type { PluginOrigin } from "../plugins/plugin-origin.types.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 
 /** Inputs that control plugin metadata and trust scope for auth alias lookup. */
 export type ProviderAuthAliasLookupParams = {
@@ -119,6 +120,19 @@ function setPreferredAlias(params: {
 export function resolveProviderAuthAliasMap(
   params?: ProviderAuthAliasLookupParams,
 ): Record<string, string> {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (
+      (params?.config && params.config !== scope.config) ||
+      !scope.authLookupMaps ||
+      params?.metadataSnapshot
+    )
+      throw new Error("Auth aliases are outside the explicit provider scope");
+    return Object.assign(Object.create(null), scope.authLookupMaps.aliasMap) as Record<
+      string,
+      string
+    >;
+  }
   const env = params?.env ?? process.env;
   const config = params?.config;
   let cacheKey: string | undefined;
