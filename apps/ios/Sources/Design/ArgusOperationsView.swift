@@ -14,6 +14,20 @@ struct ArgusOperationsSection: View {
     }
 
     var body: some View {
+        ArgusOperationsContent(store: self.store, client: self.client)
+            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)") {
+                self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
+                if let client { await self.store.refresh(using: client) }
+                else { self.store.markUnavailable() }
+            }
+    }
+}
+
+struct ArgusOperationsContent: View {
+    let store: ArgusOperationsStore
+    let client: ArgusOperationsClient?
+
+    var body: some View {
         CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("External technical evidence")
@@ -67,11 +81,6 @@ struct ArgusOperationsSection: View {
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
-        .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)") {
-            self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
-            if let client { await self.store.refresh(using: client) }
-            else { self.store.markUnavailable() }
-        }
     }
 }
 
