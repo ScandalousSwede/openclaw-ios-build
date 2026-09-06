@@ -79,13 +79,53 @@ type Page = {
   };
   next_cursor: string | null;
 };
+type WorkContract = {
+  schema: "argus.work.read-contract.v1";
+  operation_id: string;
+  requested_operation_id: string;
+  requested_event_id: string;
+  latest_event_id: string;
+  native_observations: { event_id: string; adapter: string | null; outcome: string | null }[];
+  structural_verification: {
+    status: "not_established" | "passed_recorded" | "failed_recorded";
+    semantic_correctness_established: false;
+  };
+  independent_verification: {
+    artifacts: {
+      event_id: string;
+      outcome: "PASS" | "FAIL";
+      artifact_sha256: string;
+      verifier_report_sha256: string;
+    }[];
+    covers_all_current_artifacts: boolean;
+  };
+  owner_disposition: { status: "not_established" };
+  owner_accepted: false;
+  pending_owner_feedback: { event_id: string; owner: string | null; reason: string | null }[];
+  continuation: {
+    mode: "read_only";
+    action: "inspect_current_evidence";
+    operation_id: string;
+    event_id: string;
+    artifact_sha256: string[];
+    dispatch_enabled: false;
+  };
+  coverage: {
+    scope: "canonical_operation_trace" | "canonical_federation_observation";
+    complete: boolean;
+    cross_scope_absence_established: false;
+  };
+  is_state_transition: false;
+};
 type DetailResponse = {
+  work_contract?: WorkContract;
   item: Operation;
   requested: Operation;
   timeline: Operation[];
   coverage: { complete: boolean; has_more: boolean };
 };
 type Detail = Operation & {
+  workContract: WorkContract | null;
   timeline: Operation[];
   newerObservation: boolean;
   historyComplete: boolean;
@@ -308,9 +348,34 @@ export class OperationalView extends LitElement {
       });
       if (detail.requested.operation_id !== operationId)
         throw new Error("Operation identity mismatch");
+      const contract = detail.work_contract;
+      const currentArtifacts = new Set(detail.item.artifacts.map((artifact) => artifact.sha256));
+      // The read model must describe this exact requested/current pair. Never
+      // attach verification or continuation from another observation to its artifacts.
+      if (
+        contract &&
+        (contract.schema !== "argus.work.read-contract.v1" ||
+          contract.operation_id !== detail.item.operation_id ||
+          contract.latest_event_id !== detail.item.event_id ||
+          contract.requested_operation_id !== detail.requested.operation_id ||
+          contract.requested_event_id !== detail.requested.event_id ||
+          contract.continuation.operation_id !== detail.item.operation_id ||
+          contract.continuation.event_id !== detail.item.event_id ||
+          contract.continuation.mode !== "read_only" ||
+          contract.continuation.action !== "inspect_current_evidence" ||
+          contract.continuation.dispatch_enabled !== false ||
+          contract.continuation.artifact_sha256.some((digest) => !currentArtifacts.has(digest)) ||
+          contract.independent_verification.artifacts.some(
+            (verification) => !currentArtifacts.has(verification.artifact_sha256),
+          ) ||
+          contract.is_state_transition !== false ||
+          contract.owner_accepted !== false)
+      )
+        throw new Error("Work contract identity or authority mismatch");
       if (generation === this.generation) {
         this.detail = {
           ...detail.item,
+          workContract: contract ?? null,
           timeline: detail.timeline,
           newerObservation: detail.item.operation_id !== detail.requested.operation_id,
           historyComplete: detail.coverage.complete,
@@ -371,6 +436,92 @@ export class OperationalView extends LitElement {
       if (generation === this.generation) this.busy = false;
     }
   }
+  private renderWorkContract(detail: Detail) {
+    const contract = detail.workContract;
+    if (!contract)
+      return html`<p>Owner acceptance ${detail.owner_accepted ? "recorded" : "not recorded"}.</p>
+        <p>
+          Evidence basis is unavailable from this gateway. Verification and owner disposition are
+          not inferred.
+        </p>`;
+    const structural = {
+      not_established: "Not established in returned evidence",
+      passed_recorded: "Passed structural check recorded",
+      failed_recorded: "Failed structural check recorded",
+    }[contract.structural_verification.status];
+    const independent = contract.independent_verification;
+    return html`<section class="argus-work-contract" aria-label="Evidence basis and continuation">
+      <h3>Evidence basis</h3>
+      <dl class="argus-evidence-basis">
+        <dt>Native observation</dt>
+        <dd>
+          ${contract.native_observations.length
+            ? html`<ul>
+                ${contract.native_observations.map(
+                  (observation) =>
+                    html`<li>
+                      ${observation.adapter ?? "Unknown producer"}:
+                      ${observation.outcome ?? "outcome not recorded"} · producer observation
+                    </li>`,
+                )}
+              </ul>`
+            : "No native outcome included in this scope"}
+        </dd>
+        <dt>Structural verification</dt>
+        <dd>
+          ${structural ?? "Status unavailable"}. Semantic correctness is not established by this
+          check.
+        </dd>
+        <dt>Independent verification</dt>
+        <dd>
+          ${independent.artifacts.length
+            ? html`<p>
+                  ${independent.covers_all_current_artifacts
+                    ? "PASS receipts cover all current artifacts."
+                    : "Returned receipts do not establish a pass for all current artifacts."}
+                </p>
+                <ul>
+                  ${independent.artifacts.map(
+                    (verification) =>
+                      html`<li>
+                        ${verification.outcome} · artifact ${verification.artifact_sha256}<br />Verifier
+                        report ${verification.verifier_report_sha256}
+                      </li>`,
+                  )}
+                </ul>`
+            : "Not established in returned evidence"}
+        </dd>
+        <dt>Owner disposition</dt>
+        <dd>Unknown in this reader. Owner acceptance not recorded.</dd>
+      </dl>
+      ${contract.pending_owner_feedback.length
+        ? html`<h4>Pending owner feedback</h4>
+            <ul>
+              ${contract.pending_owner_feedback.map(
+                (feedback) =>
+                  html`<li>
+                    ${feedback.owner ?? "Owner unspecified"}:
+                    ${feedback.reason ?? "Reason not included"}
+                  </li>`,
+              )}
+            </ul>`
+        : nothing}
+      <p>
+        ${contract.coverage.complete ? "Complete returned scope" : "Partial returned scope"} ·
+        ${contract.coverage.scope === "canonical_federation_observation"
+          ? "this federation observation"
+          : "this canonical operation trace"}.
+        Evidence outside this scope has not been ruled out.
+      </p>
+      <h3>Read-only continuation</h3>
+      <p>
+        <a href=${this.observationLink(contract.continuation.operation_id)}
+          >Inspect current evidence</a
+        >. Use the verified artifact controls below. Continuing execution requires the owning
+        workflow; this view does not dispatch work or record a state transition.
+      </p>
+    </section>`;
+  }
   override render() {
     const connected = this.context.gateway.snapshot.connected;
     const items =
@@ -380,6 +531,31 @@ export class OperationalView extends LitElement {
           .includes(this.filter.toLocaleLowerCase()),
       ) ?? [];
     return html`<style>
+        .argus-evidence-basis {
+          display: grid;
+          grid-template-columns: minmax(130px, 1fr) minmax(0, 3fr);
+          gap: 12px 20px;
+        }
+        .argus-evidence-basis dt {
+          font-weight: 650;
+        }
+        .argus-evidence-basis dd {
+          margin: 0;
+          overflow-wrap: anywhere;
+        }
+        .argus-evidence-basis ul,
+        .argus-evidence-basis p {
+          margin: 0;
+        }
+        @media (max-width: 640px) {
+          .argus-evidence-basis {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 4px;
+          }
+          .argus-evidence-basis dd {
+            margin-bottom: 12px;
+          }
+        }
         .argus-evidence {
           background: var(--card, #101c29);
           border: 1px solid color-mix(in srgb, currentColor 45%, transparent);
@@ -661,7 +837,7 @@ export class OperationalView extends LitElement {
                 Event ${operationTime(this.detail.occurred_at)} · observed
                 ${operationTime(this.detail.observed_at)}
               </p>
-              <p>Owner acceptance ${this.detail.owner_accepted ? "recorded" : "not recorded"}.</p>
+              ${this.renderWorkContract(this.detail)}
               <h3>Artifacts</h3>
               ${this.detail.artifacts.map(
                 (artifact) =>

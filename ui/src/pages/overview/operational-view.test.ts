@@ -385,3 +385,141 @@ it("restores a user-edited project selection when browser history changes", asyn
   await element.updateComplete;
   expect(select.value).toBe("MiKobots");
 });
+
+const workContract = {
+  schema: "argus.work.read-contract.v1",
+  operation_id: item.operation_id,
+  requested_operation_id: item.operation_id,
+  requested_event_id: item.event_id,
+  latest_event_id: item.event_id,
+  native_observations: [
+    { event_id: item.event_id, adapter: "synthetic-harness", outcome: "success" },
+  ],
+  structural_verification: { status: "not_established", semantic_correctness_established: false },
+  independent_verification: { artifacts: [], covers_all_current_artifacts: false },
+  owner_disposition: { status: "not_established" },
+  owner_accepted: false,
+  pending_owner_feedback: [],
+  continuation: {
+    mode: "read_only",
+    action: "inspect_current_evidence",
+    operation_id: item.operation_id,
+    event_id: item.event_id,
+    artifact_sha256: [],
+    dispatch_enabled: false,
+  },
+  coverage: {
+    scope: "canonical_federation_observation",
+    complete: true,
+    cross_scope_absence_established: false,
+  },
+  is_state_transition: false,
+};
+async function mountContract(
+  contract: unknown,
+  current: Omit<typeof item, "artifacts"> & {
+    artifacts: { sha256: string; bytes: number }[];
+  } = item,
+) {
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce(page)
+    .mockResolvedValueOnce({
+      item: current,
+      requested: item,
+      timeline: [current, item],
+      coverage: { complete: true, has_more: false },
+      work_contract: contract,
+    });
+  const mounted = await mount(request);
+  [...mounted.element.querySelectorAll("button")]
+    .find((node) => node.textContent?.includes("Open work"))
+    ?.click();
+  await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+  await mounted.element.updateComplete;
+  return mounted;
+}
+describe("read-only work evidence contract", () => {
+  it("separates producer success from verification, owner disposition and continuation", async () => {
+    const { element, request } = await mountContract(workContract);
+    await vi.waitFor(() => expect(element.textContent).toContain("Evidence basis"));
+    const basis = element.querySelector(".argus-work-contract")!;
+    const text = basis.textContent?.replace(/\s+/g, " ") ?? "";
+    expect(text).toContain("synthetic-harness: success · producer observation");
+    expect(text).toContain("Not established in returned evidence");
+    expect(text).toContain("Unknown in this reader. Owner acceptance not recorded.");
+    expect(text).toContain("Evidence outside this scope has not been ruled out");
+    expect(basis.querySelector("a")?.getAttribute("href")).toContain(
+      "argus_operation=external-held-out",
+    );
+    expect(basis.querySelector("button")).toBeNull();
+    expect(request.mock.calls.map((call) => call[0])).toEqual([
+      "argus.operations.list",
+      "argus.operations.detail",
+    ]);
+  });
+  it("shows recorded failure and incomplete independent coverage without promoting acceptance", async () => {
+    const artifact = { sha256: "a".repeat(64), bytes: 3 };
+    const { element } = await mountContract(
+      {
+        ...workContract,
+        native_observations: [{ event_id: item.event_id, adapter: null, outcome: null }],
+        structural_verification: {
+          status: "failed_recorded",
+          semantic_correctness_established: false,
+        },
+        independent_verification: {
+          artifacts: [
+            {
+              event_id: "verification-a",
+              outcome: "FAIL",
+              artifact_sha256: artifact.sha256,
+              verifier_report_sha256: "b".repeat(64),
+            },
+          ],
+          covers_all_current_artifacts: false,
+        },
+        pending_owner_feedback: [
+          { event_id: "feedback-a", owner: "Technical owner", reason: "Inspect the failed check" },
+        ],
+        continuation: { ...workContract.continuation, artifact_sha256: [artifact.sha256] },
+        coverage: { ...workContract.coverage, complete: false },
+      },
+      { ...item, artifacts: [artifact] },
+    );
+    await vi.waitFor(() =>
+      expect(element.textContent).toContain("Failed structural check recorded"),
+    );
+    const basis = element.querySelector(".argus-work-contract")!;
+    const text = basis.textContent?.replace(/\s+/g, " ") ?? "";
+    expect(text).toContain("Unknown producer: outcome not recorded");
+    expect(text).toContain("do not establish a pass for all current artifacts");
+    expect(text).toContain("FAIL · artifact " + artifact.sha256);
+    expect(text).toContain("Technical owner: Inspect the failed check");
+    expect(text).toContain("Partial returned scope");
+    expect(text).toContain("Owner acceptance not recorded");
+  });
+  it.each([
+    { operation_id: "another-observation" },
+    { requested_event_id: "another-requested-event" },
+    {
+      independent_verification: {
+        artifacts: [
+          {
+            event_id: "old-verification",
+            outcome: "PASS",
+            artifact_sha256: "f".repeat(64),
+            verifier_report_sha256: "e".repeat(64),
+          },
+        ],
+        covers_all_current_artifacts: true,
+      },
+    },
+    { continuation: { ...workContract.continuation, dispatch_enabled: true } },
+  ])("refuses a mismatched identity or execution-bearing contract: %j", async (delta) => {
+    const { element } = await mountContract({ ...workContract, ...delta });
+    await vi.waitFor(() => expect(element.textContent).toContain("Work detail is unavailable"));
+    expect(element.querySelector(".argus-work-contract")).toBeNull();
+    expect(element.querySelector(".argus-detail")).toBeNull();
+  });
+});
