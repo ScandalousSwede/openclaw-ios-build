@@ -1,7 +1,7 @@
 /** Tests agent bootstrap file discovery, filtering, and injected context modes. */
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInternalHooks,
   registerInternalHook,
@@ -9,6 +9,7 @@ import {
 } from "../hooks/internal-hooks.js";
 import { makeTempWorkspace } from "../test-helpers/workspace.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import * as bootstrapCache from "./bootstrap-cache.js";
 import {
   resetBootstrapWarningCacheForTest,
   FULL_BOOTSTRAP_COMPLETED_CUSTOM_TYPE,
@@ -18,7 +19,9 @@ import {
   resolveBootstrapFilesForRun,
   resolveContextInjectionMode,
 } from "./bootstrap-files.js";
+import * as bootstrapHooks from "./bootstrap-hooks.js";
 import type { WorkspaceBootstrapFile } from "./workspace.js";
+import * as workspace from "./workspace.js";
 
 function registerExtraBootstrapFileHook() {
   registerInternalHook("agent:bootstrap", (event) => {
@@ -385,6 +388,95 @@ describe("resolveBootstrapContextForRun", () => {
 
     expect(files.map((file) => file.name)).toStrictEqual(["HEARTBEAT.md"]);
     expect(files[0]?.content).toBe("check inbox");
+  });
+
+  it.each(["default", "cron"] as const)(
+    "does not invoke personal bootstrap loaders, setup probes or hooks in lightweight %s mode",
+    async (runKind) => {
+      const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-no-read-");
+      await fs.writeFile(
+        path.join(workspaceDir, "SOUL.md"),
+        "protected synthetic sentinel",
+        "utf8",
+      );
+      const forbidden = [
+        vi.spyOn(bootstrapCache, "getOrLoadBootstrapFiles"),
+        vi.spyOn(workspace, "loadWorkspaceBootstrapFiles"),
+        vi.spyOn(workspace, "isWorkspaceSetupCompleted"),
+        vi.spyOn(bootstrapHooks, "applyBootstrapHookOverrides"),
+      ];
+      for (const spy of forbidden) {
+        spy.mockRejectedValue(new Error("disallowed bootstrap read"));
+      }
+      try {
+        const files = await resolveBootstrapFilesForRun({
+          workspaceDir,
+          sessionKey: "agent:main:bounded-test",
+          contextMode: "lightweight",
+          runKind,
+        });
+        expect(files).toStrictEqual([]);
+        for (const spy of forbidden) {
+          expect(spy).not.toHaveBeenCalled();
+        }
+      } finally {
+        for (const spy of forbidden) {
+          spy.mockRestore();
+        }
+      }
+    },
+  );
+
+  it("reads only HEARTBEAT and skips cache, setup probes and hooks in lightweight heartbeat mode", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-heartbeat-no-read-");
+    await fs.writeFile(path.join(workspaceDir, "HEARTBEAT.md"), "bounded heartbeat", "utf8");
+    await fs.writeFile(path.join(workspaceDir, "SOUL.md"), "protected synthetic sentinel", "utf8");
+    const forbidden = [
+      vi.spyOn(bootstrapCache, "getOrLoadBootstrapFiles"),
+      vi.spyOn(workspace, "loadWorkspaceBootstrapFiles"),
+      vi.spyOn(workspace, "isWorkspaceSetupCompleted"),
+      vi.spyOn(bootstrapHooks, "applyBootstrapHookOverrides"),
+    ];
+    const bounded = vi.spyOn(workspace, "loadExtraBootstrapFilesWithDiagnostics");
+    for (const spy of forbidden) {
+      spy.mockRejectedValue(new Error("disallowed bootstrap read"));
+    }
+    try {
+      const files = await resolveBootstrapFilesForRun({
+        workspaceDir,
+        sessionKey: "agent:main:heartbeat-test",
+        contextMode: "lightweight",
+        runKind: "heartbeat",
+      });
+      expect(files.map((file) => file.content)).toStrictEqual(["bounded heartbeat"]);
+      expect(bounded).toHaveBeenCalledExactlyOnceWith(workspaceDir, ["HEARTBEAT.md"]);
+      for (const spy of forbidden) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    } finally {
+      bounded.mockRestore();
+      for (const spy of forbidden) {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("does not follow a lightweight heartbeat alias to a personal file", async () => {
+    const workspaceDir = await makeTempWorkspace("openclaw-heartbeat-alias-");
+    await fs.writeFile(path.join(workspaceDir, "SOUL.md"), "protected synthetic sentinel", "utf8");
+    await fs.symlink(path.join(workspaceDir, "SOUL.md"), path.join(workspaceDir, "HEARTBEAT.md"));
+    const bounded = vi.spyOn(workspace, "loadExtraBootstrapFilesWithDiagnostics");
+    try {
+      const files = await resolveBootstrapFilesForRun({
+        workspaceDir,
+        contextMode: "lightweight",
+        runKind: "heartbeat",
+      });
+      expect(files[0]?.missing).toBe(true);
+      expect(bounded).not.toHaveBeenCalled();
+    } finally {
+      bounded.mockRestore();
+    }
   });
 
   it("keeps bootstrap context empty in lightweight cron mode", async () => {

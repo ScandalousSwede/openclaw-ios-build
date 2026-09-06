@@ -25,6 +25,7 @@ import {
   filterBootstrapFilesForSession,
   isWorkspaceSetupCompleted,
   loadWorkspaceBootstrapFiles,
+  loadExtraBootstrapFilesWithDiagnostics,
   type WorkspaceBootstrapFile,
 } from "./workspace.js";
 
@@ -198,23 +199,6 @@ function sanitizeBootstrapFiles(
   return sanitized;
 }
 
-function applyContextModeFilter(params: {
-  files: WorkspaceBootstrapFile[];
-  contextMode?: BootstrapContextMode;
-  runKind?: BootstrapContextRunKind;
-}): WorkspaceBootstrapFile[] {
-  const contextMode = params.contextMode ?? "full";
-  const runKind = params.runKind ?? "default";
-  if (contextMode !== "lightweight") {
-    return params.files;
-  }
-  if (runKind === "heartbeat") {
-    return params.files.filter((file) => file.name === "HEARTBEAT.md");
-  }
-  // cron/default lightweight mode keeps bootstrap context empty on purpose.
-  return [];
-}
-
 function shouldExcludeHeartbeatBootstrapFile(params: {
   config?: OpenClawConfig;
   sessionKey?: string;
@@ -299,6 +283,34 @@ export async function resolveBootstrapFilesForRun(params: {
   contextMode?: BootstrapContextMode;
   runKind?: BootstrapContextRunKind;
 }): Promise<WorkspaceBootstrapFile[]> {
+  // Lightweight is a read boundary, not just an output filter. In particular,
+  // setup probes, the full bootstrap cache and hooks may read personal files.
+  if (params.contextMode === "lightweight") {
+    if (params.runKind !== "heartbeat") {
+      return [];
+    }
+    const heartbeatPath = path.join(
+      resolveUserPath(params.workspaceDir),
+      DEFAULT_HEARTBEAT_FILENAME,
+    );
+    const missingHeartbeat: WorkspaceBootstrapFile = {
+      name: DEFAULT_HEARTBEAT_FILENAME,
+      path: heartbeatPath,
+      missing: true,
+    };
+    // Do not let a heartbeat alias widen the bounded filename selection.
+    try {
+      if (!(await fs.lstat(heartbeatPath)).isFile()) {
+        return [missingHeartbeat];
+      }
+    } catch {
+      return [missingHeartbeat];
+    }
+    const { files } = await loadExtraBootstrapFilesWithDiagnostics(params.workspaceDir, [
+      DEFAULT_HEARTBEAT_FILENAME,
+    ]);
+    return files.length > 0 ? files : [missingHeartbeat];
+  }
   const excludeHeartbeatBootstrapFile = shouldExcludeHeartbeatBootstrapFile(params);
   const sessionKey = params.sessionKey ?? params.sessionId;
   const workspaceSetupCompleted = await isWorkspaceSetupCompletedForContext(params.workspaceDir);
@@ -308,15 +320,11 @@ export async function resolveBootstrapFilesForRun(params: {
         sessionKey: params.sessionKey,
       })
     : await loadWorkspaceBootstrapFiles(params.workspaceDir);
-  const bootstrapFiles = applyContextModeFilter({
-    files: filterCompletedWorkspaceBootstrapFile(
-      filterBootstrapFilesForSession(rawFiles, sessionKey),
-      workspaceSetupCompleted,
-      params.workspaceDir,
-    ),
-    contextMode: params.contextMode,
-    runKind: params.runKind,
-  });
+  const bootstrapFiles = filterCompletedWorkspaceBootstrapFile(
+    filterBootstrapFilesForSession(rawFiles, sessionKey),
+    workspaceSetupCompleted,
+    params.workspaceDir,
+  );
 
   const updated = await applyBootstrapHookOverrides({
     files: bootstrapFiles,
