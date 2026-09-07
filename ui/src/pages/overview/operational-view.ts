@@ -399,7 +399,7 @@ export class OperationalView extends LitElement {
       if (generation === this.generation)
         this.verifiedArtifact = {
           url: URL.createObjectURL(new Blob([bytes], { type: result.mime_type })),
-          label,
+          label: `${label} ${artifact.display_name ? `${artifact.display_name} · ` : ""}${artifact.sha256.slice(0, 12)}`,
         };
     } catch {
       if (generation === this.generation)
@@ -1160,8 +1160,8 @@ export class OperationalView extends LitElement {
               </h3>
               ${!this.detail.artifacts.length
                 ? html`<p>
-                    No artifact references were returned. Inspect provenance for the recorded
-                    evidence.
+                    No artifact references were returned for the current observation. Earlier
+                    artifacts, when available, are listed below.
                   </p>`
                 : nothing}
               ${this.renderArtifacts(this.detail)} ${this.renderEarlierArtifacts(this.detail)}
