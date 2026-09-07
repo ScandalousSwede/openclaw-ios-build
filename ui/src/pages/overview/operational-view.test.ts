@@ -112,6 +112,41 @@ describe("operational evidence overview", () => {
     await element.updateComplete;
     expect(element.textContent).toContain("Operation: external-held-out");
   });
+  it("uses compact accessible rows and marks only the requested observation selected", async () => {
+    const other = { ...item, operation_id: "other-observation", title: "Another result" };
+    const request = vi.fn().mockImplementation(async (method, params) => {
+      if (method === "argus.operations.list") return { ...page, items: [item, other] };
+      const selected = params.operation_id === item.operation_id ? item : other;
+      return {
+        item: selected,
+        requested: selected,
+        timeline: [selected],
+        coverage: { complete: true, has_more: false },
+      };
+    });
+    const { element } = await mount(request);
+    const list = element.querySelector('ul[aria-label="Work observations"]')!;
+    expect(list.querySelectorAll("h3")).toHaveLength(0);
+    const rows = [...list.querySelectorAll<HTMLButtonElement>("button")];
+    expect(rows).toHaveLength(2);
+    expect(rows[0].textContent).toContain("Reader correction");
+    expect(rows[0].textContent).toContain("Recorded state: verified");
+    expect(rows[0].textContent).toContain("Observed");
+    rows[0].click();
+    await vi.waitFor(() =>
+      expect(element.querySelector(".argus-detail h3")?.textContent).toContain("Reader correction"),
+    );
+    expect(rows[0].getAttribute("aria-current")).toBe("true");
+    expect(rows[0].textContent).toContain("Selected");
+    expect(document.activeElement).toBe(element.querySelector(".argus-detail h3"));
+    rows[1].click();
+    await vi.waitFor(() =>
+      expect(element.querySelector(".argus-detail h3")?.textContent).toContain("Another result"),
+    );
+    expect(list.querySelectorAll('[aria-current="true"]')).toHaveLength(1);
+    expect(rows[0].getAttribute("aria-current")).toBe("false");
+    expect(rows[1].getAttribute("aria-current")).toBe("true");
+  });
   it("shows a newer observation without inferring supersession or acceptance", async () => {
     const corrected = {
       ...item,

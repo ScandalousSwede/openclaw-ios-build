@@ -486,8 +486,8 @@ export class OperationalView extends LitElement {
           display: flex;
           flex-wrap: wrap;
           align-items: center;
-          gap: 16px;
-          margin: 20px 0;
+          gap: 12px;
+          margin: 12px 0;
         }
         .argus-evidence button,
         .argus-evidence input,
@@ -537,6 +537,59 @@ export class OperationalView extends LitElement {
           border-radius: 10px;
           padding: 18px;
         }
+        .argus-evidence .argus-work-list {
+          gap: 8px;
+          max-height: 20rem;
+          overflow-y: auto;
+          padding: 4px;
+          margin: 8px -4px;
+        }
+        .argus-evidence .argus-work-list > li {
+          border: 0;
+          padding: 0;
+        }
+        .argus-evidence .argus-work-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 4px 12px;
+          width: 100%;
+          text-align: left;
+          border: 1px solid var(--border);
+          border-radius: var(--radius-md, 8px);
+          background: var(--card);
+          color: inherit;
+          padding: 10px 12px;
+          line-height: 1.4;
+        }
+        .argus-evidence .argus-work-row[aria-current="true"] {
+          border-color: var(--accent);
+          box-shadow: inset 3px 0 0 var(--accent);
+          background: color-mix(in srgb, var(--accent) 8%, var(--card));
+        }
+        .argus-work-title {
+          font-size: 1rem;
+          font-weight: 650;
+        }
+        .argus-work-context {
+          grid-column: 1 / -1;
+          font-size: 0.875rem;
+        }
+        .argus-work-action {
+          font-size: 0.875rem;
+          font-weight: 600;
+        }
+        @media (max-width: 640px) {
+          .argus-evidence .argus-work-list {
+            max-height: 14rem;
+          }
+          .argus-evidence .argus-work-row {
+            gap: 4px 8px;
+          }
+          .argus-work-action {
+            max-width: 6rem;
+          }
+        }
         .argus-evidence details {
           margin-top: 16px;
         }
@@ -546,8 +599,8 @@ export class OperationalView extends LitElement {
         }
         .argus-evidence .argus-detail {
           border-top: 2px solid var(--border, #466075);
-          margin-top: 24px;
-          padding-top: 16px;
+          margin-top: 16px;
+          padding-top: 12px;
         }
       </style>
       <section
@@ -666,22 +719,30 @@ export class OperationalView extends LitElement {
               }}
           /></label>
         </div>
-        <ul>
+        <ul class="argus-work-list" aria-label="Work observations">
           ${items.map(
-            (item) =>
-              html`<li>
-                <h3>${conciseTitle(item.title)}</h3>
-                <p>Recorded state: ${item.state}</p>
-                <p>Observed ${operationTime(item.observed_at)}</p>
-                <p>${item.artifacts.length} artifact references</p>
-                <button
-                  class="btn"
-                  ?disabled=${!connected || this.busy}
-                  @click=${() => this.openDetail(item)}
-                >
-                  Open work details
-                </button>
-              </li>`,
+            (item) => html`<li>
+              <button
+                class="argus-work-row"
+                aria-current=${this.selectedOperation === item.operation_id ? "true" : "false"}
+                ?disabled=${!connected || this.busy}
+                @click=${() => this.openDetail(item)}
+              >
+                <span class="argus-work-title">${conciseTitle(item.title)}</span>
+                <span class="argus-work-action">
+                  ${this.selectedOperation === item.operation_id ? "Selected" : "Open work details"}
+                </span>
+                <span class="argus-work-context">
+                  Recorded state: ${item.state} · ${item.artifacts.length} artifact references
+                  ${item.artifact_context?.relation === "previous_attempt"
+                    ? " · Previous-attempt evidence"
+                    : item.artifact_context?.relation === "current_attempt"
+                      ? " · Current-attempt evidence"
+                      : ""}
+                </span>
+                <span class="argus-work-context">Observed ${operationTime(item.observed_at)}</span>
+              </button>
+            </li>`,
           )}
         </ul>
         ${this.page && !items.length
