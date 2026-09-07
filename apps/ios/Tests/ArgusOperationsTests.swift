@@ -5,12 +5,12 @@ import Testing
 
 @MainActor
 struct ArgusOperationsTests {
-    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil) throws -> ArgusOperationsPage {
+    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil) throws -> ArgusOperationsPage {
         let payload: [String: Any] = [
             "items": [[
                 "operation_id": id, "task_id": "technical-result-47", "event_id": "event-47",
-                "title": "Synthetic external result", "source": "federation:external-test",
-                "project": "Argus", "kind": "evidence", "state": "observed",
+                "title": "Synthetic external result", "source": source, "evidence_scope": scope as Any? ?? NSNull(),
+                "project": "Argus", "kind": "evidence", "state": state,
                 "occurred_at": "2026-09-06T00:00:00Z", "observed_at": "2026-09-06T00:01:00Z",
                 "artifacts": [], "owner_accepted": false,
             ]],
@@ -77,4 +77,44 @@ struct ArgusOperationsTests {
                 for: "operation-47", artifact: .init(sha256: response.sha256, bytes: 0))
         }
     }
+    @Test func mixedCanonicalAndFederationPageAcceptsActualLifecycle() throws {
+        let store = ArgusOperationsStore()
+        let external = try self.page()
+        let canonical = try self.page(id: "ordinary-97", state: "verified",
+            source: "canonical:codex-completion-adapter", scope: "admitted_canonical_technical_operation")
+        try store.accept(ArgusOperationsPage(items: external.items + canonical.items,
+            coverage: external.coverage, nextCursor: nil, automaticDispatchEnabled: false), more: false)
+        #expect(store.items.map(\.state) == ["observed", "verified"])
+        for state in ["running", "failed", "retry_scheduled", "artifact_produced", "disposed"] {
+            let value = try self.page(state: state, source: "canonical:codex-completion-adapter",
+                scope: "admitted_canonical_technical_operation")
+            try store.accept(value, more: false)
+            #expect(store.items.first?.state == state)
+        }
+    }
+
+    @Test func invalidCanonicalScopeOrStateCannotReplaceSnapshot() throws {
+        let store = ArgusOperationsStore()
+        try store.accept(self.page(), more: false)
+        for invalid in [
+            try self.page(state: "verified"),
+            try self.page(state: "verified", source: "canonical:codex-completion-adapter"),
+            try self.page(state: "invented", source: "canonical:codex-completion-adapter",
+                scope: "admitted_canonical_technical_operation"),
+        ] {
+            #expect(throws: ArgusOperationsError.self) { try store.accept(invalid, more: false) }
+            #expect(store.items.first?.state == "observed")
+        }
+    }
+
+    @Test func canonicalDetailAllowsRepeatedOperationWithDistinctTimelineEvents() throws {
+        let item = try self.page(state: "verified", source: "canonical:codex-completion-adapter",
+            scope: "admitted_canonical_technical_operation").items[0]
+        let detail = ArgusOperationDetail(item: item, requested: item, timeline: [item],
+            coverage: .init(complete: true, hasMore: false, observedAt: nil), ownerAccepted: false)
+        try detail.validate(for: item)
+        let foreign = try self.page(id: "foreign-operation").items[0]
+        #expect(throws: ArgusOperationsError.self) { try detail.validate(for: foreign) }
+    }
+
 }

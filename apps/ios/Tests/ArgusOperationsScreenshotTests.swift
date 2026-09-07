@@ -11,7 +11,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let item = ArgusOperation(
             operationId: "fixture-operation", taskId: "fixture-task", eventId: "fixture-event",
             title: "Synthetic result: checkpoint retry verified",
-            source: "fixture:simulator", project: "Argus", kind: "test fixture", state: "observed",
+            source: "federation:fixture-simulator", project: "Argus", kind: "test fixture", state: "observed",
             occurredAt: "2026-09-06T00:00:00Z", observedAt: "2026-09-06T00:01:00Z",
             artifacts: [], supersedesEventId: nil, ownerAccepted: false)
         try store.accept(ArgusOperationsPage(
@@ -22,7 +22,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         for (name, size) in [("standard", DynamicTypeSize.large), ("offline-accessibility", .accessibility1)] {
             if name == "offline-accessibility" { store.markUnavailable() }
             let root = VStack(alignment: .leading, spacing: 12) {
-                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
+                Text("SIMULATOR FIXTURE â€” NOT LIVE EVIDENCE")
                     .font(.caption.bold()).padding(.horizontal)
                 ArgusOperationsContent(store: store, client: nil)
             }
@@ -68,4 +68,28 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             self.add(attachment)
         }
     }
+    @MainActor
+    func testProductionCanonicalWorkSummary() throws {
+        let (item, work) = try ArgusWorkContractTests.fixture(relation: "previous_attempt")
+        try work.validate(for: item)
+        let root = VStack(alignment: .leading, spacing: 12) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            ArgusWorkSummary(work: work, artifactContext: item.artifactContext)
+        }
+        .padding()
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.dynamicTypeSize, .accessibility1)
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let renderer = ImageRenderer(content: root)
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 300)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-work-simulator-fixture-previous-attempt-accessibility"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
 }

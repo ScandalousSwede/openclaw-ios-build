@@ -23,7 +23,38 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     let artifacts: [Artifact]
     let supersedesEventId: String?
     let ownerAccepted: Bool
+    struct Display: Decodable, Sendable {
+        let label: String
+        let changeSummary: String?
+        let artifactLabel: String?
+        let continuationLabel: String?
+        var isValid: Bool {
+            (1...160).contains(self.label.count)
+                && (self.changeSummary.map { (1...500).contains($0.count) } ?? true)
+                && (self.artifactLabel.map { (1...160).contains($0.count) } ?? true)
+                && (self.continuationLabel.map { (1...160).contains($0.count) } ?? true)
+        }
+    }
+    var display: Display? = nil
+    var evidenceScope: String? = nil
+    var artifactContext: ArgusArtifactContext? = nil
     var id: String { self.operationId }
+
+    var isAdmitted: Bool {
+        guard self.project == "Argus", !self.ownerAccepted,
+              !self.operationId.isEmpty, !self.taskId.isEmpty, !self.eventId.isEmpty,
+              self.artifacts.count <= 100, self.display?.isValid != false else { return false }
+        if self.source.hasPrefix("federation:") { return self.state == "observed" }
+        return self.source == "canonical:codex-completion-adapter"
+            && self.evidenceScope == "admitted_canonical_technical_operation"
+            && Self.canonicalStates.contains(self.state)
+    }
+
+    static let canonicalStates: Set<String> = [
+        "observed", "queued", "claimed", "running", "artifact_produced", "routed", "delivered",
+        "acknowledged", "verified", "disposed", "blocked", "retry_scheduled", "failed",
+        "dead_lettered", "expired", "superseded", "cancelled",
+    ]
 }
 
 struct ArgusOperationsCoverage: Decodable, Sendable {
@@ -45,6 +76,16 @@ struct ArgusOperationDetail: Decodable, Sendable {
     let timeline: [ArgusOperation]
     let coverage: ArgusOperationsCoverage
     let ownerAccepted: Bool
+    var workContract: ArgusWorkContract? = nil
+
+    func validate(for operation: ArgusOperation) throws {
+        guard self.requested.id == operation.id, !self.ownerAccepted,
+              self.timeline.count <= 256,
+              ([self.item, self.requested] + self.timeline).allSatisfy({
+                  $0.isAdmitted && $0.taskId == operation.taskId && $0.source == operation.source
+              }) else { throw ArgusOperationsError.invalidResponse }
+        try self.workContract?.validate(for: self.item)
+    }
 }
 
 struct ArgusOperationArtifact: Decodable, Identifiable, Sendable {
@@ -143,7 +184,7 @@ final class ArgusOperationsStore {
 
     func accept(_ page: ArgusOperationsPage, more: Bool) throws {
         guard page.items.count <= 100, !page.automaticDispatchEnabled,
-              page.items.allSatisfy({ $0.project == "Argus" && $0.state == "observed" && !$0.ownerAccepted }),
+              page.items.allSatisfy({ $0.isAdmitted }),
               page.coverage.hasMore == (page.nextCursor != nil)
         else { throw ArgusOperationsError.invalidResponse }
         var merged = more ? self.items : []

@@ -30,10 +30,10 @@ struct ArgusOperationsContent: View {
     var body: some View {
         CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("External technical evidence")
+                Text("Work and technical evidence")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
-                Text("Observations from other tools. These do not establish active work, completion or owner acceptance.")
+                Text("Canonical work and external observations. Recorded status does not establish owner acceptance.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if self.store.unavailable {
@@ -46,7 +46,7 @@ struct ArgusOperationsContent: View {
                     Text("Last observed: \(observed)").font(.caption).foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
-                    Text("No external evidence found in the Argus federation scope.")
+                    Text("No evidence found in this returned Argus scope.")
                         .font(.subheadline)
                 }
                 ForEach(self.store.items) { item in
@@ -89,9 +89,9 @@ private struct ArgusOperationRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(self.item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+            Text(self.item.display?.label ?? self.item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
             Text("\(self.item.source) · \(self.item.kind)").font(.caption).foregroundStyle(.secondary)
-            Label(self.item.supersedesEventId == nil ? "Observed" : "Correction observed", systemImage: "doc.text")
+            Label(self.item.supersedesEventId == nil ? self.item.state.replacingOccurrences(of: "_", with: " ").capitalized : "Correction observed", systemImage: "doc.text")
                 .font(.caption)
             Text("Observed \(self.item.observedAt)").font(.caption).foregroundStyle(.secondary)
         }
@@ -126,18 +126,21 @@ private struct ArgusOperationDetailView: View {
                     Text("The paired gateway changed. Return Home to load its evidence.")
                 } else {
                     ArgusOperationRow(item: self.detail?.item ?? self.operation)
-                    Text("Owner acceptance has not been established. This is a recorded external observation.")
+                    Text("Owner acceptance has not been established. This view reports scoped recorded evidence.")
                         .font(.subheadline)
                     if !self.appModel.isOperatorGatewayConnected {
                         Label("Offline — last observed detail", systemImage: "wifi.slash")
                     }
                     if let error { Text(error).foregroundStyle(.secondary) }
                     if let detail {
+                        if let work = detail.workContract {
+                            ArgusWorkSummary(work: work, artifactContext: detail.item.artifactContext)
+                        }
                         Text("Evidence timeline").font(.headline).accessibilityAddTraits(.isHeader)
                         if detail.item.id != detail.requested.id {
                             Text("A newer observation is available for this task.").font(.subheadline)
                         }
-                        ForEach(detail.timeline) { item in
+                        ForEach(detail.timeline, id: \.eventId) { item in
                             ArgusOperationRow(item: item)
                             ForEach(item.artifacts) { artifact in
                                 Button {
@@ -180,13 +183,7 @@ private struct ArgusOperationDetailView: View {
             let response = try await self.client.request(
                 "argus.operations.detail", params: ["operation_id": self.operation.id], as: ArgusOperationDetail.self)
             guard self.sameGateway else { return }
-            guard response.requested.id == self.operation.id, !response.ownerAccepted,
-                  response.timeline.count <= 100,
-                  ([response.item, response.requested] + response.timeline).allSatisfy({
-                      $0.project == "Argus" && !$0.ownerAccepted && $0.state == "observed"
-                          && $0.taskId == self.operation.taskId && $0.source == self.operation.source
-                  })
-            else { throw ArgusOperationsError.invalidResponse }
+            try response.validate(for: self.operation)
             self.detail = response
             self.error = nil
         } catch { self.error = "Detail unavailable. Previously observed evidence remains visible." }
