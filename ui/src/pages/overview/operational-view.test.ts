@@ -934,3 +934,44 @@ it("uses admitted display metadata while preserving raw producer title and autho
   expect(element.textContent).toContain("Recorded state: verified");
   expect(element.textContent).toContain("Owner acceptance not recorded");
 });
+
+it("does not label an active federation observation without artifacts as a result", async () => {
+  const active = {
+    ...item,
+    kind: "task.started",
+    state: "observed",
+    artifacts: [],
+    artifact_context: {
+      relation: "federation_observation",
+      current_attempt_id: null,
+      artifact_attempt_id: null,
+    },
+  };
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ ...page, items: [active] })
+    .mockResolvedValueOnce({
+      item: active,
+      requested: active,
+      timeline: [active],
+      coverage: { complete: true, has_more: false },
+    });
+  const { element } = await mount(request);
+  element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+  await vi.waitFor(() =>
+    expect(element.querySelector(".argus-detail")?.textContent).toContain(
+      "Inspect recorded evidence",
+    ),
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).not.toContain("Inspect the result");
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "No artifact references were returned",
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).toContain("Recorded state: observed");
+  expect(element.querySelector(".argus-detail details")?.textContent).toContain(
+    "Artifact links belong to this observation.",
+  );
+  expect(element.querySelector(".argus-detail details")?.textContent).not.toContain(
+    "current attempt not recorded",
+  );
+});

@@ -865,7 +865,9 @@ export class OperationalView extends LitElement {
                   ? "Inspect previous-attempt evidence"
                   : this.detail.artifact_context?.relation === "current_attempt" ||
                       this.detail.artifact_context?.relation === "federation_observation"
-                    ? "Inspect the result"
+                    ? this.detail.artifacts.length
+                      ? "Inspect the result"
+                      : "Inspect recorded evidence"
                     : "Inspect available evidence"}
               </h3>
               ${!this.detail.artifacts.length
@@ -903,10 +905,13 @@ export class OperationalView extends LitElement {
                 <p>Task: ${this.detail.task_id}</p>
                 ${this.detail.artifact_context
                   ? html`<p>
-                      Artifact relation: ${this.detail.artifact_context.relation} · current attempt
-                      ${this.detail.artifact_context.current_attempt_id ?? "not recorded"} ·
-                      artifact attempt
-                      ${this.detail.artifact_context.artifact_attempt_id ?? "not recorded"}
+                      Artifact relation: ${this.detail.artifact_context.relation}.
+                      ${this.detail.artifact_context.relation === "federation_observation"
+                        ? "Artifact links belong to this observation."
+                        : html`Current attempt
+                          ${this.detail.artifact_context.current_attempt_id ?? "not recorded"} ·
+                          artifact attempt
+                          ${this.detail.artifact_context.artifact_attempt_id ?? "not recorded"}`}
                     </p>`
                   : nothing}
                 <p>Scope: ${this.detail.evidence_scope ?? "canonical_federation_observation"}</p>
