@@ -1,11 +1,18 @@
 {
-  "fallbackKeys": [],
-  "generatedAt": "2026-07-08T13:50:18.082Z",
+  "fallbackKeys": [
+    "argusEvidence.allRecordsLoaded",
+    "argusEvidence.artifactReference",
+    "argusEvidence.artifactReferences",
+    "argusEvidence.loadedRecord",
+    "argusEvidence.loadedRecords",
+    "argusEvidence.partialRecords"
+  ],
+  "generatedAt": "2026-09-07T22:42:26.839Z",
   "locale": "fr",
   "model": "gpt-5.5",
   "provider": "openai",
-  "sourceHash": "46a510a0c1922e82db6836aedafbded1b740535fc1aa22071f5398692b5aeee9",
-  "totalKeys": 1669,
+  "sourceHash": "90759bd98bcb121a9fb8e163277ae3b0b19f336d2ac542ca50db82859b564b2a",
+  "totalKeys": 1675,
   "translatedKeys": 1669,
   "workflow": 1
 }

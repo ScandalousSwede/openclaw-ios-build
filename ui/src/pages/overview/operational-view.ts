@@ -11,6 +11,7 @@ import {
   type ArtifactReviewBinding,
   type ExecApprovalRequest,
 } from "../../app/exec-approval.ts";
+import { I18nController, t } from "../../i18n/index.ts";
 import {
   parsePage,
   parseDetail,
@@ -81,6 +82,7 @@ function operationTime(value: string): string {
 }
 
 export class OperationalView extends LitElement {
+  readonly i18nController = new I18nController(this);
   @consume({ context: applicationContext, subscribe: false })
   private context!: ApplicationContext;
   @state() private page: Page | null = null;
@@ -472,7 +474,10 @@ export class OperationalView extends LitElement {
         (operation) => html`<section aria-label="Earlier observation">
           <h4>${operationHeading(operation)}</h4>
           <p>
-            Recorded state: ${operation.state} · Observed ${operationTime(operation.observed_at)}
+            <span title=${operation.state}
+              >Recorded state: ${operation.state.replaceAll("_", " ")}</span
+            >
+            · Observed ${operationTime(operation.observed_at)}
           </p>
           <a href=${this.observationLink(operation.operation_id, operation.event_id)}
             >Link to this earlier observation</a
@@ -963,7 +968,7 @@ export class OperationalView extends LitElement {
               : this.error || this.listUnavailable
                 ? "Evidence unavailable; verify freshness before acting on loaded records."
                 : this.page
-                  ? `${this.page.items.length} loaded ${this.page.items.length === 1 ? "record" : "records"}. ${this.page.coverage.complete ? "Complete within the declared scope." : "Partial coverage."}`
+                  ? `${t(this.page.items.length === 1 ? "argusEvidence.loadedRecord" : "argusEvidence.loadedRecords", { count: String(this.page.items.length) })} ${t(this.page.coverage.complete ? "argusEvidence.allRecordsLoaded" : "argusEvidence.partialRecords")}`
                   : "Coverage unavailable."}
         </p>
         ${this.page
@@ -1097,7 +1102,16 @@ export class OperationalView extends LitElement {
                     : "Open work details"}
                 </span>
                 <span class="argus-work-context">
-                  Recorded state: ${item.state} · ${item.artifacts.length} artifact references
+                  <span title=${item.state}
+                    >Recorded state: ${item.state.replaceAll("_", " ")}</span
+                  >
+                  ·
+                  ${t(
+                    item.artifacts.length === 1
+                      ? "argusEvidence.artifactReference"
+                      : "argusEvidence.artifactReferences",
+                    { count: String(item.artifacts.length) },
+                  )}
                   ${item.artifact_context?.relation === "previous_attempt"
                     ? " · Previous-attempt evidence"
                     : item.artifact_context?.relation === "current_attempt"
@@ -1128,7 +1142,11 @@ export class OperationalView extends LitElement {
         ${this.detail
           ? html`<section class="argus-detail" aria-label="Work details">
               <h3 class="argus-selected-title" tabindex="-1">${operationHeading(this.detail)}</h3>
-              <p>Recorded state: ${this.detail.state}</p>
+              <p>
+                <span title=${this.detail.state}
+                  >Recorded state: ${this.detail.state.replaceAll("_", " ")}</span
+                >
+              </p>
               ${operationHeading(this.detail) !== (this.detail.display?.label ?? this.detail.title)
                 ? html`<p class="argus-source-summary">${this.detail.title}</p>`
                 : nothing}
@@ -1226,6 +1244,7 @@ export class OperationalView extends LitElement {
               ${this.renderReviewHistory()}
               <details>
                 <summary>Provenance, verification and history</summary>
+                <p>Recorded state value: ${this.detail.state}</p>
                 <h4>Producer narrative</h4>
                 <p>${this.detail.title}</p>
                 <p>${this.detail.kind} · ${this.detail.source}</p>

@@ -3,6 +3,14 @@
 import type { TranslationMap } from "../lib/types.ts";
 
 export const ko: TranslationMap = {
+  argusEvidence: {
+    loadedRecord: "{count} record loaded.",
+    loadedRecords: "{count} records loaded.",
+    allRecordsLoaded: "All matching records in this evidence scope are loaded.",
+    partialRecords: "More matching records may exist; coverage is partial.",
+    artifactReference: "{count} artifact reference",
+    artifactReferences: "{count} artifact references",
+  },
   common: {
     health: "상태",
     ok: "확인",
