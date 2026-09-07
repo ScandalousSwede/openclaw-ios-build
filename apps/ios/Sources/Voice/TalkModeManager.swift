@@ -136,6 +136,8 @@ final class TalkModeManager: NSObject {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var recognitionCallbackGeneration: UInt64 = 0
+    private var interruptedRecognitionGeneration: UInt64?
+    private var interruptionRecoveryTask: Task<Void, Never>?
     private var silenceTask: Task<Void, Never>?
     private var silenceMonitorGeneration: UInt64 = 0
     private var pttTimeoutGeneration: UInt64 = 0
@@ -1364,7 +1366,10 @@ final class TalkModeManager: NSObject {
         await self.handleTranscript(transcript: transcript, isFinal: isFinal)
     }
 
-    private func restartRecognitionAfterError(expectedGeneration: UInt64) async {
+    private func restartRecognitionAfterError(
+        expectedGeneration: UInt64,
+        resetSilenceAfterRestart: Bool = false) async
+    {
         guard !Task.isCancelled,
               expectedGeneration == self.recognitionCallbackGeneration,
               self.isEnabled,
@@ -1390,6 +1395,7 @@ final class TalkModeManager: NSObject {
             try self.startRecognition()
             self.isListening = true
             self.statusText = "Listening"
+            if resetSilenceAfterRestart { self.lastHeard = Date() }
             self.recordRecognitionEvent("speech_recognition_restarted", result: "success")
             GatewayDiagnostics.log("talk speech: recognition restarted")
         } catch {
@@ -1403,6 +1409,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func stopRecognition() {
+        self.interruptedRecognitionGeneration = nil
         self.bargeInCandidate = nil
         self.recognitionCallbackGeneration &+= 1
         self.recognitionTask?.cancel()
@@ -3375,6 +3382,40 @@ final class TalkModeManager: NSObject {
             optionValue: optionValue,
             currentPortTypes: self.currentAudioPortTypes,
             context: self.audioSessionCallbackContext(callbackGeneration: callbackGeneration))
+        guard let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        switch type {
+        case .began:
+            // Handle only the continuous microphone we currently own. Playback,
+            // explicit PTT, and realtime sessions retain their existing owners.
+            guard self.captureMode == .continuous, self.isEnabled,
+                  self.isListening || self.interruptedRecognitionGeneration != nil,
+                  !self.isSpeechOutputActive, self.realtimeSession == nil, self.realtimeRelaySession == nil
+            else { return }
+            self.interruptionRecoveryTask?.cancel()
+            self.stopRecognition()
+            self.interruptedRecognitionGeneration = self.recognitionCallbackGeneration
+            self.finalizedTranscriptPrefix = self.lastTranscript
+            self.isListening = false
+            self.currentAudioActivation = .inactive
+            self.statusText = "Microphone interrupted"
+            self.recordRecognitionEvent("speech_capture_interrupted", result: "paused")
+        case .ended:
+            guard let generation = self.interruptedRecognitionGeneration else { return }
+            guard generation == self.recognitionCallbackGeneration,
+                  AVAudioSession.InterruptionOptions(rawValue: optionValue).contains(.shouldResume)
+            else {
+                self.interruptedRecognitionGeneration = nil
+                return
+            }
+            // Retain pause ownership during the delayed restart. Another began
+            // must invalidate that task even though isListening is already false.
+            self.interruptionRecoveryTask = Task { @MainActor [weak self] in
+                await self?.restartRecognitionAfterError(
+                    expectedGeneration: generation, resetSilenceAfterRestart: true)
+            }
+        @unknown default:
+            break
+        }
     }
 
     private func handleAudioMediaServicesNotification(
@@ -5166,6 +5207,10 @@ extension TalkModeManager {
 
     func _test_setPTTEndBeforeBodyHook(_ hook: @escaping () async -> Void) {
         self.pttEndBeforeBodyOverride = hook
+    }
+
+    func _test_waitForInterruptionRecovery() async {
+        await self.interruptionRecoveryTask?.value
     }
 
     func _test_recognitionCallbackGeneration() -> UInt64 {

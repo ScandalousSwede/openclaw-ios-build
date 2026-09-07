@@ -2733,6 +2733,70 @@ extension TalkDurableOutboxTests {
         manager.setEnabled(false)
     }
 
+    @Test func continuousMicrophoneInterruptionPausesAndResumesSameTranscript() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition(transcript: "Before interruption")
+        manager._test_backdateLastHeard(seconds: 60)
+        let oldGeneration = manager._test_recognitionCallbackGeneration()
+        manager._test_handleAudioSessionInterruption(typeValue: 1, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+        #expect(!manager.isListening)
+        #expect(manager.statusText == "Microphone interrupted")
+        await manager._test_deliverRecognitionCallback(
+            transcript: "stale", isFinal: true, generation: oldGeneration)
+        #expect(manager._test_lastTranscript() == "Before interruption")
+        manager._test_handleAudioSessionInterruption(typeValue: 0, reasonValue: nil, optionValue: 1, callbackGeneration: nil)
+        await manager._test_waitForInterruptionRecovery()
+        #expect(manager.isListening)
+        #expect(manager._test_lastSpeechActivity().map { Date().timeIntervalSince($0) < 1 } == true)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "after interruption", isFinal: false, generation: manager._test_recognitionCallbackGeneration())
+        #expect(manager._test_lastTranscript() == "Before interruption after interruption")
+        manager.setEnabled(false)
+    }
+
+    @Test func newInterruptionInvalidatesPendingMicrophoneRecovery() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition(transcript: "preserved")
+        manager._test_handleAudioSessionInterruption(typeValue: 1, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+        manager._test_handleAudioSessionInterruption(typeValue: 0, reasonValue: nil, optionValue: 1, callbackGeneration: nil)
+        manager._test_handleAudioSessionInterruption(typeValue: 1, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+        let interruptedGeneration = manager._test_recognitionCallbackGeneration()
+        await manager._test_waitForInterruptionRecovery()
+        #expect(!manager.isListening)
+        #expect(manager._test_recognitionCallbackGeneration() == interruptedGeneration)
+        manager._test_handleAudioSessionInterruption(typeValue: 0, reasonValue: nil, optionValue: 1, callbackGeneration: nil)
+        await manager._test_waitForInterruptionRecovery()
+        #expect(manager.isListening)
+        #expect(manager._test_lastTranscript() == "preserved")
+        manager.setEnabled(false)
+    }
+
+    @Test func microphoneInterruptionWithoutResumeHintDoesNotRestart() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition()
+        manager._test_handleAudioSessionInterruption(typeValue: 1, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+        let pausedGeneration = manager._test_recognitionCallbackGeneration()
+        manager._test_handleAudioSessionInterruption(typeValue: 0, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+        await manager._test_waitForInterruptionRecovery()
+        #expect(!manager.isListening)
+        #expect(manager._test_recognitionCallbackGeneration() == pausedGeneration)
+        manager.setEnabled(false)
+    }
+
+    @Test func microphoneInterruptionResumeCannotOverrideBackgroundOrDisable() async {
+        for background in [true, false] {
+            let manager = TalkModeManager(allowSimulatorCapture: true)
+            manager._test_prepareContinuousRecognition()
+            manager._test_handleAudioSessionInterruption(typeValue: 1, reasonValue: nil, optionValue: 0, callbackGeneration: nil)
+            manager._test_handleAudioSessionInterruption(typeValue: 0, reasonValue: nil, optionValue: 1, callbackGeneration: nil)
+            if background { manager.setForegroundAudioCaptureAllowed(false) }
+            else { manager.setEnabled(false) }
+            await manager._test_waitForInterruptionRecovery()
+            #expect(!manager.isListening)
+            manager.setEnabled(false)
+        }
+    }
+
     @Test func recognitionFinalRestartFailurePreservesTextWithoutFalseListening() async {
         let manager = TalkModeManager(allowSimulatorCapture: false)
         manager._test_prepareContinuousRecognition()
