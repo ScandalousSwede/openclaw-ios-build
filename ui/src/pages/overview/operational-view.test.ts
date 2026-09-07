@@ -147,6 +147,35 @@ describe("operational evidence overview", () => {
     expect(rows[0].getAttribute("aria-current")).toBe("false");
     expect(rows[1].getAttribute("aria-current")).toBe("true");
   });
+  it("keeps a long producer title accessible while bounding the detail heading", async () => {
+    const title =
+      "Reader correction · Synthetic workflow repository and run receipt " +
+      "long source identity ".repeat(12);
+    const long = { ...item, title };
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({ ...page, items: [long] })
+      .mockResolvedValueOnce({
+        item: long,
+        requested: long,
+        timeline: [long],
+        coverage: { complete: true, has_more: false },
+      });
+    const { element } = await mount(request);
+    const row = element.querySelector<HTMLButtonElement>(".argus-work-row")!;
+    const rowTitle = row.querySelector(".argus-work-title")!;
+    expect(rowTitle.textContent).toBe(title);
+    expect(rowTitle.getAttribute("title")).toBe(title);
+    row.click();
+    await vi.waitFor(() => expect(element.querySelector(".argus-detail h3")).not.toBeNull());
+    const heading = element.querySelector(".argus-detail h3")!;
+    expect(heading.textContent!.length).toBeLessThanOrEqual(72);
+    expect(heading.textContent).toContain("…");
+    expect(element.querySelector(".argus-detail details")?.textContent).toContain(title);
+    expect(element.querySelector(".argus-detail")?.textContent).toContain(
+      "Recorded state: verified",
+    );
+  });
   it("shows a newer observation without inferring supersession or acceptance", async () => {
     const corrected = {
       ...item,

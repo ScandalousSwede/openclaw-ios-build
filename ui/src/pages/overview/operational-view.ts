@@ -66,7 +66,7 @@ type Detail = Operation & {
 
 function conciseTitle(value: string): string {
   const text = value.replace(/\s+/g, " ").trim();
-  return text.length > 140 ? `${text.slice(0, 137).trimEnd()}…` : text;
+  return text.length > 72 ? `${text.slice(0, 71).trimEnd()}…` : text;
 }
 
 function operationTime(value: string): string {
@@ -568,6 +568,10 @@ export class OperationalView extends LitElement {
           background: color-mix(in srgb, var(--accent) 8%, var(--card));
         }
         .argus-work-title {
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          -webkit-line-clamp: 2;
+          overflow: hidden;
           font-size: 1rem;
           font-weight: 650;
         }
@@ -584,10 +588,11 @@ export class OperationalView extends LitElement {
             max-height: 14rem;
           }
           .argus-evidence .argus-work-row {
-            gap: 4px 8px;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 4px;
           }
           .argus-work-action {
-            max-width: 6rem;
+            grid-row: 4;
           }
         }
         .argus-evidence details {
@@ -728,7 +733,7 @@ export class OperationalView extends LitElement {
                 ?disabled=${!connected || this.busy}
                 @click=${() => this.openDetail(item)}
               >
-                <span class="argus-work-title">${conciseTitle(item.title)}</span>
+                <span class="argus-work-title" title=${item.title}>${item.title}</span>
                 <span class="argus-work-action">
                   ${this.selectedOperation === item.operation_id ? "Selected" : "Open work details"}
                 </span>
