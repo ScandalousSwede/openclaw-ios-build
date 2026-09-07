@@ -7,6 +7,11 @@ import {
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
 import {
+  sameArtifactReviewBinding,
+  type ArtifactReviewBinding,
+  type ExecApprovalRequest,
+} from "../../app/exec-approval.ts";
+import {
   parsePage,
   parseDetail,
   parseArtifactResponse,
@@ -109,6 +114,7 @@ export class OperationalView extends LitElement {
   private refreshTimer?: number;
   @state() private artifactUrl: string | null = null;
   @state() private reviewAvailable = false;
+  @state() private pendingArtifactReviews: readonly ExecApprovalRequest[] = [];
   @state() private reviewBusy = false;
   @state() private reviewMessage: string | null = null;
   private unsubscribeOverlays?: () => void;
@@ -124,8 +130,10 @@ export class OperationalView extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
     this.reviewAvailable = this.context.overlays?.snapshot.artifactReviewAvailable === true;
+    this.pendingArtifactReviews = this.context.overlays?.snapshot.pendingArtifactReviews ?? [];
     this.unsubscribeOverlays = this.context.overlays?.subscribe((snapshot) => {
       this.reviewAvailable = snapshot.artifactReviewAvailable === true;
+      this.pendingArtifactReviews = snapshot.pendingArtifactReviews ?? [];
     });
     this.readLocation();
     window.addEventListener("popstate", this.onPopState);
@@ -469,6 +477,27 @@ export class OperationalView extends LitElement {
       </p>
     </section>`;
   }
+  private currentReviewBinding(): ArtifactReviewBinding | null {
+    return this.detail
+      ? {
+          operation_id: this.detail.operation_id,
+          event_id: this.detail.event_id,
+          artifact_sha256: this.detail.artifacts.map((a) => a.sha256).sort(),
+        }
+      : null;
+  }
+  private hasPendingArtifactReview(): boolean {
+    const binding = this.currentReviewBinding();
+    return Boolean(
+      binding &&
+      this.pendingArtifactReviews.some(
+        (entry) =>
+          entry.expiresAtMs > Date.now() &&
+          entry.artifactReview &&
+          sameArtifactReviewBinding(entry.artifactReview.binding, binding),
+      ),
+    );
+  }
   private canRequestArtifactReview(): boolean {
     return (
       this.reviewAvailable &&
@@ -505,6 +534,29 @@ export class OperationalView extends LitElement {
     this.reviewBusy = true;
     this.reviewMessage = null;
     try {
+      const opened = await this.context.overlays.refreshApprovals?.(
+        binding,
+        () =>
+          generation === this.generation &&
+          this.context.gateway.snapshot.client === client &&
+          Boolean(
+            this.currentReviewBinding() &&
+            sameArtifactReviewBinding(this.currentReviewBinding()!, binding),
+          ),
+      );
+      if (
+        generation !== this.generation ||
+        this.context.gateway.snapshot.client !== client ||
+        !this.currentReviewBinding() ||
+        !sameArtifactReviewBinding(this.currentReviewBinding()!, binding)
+      )
+        return;
+      if (!this.reviewAvailable) throw new Error("Review list unavailable");
+      if (opened) {
+        this.reviewMessage =
+          "Opened the current pending review. No new request or decision was submitted.";
+        return;
+      }
       await client.request("plugin.approval.request", {
         kind: "artifact_review",
         binding,
@@ -983,7 +1035,9 @@ export class OperationalView extends LitElement {
                       ?disabled=${this.reviewBusy || this.busy}
                       @click=${() => this.requestArtifactReview()}
                     >
-                      Request operator review
+                      ${this.hasPendingArtifactReview()
+                        ? "Open pending review"
+                        : "Request operator review"}
                     </button>
                   </p>`
                 : nothing}

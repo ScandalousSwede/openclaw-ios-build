@@ -30,6 +30,7 @@ async function mount(
   request = vi.fn().mockResolvedValue(page),
   connected = true,
   reviewAvailable = false,
+  pendingReviews: unknown[] = [],
 ) {
   const element = new OperationalView();
   type Snapshot = { connected: boolean; client: { request: typeof request } };
@@ -41,16 +42,12 @@ async function mount(
       return () => listeners.delete(listener);
     }),
   };
-  Object.assign(element, {
-    context: {
-      gateway,
-      overlays: {
-        snapshot: { artifactReviewAvailable: reviewAvailable },
-        subscribe: () => () => {},
-        refreshApprovals: vi.fn(),
-      },
-    },
-  });
+  const overlays = {
+    snapshot: { artifactReviewAvailable: reviewAvailable, pendingArtifactReviews: pendingReviews },
+    subscribe: () => () => {},
+    refreshApprovals: vi.fn().mockResolvedValue(false),
+  };
+  Object.assign(element, { context: { gateway, overlays } });
   document.body.append(element);
   await vi.waitFor(() =>
     expect(element.textContent).toContain(connected ? "Reader correction" : "Disconnected"),
@@ -59,6 +56,7 @@ async function mount(
   return {
     element,
     gateway,
+    overlays,
     request,
     setConnected: (next: boolean) => {
       gateway.snapshot = { ...gateway.snapshot, connected: next };
@@ -1005,6 +1003,7 @@ describe("current artifact operator review", () => {
     value: typeof ordinary,
     available = true,
     resolve = vi.fn().mockRejectedValue(new Error("unknown result")),
+    pendingReviews: unknown[] = [],
   ) {
     const request = vi.fn(async (method: string, params?: unknown) => {
       if (method === "argus.operations.list") return { ...page, items: [value] };
@@ -1017,7 +1016,7 @@ describe("current artifact operator review", () => {
         };
       return resolve(method, params);
     });
-    const result = await mount(request, true, available);
+    const result = await mount(request, true, available, pendingReviews);
     [...result.element.querySelectorAll("button")]
       .find((b) => b.textContent?.includes("Open work"))
       ?.click();
@@ -1032,6 +1031,35 @@ describe("current artifact operator review", () => {
         ),
     };
   }
+  it("opens the current pending review button without a second request or decision", async () => {
+    const binding = {
+      operation_id: ordinary.operation_id,
+      event_id: ordinary.event_id,
+      artifact_sha256: ordinary.artifacts.map((a) => a.sha256),
+    };
+    const pending = {
+      id: "durable-review",
+      kind: "artifact_review",
+      expiresAtMs: Date.now() + 60000,
+      artifactReview: { binding },
+    };
+    const result = await openReview(ordinary, true, vi.fn(), [pending]);
+    result.overlays.refreshApprovals.mockResolvedValue(true);
+    const button = [...result.element.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Open pending review"),
+    );
+    expect(button).toBeDefined();
+    button!.click();
+    await vi.waitFor(() =>
+      expect(result.element.textContent).toContain("No new request or decision was submitted"),
+    );
+    expect(result.overlays.refreshApprovals).toHaveBeenCalledWith(binding, expect.any(Function));
+    expect(
+      result.request.mock.calls.some(
+        ([method]) => method === "plugin.approval.request" || method === "plugin.approval.resolve",
+      ),
+    ).toBe(false);
+  });
   it("retries the exact binding with one stable request key after an unknown result", async () => {
     const { button, resolve, element } = await openReview(ordinary);
     expect(button()).toBeDefined();

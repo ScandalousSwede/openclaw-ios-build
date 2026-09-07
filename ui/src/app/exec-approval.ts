@@ -433,11 +433,17 @@ export async function refreshPendingApprovalQueue(
       artifactResult.status === "fulfilled" && isRecord(artifactResult.value)
         ? artifactResult.value
         : null;
-    const artifactApprovals =
-      artifactPayload && Array.isArray(artifactPayload.items)
-        ? (parseApprovalList(artifactPayload.items, parseArtifactReviewPending) ?? [])
-        : currentApprovalsForKind(state.execApprovalQueue, "artifact_review");
-    const artifactAvailable = artifactPayload?.available === true;
+    const parsedArtifactApprovals =
+      artifactPayload && Array.isArray(artifactPayload.items) && artifactPayload.items.length <= 100
+        ? parseApprovalList(artifactPayload.items, parseArtifactReviewPending)
+        : null;
+    const artifactListValid =
+      parsedArtifactApprovals !== null &&
+      parsedArtifactApprovals.length === (artifactPayload!.items as unknown[]).length;
+    const artifactApprovals = artifactListValid
+      ? parsedArtifactApprovals
+      : currentApprovalsForKind(state.execApprovalQueue, "artifact_review");
+    const artifactAvailable = artifactPayload?.available === true && artifactListValid;
     const refreshed = mergeRefreshedApprovalQueue(
       sortApprovalsNewestFirst([...execApprovals, ...pluginApprovals, ...artifactApprovals]),
       refreshStartedWith,
@@ -480,4 +486,19 @@ export function clearResolvedExecApprovalPrompt(state: ExecApprovalPromptState, 
   for (const refresh of state.execApprovalRefreshes ?? []) {
     refresh.removedIds.add(id);
   }
+}
+
+/** Compare exact current evidence bindings; hash order is not authority. */
+export function sameArtifactReviewBinding(
+  a: ArtifactReviewBinding,
+  b: ArtifactReviewBinding,
+): boolean {
+  return (
+    a.operation_id === b.operation_id &&
+    a.event_id === b.event_id &&
+    a.artifact_sha256.length === b.artifact_sha256.length &&
+    [...a.artifact_sha256]
+      .sort()
+      .every((hash, index) => hash === [...b.artifact_sha256].sort()[index])
+  );
 }

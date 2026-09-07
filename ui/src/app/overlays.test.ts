@@ -194,7 +194,8 @@ it("resolves artifact reviews with bound identity and can defer without recordin
   overlays.deferApproval?.();
   expect(overlays.snapshot.approvalQueue).toHaveLength(0);
   expect(request.mock.calls.some(([method]) => method === "plugin.approval.resolve")).toBe(false);
-  await overlays.refreshApprovals?.();
+  expect(overlays.snapshot.pendingArtifactReviews).toHaveLength(1);
+  expect(await overlays.refreshApprovals?.(binding)).toBe(true);
   await overlays.decideApproval("accept_artifact");
   expect(request).toHaveBeenCalledWith("plugin.approval.resolve", {
     kind: "artifact_review",
@@ -247,5 +248,56 @@ it("uses bounded deterministic resolution keys for maximum-length review IDs", a
   expect(keys[0]).toMatch(/^artifact-review:[a-f0-9]{64}$/);
   expect(keys[0]).toBe(keys[1]);
   expect(keys[2]).not.toBe(keys[0]);
+  overlays.dispose();
+});
+
+it("opens only a matching authoritative unexpired pending review and never revives disposed or offline state", async () => {
+  const binding = {
+    operation_id: "operation",
+    event_id: "current",
+    artifact_sha256: ["a".repeat(64)],
+  };
+  let items = [{ id: "review", binding, created_at_ms: 1000, expires_at_ms: Date.now() + 60000 }];
+  let fail = false;
+  const request = vi.fn<RequestFn>(async (_method, params) => {
+    if ((params as { kind?: string })?.kind !== "artifact_review") return [];
+    if (fail) throw new Error("offline");
+    return { available: true, items };
+  });
+  const harness = createGatewayHarness(client(request));
+  const overlays = createApplicationOverlays(harness.gateway);
+  await vi.waitFor(() => expect(overlays.snapshot.approvalQueue).toHaveLength(1));
+  overlays.deferApproval?.();
+  expect(overlays.snapshot.approvalQueue).toHaveLength(0);
+  expect(overlays.snapshot.pendingArtifactReviews).toHaveLength(1);
+  expect(await overlays.refreshApprovals?.({ ...binding, event_id: "other" })).toBe(false);
+  expect(overlays.snapshot.approvalQueue).toHaveLength(0);
+  expect(await overlays.refreshApprovals?.(binding, () => false)).toBe(false);
+  expect(await overlays.refreshApprovals?.(binding)).toBe(true);
+  overlays.deferApproval?.();
+  fail = true;
+  expect(await overlays.refreshApprovals?.(binding)).toBe(false);
+  expect(overlays.snapshot.artifactReviewAvailable).toBe(false);
+  expect(overlays.snapshot.pendingArtifactReviews).toHaveLength(0);
+  fail = false;
+  items = [
+    {
+      id: "malformed",
+      binding: { ...binding, event_id: "" },
+      created_at_ms: 1000,
+      expires_at_ms: Date.now() + 60000,
+    },
+  ];
+  expect(await overlays.refreshApprovals?.(binding)).toBe(false);
+  expect(overlays.snapshot.artifactReviewAvailable).toBe(false);
+  items = [];
+  expect(await overlays.refreshApprovals?.(binding)).toBe(false);
+  expect(overlays.snapshot.pendingArtifactReviews).toHaveLength(0);
+  items = [{ id: "expired", binding, created_at_ms: 1000, expires_at_ms: Date.now() - 1 }];
+  expect(await overlays.refreshApprovals?.(binding)).toBe(false);
+  harness.update({ connected: false });
+  request.mockClear();
+  expect(await overlays.refreshApprovals?.(binding)).toBe(false);
+  expect(request).not.toHaveBeenCalled();
   overlays.dispose();
 });

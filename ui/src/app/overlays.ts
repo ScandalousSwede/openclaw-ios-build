@@ -20,6 +20,8 @@ import {
   parseExecApprovalResolved,
   parsePluginApprovalRequested,
   refreshPendingApprovalQueue,
+  sameArtifactReviewBinding,
+  type ArtifactReviewBinding,
   type ApprovalDecision,
   type ExecApprovalPromptState,
   type ExecApprovalRequest,
@@ -38,6 +40,7 @@ export type ApplicationOverlaySnapshot = {
   approvalQueue: readonly ExecApprovalRequest[];
   approvalBusy: boolean;
   artifactReviewAvailable?: boolean;
+  pendingArtifactReviews?: readonly ExecApprovalRequest[];
   approvalError: string | null;
   devicePairSetupOpen: boolean;
   devicePairSetupLoading: boolean;
@@ -51,7 +54,10 @@ export type ApplicationOverlays = {
   subscribe: (listener: (snapshot: ApplicationOverlaySnapshot) => void) => () => void;
   runUpdate: () => Promise<void>;
   dismissUpdate: () => void;
-  refreshApprovals?: () => Promise<void>;
+  refreshApprovals?: (
+    openBinding?: ArtifactReviewBinding,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean>;
   deferApproval?: () => void;
   decideApproval: (decision: ApprovalDecision) => Promise<void>;
   openDevicePairSetup: () => Promise<void>;
@@ -238,12 +244,22 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
     execApprovalExpiryTimers: new Map(),
   };
 
+  // Local presentation state only; the existing queue remains the authoritative read projection.
+  const deferredArtifactReviews = new Set<string>();
+  const visibleApprovals = () =>
+    promptState.execApprovalQueue.filter((entry) => !deferredArtifactReviews.has(entry.id));
   const publish = () => {
     snapshot = {
       updateAvailable: snapshot.updateAvailable,
       updateRunning: snapshot.updateRunning,
       updateStatusBanner: snapshot.updateStatusBanner,
-      approvalQueue: promptState.execApprovalQueue,
+      approvalQueue: visibleApprovals(),
+      pendingArtifactReviews:
+        promptState.artifactReviewAvailable === true
+          ? promptState.execApprovalQueue.filter(
+              (entry) => entry.kind === "artifact_review" && entry.expiresAtMs > Date.now(),
+            )
+          : [],
       approvalBusy: promptState.execApprovalBusy,
       artifactReviewAvailable: promptState.artifactReviewAvailable === true,
       approvalError: promptState.execApprovalError,
@@ -586,17 +602,44 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       publish();
     },
     deferApproval() {
-      const active = promptState.execApprovalQueue[0];
+      const active = snapshot.approvalQueue[0];
       if (active?.kind === "artifact_review" && !promptState.execApprovalBusy) {
-        dismissExecApprovalPrompt(promptState, active.id);
+        deferredArtifactReviews.add(active.id);
         publish();
       }
     },
-    async refreshApprovals() {
-      if (activeClient && isCurrentClient(activeClient)) await refreshApprovals(activeClient);
+    async refreshApprovals(openBinding, isCurrent) {
+      const binding = openBinding
+        ? { ...openBinding, artifact_sha256: [...openBinding.artifact_sha256] }
+        : undefined;
+      const client = activeClient;
+      if (!client || !isCurrentClient(client)) return false;
+      await refreshApprovals(client);
+      if (
+        !isCurrentClient(client) ||
+        promptState.artifactReviewAvailable !== true ||
+        !binding ||
+        isCurrent?.() === false
+      )
+        return false;
+      const pending = promptState.execApprovalQueue.find(
+        (entry) =>
+          entry.kind === "artifact_review" &&
+          entry.expiresAtMs > Date.now() &&
+          entry.artifactReview &&
+          sameArtifactReviewBinding(entry.artifactReview.binding, binding),
+      );
+      if (!pending) return false;
+      deferredArtifactReviews.delete(pending.id);
+      promptState.execApprovalQueue = [
+        pending,
+        ...promptState.execApprovalQueue.filter((entry) => entry.id !== pending.id),
+      ];
+      publish();
+      return true;
     },
     async decideApproval(decision) {
-      const active = promptState.execApprovalQueue[0];
+      const active = snapshot.approvalQueue[0];
       const client = gateway.snapshot.client;
       if (!active || !client || promptState.execApprovalBusy || disposed) {
         return;
@@ -651,7 +694,7 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
           }
           return;
         }
-        if (isCurrentClient(client) && promptState.execApprovalQueue[0]?.id === active.id) {
+        if (isCurrentClient(client) && snapshot.approvalQueue[0]?.id === active.id) {
           promptState.execApprovalError = `Approval failed: ${error instanceof Error ? error.message : String(error)}`;
         }
       } finally {
