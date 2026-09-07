@@ -740,7 +740,7 @@ export class OperationalView extends LitElement {
         ${this.lastCheckedAt
           ? html`<p>
               Evidence last checked ${operationTime(this.lastCheckedAt)}.
-              ${this.page?._authority_read
+              ${this.page?._authority_read?.snapshot_age_seconds !== undefined
                 ? html`Snapshot age at that check:
                   ${Math.max(0, Math.round(this.page._authority_read.snapshot_age_seconds))}
                   seconds.`

@@ -161,3 +161,15 @@ it("retains measured snapshot age without retaining snapshot filesystem metadata
     parsePage({ ...fixtures[0].list, _authority_read: { snapshot_age_seconds: -31 } }),
   ).toThrow();
 });
+
+it("preserves live-transaction reads with unknown snapshot age", () => {
+  const page = parsePage({
+    ...fixtures[0].list,
+    _authority_read: {
+      canonical_source: "operational_ledger_live_read_transaction",
+      read_only: true,
+    },
+  });
+  expect(page._authority_read).toEqual({});
+  expect(page._authority_read?.snapshot_age_seconds).toBeUndefined();
+});

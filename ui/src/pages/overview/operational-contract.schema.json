@@ -13,10 +13,7 @@
               "type": "number",
               "minimum": -30
             }
-          },
-          "required": [
-            "snapshot_age_seconds"
-          ]
+          }
         },
         "items": {
           "type": "array",

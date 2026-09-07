@@ -91,7 +91,7 @@ const workContractSchema = z.object({
 });
 const snapshotReadSchema = z
   .object({
-    snapshot_age_seconds: z.number().finite().min(-30),
+    snapshot_age_seconds: z.number().finite().min(-30).optional(),
   })
   .optional();
 const pageSchema = z.object({
