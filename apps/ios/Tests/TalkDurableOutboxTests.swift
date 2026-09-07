@@ -2688,6 +2688,51 @@ extension TalkDurableOutboxTests {
         manager.setEnabled(false)
     }
 
+    @Test func nonInterruptingFinalDuringSpeechRenewsRecognitionWithoutConsumingEcho() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition(transcript: "preserved user text")
+        manager._test_setSpeakingPlaybackFormat(nil)
+        let generation = manager._test_recognitionCallbackGeneration()
+        let playbackGeneration = manager._test_ttsGeneration()
+        // Empty final text cannot qualify as barge-in, independent of simulator route.
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: true, generation: generation)
+        let renewedGeneration = manager._test_recognitionCallbackGeneration()
+        #expect(renewedGeneration != generation)
+        #expect(manager.isSpeaking)
+        #expect(manager._test_ttsGeneration() == playbackGeneration)
+        #expect(manager._test_lastTranscript() == "preserved user text")
+        await manager._test_deliverRecognitionCallback(
+            transcript: "stale final", isFinal: true, generation: generation)
+        #expect(manager._test_recognitionCallbackGeneration() == renewedGeneration)
+        manager.setEnabled(false)
+    }
+
+    @Test func speechRecognitionRenewalFailureDoesNotCancelPlayback() async {
+        let manager = TalkModeManager(allowSimulatorCapture: false)
+        manager._test_prepareContinuousRecognition(transcript: "preserved user text")
+        manager._test_setSpeakingPlaybackFormat(nil)
+        let playbackGeneration = manager._test_ttsGeneration()
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: true, generation: manager._test_recognitionCallbackGeneration())
+        #expect(manager.isSpeaking)
+        #expect(manager._test_ttsGeneration() == playbackGeneration)
+        #expect(manager._test_lastTranscript() == "preserved user text")
+        manager.setEnabled(false)
+    }
+
+    @Test func speechRecognitionFinalCannotRestartCaptureInBackground() async {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_prepareContinuousRecognition()
+        manager._test_setSpeakingPlaybackFormat(nil)
+        manager.setForegroundAudioCaptureAllowed(false)
+        let generation = manager._test_recognitionCallbackGeneration()
+        await manager._test_deliverRecognitionCallback(
+            transcript: "", isFinal: true, generation: generation)
+        #expect(manager._test_recognitionCallbackGeneration() == generation)
+        manager.setEnabled(false)
+    }
+
     @Test func recognitionFinalRestartFailurePreservesTextWithoutFalseListening() async {
         let manager = TalkModeManager(allowSimulatorCapture: false)
         manager._test_prepareContinuousRecognition()

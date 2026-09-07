@@ -1439,6 +1439,19 @@ final class TalkModeManager: NSObject {
         if ttsActive, self.interruptOnSpeech {
             if self.shouldInterrupt(with: trimmed, isFinal: isFinal) {
                 self.stopSpeaking(origin: .speechRecognitionBargeIn)
+            } else if isFinal, self.captureMode == .continuous, self.isEnabled,
+                      self.foregroundAudioCaptureAllowed, self.gatewayConnected,
+                      self.isSpeechOutputActive
+            {
+                // A final result retires this recognition task even when its text
+                // was echo or did not qualify as an interruption. Renew only the
+                // recognizer; the current speech owner keeps its queue and session.
+                do {
+                    try self.startRecognition()
+                    self.recordRecognitionEvent("speech_barge_in_recognition_renewed", result: "success")
+                } catch {
+                    self.recordRecognitionEvent("speech_barge_in_recognition_renewal_failed", result: "failed")
+                }
             }
             return
         }
