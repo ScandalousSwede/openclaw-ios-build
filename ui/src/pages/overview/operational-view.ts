@@ -21,6 +21,7 @@ import {
   type WorkContract,
   type ReviewHistory,
 } from "./operational-contract.ts";
+import { operationHeading } from "./operational-heading.ts";
 
 type EvidenceFilters = {
   project: string;
@@ -1000,7 +1001,7 @@ export class OperationalView extends LitElement {
                 @click=${() => this.openDetail(item)}
               >
                 <span class="argus-work-title" title=${item.display?.label ?? item.title}
-                  >${item.display?.label ?? item.title}</span
+                  >${operationHeading(item)}</span
                 >
                 <span class="argus-work-action">
                   ${this.selectedOperation === item.operation_id ? "Selected" : "Open work details"}
@@ -1036,10 +1037,11 @@ export class OperationalView extends LitElement {
           : nothing}
         ${this.detail
           ? html`<section class="argus-detail" aria-label="Work details">
-              <h3 class="argus-selected-title" tabindex="-1">
-                ${this.detail.display?.label ?? this.detail.title}
-              </h3>
+              <h3 class="argus-selected-title" tabindex="-1">${operationHeading(this.detail)}</h3>
               <p>Recorded state: ${this.detail.state}</p>
+              ${operationHeading(this.detail) !== (this.detail.display?.label ?? this.detail.title)
+                ? html`<p class="argus-source-summary">${this.detail.title}</p>`
+                : nothing}
               ${this.detail.display?.change_summary
                 ? html`<p>${this.detail.display.change_summary}</p>`
                 : nothing}

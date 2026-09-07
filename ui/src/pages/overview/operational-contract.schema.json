@@ -36,6 +36,79 @@
               "title": {
                 "type": "string"
               },
+              "project": {
+                "type": "string",
+                "enum": [
+                  "Argus",
+                  "MiKobots",
+                  "EPC"
+                ]
+              },
+              "native": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "adapter": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "native_event": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "outcome": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "session_id": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "turn_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "item_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "adapter",
+                      "native_event",
+                      "outcome",
+                      "session_id",
+                      "turn_id",
+                      "item_id"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "display": {
                 "type": "object",
                 "properties": {
@@ -317,6 +390,79 @@
             "title": {
               "type": "string"
             },
+            "project": {
+              "type": "string",
+              "enum": [
+                "Argus",
+                "MiKobots",
+                "EPC"
+              ]
+            },
+            "native": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "adapter": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "native_event": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "outcome": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "turn_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "item_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "adapter",
+                    "native_event",
+                    "outcome",
+                    "session_id",
+                    "turn_id",
+                    "item_id"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "display": {
               "type": "object",
               "properties": {
@@ -494,6 +640,79 @@
             },
             "title": {
               "type": "string"
+            },
+            "project": {
+              "type": "string",
+              "enum": [
+                "Argus",
+                "MiKobots",
+                "EPC"
+              ]
+            },
+            "native": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "adapter": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "native_event": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "outcome": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "session_id": {
+                      "type": "string",
+                      "maxLength": 200
+                    },
+                    "turn_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "item_id": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 200
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "adapter",
+                    "native_event",
+                    "outcome",
+                    "session_id",
+                    "turn_id",
+                    "item_id"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "display": {
               "type": "object",
@@ -674,6 +893,79 @@
               },
               "title": {
                 "type": "string"
+              },
+              "project": {
+                "type": "string",
+                "enum": [
+                  "Argus",
+                  "MiKobots",
+                  "EPC"
+                ]
+              },
+              "native": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "adapter": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "native_event": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "outcome": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "session_id": {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      "turn_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "item_id": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "adapter",
+                      "native_event",
+                      "outcome",
+                      "session_id",
+                      "turn_id",
+                      "item_id"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "display": {
                 "type": "object",

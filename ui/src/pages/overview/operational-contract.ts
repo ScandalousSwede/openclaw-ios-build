@@ -25,6 +25,18 @@ const operationSchema = z.object({
   task_id: z.string(),
   event_id: identity,
   title: z.string(),
+  project: z.enum(["Argus", "MiKobots", "EPC"]).optional(),
+  native: z
+    .object({
+      adapter: z.string().max(200),
+      native_event: z.string().max(200),
+      outcome: z.string().max(200).nullable(),
+      session_id: z.string().max(200),
+      turn_id: z.string().max(200).nullable(),
+      item_id: z.string().max(200).nullable(),
+    })
+    .nullable()
+    .optional(),
   display: z
     .object({
       label: z.string().min(1).max(160),

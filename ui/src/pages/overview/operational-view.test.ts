@@ -611,6 +611,38 @@ describe("read-only work evidence contract", () => {
 });
 
 describe("result-first evidence hierarchy", () => {
+  it("keeps compact native headings and full source limitations outside provenance", async () => {
+    const title =
+      "Reader correction: synthetic source summary with explicit sample and scope limits";
+    const operation = {
+      ...item,
+      title,
+      project: "MiKobots",
+      native: {
+        adapter: "codex-app-server",
+        native_event: "turn/started",
+        outcome: "in_progress",
+        session_id: "synthetic-thread",
+        turn_id: "synthetic-turn",
+        item_id: null,
+      },
+    };
+    const { element } = await mountContract(workContract, operation);
+    Object.assign(element, { page: { ...page, items: [operation] } });
+    element.requestUpdate();
+    await element.updateComplete;
+    const detail = element.querySelector(".argus-detail")!;
+    expect(detail.querySelector("h3")!.textContent!.trim()).toBe(
+      "MiKobots · Codex turn observed running",
+    );
+    expect(detail.querySelector(":scope > .argus-source-summary")!.textContent).toBe(title);
+    expect(detail.querySelector<HTMLDetailsElement>(":scope > details")!.open).toBe(false);
+    expect(detail.querySelector(":scope > details")!.textContent).toContain(title);
+    expect(element.querySelector(".argus-work-title")!.textContent!.trim()).toBe(
+      "MiKobots · Codex turn observed running",
+    );
+  });
+
   it("keeps full selected summary visible and detailed provenance collapsed", async () => {
     const title = "Reader correction " + "detailed producer narrative ".repeat(30);
     const { element } = await mountContract(workContract, { ...item, title });
