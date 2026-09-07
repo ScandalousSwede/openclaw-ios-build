@@ -94,11 +94,14 @@ type WorkContract = {
     semantic_correctness_established: false;
   };
   independent_verification: {
+    semantic_correctness_established?: boolean;
     artifacts: {
       event_id: string;
       outcome: "PASS" | "FAIL";
       artifact_sha256: string;
       verifier_report_sha256: string;
+      verification_kind?: string;
+      semantic_correctness_established?: boolean;
     }[];
     covers_all_current_artifacts: boolean;
   };
@@ -801,7 +804,14 @@ export class OperationalView extends LitElement {
               <p>Recorded state: ${this.detail.state}</p>
               <p class="argus-disposition">
                 ${this.detail.workContract?.independent_verification.covers_all_current_artifacts
-                  ? "Independent PASS receipts cover the current artifacts."
+                  ? this.detail.workContract.independent_verification
+                      .semantic_correctness_established === false &&
+                    this.detail.workContract.independent_verification.artifacts.length > 0 &&
+                    this.detail.workContract.independent_verification.artifacts.every(
+                      (entry) => entry.verification_kind === "structural_artifact_contract",
+                    )
+                    ? "Structural verification passed for the current artifacts. Semantic correctness is not established by this receipt."
+                    : "Independent PASS receipts cover the current artifacts."
                   : this.detail.workContract?.independent_verification.artifacts.some(
                         (entry) => entry.outcome === "FAIL",
                       )

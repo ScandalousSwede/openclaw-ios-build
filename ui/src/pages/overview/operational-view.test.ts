@@ -631,3 +631,40 @@ describe("result-first evidence hierarchy", () => {
     },
   );
 });
+
+it("names structural-only verification in the primary summary without hiding its semantic limit", async () => {
+  const artifact = { sha256: "a".repeat(64), bytes: 3 };
+  const { element } = await mountContract(
+    {
+      ...workContract,
+      structural_verification: {
+        status: "passed_recorded",
+        semantic_correctness_established: false,
+      },
+      independent_verification: {
+        semantic_correctness_established: false,
+        artifacts: [
+          {
+            event_id: "structural-verifier-event",
+            outcome: "PASS",
+            artifact_sha256: artifact.sha256,
+            verifier_report_sha256: "b".repeat(64),
+            verification_kind: "structural_artifact_contract",
+            semantic_correctness_established: false,
+          },
+        ],
+        covers_all_current_artifacts: true,
+      },
+      continuation: { ...workContract.continuation, artifact_sha256: [artifact.sha256] },
+    },
+    { ...item, artifacts: [artifact] },
+  );
+  const summary = element.querySelector(".argus-disposition")!;
+  expect(summary.closest("details")).toBeNull();
+  expect(summary.textContent).toContain(
+    "Structural verification passed for the current artifacts.",
+  );
+  expect(summary.textContent).toContain("Semantic correctness is not established by this receipt.");
+  expect(summary.textContent).not.toContain("Independent PASS");
+  expect(element.querySelector(".argus-detail details")?.hasAttribute("open")).toBe(false);
+});
