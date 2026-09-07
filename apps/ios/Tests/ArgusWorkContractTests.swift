@@ -3,25 +3,25 @@ import Testing
 @testable import OpenClaw
 
 struct ArgusWorkContractTests {
-    static func fixture(relation: String = "current_attempt") throws -> (ArgusOperation, ArgusWorkContract) {
+    static func fixture(relation: String = "current_attempt", preArtifact: Bool = false) throws -> (ArgusOperation, ArgusWorkContract) {
         let digest = String(repeating: "a", count: 64)
         let itemJSON: [String: Any] = [
             "operation_id": "ordinary-97", "task_id": "task-97", "event_id": "event-99",
             "title": "Technical result", "source": "canonical:codex-completion-adapter",
-            "project": "Argus", "kind": "verifier.outcome.verified", "state": "verified",
+            "project": "Argus", "kind": "verifier.outcome.verified", "state": preArtifact ? "running" : "verified",
             "occurred_at": "2026-09-07T03:00:00Z", "observed_at": "2026-09-07T03:00:00Z",
             "owner_accepted": false, "evidence_scope": "admitted_canonical_technical_operation",
-            "artifacts": [["sha256": digest, "bytes": 32]],
+            "artifacts": preArtifact ? [] : [["sha256": digest, "bytes": 32]],
             "artifact_context": ["relation": relation, "current_attempt_id": "attempt-2", "artifact_attempt_id": relation == "current_attempt" ? "attempt-2" : "attempt-1"],
         ]
         let workJSON: [String: Any] = [
             "schema": "argus.work.read-contract.v1", "operation_id": "ordinary-97",
-            "latest_event_id": "event-99", "canonical_state": "verified",
+            "latest_event_id": "event-99", "canonical_state": preArtifact ? "running" : "verified",
             "owner_accepted": false, "is_state_transition": false,
             "structural_verification": ["status": "not_established", "semantic_correctness_established": false, "covers_all_current_artifacts": false],
             "independent_verification": ["artifacts": [], "covers_all_current_artifacts": false, "semantic_correctness_established": false],
             "pending_owner_feedback": [],
-            "continuation": ["mode": "read_only", "action": "inspect_current_evidence", "operation_id": "ordinary-97", "event_id": "event-99", "artifact_sha256": [digest], "dispatch_enabled": false],
+            "continuation": ["mode": "read_only", "action": "inspect_current_evidence", "operation_id": "ordinary-97", "event_id": "event-99", "artifact_sha256": preArtifact ? [] : [digest], "dispatch_enabled": false],
             "coverage": ["scope": "canonical_operation_trace", "complete": false, "cross_scope_absence_established": false],
         ]
         let decoder = JSONDecoder()
@@ -57,4 +57,14 @@ struct ArgusWorkContractTests {
         }
         #expect(throws: ArgusOperationsError.self) { try changed(continuation: work.continuation, owner: true).validate(for: item) }
     }
+    @Test func runningBeforeFirstArtifactIsReadableWithoutInventedContinuation() throws {
+        let (item, work) = try Self.fixture(relation: "unknown", preArtifact: true)
+        try work.validate(for: item)
+        #expect(item.isAdmitted)
+        #expect(item.state == "running")
+        #expect(item.artifacts.isEmpty)
+        #expect(work.continuation.artifactSha256.isEmpty)
+        #expect(!work.independentVerification.coversAllCurrentArtifacts)
+    }
+
 }

@@ -92,4 +92,27 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         self.add(attachment)
     }
 
+    @MainActor
+    func testProductionRunningBeforeFirstArtifactSummary() throws {
+        let (item, work) = try ArgusWorkContractTests.fixture(relation: "unknown", preArtifact: true)
+        try work.validate(for: item)
+        let root = VStack(alignment: .leading, spacing: 12) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            ArgusWorkSummary(work: work, artifactContext: item.artifactContext)
+        }
+        .padding()
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let renderer = ImageRenderer(content: root)
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 200)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-work-simulator-fixture-running-no-artifact"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
 }

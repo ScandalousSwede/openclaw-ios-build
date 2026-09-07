@@ -119,7 +119,9 @@ struct ArgusWorkSummary: View {
                     Text(request.reason ?? "Inspect the recorded evidence.")
                 }
             }
-            Text("Continuation: inspect the current evidence and open its verified artifact below. No work is dispatched.")
+            Text(self.work.continuation.artifactSha256.isEmpty
+                 ? "No artifact is recorded yet. Inspect the current status and refresh for new evidence. No work is dispatched."
+                 : "Continuation: inspect the current evidence and open its verified artifact below. No work is dispatched.")
             Text("Scope: \(self.work.coverage.scope). \(self.work.coverage.complete ? "Returned scope complete." : "Coverage is partial.")")
                 .font(.caption).foregroundStyle(.secondary)
         }
