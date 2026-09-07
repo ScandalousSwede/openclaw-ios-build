@@ -19,6 +19,7 @@ import {
   type Operation,
   type Page,
   type WorkContract,
+  type ReviewHistory,
 } from "./operational-contract.ts";
 
 type EvidenceFilters = {
@@ -63,6 +64,7 @@ function validateFilters(filters: EvidenceFilters): string | null {
 
 type Detail = Operation & {
   workContract: WorkContract | null;
+  reviewHistory: ReviewHistory | null;
   timeline: Operation[];
   newerObservation: boolean;
   historyComplete: boolean;
@@ -340,6 +342,7 @@ export class OperationalView extends LitElement {
         this.detail = {
           ...detail.item,
           workContract: detail.work_contract ?? null,
+          reviewHistory: detail.review_history ?? null,
           timeline: detail.timeline,
           newerObservation: detail.item.operation_id !== detail.requested.operation_id,
           historyComplete: detail.coverage.complete,
@@ -477,6 +480,81 @@ export class OperationalView extends LitElement {
       </p>
     </section>`;
   }
+  private renderReviewHistory() {
+    const history = this.detail?.reviewHistory;
+    const time = (value: number) => {
+      const date = new Date(value);
+      return Number.isNaN(date.valueOf())
+        ? "Time unavailable"
+        : date.toLocaleString(undefined, { timeZoneName: "short" });
+    };
+    return html`<section class="argus-review-history" aria-label="Recorded operator reviews">
+      <details>
+        <summary>Recorded operator reviews${history ? ` (${history.items.length})` : ""}</summary>
+        ${!history
+          ? html`<p>Operator review history was not supplied by this reader.</p>`
+          : html`
+              <p>
+                Receipt-qualified operator records in the admitted review corpus at snapshot
+                ${history.coverage.snapshot_sequence}.
+                ${history.coverage.complete && !history.coverage.has_more
+                  ? "Complete within this returned scope."
+                  : "Partial coverage; additional records may exist."}
+              </p>
+              <p>
+                This history does not establish a currently actionable review, owner acceptance,
+                scientific correctness or independent verification.
+              </p>
+              ${history.items.length === 0
+                ? html`<p>No qualified review records were returned in this scope.</p>`
+                : html`<ol>
+                    ${history.items.map(
+                      (review) => html`<li>
+                        <p>
+                          <strong
+                            >${review.state === "pending"
+                              ? "Review requested"
+                              : review.state === "accepted"
+                                ? "Operator accepted the bound artifact"
+                                : "Operator rejected the bound artifact"}</strong
+                          >
+                          ·
+                          ${review.binding_relation === "current"
+                            ? "Current artifact binding"
+                            : "Earlier evidence binding"}
+                        </p>
+                        ${review.state === "pending"
+                          ? html`<p>No qualified disposition recorded.</p>`
+                          : html`<p>
+                              Authenticated operator disposition recorded
+                              ${time(review.disposition!.recorded_at_ms)}.
+                            </p>`}
+                        <p>
+                          Requested ${time(review.requested_at_ms)}. Request expiry
+                          ${time(review.expires_at_ms)}${review.expires_at_ms <= Date.now()
+                            ? " (passed)"
+                            : ""}.
+                        </p>
+                        <p>
+                          Review <code>${review.id}</code> · Request event
+                          <code>${review.request_event_id}</code>${review.disposition
+                            ? html` · Disposition event <code>${review.disposition.event_id}</code>`
+                            : nothing}
+                        </p>
+                        <p>Bound event <code>${review.binding.event_id}</code></p>
+                        <p>
+                          Artifact SHA-256:
+                          ${review.binding.artifact_sha256.map(
+                            (hash) => html`<code>${hash}</code> `,
+                          )}
+                        </p>
+                      </li>`,
+                    )}
+                  </ol>`}
+            `}
+      </details>
+    </section>`;
+  }
   private currentReviewBinding(): ArtifactReviewBinding | null {
     return this.detail
       ? {
@@ -592,6 +670,12 @@ export class OperationalView extends LitElement {
           .includes(this.filter.toLocaleLowerCase()),
       ) ?? [];
     return html`<style>
+        .argus-review-history code {
+          overflow-wrap: anywhere;
+        }
+        .argus-review-history li {
+          margin-block: 1rem;
+        }
         .argus-evidence-basis {
           display: grid;
           grid-template-columns: minmax(130px, 1fr) minmax(0, 3fr);
@@ -609,6 +693,12 @@ export class OperationalView extends LitElement {
           margin: 0;
         }
         @media (max-width: 640px) {
+          .argus-review-history code {
+            overflow-wrap: anywhere;
+          }
+          .argus-review-history li {
+            margin-block: 1rem;
+          }
           .argus-evidence-basis {
             grid-template-columns: minmax(0, 1fr);
             gap: 4px;
@@ -1042,6 +1132,7 @@ export class OperationalView extends LitElement {
                   </p>`
                 : nothing}
               ${this.reviewMessage ? html`<p role="status">${this.reviewMessage}</p>` : nothing}
+              ${this.renderReviewHistory()}
               <details>
                 <summary>Provenance, verification and history</summary>
                 <h4>Producer narrative</h4>

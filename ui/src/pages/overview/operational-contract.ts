@@ -113,11 +113,53 @@ const pageSchema = z.object({
     observed_at: z.string(),
   }),
 });
+const reviewIdentity = z.string().regex(/^[A-Za-z0-9_.:-]{1,512}$/);
+const reviewHistorySchema = z
+  .object({
+    items: z
+      .array(
+        z
+          .object({
+            id: reviewIdentity,
+            request_event_id: reviewIdentity,
+            binding: z
+              .object({
+                operation_id: reviewIdentity,
+                event_id: reviewIdentity,
+                artifact_sha256: z.array(digest).min(1).max(64),
+              })
+              .strict(),
+            state: z.enum(["pending", "accepted", "rejected"]),
+            binding_relation: z.enum(["current", "previous"]),
+            requested_at_ms: z.number().int().nonnegative(),
+            expires_at_ms: z.number().int().nonnegative(),
+            disposition: z
+              .object({ event_id: reviewIdentity, recorded_at_ms: z.number().int().nonnegative() })
+              .strict()
+              .nullable(),
+          })
+          .strict(),
+      )
+      .max(25),
+    coverage: z
+      .object({
+        complete: z.boolean(),
+        has_more: z.boolean(),
+        snapshot_sequence: z.number().int().nonnegative(),
+      })
+      .strict(),
+    owner_accepted: z.literal(false),
+  })
+  .strict()
+  .describe(
+    "Recorded receipt-qualified artifact review history, not an actionable approval list. Pending means a qualified request with no qualified disposition recorded; expiry is request expiry only. Actionability comes only from the authenticated pending-action list.",
+  );
 const detailSchema = z.object({
   item: operationSchema,
   requested: operationSchema,
   timeline: z.array(operationSchema),
   work_contract: workContractSchema.optional(),
+  review_history: reviewHistorySchema.optional(),
   coverage: z.object({ complete: z.boolean(), has_more: z.boolean() }),
 });
 const artifactResponseSchema = z.object({
@@ -132,6 +174,7 @@ export type Artifact = z.infer<typeof artifactSchema>;
 export type Operation = z.infer<typeof operationSchema>;
 export type Page = z.infer<typeof pageSchema>;
 export type WorkContract = z.infer<typeof workContractSchema>;
+export type ReviewHistory = z.infer<typeof reviewHistorySchema>;
 export type DetailResponse = z.infer<typeof detailSchema>;
 
 export const operationalResponseSchemas = {
@@ -142,7 +185,7 @@ export const operationalResponseSchemas = {
 // One neutral response contract, exported for the existing Python/plugin fixtures.
 // Extra admitted backend metadata is allowed on input and stripped from UI values.
 export function createOperationalContractJsonSchema() {
-  return {
+  const contract = {
     $schema: "https://json-schema.org/draft/2020-12/schema",
     $id: "urn:argus:operational-read-response:v1",
     $defs: Object.fromEntries(
@@ -152,6 +195,26 @@ export function createOperationalContractJsonSchema() {
       ]),
     ),
   };
+  // Cross-field constraints shared with the incumbent Python reader schema.
+  const history = contract.$defs.detail.properties!.review_history as {
+    properties: {
+      items: {
+        items: {
+          properties: { binding: { properties: { artifact_sha256: { uniqueItems?: boolean } } } };
+          allOf?: unknown[];
+        };
+      };
+    };
+  };
+  history.properties.items.items.properties.binding.properties.artifact_sha256.uniqueItems = true;
+  history.properties.items.items.allOf = [
+    {
+      if: { properties: { state: { const: "pending" } } },
+      then: { properties: { disposition: { type: "null" } } },
+      else: { properties: { disposition: { type: "object" } } },
+    },
+  ];
+  return contract;
 }
 
 export function parsePage(value: unknown): Page {
@@ -203,5 +266,22 @@ export function parseDetail(value: unknown, requestedId: string): DetailResponse
     JSON.stringify(contract.continuation.artifact_context) !== JSON.stringify(context)
   )
     throw new Error("Continuation artifact attempt mismatch");
+  for (const review of detail.review_history?.items ?? []) {
+    const reviewHashes = new Set(review.binding.artifact_sha256);
+    if (
+      review.binding.operation_id !== detail.item.operation_id ||
+      reviewHashes.size !== review.binding.artifact_sha256.length ||
+      (review.state === "pending") !== (review.disposition === null)
+    )
+      throw new Error("Review history identity mismatch");
+    if (
+      review.binding_relation === "current" &&
+      (context?.relation !== "current_attempt" ||
+        review.binding.event_id !== detail.item.event_id ||
+        reviewHashes.size !== hashes.size ||
+        [...reviewHashes].some((hash) => !hashes.has(hash)))
+    )
+      throw new Error("Review history current binding mismatch");
+  }
   return detail;
 }

@@ -1133,6 +1133,177 @@
             "is_state_transition"
           ]
         },
+        "review_history": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "maxItems": 25,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.:-]{1,512}$"
+                  },
+                  "request_event_id": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_.:-]{1,512}$"
+                  },
+                  "binding": {
+                    "type": "object",
+                    "properties": {
+                      "operation_id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.:-]{1,512}$"
+                      },
+                      "event_id": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.:-]{1,512}$"
+                      },
+                      "artifact_sha256": {
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "pattern": "^[0-9a-f]{64}$"
+                        },
+                        "uniqueItems": true
+                      }
+                    },
+                    "required": [
+                      "operation_id",
+                      "event_id",
+                      "artifact_sha256"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "accepted",
+                      "rejected"
+                    ]
+                  },
+                  "binding_relation": {
+                    "type": "string",
+                    "enum": [
+                      "current",
+                      "previous"
+                    ]
+                  },
+                  "requested_at_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "expires_at_ms": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "disposition": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "event_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_.:-]{1,512}$"
+                          },
+                          "recorded_at_ms": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          }
+                        },
+                        "required": [
+                          "event_id",
+                          "recorded_at_ms"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "request_event_id",
+                  "binding",
+                  "state",
+                  "binding_relation",
+                  "requested_at_ms",
+                  "expires_at_ms",
+                  "disposition"
+                ],
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "state": {
+                          "const": "pending"
+                        }
+                      }
+                    },
+                    "then": {
+                      "properties": {
+                        "disposition": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    "else": {
+                      "properties": {
+                        "disposition": {
+                          "type": "object"
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "complete": {
+                  "type": "boolean"
+                },
+                "has_more": {
+                  "type": "boolean"
+                },
+                "snapshot_sequence": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "complete",
+                "has_more",
+                "snapshot_sequence"
+              ],
+              "additionalProperties": false
+            },
+            "owner_accepted": {
+              "type": "boolean",
+              "const": false
+            }
+          },
+          "required": [
+            "items",
+            "coverage",
+            "owner_accepted"
+          ],
+          "additionalProperties": false,
+          "description": "Recorded receipt-qualified artifact review history, not an actionable approval list. Pending means a qualified request with no qualified disposition recorded; expiry is request expiry only. Actionability comes only from the authenticated pending-action list."
+        },
         "coverage": {
           "type": "object",
           "properties": {

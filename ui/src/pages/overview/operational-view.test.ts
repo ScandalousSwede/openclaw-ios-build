@@ -183,7 +183,7 @@ describe("operational evidence overview", () => {
     const heading = element.querySelector(".argus-detail h3")!;
     expect(heading.textContent!.trim().length).toBeLessThanOrEqual(72);
     expect(heading.textContent).toContain("…");
-    expect(element.querySelector(".argus-detail details")?.textContent).toContain(title);
+    expect(element.querySelector(".argus-detail > details")?.textContent).toContain(title);
     expect(element.querySelector(".argus-detail")?.textContent).toContain(
       "Recorded state: verified",
     );
@@ -616,7 +616,7 @@ describe("result-first evidence hierarchy", () => {
     const { element } = await mountContract(workContract, { ...item, title });
     const detail = element.querySelector(".argus-detail")!;
     expect(detail.querySelector("h3")!.textContent!.length).toBeLessThanOrEqual(140);
-    const provenance = detail.querySelector("details")!;
+    const provenance = detail.querySelector<HTMLDetailsElement>(":scope > details")!;
     expect(provenance.open).toBe(false);
     expect(provenance.textContent).toContain(title);
     expect(provenance.textContent).toContain("Owner acceptance not recorded");
@@ -641,7 +641,7 @@ describe("result-first evidence hierarchy", () => {
         capability_id: "codex.completion",
       },
     );
-    const provenance = element.querySelector(".argus-detail details")!;
+    const provenance = element.querySelector(".argus-detail > details")!;
     expect(provenance.textContent).toContain("admitted_canonical_technical_operation");
     expect(provenance.textContent).toContain("synthetic-executor");
     expect(provenance.textContent).toContain("No native outcome included in this scope");
@@ -747,7 +747,7 @@ it("names structural-only verification in the primary summary without hiding its
   );
   expect(summary.textContent).toContain("Semantic correctness is not established by this receipt.");
   expect(summary.textContent).not.toContain("Independent PASS");
-  expect(element.querySelector(".argus-detail details")?.hasAttribute("open")).toBe(false);
+  expect(element.querySelector(".argus-detail > details")?.hasAttribute("open")).toBe(false);
 });
 
 it("keeps previous-attempt artifacts inspectable without labeling them a current result", async () => {
@@ -937,7 +937,7 @@ it("uses admitted display metadata while preserving raw producer title and autho
   await vi.waitFor(() =>
     expect(element.querySelector(".argus-detail h3")?.textContent).toContain("useful label"),
   );
-  expect(element.querySelector(".argus-detail details")?.textContent).toContain(item.title);
+  expect(element.querySelector(".argus-detail > details")?.textContent).toContain(item.title);
   expect(element.querySelector(".argus-detail")?.textContent).toContain(
     "<script>synthetic text</script>",
   );
@@ -979,10 +979,10 @@ it("does not label an active federation observation without artifacts as a resul
     "No artifact references were returned",
   );
   expect(element.querySelector(".argus-detail")?.textContent).toContain("Recorded state: observed");
-  expect(element.querySelector(".argus-detail details")?.textContent).toContain(
+  expect(element.querySelector(".argus-detail > details")?.textContent).toContain(
     "Artifact links belong to this observation.",
   );
-  expect(element.querySelector(".argus-detail details")?.textContent).not.toContain(
+  expect(element.querySelector(".argus-detail > details")?.textContent).not.toContain(
     "current attempt not recorded",
   );
 });
@@ -1115,5 +1115,91 @@ describe("current artifact operator review", () => {
       expect(element.textContent).toContain("This action does not submit an artifact decision"),
     );
     expect(request.mock.calls.some(([method]) => method === "plugin.approval.resolve")).toBe(false);
+  });
+});
+
+describe("recorded operator review history", () => {
+  it.each(["pending", "accepted", "rejected"])(
+    "labels %s history without inventing an actionable request",
+    async (state) => {
+      const current = {
+        ...item,
+        artifacts: [{ sha256: "a".repeat(64), bytes: 3 }],
+        artifact_context: {
+          relation: "current_attempt",
+          current_attempt_id: "attempt-two",
+          artifact_attempt_id: "attempt-two",
+        },
+      };
+      const detail = {
+        item: current,
+        requested: current,
+        timeline: [current],
+        coverage: { complete: true, has_more: false },
+        review_history: {
+          items: [
+            {
+              id: "old-review",
+              request_event_id: "old-request",
+              binding: {
+                operation_id: current.operation_id,
+                event_id: "old-event",
+                artifact_sha256: ["b".repeat(64)],
+              },
+              state,
+              binding_relation: "previous",
+              requested_at_ms: 100,
+              expires_at_ms: 200,
+              disposition:
+                state === "pending"
+                  ? null
+                  : { event_id: "operator-disposition", recorded_at_ms: 150 },
+            },
+          ],
+          coverage: { complete: false, has_more: true, snapshot_sequence: 9 },
+          owner_accepted: false,
+        },
+      };
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce({ ...page, items: [current] })
+        .mockResolvedValueOnce(detail);
+      const { element, setConnected } = await mount(request);
+      element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+      await vi.waitFor(() =>
+        expect(element.querySelector(".argus-review-history")?.textContent).toContain(
+          "Earlier evidence binding",
+        ),
+      );
+      const text = element.querySelector(".argus-review-history")!.textContent!;
+      expect(text).toContain(
+        state === "pending"
+          ? "No qualified disposition recorded"
+          : `Operator ${state} the bound artifact`,
+      );
+      expect(text).toContain("does not establish a currently actionable review");
+      expect(text).toContain("passed");
+      expect(element.textContent).not.toContain("Open pending review");
+      setConnected(false);
+      await element.updateComplete;
+      expect(element.textContent).toContain("Disconnected");
+      expect(element.textContent).not.toContain("Open pending review");
+    },
+  );
+  it("marks history absent from older readers as not supplied", async () => {
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce({
+        item,
+        requested: item,
+        timeline: [item],
+        coverage: { complete: true, has_more: false },
+      });
+    const { element } = await mount(request);
+    element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+    await vi.waitFor(() =>
+      expect(element.textContent).toContain("Operator review history was not supplied"),
+    );
   });
 });

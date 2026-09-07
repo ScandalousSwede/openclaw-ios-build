@@ -173,3 +173,88 @@ it("preserves live-transaction reads with unknown snapshot age", () => {
   expect(page._authority_read).toEqual({});
   expect(page._authority_read?.snapshot_age_seconds).toBeUndefined();
 });
+
+function historyDetail() {
+  const fixture = structuredClone(fixtures.find((value) => value.name === "ordinary-corrected")!);
+  return {
+    ...fixture.detail,
+    review_history: {
+      items: [
+        {
+          id: "review-one",
+          request_event_id: "request-one",
+          binding: {
+            operation_id: fixture.detail.item.operation_id,
+            event_id: fixture.detail.item.event_id,
+            artifact_sha256: fixture.detail.item.artifacts.map((artifact) => artifact.sha256),
+          },
+          state: "pending",
+          binding_relation: "current",
+          requested_at_ms: 100,
+          expires_at_ms: 200,
+          disposition: null as null | { event_id: string; recorded_at_ms: number },
+        },
+      ],
+      coverage: { complete: true, has_more: false, snapshot_sequence: 7 },
+      owner_accepted: false,
+    },
+  };
+}
+it("retains bounded operator history without promoting earlier bindings or owner authority", () => {
+  const detail = historyDetail();
+  for (const state of ["pending", "accepted", "rejected"]) {
+    detail.review_history.items[0].state = state;
+    detail.review_history.items[0].disposition =
+      state === "pending" ? null : { event_id: "disposition-one", recorded_at_ms: 150 };
+    expect(parseDetail(detail, detail.requested.operation_id).review_history?.items[0].state).toBe(
+      state,
+    );
+  }
+  detail.review_history.items[0].binding_relation = "previous";
+  detail.review_history.items[0].binding.event_id = "earlier-event";
+  detail.review_history.items[0].binding.artifact_sha256 = ["f".repeat(64)];
+  expect(
+    parseDetail(detail, detail.requested.operation_id).review_history?.items[0].binding_relation,
+  ).toBe("previous");
+  expect(parseDetail(detail, detail.requested.operation_id).review_history?.owner_accepted).toBe(
+    false,
+  );
+});
+it("rejects malformed, foreign and false-current operator history", () => {
+  const mutations = [
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].binding.operation_id = "foreign";
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].binding.event_id = "older";
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].binding.artifact_sha256 = ["f".repeat(64)];
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].binding.artifact_sha256.push(
+        d.review_history.items[0].binding.artifact_sha256[0],
+      );
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].state = "accepted";
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items[0].disposition = { event_id: "unexpected", recorded_at_ms: 150 };
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.items = Array.from({ length: 26 }, () => d.review_history.items[0]);
+    },
+    (d: ReturnType<typeof historyDetail>) => {
+      d.review_history.owner_accepted = true;
+    },
+  ];
+  for (const mutate of mutations) {
+    const detail = historyDetail();
+    mutate(detail);
+    expect(() => parseDetail(detail, detail.requested.operation_id)).toThrow();
+  }
+  expect(
+    parseDetail(fixtures[0].detail, fixtures[0].requested_operation_id).review_history,
+  ).toBeUndefined();
+});
