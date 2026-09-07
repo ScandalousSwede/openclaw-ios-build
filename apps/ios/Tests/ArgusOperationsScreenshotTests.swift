@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Vision
 import XCTest
 @testable import OpenClaw
 
@@ -32,9 +33,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             .environment(\.colorScheme, .dark)
             .frame(width: 390)
             .fixedSize(horizontal: false, vertical: true)
-            let renderer = ImageRenderer(content: root)
-            renderer.scale = 2
-            let image = try XCTUnwrap(renderer.uiImage)
+            let image = try self.hostedImage(root, selectedProject: store.project.rawValue)
             let fullImage = try XCTUnwrap(image.cgImage)
             // Exclude the fixture warning: it must not make an empty content render pass.
             let labelExclusionHeight = 200
@@ -164,14 +163,63 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         .environment(\.colorScheme, .dark)
         .frame(width: 390)
         .fixedSize(horizontal: false, vertical: true)
-        let renderer = ImageRenderer(content: root)
-        renderer.scale = 2
-        let image = try XCTUnwrap(renderer.uiImage)
+        let image = try self.hostedImage(root, selectedProject: store.project.rawValue)
         XCTAssertGreaterThan(image.size.height, 400)
         let attachment = XCTAttachment(image: image)
         attachment.name = "argus-mikobots-project-simulator-fixture-accessibility"
         attachment.lifetime = .keepAlways
         self.add(attachment)
+    }
+
+    /// ImageRenderer replaces UIKit-backed menu controls with placeholders. Keep the
+    /// production control and capture its real hosted view hierarchy instead.
+    @MainActor
+    private func hostedImage(_ content: some View, selectedProject: String) throws -> UIImage {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let host = UIHostingController(rootView: content)
+        host.safeAreaRegions = []
+        host.overrideUserInterfaceStyle = .dark
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        let size = host.sizeThatFits(in: CGSize(width: 390, height: 4000))
+        XCTAssertTrue(size.height.isFinite && size.height > 0 && size.height < 4000)
+        guard size.height.isFinite, size.height > 0, size.height < 4000 else {
+            throw NSError(domain: "ArgusScreenshot", code: 1)
+        }
+        window.frame = CGRect(origin: .zero, size: CGSize(width: 390, height: ceil(size.height)))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+            previousKeyWindow?.makeKey()
+        }
+        host.view.frame = window.bounds
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 2
+        var rendered = false
+        let image = UIGraphicsImageRenderer(bounds: host.view.bounds, format: format).image { _ in
+            rendered = host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        }
+        XCTAssertTrue(rendered, "The complete UIKit hierarchy must render")
+        let cgImage = try XCTUnwrap(image.cgImage)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+        let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
+            guard let text = observation.topCandidates(1).first?.string else { return nil }
+            return (text, observation.boundingBox)
+        }
+        // Card text alone must not satisfy the menu assertion: the selected project
+        // must be visible ABOVE the observation timestamp, where the control lives.
+        let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
+        XCTAssertTrue(words.contains {
+            $0.0 == selectedProject && $0.1.minY > timestamp.1.maxY
+        }, "The selected project menu label must be visible above the timestamp")
+        return image
     }
 
 }
