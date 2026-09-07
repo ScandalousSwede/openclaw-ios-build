@@ -71,11 +71,6 @@ type Detail = Operation & {
   requestedOperation: Operation;
 };
 
-function conciseTitle(value: string): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  return text.length > 72 ? `${text.slice(0, 71).trimEnd()}…` : text;
-}
-
 function operationTime(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.valueOf())
@@ -670,6 +665,12 @@ export class OperationalView extends LitElement {
           .includes(this.filter.toLocaleLowerCase()),
       ) ?? [];
     return html`<style>
+        .argus-selected-title {
+          overflow-wrap: anywhere;
+          white-space: normal;
+          font-size: 1.05rem;
+          line-height: 1.5;
+        }
         .argus-review-history code {
           overflow-wrap: anywhere;
         }
@@ -693,6 +694,12 @@ export class OperationalView extends LitElement {
           margin: 0;
         }
         @media (max-width: 640px) {
+          .argus-selected-title {
+            overflow-wrap: anywhere;
+            white-space: normal;
+            font-size: 1.05rem;
+            line-height: 1.5;
+          }
           .argus-review-history code {
             overflow-wrap: anywhere;
           }
@@ -1029,8 +1036,8 @@ export class OperationalView extends LitElement {
           : nothing}
         ${this.detail
           ? html`<section class="argus-detail" aria-label="Work details">
-              <h3 tabindex="-1">
-                ${conciseTitle(this.detail.display?.label ?? this.detail.title)}
+              <h3 class="argus-selected-title" tabindex="-1">
+                ${this.detail.display?.label ?? this.detail.title}
               </h3>
               <p>Recorded state: ${this.detail.state}</p>
               ${this.detail.display?.change_summary

@@ -159,7 +159,7 @@ describe("operational evidence overview", () => {
     expect(rows[0].getAttribute("aria-current")).toBe("false");
     expect(rows[1].getAttribute("aria-current")).toBe("true");
   });
-  it("keeps a long producer title accessible while bounding the detail heading", async () => {
+  it("keeps the selected producer summary complete while bounding only the list row", async () => {
     const title =
       "Reader correction · Synthetic workflow repository and run receipt " +
       "long source identity ".repeat(12);
@@ -181,8 +181,8 @@ describe("operational evidence overview", () => {
     row.click();
     await vi.waitFor(() => expect(element.querySelector(".argus-detail h3")).not.toBeNull());
     const heading = element.querySelector(".argus-detail h3")!;
-    expect(heading.textContent!.trim().length).toBeLessThanOrEqual(72);
-    expect(heading.textContent).toContain("…");
+    expect(heading.textContent!.trim()).toBe(title.trim());
+    expect(heading.textContent).not.toContain("…");
     expect(element.querySelector(".argus-detail > details")?.textContent).toContain(title);
     expect(element.querySelector(".argus-detail")?.textContent).toContain(
       "Recorded state: verified",
@@ -611,11 +611,11 @@ describe("read-only work evidence contract", () => {
 });
 
 describe("result-first evidence hierarchy", () => {
-  it("keeps full producer text in collapsed provenance and puts artifacts first", async () => {
+  it("keeps full selected summary visible and detailed provenance collapsed", async () => {
     const title = "Reader correction " + "detailed producer narrative ".repeat(30);
     const { element } = await mountContract(workContract, { ...item, title });
     const detail = element.querySelector(".argus-detail")!;
-    expect(detail.querySelector("h3")!.textContent!.length).toBeLessThanOrEqual(140);
+    expect(detail.querySelector("h3")!.textContent!.trim()).toBe(title.trim());
     const provenance = detail.querySelector<HTMLDetailsElement>(":scope > details")!;
     expect(provenance.open).toBe(false);
     expect(provenance.textContent).toContain(title);
@@ -1202,4 +1202,26 @@ describe("recorded operator review history", () => {
       expect(element.textContent).toContain("Operator review history was not supplied"),
     );
   });
+});
+
+it("shows the entire admitted surface-result limitations outside collapsed provenance", async () => {
+  const title =
+    "Reader correction · Synthetic surface audit: all sampled pieces covered; sampled excess reported using reused samples. Retrospective completed observation with hash-verified artifact. No fresh native queries, Hausdorff bound, dynamics qualification, physical dispatch or owner acceptance.";
+  const observation = { ...item, title };
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ ...page, items: [observation] })
+    .mockResolvedValueOnce({
+      item: observation,
+      requested: observation,
+      timeline: [observation],
+      coverage: { complete: true, has_more: false },
+    });
+  const { element } = await mount(request);
+  element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+  await vi.waitFor(() =>
+    expect(element.querySelector(".argus-selected-title")?.textContent?.trim()).toBe(title),
+  );
+  expect(element.querySelector(".argus-selected-title")?.closest("details")).toBeNull();
+  expect(element.querySelector<HTMLDetailsElement>(".argus-detail > details")?.open).toBe(false);
 });
