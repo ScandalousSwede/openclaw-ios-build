@@ -208,6 +208,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
+        request.customWords = [selectedProject]
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
         let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
             guard let text = observation.topCandidates(1).first?.string else { return nil }
@@ -216,10 +217,29 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         // Card text alone must not satisfy the menu assertion: the selected project
         // must be visible ABOVE the observation timestamp, where the control lives.
         let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
-        XCTAssertTrue(words.contains {
-            $0.0 == selectedProject && $0.1.minY > timestamp.1.maxY
-        }, "The selected project menu label must be visible above the timestamp")
+        let aboveTimestamp = words.filter { $0.1.minY > timestamp.1.maxY }
+        XCTAssertTrue(aboveTimestamp.contains {
+            Self.containsProjectLabel($0.0, project: selectedProject)
+        }, "The selected project menu label must be visible above the timestamp; fixture OCR: " +
+            aboveTimestamp.prefix(12).map { String($0.0.prefix(160)) }.joined(separator: " | "))
         return image
+    }
+
+    private static func containsProjectLabel(_ text: String, project: String) -> Bool {
+        // OCR may include the adjacent menu chevrons in the same text observation.
+        // Preserve a complete project token, never a prefix of another project name.
+        let pattern = "(?<![A-Za-z0-9])" + NSRegularExpression.escapedPattern(for: project) + "(?![A-Za-z0-9])"
+        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    func testMenuOCRRequiresCompleteProjectToken() {
+        XCTAssertTrue(Self.containsProjectLabel("Argus", project: "Argus"))
+        XCTAssertTrue(Self.containsProjectLabel("MiKobots ⌃⌄", project: "MiKobots"))
+        XCTAssertTrue(Self.containsProjectLabel("Argus v", project: "Argus"))
+        XCTAssertFalse(Self.containsProjectLabel("MiKobotsOther", project: "MiKobots"))
+        XCTAssertFalse(Self.containsProjectLabel("NotArgus", project: "Argus"))
+        XCTAssertFalse(Self.containsProjectLabel("EPC", project: "Argus"))
+        XCTAssertFalse(Self.containsProjectLabel("🚫", project: "Argus"))
     }
 
 }
