@@ -5,12 +5,12 @@ import Testing
 
 @MainActor
 struct ArgusOperationsTests {
-    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil) throws -> ArgusOperationsPage {
+    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil, project: String = "Argus") throws -> ArgusOperationsPage {
         let payload: [String: Any] = [
             "items": [[
                 "operation_id": id, "task_id": "technical-result-47", "event_id": "event-47",
                 "title": "Synthetic external result", "source": source, "evidence_scope": scope as Any? ?? NSNull(),
-                "project": "Argus", "kind": "evidence", "state": state,
+                "project": project, "kind": "evidence", "state": state,
                 "occurred_at": "2026-09-06T00:00:00Z", "observed_at": "2026-09-06T00:01:00Z",
                 "artifacts": [], "owner_accepted": false,
             ]],
@@ -248,6 +248,69 @@ struct ArgusOperationsTests {
         let detail = try decoder.decode(ArgusOperationDetail.self, from: JSONSerialization.data(withJSONObject: payload))
         try detail.validate(for: detail.item)
         #expect(detail.reviewHistory == nil)
+    }
+
+    @Test func projectSelectionRequestsExactScopeAndResetsPagination() async throws {
+        let store = ArgusOperationsStore()
+        store.selectGateway("gateway-a")
+        #expect(store.project == .argus)
+        try store.accept(self.page(cursor: "argus-cursor"), more: false)
+        store.selectProject(.miKobots)
+        #expect(store.items.isEmpty)
+        #expect(store.nextCursor == nil)
+        #expect(store.coverage == nil)
+        let robotics = try self.page(project: "MiKobots")
+        await store.refresh(gatewayID: "gateway-a") { params in
+            #expect(params == ["project": "MiKobots"])
+            return robotics
+        }
+        #expect(store.items.first?.project == "MiKobots")
+        #expect(throws: ArgusOperationsError.self) { try store.accept(self.page(), more: false) }
+        store.selectProject(.epc)
+        let epc = try self.page(project: "EPC")
+        await store.refresh(gatewayID: "gateway-a") { params in
+            #expect(params == ["project": "EPC"])
+            return epc
+        }
+        #expect(store.items.first?.project == "EPC")
+        store.selectProject(.argus)
+        #expect(store.items.isEmpty)
+    }
+
+    @Test func projectSwitchFencesSuspendedPriorProjectResponse() async throws {
+        let store = ArgusOperationsStore()
+        store.selectGateway("gateway-a")
+        let old = try self.page(id: "old-argus")
+        let current = try self.page(id: "new-mikobots", project: "MiKobots")
+        var pending: CheckedContinuation<ArgusOperationsPage, Never>?
+        let first = Task { @MainActor in
+            await store.refresh(gatewayID: "gateway-a") { _ in
+                await withCheckedContinuation { pending = $0 }
+            }
+        }
+        while pending == nil { await Task.yield() }
+        store.selectProject(.miKobots)
+        await store.refresh(gatewayID: "gateway-a") { _ in current }
+        pending?.resume(returning: old)
+        await first.value
+        #expect(store.items.map(\.id) == ["new-mikobots"])
+        #expect(!store.isLoading)
+        #expect(!store.unavailable)
+    }
+
+    @Test func projectDetailCannotCrossProjectAndCanonicalScopeStaysArgus() throws {
+        let robotics = try self.page(project: "MiKobots").items[0]
+        let argus = try self.page().items[0]
+        let valid = ArgusOperationDetail(item: robotics, requested: robotics, timeline: [robotics],
+            coverage: .init(complete: true, hasMore: false, observedAt: nil), ownerAccepted: false)
+        try valid.validate(for: robotics)
+        let invalid = ArgusOperationDetail(item: argus, requested: robotics, timeline: [argus],
+            coverage: valid.coverage, ownerAccepted: false)
+        #expect(throws: ArgusOperationsError.self) { try invalid.validate(for: robotics) }
+        #expect(!(try self.page(project: "Unknown").items[0]).isAdmitted)
+        let canonical = try self.page(state: "verified", source: "canonical:codex-completion-adapter",
+            scope: "admitted_canonical_technical_operation", project: "MiKobots").items[0]
+        #expect(!canonical.isAdmitted)
     }
 
 }

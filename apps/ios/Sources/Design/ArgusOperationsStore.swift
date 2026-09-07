@@ -3,6 +3,12 @@ import Foundation
 import Observation
 import OpenClawKit
 
+enum ArgusEvidenceProject: String, CaseIterable, Sendable {
+    case argus = "Argus"
+    case miKobots = "MiKobots"
+    case epc = "EPC"
+}
+
 struct ArgusOperation: Decodable, Identifiable, Sendable {
     struct Artifact: Decodable, Identifiable, Sendable {
         let sha256: String
@@ -41,11 +47,11 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     var id: String { self.operationId }
 
     var isAdmitted: Bool {
-        guard self.project == "Argus", !self.ownerAccepted,
+        guard ArgusEvidenceProject(rawValue: self.project) != nil, !self.ownerAccepted,
               !self.operationId.isEmpty, !self.taskId.isEmpty, !self.eventId.isEmpty,
               self.artifacts.count <= 100, self.display?.isValid != false else { return false }
         if self.source.hasPrefix("federation:") { return self.state == "observed" }
-        return self.source == "canonical:codex-completion-adapter"
+        return self.project == "Argus" && self.source == "canonical:codex-completion-adapter"
             && self.evidenceScope == "admitted_canonical_technical_operation"
             && Self.canonicalStates.contains(self.state)
     }
@@ -83,7 +89,8 @@ struct ArgusOperationDetail: Decodable, Sendable {
         guard self.requested.id == operation.id, !self.ownerAccepted,
               self.timeline.count <= 256,
               ([self.item, self.requested] + self.timeline).allSatisfy({
-                  $0.isAdmitted && $0.taskId == operation.taskId && $0.source == operation.source
+                  $0.isAdmitted && $0.project == operation.project
+                      && $0.taskId == operation.taskId && $0.source == operation.source
               }) else { throw ArgusOperationsError.invalidResponse }
         try self.workContract?.validate(for: self.item)
         try self.reviewHistory?.validate(for: self.item)
@@ -139,6 +146,7 @@ struct ArgusOperationsClient: Sendable {
 @MainActor
 @Observable
 final class ArgusOperationsStore {
+    private(set) var project: ArgusEvidenceProject = .argus
     private(set) var items: [ArgusOperation] = []
     private(set) var coverage: ArgusOperationsCoverage?
     private(set) var nextCursor: String?
@@ -152,6 +160,16 @@ final class ArgusOperationsStore {
     func selectGateway(_ id: String?) {
         guard id != self.gatewayID else { return }
         self.gatewayID = id
+        self.resetObservation()
+    }
+
+    func selectProject(_ project: ArgusEvidenceProject) {
+        guard project != self.project else { return }
+        self.project = project
+        self.resetObservation()
+    }
+
+    private func resetObservation() {
         self.generation += 1
         self.items = []
         self.coverage = nil
@@ -183,7 +201,7 @@ final class ArgusOperationsStore {
         let generation = self.generation
         defer { if generation == self.generation { self.isLoading = false } }
         do {
-            var params = ["project": "Argus"]
+            var params = ["project": self.project.rawValue]
             if more { params["cursor"] = self.nextCursor }
             let page = try await fetch(params)
             guard generation == self.generation, !Task.isCancelled else { return }
@@ -196,7 +214,7 @@ final class ArgusOperationsStore {
 
     func accept(_ page: ArgusOperationsPage, more: Bool) throws {
         guard page.items.count <= 100, !page.automaticDispatchEnabled,
-              page.items.allSatisfy({ $0.isAdmitted }),
+              page.items.allSatisfy({ $0.isAdmitted && $0.project == self.project.rawValue }),
               page.coverage.hasMore == (page.nextCursor != nil)
         else { throw ArgusOperationsError.invalidResponse }
         var merged = more ? self.items : []

@@ -140,4 +140,38 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         self.add(attachment)
     }
 
+    @MainActor
+    func testProductionMiKobotsProjectScope() throws {
+        let store = ArgusOperationsStore()
+        store.selectGateway("simulator-fixture")
+        store.selectProject(.miKobots)
+        let item = ArgusOperation(
+            operationId: "fixture-mikobots", taskId: "fixture-task", eventId: "fixture-event",
+            title: "Synthetic MiKobots technical observation", source: "federation:simulator-fixture",
+            project: "MiKobots", kind: "test fixture", state: "observed",
+            occurredAt: "2026-09-07T00:00:00Z", observedAt: "2026-09-07T00:01:00Z",
+            artifacts: [], supersedesEventId: nil, ownerAccepted: false)
+        try store.accept(ArgusOperationsPage(items: [item],
+            coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
+            nextCursor: nil, automaticDispatchEnabled: false), more: false)
+        let root = VStack(alignment: .leading, spacing: 12) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            ArgusOperationsContent(store: store, client: nil)
+        }
+        .padding(.top)
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.dynamicTypeSize, .accessibility1)
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let renderer = ImageRenderer(content: root)
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 400)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-mikobots-project-simulator-fixture-accessibility"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
 }

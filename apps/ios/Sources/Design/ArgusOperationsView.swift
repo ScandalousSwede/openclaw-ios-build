@@ -16,7 +16,7 @@ struct ArgusOperationsSection: View {
 
     var body: some View {
         ArgusOperationsContent(store: self.store, client: self.client)
-            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)") {
+            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)|\(self.store.project.rawValue)") {
                 self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
                 // Invalidate suspended work from the previous visibility/route scope.
                 self.store.markUnavailable()
@@ -43,6 +43,18 @@ struct ArgusOperationsContent: View {
                 Text("Canonical work and external observations. Recorded status does not establish owner acceptance.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Picker("Evidence project", selection: Binding(
+                    get: { self.store.project }, set: { self.store.selectProject($0) })) {
+                    ForEach(ArgusEvidenceProject.allCases, id: \.self) { project in
+                        Text(project.rawValue).tag(project)
+                    }
+                }
+                .pickerStyle(.menu)
+                .accessibilityLabel("Evidence project")
+                if self.store.project != .argus {
+                    Text("Technical observations only. This view does not control equipment or establish scientific authority.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 if self.store.unavailable {
                     Label(self.store.items.isEmpty
                         ? "Evidence unavailable. Connect and refresh."
@@ -53,7 +65,7 @@ struct ArgusOperationsContent: View {
                     Text("Last observed: \(observed)").font(.caption).foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
-                    Text("No evidence found in this returned Argus scope.")
+                    Text("No evidence found in this returned \(self.store.project.rawValue) scope.")
                         .font(.subheadline)
                 }
                 ForEach(self.store.items) { item in
@@ -98,7 +110,7 @@ private struct ArgusOperationRow: View {
         VStack(alignment: .leading, spacing: 5) {
             Text(self.item.display?.label ?? self.item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
             if let summary = self.item.display?.changeSummary { Text(summary).font(.subheadline) }
-            Text("\(self.item.source) · \(self.item.kind)").font(.caption).foregroundStyle(.secondary)
+            Text("\(self.item.project) · \(self.item.source) · \(self.item.kind)").font(.caption).foregroundStyle(.secondary)
             Label(self.item.supersedesEventId == nil ? self.item.state.replacingOccurrences(of: "_", with: " ").capitalized : "Correction observed", systemImage: "doc.text")
                 .font(.caption)
             Text("Observed \(self.item.observedAt)").font(.caption).foregroundStyle(.secondary)
