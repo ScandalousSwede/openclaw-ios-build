@@ -104,6 +104,60 @@ export async function createBundledAnthropicModelMetadata(
   return [manifest];
 }
 
+/** Prepare shipped provider metadata for an explicit scope without registry discovery. */
+export async function createBundledProviderRuntimeScopeMetadata(
+  config: import("../config/types.openclaw.js").OpenClawConfig,
+  providerId: "anthropic" | "openai",
+): Promise<
+  Omit<import("../plugins/provider-runtime-scope.js").ExplicitProviderRuntimeScope, "config">
+> {
+  if (providerId !== "anthropic" && providerId !== "openai") {
+    throw new Error("Unsupported bundled provider scope");
+  }
+  const { assertExplicitProviderAdmission } = await import("../plugins/provider-runtime-scope.js");
+  assertExplicitProviderAdmission(config, providerId);
+  const { buildAdmittedProviderAuthLookupMaps } = await import("../secrets/provider-env-vars.js");
+  const [provider, manifest] =
+    providerId === "anthropic"
+      ? await Promise.all([
+          import("../../extensions/anthropic/api.js").then((api) => api.buildAnthropicProvider()),
+          import("../../extensions/anthropic/openclaw.plugin.json", {
+            with: { type: "json" },
+          }).then((value) => value.default),
+        ])
+      : await Promise.all([
+          import("../../extensions/openai/api.js").then((api) => api.buildOpenAIProvider()),
+          import("../../extensions/openai/openclaw.plugin.json", { with: { type: "json" } }).then(
+            (value) => value.default,
+          ),
+        ]);
+  // These are the shipped manifests checked by bundled-plugin contract tests,
+  // not fabricated registry/index records. Keep auth reduction on real declarations.
+  type AuthManifest = Parameters<
+    typeof buildAdmittedProviderAuthLookupMaps
+  >[0]["manifests"][number];
+  type Scope = import("../plugins/provider-runtime-scope.js").ExplicitProviderRuntimeScope;
+  // JSON imports widen catalog literal types. The fixed shipped files satisfy
+  // the manifest contract; no caller-supplied document crosses this boundary.
+  const providerManifest = manifest as unknown as NonNullable<Scope["providerManifest"]>;
+  const authManifest = {
+    ...manifest,
+    origin: "bundled",
+    cliBackends: "cliBackends" in manifest ? manifest.cliBackends : [],
+  } as unknown as AuthManifest;
+  return {
+    provider,
+    manifestPlugins: [
+      {
+        modelIdNormalization:
+          "modelIdNormalization" in manifest ? manifest.modelIdNormalization : undefined,
+      },
+    ],
+    providerManifest,
+    authLookupMaps: buildAdmittedProviderAuthLookupMaps({ providerId, manifests: [authManifest] }),
+  };
+}
+
 /** Read and core-validate source settings without loading unrelated plugin defaults. */
 export async function loadValidatedSourceConfigForProvider() {
   const [{ readSourceConfigStrict }, { validateConfigObjectRaw }] = await Promise.all([

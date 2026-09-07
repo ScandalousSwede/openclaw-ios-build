@@ -116,6 +116,43 @@ function setPreferredAlias(params: {
   }
 }
 
+/** Pure alias reduction after the caller's manifest trust/admission filtering. */
+export function buildProviderAuthAliasMapFromManifests(
+  plugins: readonly Pick<
+    PluginManifestRecord,
+    "origin" | "providerAuthAliases" | "providerAuthChoices"
+  >[],
+): Record<string, string> {
+  const preferredAliases = new Map<string, ProviderAuthAliasCandidate>();
+  const aliases: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const plugin of plugins) {
+    for (const [alias, target] of Object.entries(plugin.providerAuthAliases ?? {}).toSorted(
+      ([left], [right]) => left.localeCompare(right),
+    )) {
+      setPreferredAlias({
+        aliases: preferredAliases,
+        alias,
+        origin: plugin.origin,
+        target,
+      });
+    }
+    for (const choice of plugin.providerAuthChoices ?? []) {
+      for (const deprecatedChoiceId of choice.deprecatedChoiceIds ?? []) {
+        setPreferredAlias({
+          aliases: preferredAliases,
+          alias: deprecatedChoiceId,
+          origin: plugin.origin,
+          target: choice.provider,
+        });
+      }
+    }
+  }
+  for (const [alias, candidate] of preferredAliases) {
+    aliases[alias] = candidate.target;
+  }
+  return aliases;
+}
+
 /** Resolve canonical auth provider aliases from plugin metadata. */
 export function resolveProviderAuthAliasMap(
   params?: ProviderAuthAliasLookupParams,
@@ -183,36 +220,9 @@ export function resolveProviderAuthAliasMap(
       ...(params?.workspaceDir !== undefined ? { workspaceDir: params.workspaceDir } : {}),
       env,
     });
-  const preferredAliases = new Map<string, ProviderAuthAliasCandidate>();
-  const aliases: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const plugin of snapshot.plugins) {
-    if (!shouldUsePluginAuthAliases(plugin, params)) {
-      continue;
-    }
-    for (const [alias, target] of Object.entries(plugin.providerAuthAliases ?? {}).toSorted(
-      ([left], [right]) => left.localeCompare(right),
-    )) {
-      setPreferredAlias({
-        aliases: preferredAliases,
-        alias,
-        origin: plugin.origin,
-        target,
-      });
-    }
-    for (const choice of plugin.providerAuthChoices ?? []) {
-      for (const deprecatedChoiceId of choice.deprecatedChoiceIds ?? []) {
-        setPreferredAlias({
-          aliases: preferredAliases,
-          alias: deprecatedChoiceId,
-          origin: plugin.origin,
-          target: choice.provider,
-        });
-      }
-    }
-  }
-  for (const [alias, candidate] of preferredAliases) {
-    aliases[alias] = candidate.target;
-  }
+  const aliases = buildProviderAuthAliasMapFromManifests(
+    snapshot.plugins.filter((plugin) => shouldUsePluginAuthAliases(plugin, params)),
+  );
   if (envCache && cacheKey) {
     envCache.set(cacheKey, aliases);
   }

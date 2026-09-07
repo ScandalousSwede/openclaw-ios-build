@@ -1,7 +1,10 @@
 /** Resolves provider environment variable candidates and auth evidence from core/plugin metadata. */
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import { resolveProviderAuthAliasMap } from "../agents/provider-auth-aliases.js";
+import {
+  buildProviderAuthAliasMapFromManifests,
+  resolveProviderAuthAliasMap,
+} from "../agents/provider-auth-aliases.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -60,6 +63,56 @@ export type ProviderAuthLookupMaps = {
   authEvidenceMap: Readonly<Record<string, readonly ProviderAuthEvidence[]>>;
   setupProviderFallbackRefs: readonly string[];
 };
+
+/** Only auth declarations from manifests already admitted by their owning caller. */
+type AdmittedProviderAuthManifest = Pick<
+  PluginManifestRecord,
+  | "providers"
+  | "cliBackends"
+  | "providerAuthAliases"
+  | "providerAuthChoices"
+  | "providerAuthEnvVars"
+  | "setup"
+>;
+
+/** Internal reduction for a closed provider scope; no registry/index or credential reads.
+ * The caller supplies admitted bundled manifests; aliases use the incumbent reducer.
+ * Snapshot readers retain their trust/enablement filters before using the same reducers.
+ */
+export function buildAdmittedProviderAuthLookupMaps(params: {
+  providerId: string;
+  manifests: readonly (AdmittedProviderAuthManifest & { origin: "bundled" })[];
+}): ProviderAuthLookupMaps {
+  const providerId = normalizeProviderId(params.providerId);
+  if (
+    !providerId ||
+    providerId !== params.providerId ||
+    params.manifests.some((manifest) => manifest.origin !== "bundled") ||
+    !params.manifests.some((manifest) => manifest.providers.includes(providerId))
+  ) {
+    throw new Error("Auth manifests do not own the selected provider");
+  }
+  const aliasMap = Object.fromEntries(
+    Object.entries(buildProviderAuthAliasMapFromManifests(params.manifests)).filter(
+      ([, target]) => target === providerId,
+    ),
+  );
+  const names = new Set([providerId, ...Object.keys(aliasMap)]);
+  const select = <T>(map: Readonly<Record<string, T>>): Record<string, T> =>
+    Object.fromEntries(Object.entries(map).filter(([name]) => names.has(name)));
+  return {
+    aliasMap,
+    envCandidateMap: select({
+      ...reduceManifestProviderAuthEnvVarCandidates(params.manifests, aliasMap),
+      ...CORE_PROVIDER_AUTH_ENV_VAR_CANDIDATES,
+    }),
+    authEvidenceMap: select(reduceManifestProviderAuthEvidence(params.manifests, aliasMap)),
+    setupProviderFallbackRefs: reduceManifestSetupProviderFallbackRefs(
+      params.manifests,
+      aliasMap,
+    ).filter((name) => names.has(name)),
+  };
+}
 
 function isWorkspacePluginTrustedForProviderEnvVars(
   plugin: PluginManifestRecord,
@@ -201,11 +254,18 @@ function resolveManifestProviderAuthEnvVarCandidatesFromSnapshot(
   snapshot: PluginMetadataSnapshot,
   aliases: Readonly<Record<string, string>>,
 ): Record<string, string[]> {
+  return reduceManifestProviderAuthEnvVarCandidates(
+    snapshot.plugins.filter((plugin) => shouldUsePluginProviderEnvVars(plugin, params)),
+    aliases,
+  );
+}
+
+function reduceManifestProviderAuthEnvVarCandidates(
+  plugins: readonly AdmittedProviderAuthManifest[],
+  aliases: Readonly<Record<string, string>>,
+): Record<string, string[]> {
   const candidates: Record<string, string[]> = {};
-  for (const plugin of snapshot.plugins) {
-    if (!shouldUsePluginProviderEnvVars(plugin, params)) {
-      continue;
-    }
+  for (const plugin of plugins) {
     if (plugin.providerAuthEnvVars) {
       for (const [providerId, keys] of Object.entries(plugin.providerAuthEnvVars).toSorted(
         ([left], [right]) => left.localeCompare(right),
@@ -244,17 +304,23 @@ function resolveManifestProviderAuthEvidenceFromSnapshot(
   snapshot: PluginMetadataSnapshot,
   aliases: Readonly<Record<string, string>>,
 ): Record<string, ProviderAuthEvidence[]> {
+  return reduceManifestProviderAuthEvidence(
+    snapshot.plugins.filter(
+      (plugin) =>
+        (snapshot.index.plugins.length === 0 ||
+          isInstalledPluginEnabled(snapshot.index, plugin.id, params?.config)) &&
+        shouldUsePluginProviderAuthEvidence(plugin, params),
+    ),
+    aliases,
+  );
+}
+
+function reduceManifestProviderAuthEvidence(
+  plugins: readonly AdmittedProviderAuthManifest[],
+  aliases: Readonly<Record<string, string>>,
+): Record<string, ProviderAuthEvidence[]> {
   const evidenceByProvider: Record<string, ProviderAuthEvidence[]> = {};
-  for (const plugin of snapshot.plugins) {
-    if (
-      snapshot.index.plugins.length > 0 &&
-      !isInstalledPluginEnabled(snapshot.index, plugin.id, params?.config)
-    ) {
-      continue;
-    }
-    if (!shouldUsePluginProviderAuthEvidence(plugin, params)) {
-      continue;
-    }
+  for (const plugin of plugins) {
     for (const provider of plugin.setup?.providers ?? []) {
       appendUniqueAuthEvidence(evidenceByProvider, provider.id, provider.authEvidence ?? []);
     }
@@ -275,14 +341,22 @@ function resolveManifestSetupProviderFallbackRefsFromSnapshot(
   snapshot: PluginMetadataSnapshot,
   aliases: Readonly<Record<string, string>>,
 ): string[] {
+  return reduceManifestSetupProviderFallbackRefs(
+    snapshot.plugins.filter(
+      (plugin) =>
+        snapshot.index.plugins.length === 0 ||
+        isInstalledPluginEnabled(snapshot.index, plugin.id, params?.config),
+    ),
+    aliases,
+  );
+}
+
+function reduceManifestSetupProviderFallbackRefs(
+  plugins: readonly AdmittedProviderAuthManifest[],
+  aliases: Readonly<Record<string, string>>,
+): string[] {
   const refs = new Set<string>();
-  for (const plugin of snapshot.plugins) {
-    if (
-      snapshot.index.plugins.length > 0 &&
-      !isInstalledPluginEnabled(snapshot.index, plugin.id, params?.config)
-    ) {
-      continue;
-    }
+  for (const plugin of plugins) {
     if (plugin.setup?.requiresRuntime === false) {
       continue;
     }

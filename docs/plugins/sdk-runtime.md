@@ -53,6 +53,27 @@ Internal OpenClaw runtime code follows the same direction: load config once at t
 
 Provider and channel execution paths must use the active runtime config snapshot, not a file snapshot returned for config readback or editing. File snapshots preserve source values such as SecretRef markers for UI and writes; provider callbacks need the resolved runtime view. When a helper may be called with either the active source snapshot or the active runtime snapshot, route through `selectApplicableRuntimeConfig()` before reading credentials.
 
+## Explicit bundled provider scope
+
+Standalone plugin calls that already own their input can use
+`createBundledProviderRuntimeScopeMetadata(config, providerId)` from
+`openclaw/plugin-sdk/agent-core`. It supports the shipped `anthropic` and `openai`
+providers and checks plugin enablement, allowlists, and denylists before loading
+the selected provider. Unsupported provider IDs fail.
+
+Pass the returned metadata and the same config to
+`withExplicitProviderRuntimeScope({ config, ...metadata }, callback)`. Use the
+callback's immutable config snapshot for provider operations. The scope supplies
+the shipped descriptor, model metadata, and existing auth lookup rules without
+discovering other plugins. It contains no credential values and does not grant
+model or tool access; normal selection, preparation, and auth checks still apply.
+
+When an upstream policy selects a model, pass its exact `modelRef` to both
+`resolveSimpleCompletionSelectionForAgent` and
+`prepareSimpleCompletionModelForAgent` from
+`openclaw/plugin-sdk/simple-completion-runtime`. Do not rewrite the agent's
+configured default to implement a per-call selection.
+
 ## Reusable runtime utilities
 
 Use inbound `botLoopProtection` facts for bot-authored inbound messages. Core applies the shared in-memory sliding-window guard before session record and dispatch, without tying the policy to one channel. The guard tracks `(scopeId, conversationId, participant pair)` keys, counts both directions of a pair together, applies a cooldown once the window budget is exceeded, and prunes inactive entries opportunistically.
