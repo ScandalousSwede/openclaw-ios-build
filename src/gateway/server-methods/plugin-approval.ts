@@ -26,18 +26,38 @@ import {
   registerPendingApprovalRecord,
   resolveApprovalDecisionParams,
 } from "./approval-shared.js";
+import { routeArtifactReview, type ArtifactReviewAdapter } from "./artifact-review.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
 /** Create plugin approval handlers backed by the shared approval manager. */
 export function createPluginApprovalHandlers(
   manager: ExecApprovalManager<PluginApprovalRequestPayload>,
-  opts?: { forwarder?: ExecApprovalForwarder },
+  opts?: { forwarder?: ExecApprovalForwarder; artifactReview?: ArtifactReviewAdapter },
 ): GatewayRequestHandlers {
   return {
     "plugin.approval.list": async ({ respond, client }) => {
       respond(true, listVisiblePendingApprovalRequests({ manager, client }), undefined);
     },
     "plugin.approval.request": async ({ params, client, respond, context }) => {
+      try {
+        const receipt = await routeArtifactReview({
+          method: "request",
+          input: params,
+          client,
+          adapter: opts?.artifactReview,
+        });
+        if (receipt) {
+          respond(true, receipt, undefined);
+          return;
+        }
+      } catch {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+        );
+        return;
+      }
       if (!validatePluginApprovalRequestParams(params)) {
         respond(
           false,
@@ -157,6 +177,25 @@ export function createPluginApprovalHandlers(
     },
 
     "plugin.approval.resolve": async ({ params, respond, client, context }) => {
+      try {
+        const receipt = await routeArtifactReview({
+          method: "resolve",
+          input: params,
+          client,
+          adapter: opts?.artifactReview,
+        });
+        if (receipt) {
+          respond(true, receipt, undefined);
+          return;
+        }
+      } catch {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+        );
+        return;
+      }
       const resolveParams = resolveApprovalDecisionParams({
         rawParams: params,
         validate: validatePluginApprovalResolveParams,

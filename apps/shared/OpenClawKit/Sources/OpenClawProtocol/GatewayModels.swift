@@ -8120,6 +8120,9 @@ public struct ExecApprovalResolveParams: Codable, Sendable {
 }
 
 public struct PluginApprovalRequestParams: Codable, Sendable {
+    public let kind: String?
+    public let binding: [String: AnyCodable]?
+    public let idempotencyKey: String?
     public let pluginid: String?
     public let title: String
     public let description: String
@@ -8138,6 +8141,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     public let twophase: Bool?
 
     public init(
+        kind: String? = nil,
+        binding: [String: AnyCodable]? = nil,
+        idempotencyKey: String? = nil,
         pluginid: String?,
         title: String,
         description: String,
@@ -8155,6 +8161,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         timeoutms: Int?,
         twophase: Bool?)
     {
+        self.kind = kind
+        self.binding = binding
+        self.idempotencyKey = idempotencyKey
         self.pluginid = pluginid
         self.title = title
         self.description = description
@@ -8174,6 +8183,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case kind
+        case binding
+        case idempotencyKey = "idempotency_key"
         case pluginid = "pluginId"
         case title
         case description
@@ -8194,18 +8206,30 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
 }
 
 public struct PluginApprovalResolveParams: Codable, Sendable {
+    public let kind: String?
+    public let binding: [String: AnyCodable]?
+    public let idempotencyKey: String?
     public let id: String
     public let decision: String
 
     public init(
+        kind: String? = nil,
+        binding: [String: AnyCodable]? = nil,
+        idempotencyKey: String? = nil,
         id: String,
         decision: String)
     {
+        self.kind = kind
+        self.binding = binding
+        self.idempotencyKey = idempotencyKey
         self.id = id
         self.decision = decision
     }
 
     private enum CodingKeys: String, CodingKey {
+        case kind
+        case binding
+        case idempotencyKey = "idempotency_key"
         case id
         case decision
     }

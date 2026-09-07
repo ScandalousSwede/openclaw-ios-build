@@ -97,7 +97,11 @@ const DEFAULTED_OPTIONAL_INIT_PARAM_ENTRIES: readonly [string, readonly string[]
   ["CronAddParams", ["declarationKey", "displayName", "owner"]],
   ["CronRunLogEntry", ["errorReason", "failureNotificationDelivery"]],
   ["ExecApprovalRequestParams", ["requireDeliveryRoute", "suppressDelivery"]],
-  ["PluginApprovalRequestParams", ["approvalReviewerDeviceIds"]],
+  [
+    "PluginApprovalRequestParams",
+    ["approvalReviewerDeviceIds", "kind", "binding", "idempotency_key"],
+  ],
+  ["PluginApprovalResolveParams", ["kind", "binding", "idempotency_key"]],
   ["DevicePairSetupCodeResult", ["gatewayUrls"]],
   ["AgentSummary", ["thinkingLevels", "thinkingOptions", "thinkingDefault"]],
   ["ModelChoice", ["available"]],

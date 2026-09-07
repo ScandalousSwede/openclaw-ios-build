@@ -1,6 +1,11 @@
 // Plugin approval tests cover requested/resolved plugin approval events,
 // requester visibility, broadcast behavior, and approval manager integration.
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  validatePluginApprovalRequestParams,
+  validatePluginApprovalResolveParams,
+} from "../../../packages/gateway-protocol/src/index.js";
 import type { PluginApprovalRequestPayload } from "../../infra/plugin-approvals.js";
 import { ExecApprovalManager } from "../exec-approval-manager.js";
 import { createPluginApprovalHandlers } from "./plugin-approval.js";
@@ -259,6 +264,99 @@ describe("createPluginApprovalHandlers", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe("disabled artifact-review transport integration", () => {
+    const artifactBinding = {
+      operation_id: "operation:synthetic",
+      event_id: "event:current",
+      artifact_sha256: ["a".repeat(64)],
+    };
+    const request = {
+      kind: "artifact_review",
+      title: "Review synthetic artifact",
+      description: "Display-only synthetic evidence review",
+      binding: artifactBinding,
+      idempotency_key: "request:synthetic",
+    };
+    const resolution = {
+      kind: request.kind,
+      binding: request.binding,
+      id: "review:synthetic",
+      idempotency_key: "resolve:synthetic",
+      decision: "accept_artifact",
+    };
+
+    it("protocol validates the distinct artifact arm without converting execution decisions", () => {
+      expect(validatePluginApprovalRequestParams(request)).toBe(true);
+      expect(validatePluginApprovalResolveParams(resolution)).toBe(true);
+      expect(
+        validatePluginApprovalResolveParams({ ...resolution, decision: "reject_artifact" }),
+      ).toBe(true);
+      for (const decision of ["allow-once", "allow-always", "deny"]) {
+        expect(validatePluginApprovalResolveParams({ ...resolution, decision })).toBe(false);
+      }
+      expect(
+        validatePluginApprovalRequestParams({ title: "Legacy", description: "Execution approval" }),
+      ).toBe(true);
+      expect(
+        validatePluginApprovalResolveParams({ id: "plugin:legacy", decision: "allow-once" }),
+      ).toBe(true);
+    });
+
+    it("protocol rejects caller authority claims and malformed artifact bindings", () => {
+      expect(validatePluginApprovalRequestParams({ ...request, senderIsOwner: true })).toBe(false);
+      expect(validatePluginApprovalResolveParams({ ...resolution, actor_device_id: "spoof" })).toBe(
+        false,
+      );
+      for (const artifact_sha256 of [[], ["a".repeat(64), "a".repeat(64)], ["invalid"]]) {
+        expect(
+          validatePluginApprovalRequestParams({
+            ...request,
+            binding: { ...artifactBinding, artifact_sha256 },
+          }),
+        ).toBe(false);
+      }
+    });
+
+    for (const [method, payload] of [
+      ["plugin.approval.request", request],
+      ["plugin.approval.resolve", resolution],
+    ] as const) {
+      it(`${method} reports disabled artifact review without manager mutation or broadcast`, async () => {
+        const handlers = createPluginApprovalHandlers(manager);
+        const create = vi.spyOn(manager, "create");
+        const resolve = vi.spyOn(manager, "resolve");
+        const client = createClient({
+          deviceId: "device:synthetic",
+          scopes: ["operator.approvals"],
+        });
+        if (!client) throw new Error("Missing synthetic client");
+        client.connect.role = "operator";
+        const opts = createMockOptions(method, payload, { client });
+        await handlers[method](opts);
+        expect(opts.respond).toHaveBeenCalledTimes(1);
+        const error = expectResponseRejected(opts.respond);
+        expect(error.code).toBe("INVALID_REQUEST");
+        expect(error.message).toBe("Artifact review unavailable or invalid");
+        expect(create).not.toHaveBeenCalled();
+        expect(resolve).not.toHaveBeenCalled();
+        expect(opts.context.broadcast).not.toHaveBeenCalled();
+      });
+    }
+
+    it("legacy execution resolution still resolves its manager record with adapter absent", async () => {
+      const handlers = createPluginApprovalHandlers(manager);
+      const record = registerApproval(manager, { allowedDecisions: ["allow-once", "deny"] });
+      const opts = createMockOptions("plugin.approval.resolve", {
+        id: record.id,
+        decision: "allow-once",
+      });
+      await handlers["plugin.approval.resolve"](opts);
+      expect(opts.respond).toHaveBeenCalledWith(true, { ok: true }, undefined);
+      expect(manager.getSnapshot(record.id)?.decision).toBe("allow-once");
+      expect(broadcastCall(opts).event).toBe("plugin.approval.resolved");
+    });
   });
 
   it("returns handlers for every plugin approval method", () => {
@@ -827,5 +925,52 @@ describe("createPluginApprovalHandlers", () => {
       expect(error.code).toBe("INVALID_REQUEST");
       expect(error.message).toBe("unknown or expired approval id");
     });
+  });
+});
+
+// Generation compatibility is checked without asserting Swift runtime support for this new arm.
+describe("plugin approval generated Swift compatibility", () => {
+  it("retains original initializer parameters and defaults all additive options", () => {
+    const swift = readFileSync(
+      new URL(
+        "../../../apps/shared/OpenClawKit/Sources/OpenClawProtocol/GatewayModels.swift",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const original = {
+      PluginApprovalRequestParams: [
+        "pluginid",
+        "title",
+        "description",
+        "severity",
+        "toolname",
+        "toolcallid",
+        "alloweddecisions",
+        "agentid",
+        "sessionkey",
+        "approvalreviewerdeviceids",
+        "turnsourcechannel",
+        "turnsourceto",
+        "turnsourceaccountid",
+        "turnsourcethreadid",
+        "timeoutms",
+        "twophase",
+      ],
+      PluginApprovalResolveParams: ["id", "decision"],
+    };
+    for (const [name, originalNames] of Object.entries(original)) {
+      const struct = swift.split(`public struct ${name}:`)[1]?.split("public struct ")[0];
+      expect(struct).toBeDefined();
+      const initializer = struct!.split("public init(")[1]?.split("\n    {")[0];
+      expect(initializer).toBeDefined();
+      const lines = initializer!.split("\n").filter((line) => line.includes(":"));
+      const names = lines.map((line) => line.trim().split(":")[0]);
+      const additions = ["kind", "binding", "idempotencyKey"];
+      expect(names.filter((name) => !additions.includes(name))).toEqual(originalNames);
+      for (const name of additions) {
+        expect(lines.find((line) => line.trim().startsWith(`${name}:`))).toContain("? = nil");
+      }
+    }
   });
 });
