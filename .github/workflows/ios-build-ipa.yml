@@ -594,6 +594,7 @@ jobs:
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Run iOS tests
+        id: native_tests
         run: |
           set -euo pipefail
           simulator_udid="$({ xcrun simctl list devices available --json; } | python3 -c '
@@ -664,6 +665,18 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
 
+      - name: Emit bounded native test receipt
+        if: always() && !cancelled()
+        env:
+          AIES_NATIVE_TEST_OUTCOME: ${{ steps.native_tests.outcome }}
+        run: |
+          python3 "${GITHUB_WORKSPACE}/scripts/ios-native-test-receipt.py" \
+            --result-bundle "${RUNNER_TEMP}/aies-ios-reliability.xcresult" \
+            --output "${RUNNER_TEMP}/OpenClaw-native-test-receipt.json" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --step-outcome "${AIES_NATIVE_TEST_OUTCOME}"
+
       - name: Export simulator fixture screenshots
         if: always()
         run: |
@@ -675,12 +688,30 @@ jobs:
               --output-path "${RUNNER_TEMP}/aies-simulator-fixture-screenshots"
           fi
 
+      - name: Stage native receipt with simulator evidence
+        if: always() && !cancelled()
+        run: |
+          python3 - "${RUNNER_TEMP}" <<'PY'
+          import pathlib
+          import shutil
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          source = root / "OpenClaw-native-test-receipt.json"
+          if source.is_file():
+              target = root / "aies-simulator-fixture-screenshots" / source.name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              with source.open("rb") as reader, target.open("xb") as writer:
+                  shutil.copyfileobj(reader, writer)
+          PY
+
       - name: Upload simulator fixture screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-simulator-fixture-screenshots-${{ github.run_id }}
-          path: ${{ runner.temp }}/aies-simulator-fixture-screenshots/**/*.png
+          path: |
+            ${{ runner.temp }}/aies-simulator-fixture-screenshots/**/*.png
+            ${{ runner.temp }}/aies-simulator-fixture-screenshots/OpenClaw-native-test-receipt.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -1216,6 +1247,7 @@ jobs:
           [[ -z "$(git -C "${GITHUB_WORKSPACE}" status --porcelain=v2 --untracked-files=all)" ]]
 
       - name: Run focused iOS reliability tests
+        id: native_tests
         run: |
           set -euo pipefail
           simulator_udid="$({ xcrun simctl list devices available --json; } | python3 -c '
@@ -1286,6 +1318,18 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER=""
 
+      - name: Emit bounded native test receipt
+        if: always() && !cancelled()
+        env:
+          AIES_NATIVE_TEST_OUTCOME: ${{ steps.native_tests.outcome }}
+        run: |
+          python3 "${GITHUB_WORKSPACE}/scripts/ios-native-test-receipt.py" \
+            --result-bundle "${RUNNER_TEMP}/aies-ios-reliability.xcresult" \
+            --output "${RUNNER_TEMP}/OpenClaw-native-test-receipt.json" \
+            --source-sha "${GITHUB_SHA}" \
+            --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --step-outcome "${AIES_NATIVE_TEST_OUTCOME}"
+
       - name: Export simulator fixture screenshots
         if: always()
         run: |
@@ -1297,12 +1341,30 @@ jobs:
               --output-path "${RUNNER_TEMP}/aies-simulator-fixture-screenshots"
           fi
 
+      - name: Stage native receipt with simulator evidence
+        if: always() && !cancelled()
+        run: |
+          python3 - "${RUNNER_TEMP}" <<'PY'
+          import pathlib
+          import shutil
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          source = root / "OpenClaw-native-test-receipt.json"
+          if source.is_file():
+              target = root / "aies-simulator-fixture-screenshots" / source.name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              with source.open("rb") as reader, target.open("xb") as writer:
+                  shutil.copyfileobj(reader, writer)
+          PY
+
       - name: Upload simulator fixture screenshots
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: OpenClaw-simulator-fixture-screenshots-${{ github.run_id }}
-          path: ${{ runner.temp }}/aies-simulator-fixture-screenshots/**/*.png
+          path: |
+            ${{ runner.temp }}/aies-simulator-fixture-screenshots/**/*.png
+            ${{ runner.temp }}/aies-simulator-fixture-screenshots/OpenClaw-native-test-receipt.json
           retention-days: 14
           if-no-files-found: warn
 
@@ -1849,6 +1911,22 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      - name: Stage native receipt with existing release evidence
+        if: always() && !cancelled()
+        run: |
+          python3 - "${RUNNER_TEMP}" <<'PY'
+          import pathlib
+          import shutil
+          import sys
+          root = pathlib.Path(sys.argv[1])
+          source = root / "OpenClaw-native-test-receipt.json"
+          if source.is_file():
+              target = root / "openclaw-aies-testflight" / source.name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              with source.open("rb") as reader, target.open("xb") as writer:
+                  shutil.copyfileobj(reader, writer)
+          PY
+
       - name: Upload signed release evidence
         if: always() && !cancelled()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -1868,6 +1946,7 @@ jobs:
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-export.log
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-release-lane-status.json
             ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-TestFlight-delivery.json
+            ${{ runner.temp }}/openclaw-aies-testflight/OpenClaw-native-test-receipt.json
           retention-days: 90
           if-no-files-found: warn
 
