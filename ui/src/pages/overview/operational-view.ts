@@ -110,7 +110,7 @@ export class OperationalView extends LitElement {
   };
   @state() private lastCheckedAt: string | null = null;
   private refreshTimer?: number;
-  @state() private artifactUrl: string | null = null;
+  @state() private verifiedArtifact: { url: string; label: string } | null = null;
   @state() private reviewAvailable = false;
   @state() private pendingArtifactReviews: readonly ExecApprovalRequest[] = [];
   @state() private reviewBusy = false;
@@ -250,8 +250,8 @@ export class OperationalView extends LitElement {
       await this.openDetailId(selected, false, background);
   }
   private clearArtifact() {
-    if (this.artifactUrl) URL.revokeObjectURL(this.artifactUrl);
-    this.artifactUrl = null;
+    if (this.verifiedArtifact) URL.revokeObjectURL(this.verifiedArtifact.url);
+    this.verifiedArtifact = null;
   }
   private async load(more = false, preserveDetail = false) {
     const { client, connected } = this.context.gateway.snapshot;
@@ -327,7 +327,9 @@ export class OperationalView extends LitElement {
             previousDetail.event_id !== detail.item.event_id ||
             JSON.stringify(previousDetail.artifact_context ?? null) !==
               JSON.stringify(detail.item.artifact_context ?? null) ||
-            JSON.stringify(previousDetail.artifacts) !== JSON.stringify(detail.item.artifacts))
+            JSON.stringify(previousDetail.artifacts) !== JSON.stringify(detail.item.artifacts) ||
+            JSON.stringify(previousDetail.timeline) !== JSON.stringify(detail.timeline) ||
+            JSON.stringify(previousDetail.requestedOperation) !== JSON.stringify(detail.requested))
         )
           this.clearArtifact();
         if (
@@ -357,7 +359,7 @@ export class OperationalView extends LitElement {
       if (generation === this.generation) this.busy = false;
     }
   }
-  private async openArtifact(artifact: Artifact) {
+  private async openArtifact(operation: Operation, artifact: Artifact, label: string) {
     const { client, connected } = this.context.gateway.snapshot;
     if (!client || !connected || !this.detail || this.busy) return;
     const generation = this.generation;
@@ -367,13 +369,14 @@ export class OperationalView extends LitElement {
     try {
       const result = parseArtifactResponse(
         await client.request<unknown>("argus.operations.artifact", {
-          operation_id: this.detail.operation_id,
+          operation_id: operation.operation_id,
           sha256: artifact.sha256,
         }),
       );
       if (generation !== this.generation) return;
       if (
         result.sha256 !== artifact.sha256 ||
+        (result.operation_id !== undefined && result.operation_id !== operation.operation_id) ||
         !Number.isSafeInteger(result.bytes) ||
         result.bytes < 0 ||
         result.bytes > 1_048_576 ||
@@ -394,13 +397,68 @@ export class OperationalView extends LitElement {
       )
         throw new Error("Artifact integrity failed");
       if (generation === this.generation)
-        this.artifactUrl = URL.createObjectURL(new Blob([bytes], { type: result.mime_type }));
+        this.verifiedArtifact = {
+          url: URL.createObjectURL(new Blob([bytes], { type: result.mime_type })),
+          label,
+        };
     } catch {
       if (generation === this.generation)
         this.error = "Artifact could not be verified or is unavailable. No file was opened.";
     } finally {
       if (generation === this.generation) this.busy = false;
     }
+  }
+  private renderArtifacts(operation: Operation, earlier = false) {
+    const label = earlier
+      ? "earlier-observation artifact"
+      : operation.artifact_context?.relation === "previous_attempt"
+        ? "previous-attempt artifact"
+        : "artifact";
+    return operation.artifacts.map(
+      (artifact) => html`<p>
+        <button
+          class="btn"
+          ?disabled=${!this.connectionReady || this.busy}
+          @click=${() => this.openArtifact(operation, artifact, label)}
+        >
+          ${`Verify ${label} ${artifact.display_name ? `${artifact.display_name} · ` : ""}${artifact.sha256.slice(0, 12)} (${artifact.bytes === null ? "size checked on open" : `${artifact.bytes} bytes`})`}
+        </button>
+      </p>`,
+    );
+  }
+  private renderEarlierArtifacts(detail: Detail) {
+    // A requested observation can fall outside the bounded timeline.
+    const observations = new Map(
+      detail.timeline.map((operation) => [operation.operation_id, operation]),
+    );
+    observations.set(detail.requestedOperation.operation_id, detail.requestedOperation);
+    const earlier = [...observations.values()].filter(
+      (operation) =>
+        operation.operation_id !== detail.operation_id && operation.artifacts.length > 0,
+    );
+    if (!earlier.length) return nothing;
+    return html`<details class="argus-earlier-artifacts">
+      <summary>
+        Earlier artifacts (${earlier.length}
+        ${earlier.length === 1 ? "observation" : "observations"})
+      </summary>
+      <p>
+        These artifacts belong to earlier observations. They do not establish a result for the
+        current work.
+      </p>
+      ${earlier.map(
+        (operation) => html`<section aria-label="Earlier observation">
+          <h4>${operationHeading(operation)}</h4>
+          <p>
+            Recorded state: ${operation.state} · Observed ${operationTime(operation.observed_at)}
+          </p>
+          <a href=${this.observationLink(operation.operation_id)}
+            >Link to this earlier observation</a
+          >
+          ${this.renderArtifacts(operation, true)}
+        </section>`,
+      )}
+    </details>`;
   }
   private renderWorkContract(detail: Detail) {
     const contract = detail.workContract;
@@ -1106,22 +1164,14 @@ export class OperationalView extends LitElement {
                     evidence.
                   </p>`
                 : nothing}
-              ${this.detail.artifacts.map(
-                (artifact) =>
-                  html`<p>
-                    <button
-                      class="btn"
-                      ?disabled=${!connected || this.busy}
-                      @click=${() => this.openArtifact(artifact)}
-                    >
-                      ${`Verify ${this.detail?.artifact_context?.relation === "previous_attempt" ? "previous-attempt artifact" : "artifact"} ${artifact.display_name ? `${artifact.display_name} · ` : ""}${artifact.sha256.slice(0, 12)} (${artifact.bytes === null ? "size checked on open" : `${artifact.bytes} bytes`})`}
-                    </button>
-                  </p>`,
-              )}${this.artifactUrl
-                ? html`<a class="btn" href=${this.artifactUrl} target="_blank" rel="noopener"
-                    >${this.detail.artifact_context?.relation === "previous_attempt"
-                      ? "Open verified previous-attempt artifact"
-                      : "Open verified artifact"}</a
+              ${this.renderArtifacts(this.detail)} ${this.renderEarlierArtifacts(this.detail)}
+              ${this.verifiedArtifact
+                ? html`<a
+                    class="btn"
+                    href=${this.verifiedArtifact.url}
+                    target="_blank"
+                    rel="noopener"
+                    >Open verified ${this.verifiedArtifact.label}</a
                   >`
                 : nothing}
               ${this.detail.display?.continuation_label

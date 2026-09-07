@@ -72,6 +72,112 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
+describe("earlier observation artifacts", () => {
+  const digest = "0".repeat(64);
+  const artifact = { sha256: digest, bytes: 3, display_name: "Prior report" };
+  const earlier = { ...item, artifacts: [artifact] };
+  const current = {
+    ...item,
+    operation_id: "active-next-turn",
+    event_id: "event-active",
+    state: "active",
+    title: "Reader correction continues",
+  };
+  const response = {
+    operation_id: earlier.operation_id,
+    sha256: digest,
+    bytes: 3,
+    mime_type: "text/plain",
+    content_base64: "YWJj",
+  };
+  async function setup(inTimeline: boolean, reply: () => Promise<unknown>) {
+    const create = vi.fn().mockReturnValue("blob:earlier-observation");
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static override createObjectURL = create;
+        static override revokeObjectURL = vi.fn();
+      },
+    );
+    vi.stubGlobal("crypto", {
+      subtle: { digest: vi.fn().mockResolvedValue(new Uint8Array(32).buffer) },
+    });
+    const request = vi.fn().mockImplementation(async (method) => {
+      if (method === "argus.operations.list") return page;
+      if (method === "argus.operations.detail")
+        return {
+          item: current,
+          requested: earlier,
+          timeline: inTimeline ? [current, earlier] : [current],
+          coverage: { complete: inTimeline, has_more: !inTimeline },
+        };
+      return reply();
+    });
+    const mounted = await mount(request, true, true);
+    mounted.element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+    await vi.waitFor(() => expect(mounted.element.textContent).toContain("Earlier artifacts"));
+    return { ...mounted, create };
+  }
+  afterEach(() => vi.unstubAllGlobals());
+  it.each([true, false])(
+    "opens the requested earlier result with its own identity (in timeline: %s)",
+    async (inTimeline) => {
+      const { element, request, create } = await setup(inTimeline, async () => response);
+      const section = element.querySelector(".argus-earlier-artifacts")!;
+      expect(section.querySelectorAll("section")).toHaveLength(1);
+      expect(section.textContent?.replace(/\s+/g, " ")).toContain(
+        "do not establish a result for the current work",
+      );
+      expect(element.querySelector(".argus-detail > p")?.textContent).toContain("active");
+      expect(element.textContent).not.toContain("Request operator review");
+      section.querySelector<HTMLButtonElement>("button")!.click();
+      await vi.waitFor(() => expect(element.querySelector('a[href^="blob:"]')).not.toBeNull());
+      expect(request).toHaveBeenLastCalledWith("argus.operations.artifact", {
+        operation_id: earlier.operation_id,
+        sha256: digest,
+      });
+      expect(element.querySelector('a[href^="blob:"]')?.textContent).toContain(
+        "Open verified earlier-observation artifact",
+      );
+      expect(create).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([
+    { ...response, operation_id: current.operation_id },
+    { ...response, sha256: "1".repeat(64) },
+  ])("refuses a mismatched earlier artifact response", async (reply) => {
+    const { element, create } = await setup(true, async () => reply);
+    element.querySelector<HTMLButtonElement>(".argus-earlier-artifacts button")!.click();
+    await vi.waitFor(() => expect(element.textContent).toContain("No file was opened"));
+    expect(create).not.toHaveBeenCalled();
+    expect(element.querySelector('a[href^="blob:"]')).toBeNull();
+  });
+  it("ignores an earlier artifact response after disconnect and recovers on reconnect", async () => {
+    let release!: (value: unknown) => void;
+    let delayed = true;
+    const { element, create, setConnected } = await setup(true, () =>
+      delayed
+        ? new Promise((resolve) => {
+            release = resolve;
+          })
+        : Promise.resolve(response),
+    );
+    element.querySelector<HTMLButtonElement>(".argus-earlier-artifacts button")!.click();
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    setConnected(false);
+    release(response);
+    await element.updateComplete;
+    expect(create).not.toHaveBeenCalled();
+    expect(element.querySelector('a[href^="blob:"]')).toBeNull();
+    delayed = false;
+    setConnected(true);
+    await vi.waitFor(() =>
+      expect(element.querySelector(".argus-earlier-artifacts button")).not.toBeNull(),
+    );
+    element.querySelector<HTMLButtonElement>(".argus-earlier-artifacts button")!.click();
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+  });
+});
 describe("operational evidence overview", () => {
   it("keeps partial scope and owner acceptance separate from verified execution", async () => {
     const { element } = await mount();
