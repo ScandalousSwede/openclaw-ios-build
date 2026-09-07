@@ -26,6 +26,7 @@ import { requestSessionUsage } from "../../lib/sessions/index.ts";
 import { loadSkillStatusReport } from "../../lib/skills/index.ts";
 import { renderOverview } from "./view.ts";
 import "./operational-view.ts";
+import "./handoff-view.ts";
 
 function localDateString(): string {
   const date = new Date();
@@ -394,6 +395,7 @@ class OverviewPage extends LitElement {
         </div>
       </section>
       <argus-operational-view></argus-operational-view>
+      <argus-handoff-view></argus-handoff-view>
       <details class="argus-overview-diagnostics" ?open=${!gateway.connected}>
         <summary style="font-size:18px; padding:16px; cursor:pointer">
           Connection and service diagnostics
