@@ -45,6 +45,7 @@ const queryKeys = {
   before: "argus_before",
 } as const;
 const operationKey = "argus_operation";
+const eventKey = "argus_event";
 const freshnessIntervalMs = 60_000;
 
 function validateFilters(filters: EvidenceFilters): string | null {
@@ -91,6 +92,7 @@ export class OperationalView extends LitElement {
   @state() private draftFilters: EvidenceFilters = defaultFilters();
   private appliedFilters: EvidenceFilters = defaultFilters();
   private selectedOperation: string | null = null;
+  private selectedEvent: string | null = null;
   private lastRefreshAttempt = 0;
   private readonly onPopState = () => {
     this.generation++;
@@ -184,20 +186,25 @@ export class OperationalView extends LitElement {
     this.draftFilters = filters;
     this.appliedFilters = { ...filters };
     this.selectedOperation = query.get(operationKey);
-    this.error =
-      validateFilters(filters) ??
-      (this.selectedOperation !== null &&
-      (!this.selectedOperation.trim() || this.selectedOperation.length > 300)
-        ? "The observation link has an invalid identity."
-        : null);
+    this.selectedEvent = query.get(eventKey);
+    this.error = validateFilters(filters) ?? this.invalidSelection();
   }
-  private observationLink(operationId: string): string {
+  private invalidSelection() {
+    return [this.selectedOperation, this.selectedEvent].some(
+      (id) => id !== null && (!id.trim() || id.length > 300),
+    ) ||
+      (this.selectedEvent !== null && this.selectedOperation === null)
+      ? "The observation link has an invalid identity."
+      : null;
+  }
+  private observationLink(operationId: string, eventId?: string): string {
     // Only explicitly owned query fields travel in an evidence link; never auth hashes or other app query values.
     const url = new URL(window.location.pathname, window.location.origin);
     for (const key of Object.keys(queryKeys) as (keyof EvidenceFilters)[]) {
       if (this.appliedFilters[key]) url.searchParams.set(queryKeys[key], this.appliedFilters[key]);
     }
     url.searchParams.set(operationKey, operationId);
+    if (eventId) url.searchParams.set(eventKey, eventId);
     return url.pathname + url.search;
   }
   private writeLocation() {
@@ -208,6 +215,8 @@ export class OperationalView extends LitElement {
     }
     if (this.selectedOperation) url.searchParams.set(operationKey, this.selectedOperation);
     else url.searchParams.delete(operationKey);
+    if (this.selectedEvent) url.searchParams.set(eventKey, this.selectedEvent);
+    else url.searchParams.delete(eventKey);
     window.history.replaceState(window.history.state, "", url);
   }
   private applyFilters(event: Event) {
@@ -223,6 +232,7 @@ export class OperationalView extends LitElement {
     this.appliedFilters = filters;
     this.draftFilters = { ...filters };
     this.selectedOperation = null;
+    this.selectedEvent = null;
     this.filter = "";
     this.page = null;
     this.detail = null;
@@ -232,13 +242,9 @@ export class OperationalView extends LitElement {
   }
   private async refresh(background = false) {
     if (this.busy || !this.context.gateway.snapshot.connected) return;
-    const invalid = validateFilters(this.appliedFilters);
-    if (
-      invalid ||
-      (this.selectedOperation !== null &&
-        (!this.selectedOperation.trim() || this.selectedOperation.length > 300))
-    ) {
-      this.error = invalid ?? "The observation link has an invalid identity.";
+    const invalid = validateFilters(this.appliedFilters) ?? this.invalidSelection();
+    if (invalid) {
+      this.error = invalid;
       return;
     }
     this.lastRefreshAttempt = Date.now();
@@ -247,7 +253,7 @@ export class OperationalView extends LitElement {
     await this.load(false, background);
     // Detail is an independent read: a failed list must not block a known observation link.
     if (generation === this.generation && selected)
-      await this.openDetailId(selected, false, background);
+      await this.openDetailId(selected, false, background, this.selectedEvent ?? undefined);
   }
   private clearArtifact() {
     if (this.verifiedArtifact) URL.revokeObjectURL(this.verifiedArtifact.url);
@@ -295,9 +301,14 @@ export class OperationalView extends LitElement {
     }
   }
   private async openDetail(operation: Operation) {
-    await this.openDetailId(operation.operation_id, true);
+    await this.openDetailId(operation.operation_id, true, false, operation.event_id);
   }
-  private async openDetailId(operationId: string, updateLocation: boolean, background = false) {
+  private async openDetailId(
+    operationId: string,
+    updateLocation: boolean,
+    background = false,
+    eventId?: string,
+  ) {
     const { client, connected } = this.context.gateway.snapshot;
     if (!client || !connected || this.busy) return;
     const generation = this.generation;
@@ -310,14 +321,17 @@ export class OperationalView extends LitElement {
     }
     if (updateLocation) {
       this.selectedOperation = operationId;
+      this.selectedEvent = eventId ?? null;
       this.writeLocation();
     }
     try {
       const detail = parseDetail(
         await client.request<unknown>("argus.operations.detail", {
           operation_id: operationId,
+          ...(eventId ? { event_id: eventId } : {}),
         }),
         operationId,
+        eventId,
       );
       if (generation === this.generation) {
         if (
@@ -342,7 +356,9 @@ export class OperationalView extends LitElement {
           workContract: detail.work_contract ?? null,
           reviewHistory: detail.review_history ?? null,
           timeline: detail.timeline,
-          newerObservation: detail.item.operation_id !== detail.requested.operation_id,
+          newerObservation:
+            detail.item.operation_id !== detail.requested.operation_id ||
+            detail.item.event_id !== detail.requested.event_id,
           historyComplete: detail.coverage.complete,
           requestedOperation: detail.requested,
         };
@@ -370,6 +386,7 @@ export class OperationalView extends LitElement {
       const result = parseArtifactResponse(
         await client.request<unknown>("argus.operations.artifact", {
           operation_id: operation.operation_id,
+          event_id: operation.event_id,
           sha256: artifact.sha256,
         }),
       );
@@ -377,6 +394,7 @@ export class OperationalView extends LitElement {
       if (
         result.sha256 !== artifact.sha256 ||
         (result.operation_id !== undefined && result.operation_id !== operation.operation_id) ||
+        result.event_id !== operation.event_id ||
         !Number.isSafeInteger(result.bytes) ||
         result.bytes < 0 ||
         result.bytes > 1_048_576 ||
@@ -429,12 +447,16 @@ export class OperationalView extends LitElement {
   private renderEarlierArtifacts(detail: Detail) {
     // A requested observation can fall outside the bounded timeline.
     const observations = new Map(
-      detail.timeline.map((operation) => [operation.operation_id, operation]),
+      detail.timeline.map((operation) => [operation.event_id, operation]),
     );
-    observations.set(detail.requestedOperation.operation_id, detail.requestedOperation);
+    observations.set(detail.requestedOperation.event_id, detail.requestedOperation);
     const earlier = [...observations.values()].filter(
       (operation) =>
-        operation.operation_id !== detail.operation_id && operation.artifacts.length > 0,
+        operation.event_id !== detail.event_id &&
+        operation.artifacts.length > 0 &&
+        (operation.operation_id !== detail.operation_id ||
+          operation.kind === "codex.completion.artifact_produced" ||
+          operation.event_id === detail.requestedOperation.event_id),
     );
     if (!earlier.length) return nothing;
     return html`<details class="argus-earlier-artifacts">
@@ -452,7 +474,7 @@ export class OperationalView extends LitElement {
           <p>
             Recorded state: ${operation.state} · Observed ${operationTime(operation.observed_at)}
           </p>
-          <a href=${this.observationLink(operation.operation_id)}
+          <a href=${this.observationLink(operation.operation_id, operation.event_id)}
             >Link to this earlier observation</a
           >
           ${this.renderArtifacts(operation, true)}
@@ -527,7 +549,11 @@ export class OperationalView extends LitElement {
       </p>
       <h3>Read-only continuation</h3>
       <p>
-        <a href=${this.observationLink(contract.continuation.operation_id)}
+        <a
+          href=${this.observationLink(
+            contract.continuation.operation_id,
+            contract.continuation.event_id,
+          )}
           >Inspect current evidence</a
         >. Use the verified artifact controls above. Continuing execution requires the owning
         workflow; this view does not dispatch work or record a state transition.
@@ -1054,7 +1080,10 @@ export class OperationalView extends LitElement {
             (item) => html`<li>
               <button
                 class="argus-work-row"
-                aria-current=${this.selectedOperation === item.operation_id ? "true" : "false"}
+                aria-current=${this.selectedOperation === item.operation_id &&
+                (!this.selectedEvent || this.selectedEvent === item.event_id)
+                  ? "true"
+                  : "false"}
                 ?disabled=${!connected || this.busy}
                 @click=${() => this.openDetail(item)}
               >
@@ -1062,7 +1091,10 @@ export class OperationalView extends LitElement {
                   >${operationHeading(item)}</span
                 >
                 <span class="argus-work-action">
-                  ${this.selectedOperation === item.operation_id ? "Selected" : "Open work details"}
+                  ${this.selectedOperation === item.operation_id &&
+                  (!this.selectedEvent || this.selectedEvent === item.event_id)
+                    ? "Selected"
+                    : "Open work details"}
                 </span>
                 <span class="argus-work-context">
                   Recorded state: ${item.state} · ${item.artifacts.length} artifact references
@@ -1236,11 +1268,19 @@ export class OperationalView extends LitElement {
                     </p>`
                   : nothing}
                 <p>
-                  <a href=${this.observationLink(this.detail.requestedOperation.operation_id)}
+                  <a
+                    href=${this.observationLink(
+                      this.detail.requestedOperation.operation_id,
+                      this.detail.requestedOperation.event_id,
+                    )}
                     >Link to requested observation</a
                   >${this.detail.newerObservation
                     ? html` ·
-                        <a href=${this.observationLink(this.detail.operation_id)}
+                        <a
+                          href=${this.observationLink(
+                            this.detail.operation_id,
+                            this.detail.event_id,
+                          )}
                           >Link to current observation</a
                         >`
                     : nothing}

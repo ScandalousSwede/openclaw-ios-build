@@ -189,6 +189,7 @@ const artifactResponseSchema = z.object({
   mime_type: z.string(),
   content_base64: z.string().max(1_398_104),
   operation_id: identity.optional(),
+  event_id: identity.optional(),
 });
 
 export type Artifact = z.infer<typeof artifactSchema>;
@@ -244,9 +245,15 @@ export function parsePage(value: unknown): Page {
 export function parseArtifactResponse(value: unknown) {
   return artifactResponseSchema.parse(value);
 }
-export function parseDetail(value: unknown, requestedId: string): DetailResponse {
+export function parseDetail(
+  value: unknown,
+  requestedId: string,
+  requestedEventId?: string,
+): DetailResponse {
   const detail = detailSchema.parse(value);
   if (detail.requested.operation_id !== requestedId) throw new Error("Operation identity mismatch");
+  if (requestedEventId !== undefined && detail.requested.event_id !== requestedEventId)
+    throw new Error("Event identity mismatch");
   const contract = detail.work_contract;
   const hashes = new Set(detail.item.artifacts.map((artifact) => artifact.sha256));
   if (

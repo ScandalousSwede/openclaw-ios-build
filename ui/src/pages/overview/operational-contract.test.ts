@@ -8,6 +8,17 @@ import {
   parsePage,
 } from "./operational-contract.ts";
 
+it("requires the exact requested event when a historical detail link names one", () => {
+  const detail = fixtures[0].detail;
+  expect(
+    parseDetail(detail, detail.requested.operation_id, detail.requested.event_id).requested
+      .event_id,
+  ).toBe(detail.requested.event_id);
+  expect(() => parseDetail(detail, detail.requested.operation_id, "different-event")).toThrow(
+    "Event identity mismatch",
+  );
+});
+
 describe("existing operational response contract", () => {
   it("keeps the shared Python schema identical to its typed source", () => {
     expect(schema).toEqual(createOperationalContractJsonSchema());

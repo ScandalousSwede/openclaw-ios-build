@@ -85,6 +85,7 @@ describe("earlier observation artifacts", () => {
   };
   const response = {
     operation_id: earlier.operation_id,
+    event_id: earlier.event_id,
     sha256: digest,
     bytes: 3,
     mime_type: "text/plain",
@@ -134,6 +135,7 @@ describe("earlier observation artifacts", () => {
       await vi.waitFor(() => expect(element.querySelector('a[href^="blob:"]')).not.toBeNull());
       expect(request).toHaveBeenLastCalledWith("argus.operations.artifact", {
         operation_id: earlier.operation_id,
+        event_id: earlier.event_id,
         sha256: digest,
       });
       expect(element.querySelector('a[href^="blob:"]')?.textContent).toContain(
@@ -144,6 +146,7 @@ describe("earlier observation artifacts", () => {
   );
   it.each([
     { ...response, operation_id: current.operation_id },
+    { ...response, event_id: current.event_id },
     { ...response, sha256: "1".repeat(64) },
   ])("refuses a mismatched earlier artifact response", async (reply) => {
     const { element, create } = await setup(true, async () => reply);
@@ -151,6 +154,67 @@ describe("earlier observation artifacts", () => {
     await vi.waitFor(() => expect(element.textContent).toContain("No file was opened"));
     expect(create).not.toHaveBeenCalled();
     expect(element.querySelector('a[href^="blob:"]')).toBeNull();
+  });
+  it("opens a corrected operation's earlier event and preserves its exact deep link", async () => {
+    const prior = {
+      ...earlier,
+      evidence_scope: "admitted_canonical_technical_operation",
+      kind: "codex.completion.artifact_produced",
+    };
+    const latest = {
+      ...current,
+      operation_id: prior.operation_id,
+      artifacts: [{ sha256: "1".repeat(64), bytes: 3 }],
+    };
+    const create = vi.fn().mockReturnValue("blob:historical-event");
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static override createObjectURL = create;
+        static override revokeObjectURL = vi.fn();
+      },
+    );
+    vi.stubGlobal("crypto", {
+      subtle: { digest: vi.fn().mockResolvedValue(new Uint8Array(32).buffer) },
+    });
+    window.history.replaceState(
+      {},
+      "",
+      `/overview?argus_operation=${prior.operation_id}&argus_event=${prior.event_id}`,
+    );
+    const request = vi.fn().mockImplementation(async (method) => {
+      if (method === "argus.operations.list") return { ...page, items: [latest] };
+      if (method === "argus.operations.detail")
+        return {
+          item: latest,
+          requested: prior,
+          timeline: [latest, prior],
+          coverage: { complete: true, has_more: false },
+        };
+      return response;
+    });
+    const { element } = await mount(request);
+    await vi.waitFor(() =>
+      expect(element.querySelector(".argus-earlier-artifacts button")).not.toBeNull(),
+    );
+    expect(request).toHaveBeenCalledWith("argus.operations.detail", {
+      operation_id: prior.operation_id,
+      event_id: prior.event_id,
+    });
+    const historicalLink = element.querySelector<HTMLAnchorElement>(".argus-earlier-artifacts a")!;
+    expect(new URL(historicalLink.href).searchParams.get("argus_event")).toBe(prior.event_id);
+    expect(element.querySelector(".argus-work-row")?.getAttribute("aria-current")).toBe("false");
+    element.querySelector<HTMLButtonElement>(".argus-earlier-artifacts button")!.click();
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(request).toHaveBeenLastCalledWith("argus.operations.artifact", {
+      operation_id: prior.operation_id,
+      event_id: prior.event_id,
+      sha256: digest,
+    });
+    expect(element.querySelector(".argus-detail h3")?.textContent).toContain(latest.title);
+    expect(element.querySelector('a[href^="blob:"]')?.textContent).toContain(
+      "earlier-observation artifact Prior report",
+    );
   });
   it("ignores an earlier artifact response after disconnect and recovers on reconnect", async () => {
     let release!: (value: unknown) => void;
@@ -225,6 +289,7 @@ describe("operational evidence overview", () => {
     await vi.waitFor(() =>
       expect(request).toHaveBeenCalledWith("argus.operations.detail", {
         operation_id: item.operation_id,
+        event_id: item.event_id,
       }),
     );
     await element.updateComplete;
@@ -828,6 +893,7 @@ describe("result-first evidence hierarchy", () => {
         );
         request.mockResolvedValueOnce({
           sha256: digest,
+          event_id: item.event_id,
           bytes: returned,
           mime_type: "text/plain; charset=utf-8",
           content_base64: "YWJj",
@@ -1004,7 +1070,13 @@ describe("visible operational evidence refresh", () => {
             timeline: [current],
             coverage: { complete: true, has_more: false },
           };
-        return { sha256: digest, bytes: 3, mime_type: "text/plain", content_base64: "YWJj" };
+        return {
+          sha256: digest,
+          event_id: item.event_id,
+          bytes: 3,
+          mime_type: "text/plain",
+          content_base64: "YWJj",
+        };
       });
       const { element } = await mount(request);
       element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
