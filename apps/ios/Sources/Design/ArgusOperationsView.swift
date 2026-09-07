@@ -145,6 +145,9 @@ private struct ArgusOperationDetailView: View {
                         if let work = detail.workContract {
                             ArgusWorkSummary(work: work, artifactContext: detail.item.artifactContext)
                         }
+                        if let history = detail.reviewHistory {
+                            ArgusReviewHistorySummary(history: history)
+                        }
                         Text("Evidence timeline").font(.headline).accessibilityAddTraits(.isHeader)
                         if detail.item.id != detail.requested.id {
                             Text("A newer observation is available for this task.").font(.subheadline)

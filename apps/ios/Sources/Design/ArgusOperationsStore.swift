@@ -77,6 +77,7 @@ struct ArgusOperationDetail: Decodable, Sendable {
     let coverage: ArgusOperationsCoverage
     let ownerAccepted: Bool
     var workContract: ArgusWorkContract? = nil
+    var reviewHistory: ArgusReviewHistory? = nil
 
     func validate(for operation: ArgusOperation) throws {
         guard self.requested.id == operation.id, !self.ownerAccepted,
@@ -85,6 +86,7 @@ struct ArgusOperationDetail: Decodable, Sendable {
                   $0.isAdmitted && $0.taskId == operation.taskId && $0.source == operation.source
               }) else { throw ArgusOperationsError.invalidResponse }
         try self.workContract?.validate(for: self.item)
+        try self.reviewHistory?.validate(for: self.item)
     }
 }
 

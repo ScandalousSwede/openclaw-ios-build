@@ -115,4 +115,29 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         self.add(attachment)
     }
 
+    @MainActor
+    func testProductionRecordedReviewHistoryAtAccessibilitySize() throws {
+        let (item, payload) = try ArgusOperationsTests.reviewHistoryFixture()
+        let history = try ArgusOperationsTests.decodeReviewHistory(payload)
+        try history.validate(for: item)
+        let root = VStack(alignment: .leading, spacing: 12) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            ArgusReviewHistorySummary(history: history)
+        }
+        .padding()
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.dynamicTypeSize, .accessibility1)
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let renderer = ImageRenderer(content: root)
+        renderer.scale = 2
+        let image = try XCTUnwrap(renderer.uiImage)
+        XCTAssertGreaterThan(image.size.height, 400)
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-recorded-review-history-simulator-fixture-accessibility"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
 }

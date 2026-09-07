@@ -156,4 +156,98 @@ struct ArgusOperationsTests {
         #expect(!store.isLoading)
     }
 
+    static func reviewHistoryFixture() throws -> (ArgusOperation, [String: Any]) {
+        let (item, _) = try ArgusWorkContractTests.fixture(relation: "previous_attempt")
+        let rows: [[String: Any]] = ["pending", "accepted", "rejected"].enumerated().map { index, state in
+            ["id": "review-\(index)", "request_event_id": "request-\(index)",
+             "binding": ["operation_id": item.id, "event_id": "earlier-event-\(index)",
+                         "artifact_sha256": [String(repeating: "a", count: 64)]],
+             "state": state, "binding_relation": "previous", "requested_at_ms": 1_800_000_000_000,
+             "expires_at_ms": 1_800_001_800_000,
+             "disposition": state == "pending" ? NSNull() :
+                ["event_id": "disposition-\(index)", "recorded_at_ms": 1_800_000_060_000]]
+        }
+        return (item, ["items": rows, "coverage": ["complete": true, "has_more": false,
+                          "snapshot_sequence": 42], "owner_accepted": false])
+    }
+
+    static func decodeReviewHistory(_ payload: [String: Any]) throws -> ArgusReviewHistory {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ArgusReviewHistory.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+
+    @Test func recordedReviewsPreserveEarlierBindingWithoutOwnerAcceptance() throws {
+        let (item, payload) = try Self.reviewHistoryFixture()
+        let history = try Self.decodeReviewHistory(payload)
+        let detail = ArgusOperationDetail(item: item, requested: item, timeline: [item],
+            coverage: .init(complete: true, hasMore: false, observedAt: nil), ownerAccepted: false,
+            reviewHistory: history)
+        try detail.validate(for: item)
+        #expect(history.items.map(\.title) == ["Review requested", "Operator accepted this artifact", "Operator rejected this artifact"])
+        #expect(history.items.allSatisfy { $0.bindingRelation == .previous })
+        #expect(history.items[0].disposition == nil)
+        #expect(!detail.ownerAccepted)
+        #expect(detail.workContract == nil)
+    }
+
+    @Test func malformedReviewStateBindingAndReceiptCannotBePresented() throws {
+        let (item, payload) = try Self.reviewHistoryFixture()
+        let original = try #require(payload["items"] as? [[String: Any]])
+        let cases: [(String, Any)] = [("state", "open"), ("state", "accepted"),
+            ("binding_relation", "current"), ("id", "bad\nid"), ("expires_at_ms", -1)]
+        for (key, value) in cases {
+            var rows = original
+            rows[0][key] = value
+            var bad = payload
+            bad["items"] = rows
+            #expect(throws: (any Error).self) {
+                let result = try Self.decodeReviewHistory(bad)
+                try result.validate(for: item)
+            }
+        }
+        var rows = original
+        rows[0]["binding"] = ["operation_id": "foreign-operation", "event_id": "event",
+                              "artifact_sha256": [String(repeating: "a", count: 64)]]
+        var bad = payload
+        bad["items"] = rows
+        #expect(throws: ArgusOperationsError.self) {
+            try Self.decodeReviewHistory(bad).validate(for: item)
+        }
+    }
+
+    @Test func duplicateAndOversizedReviewHistoryFailClosed() throws {
+        let (item, payload) = try Self.reviewHistoryFixture()
+        let rows = try #require(payload["items"] as? [[String: Any]])
+        for count in [2, 26] {
+            var bad = payload
+            bad["items"] = (0..<count).map { index in
+                var row = rows[0]
+                if count > 25 {
+                    row["id"] = "unique-review-\(index)"
+                    row["request_event_id"] = "unique-request-\(index)"
+                }
+                return row
+            }
+            #expect(throws: ArgusOperationsError.self) {
+                try Self.decodeReviewHistory(bad).validate(for: item)
+            }
+        }
+    }
+
+    @Test func detailWithoutOptionalReviewHistoryStillDecodes() throws {
+        let item: [String: Any] = ["operation_id": "old-operation", "task_id": "old-task",
+            "event_id": "old-event", "title": "Synthetic older gateway response",
+            "source": "canonical:codex-completion-adapter", "project": "Argus", "kind": "evidence",
+            "state": "running", "occurred_at": "2026-09-07T00:00:00Z", "observed_at": "2026-09-07T00:00:00Z",
+            "artifacts": [], "owner_accepted": false, "evidence_scope": "admitted_canonical_technical_operation"]
+        let payload: [String: Any] = ["item": item, "requested": item, "timeline": [item],
+            "coverage": ["complete": true, "has_more": false], "owner_accepted": false]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let detail = try decoder.decode(ArgusOperationDetail.self, from: JSONSerialization.data(withJSONObject: payload))
+        try detail.validate(for: detail.item)
+        #expect(detail.reviewHistory == nil)
+    }
+
 }
