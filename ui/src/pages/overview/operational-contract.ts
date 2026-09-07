@@ -16,6 +16,15 @@ const operationSchema = z.object({
   task_id: z.string(),
   event_id: identity,
   title: z.string(),
+  display: z
+    .object({
+      label: z.string().min(1).max(160),
+      change_summary: z.string().min(1).max(500).optional(),
+      artifact_label: z.string().min(1).max(160).optional(),
+      continuation_label: z.string().min(1).max(160).optional(),
+    })
+    .strict()
+    .optional(),
   source: z.string(),
   kind: z.string(),
   state: z.string(),
@@ -80,7 +89,13 @@ const workContractSchema = z.object({
   }),
   is_state_transition: z.literal(false),
 });
+const snapshotReadSchema = z
+  .object({
+    snapshot_age_seconds: z.number().finite().min(-30),
+  })
+  .optional();
 const pageSchema = z.object({
+  _authority_read: snapshotReadSchema,
   items: z.array(operationSchema),
   next_cursor: z.string().nullable(),
   coverage: z.object({

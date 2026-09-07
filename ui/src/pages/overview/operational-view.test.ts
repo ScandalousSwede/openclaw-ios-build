@@ -59,6 +59,7 @@ beforeEach(() => {
 afterEach(() => {
   document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 describe("operational evidence overview", () => {
   it("keeps partial scope and owner acceptance separate from verified execution", async () => {
@@ -169,7 +170,7 @@ describe("operational evidence overview", () => {
     row.click();
     await vi.waitFor(() => expect(element.querySelector(".argus-detail h3")).not.toBeNull());
     const heading = element.querySelector(".argus-detail h3")!;
-    expect(heading.textContent!.length).toBeLessThanOrEqual(72);
+    expect(heading.textContent!.trim().length).toBeLessThanOrEqual(72);
     expect(heading.textContent).toContain("…");
     expect(element.querySelector(".argus-detail details")?.textContent).toContain(title);
     expect(element.querySelector(".argus-detail")?.textContent).toContain(
@@ -776,4 +777,160 @@ it("labels legacy missing attempt attribution as available evidence", async () =
     "Inspect available evidence",
   );
   expect(element.querySelector(".argus-detail")?.textContent).not.toContain("Inspect the result");
+});
+
+describe("visible operational evidence refresh", () => {
+  it("refreshes a visible view without stealing focus and stops while hidden or removed", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValue({ ...page, items: [{ ...item, title: "Fresh observed work" }] });
+    const { element, setConnected } = await mount(request);
+    const search = element.querySelector<HTMLInputElement>('input[type="search"]')!;
+    search.focus();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(element.textContent).toContain("Fresh observed work");
+    expect(element.textContent).toContain("Evidence last checked");
+    expect(document.activeElement).toBe(search);
+    visibility.mockReturnValue("hidden");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    setConnected(false);
+    visibility.mockReturnValue("visible");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    element.remove();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it("does not overlap visible refresh requests", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    let release!: (value: typeof page) => void;
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      );
+    const { element } = await mount(request);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(request).toHaveBeenCalledTimes(2);
+    release(page);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(element.querySelector(".argus-evidence")?.getAttribute("aria-busy")).toBe("false");
+  });
+  it("retains a verified artifact only while current event and artifact identity remain unchanged", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const digest = "0".repeat(64);
+    const artifact = { sha256: digest, bytes: 3 };
+    let current = { ...item, artifacts: [artifact] };
+    const create = vi.fn().mockReturnValue("blob:verified-poll-fixture");
+    const revoke = vi.fn();
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static override createObjectURL = create;
+        static override revokeObjectURL = revoke;
+      },
+    );
+    vi.stubGlobal("crypto", {
+      subtle: { digest: vi.fn().mockResolvedValue(new Uint8Array(32).buffer) },
+    });
+    try {
+      const request = vi.fn().mockImplementation(async (method) => {
+        if (method === "argus.operations.list") return { ...page, items: [current] };
+        if (method === "argus.operations.detail")
+          return {
+            item: current,
+            requested: current,
+            timeline: [current],
+            coverage: { complete: true, has_more: false },
+          };
+        return { sha256: digest, bytes: 3, mime_type: "text/plain", content_base64: "YWJj" };
+      });
+      const { element } = await mount(request);
+      element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+      await vi.waitFor(() => expect(element.textContent).toContain("Verify artifact"));
+      [...element.querySelectorAll("button")]
+        .find((node) => node.textContent?.includes("Verify artifact"))!
+        .click();
+      await vi.waitFor(() => expect(element.querySelector('a[href^="blob:"]')).not.toBeNull());
+      const search = element.querySelector<HTMLInputElement>('input[type="search"]')!;
+      search.focus();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(element.querySelector('a[href^="blob:"]')).not.toBeNull();
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(revoke).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(search);
+      current = { ...current, event_id: "new-current-event" };
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(element.querySelector('a[href^="blob:"]')).toBeNull();
+      expect(revoke).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it("clears current detail on a failed refresh instead of presenting stale evidence as current", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce(page)
+      .mockResolvedValueOnce({
+        item,
+        requested: item,
+        timeline: [item],
+        coverage: { complete: true, has_more: false },
+      })
+      .mockRejectedValue(Error("synthetic unavailable"));
+    const { element } = await mount(request);
+    element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+    await vi.waitFor(() => expect(element.querySelector(".argus-detail")).not.toBeNull());
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(element.querySelector(".argus-detail")).toBeNull();
+    expect(element.querySelector('[role="status"]')?.textContent).toContain("Evidence unavailable");
+    expect(request).toHaveBeenCalledTimes(4);
+  });
+});
+
+it("uses admitted display metadata while preserving raw producer title and authority distinctions", async () => {
+  const displayed = {
+    ...item,
+    display: {
+      label: "Reader correction · useful label",
+      change_summary: "<script>synthetic text</script>",
+      artifact_label: "Technical report",
+      continuation_label: "Inspect the report with the owning workflow",
+    },
+  };
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ ...page, items: [displayed] })
+    .mockResolvedValueOnce({
+      item: displayed,
+      requested: displayed,
+      timeline: [displayed],
+      coverage: { complete: true, has_more: false },
+    });
+  const { element } = await mount(request);
+  element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+  await vi.waitFor(() =>
+    expect(element.querySelector(".argus-detail h3")?.textContent).toContain("useful label"),
+  );
+  expect(element.querySelector(".argus-detail details")?.textContent).toContain(item.title);
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "<script>synthetic text</script>",
+  );
+  expect(element.querySelector(".argus-detail script")).toBeNull();
+  expect(element.textContent).toContain("Recorded state: verified");
+  expect(element.textContent).toContain("Owner acceptance not recorded");
 });

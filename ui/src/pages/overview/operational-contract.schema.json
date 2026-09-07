@@ -6,6 +6,18 @@
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
       "properties": {
+        "_authority_read": {
+          "type": "object",
+          "properties": {
+            "snapshot_age_seconds": {
+              "type": "number",
+              "minimum": -30
+            }
+          },
+          "required": [
+            "snapshot_age_seconds"
+          ]
+        },
         "items": {
           "type": "array",
           "items": {
@@ -26,6 +38,35 @@
               },
               "title": {
                 "type": "string"
+              },
+              "display": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "change_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "artifact_label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "continuation_label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  }
+                },
+                "required": [
+                  "label"
+                ],
+                "additionalProperties": false
               },
               "source": {
                 "type": "string"
@@ -273,6 +314,35 @@
             "title": {
               "type": "string"
             },
+            "display": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "change_summary": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "artifact_label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "continuation_label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "label"
+              ],
+              "additionalProperties": false
+            },
             "source": {
               "type": "string"
             },
@@ -415,6 +485,35 @@
             },
             "title": {
               "type": "string"
+            },
+            "display": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "change_summary": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "artifact_label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "continuation_label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                }
+              },
+              "required": [
+                "label"
+              ],
+              "additionalProperties": false
             },
             "source": {
               "type": "string"
@@ -560,6 +659,35 @@
               },
               "title": {
                 "type": "string"
+              },
+              "display": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "change_summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 500
+                  },
+                  "artifact_label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  },
+                  "continuation_label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 160
+                  }
+                },
+                "required": [
+                  "label"
+                ],
+                "additionalProperties": false
               },
               "source": {
                 "type": "string"

@@ -103,8 +103,10 @@ export class OperationalView extends LitElement {
       document.visibilityState !== "hidden" &&
       Date.now() - this.lastRefreshAttempt >= freshnessIntervalMs
     )
-      void this.refresh();
+      void this.refresh(true);
   };
+  @state() private lastCheckedAt: string | null = null;
+  private refreshTimer?: number;
   @state() private artifactUrl: string | null = null;
   private unsubscribe?: () => void;
   private generation = 0;
@@ -122,6 +124,7 @@ export class OperationalView extends LitElement {
     document.addEventListener("visibilitychange", this.onReturn);
     this.unsubscribe = this.context.gateway.subscribe((snapshot) => this.updateGateway(snapshot));
     this.updateGateway(this.context.gateway.snapshot);
+    this.refreshTimer = window.setInterval(this.onReturn, freshnessIntervalMs);
   }
   private updateGateway(snapshot: ApplicationGatewaySnapshot) {
     const clientChanged = snapshot.client !== this.connectionClient;
@@ -143,6 +146,8 @@ export class OperationalView extends LitElement {
   }
   override disconnectedCallback() {
     this.unsubscribe?.();
+    if (this.refreshTimer !== undefined) window.clearInterval(this.refreshTimer);
+    this.refreshTimer = undefined;
     window.removeEventListener("popstate", this.onPopState);
     window.removeEventListener("focus", this.onReturn);
     document.removeEventListener("visibilitychange", this.onReturn);
@@ -207,7 +212,7 @@ export class OperationalView extends LitElement {
     this.writeLocation();
     void this.refresh();
   }
-  private async refresh() {
+  private async refresh(background = false) {
     if (this.busy || !this.context.gateway.snapshot.connected) return;
     const invalid = validateFilters(this.appliedFilters);
     if (
@@ -221,14 +226,16 @@ export class OperationalView extends LitElement {
     this.lastRefreshAttempt = Date.now();
     const generation = this.generation;
     const selected = this.selectedOperation;
-    await this.load();
-    if (generation === this.generation && selected) await this.openDetailId(selected, false);
+    await this.load(false, background);
+    // Detail is an independent read: a failed list must not block a known observation link.
+    if (generation === this.generation && selected)
+      await this.openDetailId(selected, false, background);
   }
   private clearArtifact() {
     if (this.artifactUrl) URL.revokeObjectURL(this.artifactUrl);
     this.artifactUrl = null;
   }
-  private async load(more = false) {
+  private async load(more = false, preserveDetail = false) {
     const { client, connected } = this.context.gateway.snapshot;
     if (!client || !connected || this.busy) return;
     const generation = this.generation;
@@ -252,12 +259,15 @@ export class OperationalView extends LitElement {
       for (const item of page.items) items.set(item.operation_id, item);
       this.page = { ...page, items: [...items.values()] };
       this.listUnavailable = false;
-      if (!more) {
+      this.lastCheckedAt = new Date().toISOString();
+      if (!more && !preserveDetail) {
         this.detail = null;
         this.clearArtifact();
       }
     } catch {
       if (generation === this.generation) {
+        this.clearArtifact();
+        this.detail = null;
         this.listUnavailable = true;
         this.error =
           "Operational evidence is unavailable. Reconnect or try Refresh. Previously loaded records are not current.";
@@ -269,14 +279,17 @@ export class OperationalView extends LitElement {
   private async openDetail(operation: Operation) {
     await this.openDetailId(operation.operation_id, true);
   }
-  private async openDetailId(operationId: string, updateLocation: boolean) {
+  private async openDetailId(operationId: string, updateLocation: boolean, background = false) {
     const { client, connected } = this.context.gateway.snapshot;
     if (!client || !connected || this.busy) return;
     const generation = this.generation;
     this.busy = true;
     this.error = null;
-    this.clearArtifact();
-    this.detail = null;
+    const previousDetail = this.detail;
+    if (!background) {
+      this.clearArtifact();
+      this.detail = null;
+    }
     if (updateLocation) {
       this.selectedOperation = operationId;
       this.writeLocation();
@@ -289,6 +302,16 @@ export class OperationalView extends LitElement {
         operationId,
       );
       if (generation === this.generation) {
+        if (
+          background &&
+          (!previousDetail ||
+            previousDetail.operation_id !== detail.item.operation_id ||
+            previousDetail.event_id !== detail.item.event_id ||
+            JSON.stringify(previousDetail.artifact_context ?? null) !==
+              JSON.stringify(detail.item.artifact_context ?? null) ||
+            JSON.stringify(previousDetail.artifacts) !== JSON.stringify(detail.item.artifacts))
+        )
+          this.clearArtifact();
         this.detail = {
           ...detail.item,
           workContract: detail.work_contract ?? null,
@@ -298,11 +321,14 @@ export class OperationalView extends LitElement {
           requestedOperation: detail.requested,
         };
         await this.updateComplete;
-        this.querySelector<HTMLElement>(".argus-detail h3")?.focus();
+        if (!background) this.querySelector<HTMLElement>(".argus-detail h3")?.focus();
       }
     } catch {
-      if (generation === this.generation)
+      if (generation === this.generation) {
+        this.clearArtifact();
+        this.detail = null;
         this.error = "Work detail is unavailable. Refresh and retry.";
+      }
     } finally {
       if (generation === this.generation) this.busy = false;
     }
@@ -711,6 +737,18 @@ export class OperationalView extends LitElement {
             </fieldset>
           </form>
         </details>
+        ${this.lastCheckedAt
+          ? html`<p>
+              Evidence last checked ${operationTime(this.lastCheckedAt)}.
+              ${this.page?._authority_read
+                ? html`Snapshot age at that check:
+                  ${Math.max(0, Math.round(this.page._authority_read.snapshot_age_seconds))}
+                  seconds.`
+                : html`Snapshot age is unavailable.`}
+              This visible view checks every 60 seconds; the evidence projection normally updates
+              every 5 minutes.
+            </p>`
+          : nothing}
         <div class="argus-toolbar">
           <button class="btn" ?disabled=${!connected || this.busy} @click=${() => this.refresh()}>
             Refresh evidence
@@ -733,7 +771,9 @@ export class OperationalView extends LitElement {
                 ?disabled=${!connected || this.busy}
                 @click=${() => this.openDetail(item)}
               >
-                <span class="argus-work-title" title=${item.title}>${item.title}</span>
+                <span class="argus-work-title" title=${item.display?.label ?? item.title}
+                  >${item.display?.label ?? item.title}</span
+                >
                 <span class="argus-work-action">
                   ${this.selectedOperation === item.operation_id ? "Selected" : "Open work details"}
                 </span>
@@ -768,8 +808,16 @@ export class OperationalView extends LitElement {
           : nothing}
         ${this.detail
           ? html`<section class="argus-detail" aria-label="Work details">
-              <h3 tabindex="-1">${conciseTitle(this.detail.title)}</h3>
+              <h3 tabindex="-1">
+                ${conciseTitle(this.detail.display?.label ?? this.detail.title)}
+              </h3>
               <p>Recorded state: ${this.detail.state}</p>
+              ${this.detail.display?.change_summary
+                ? html`<p>${this.detail.display.change_summary}</p>`
+                : nothing}
+              ${this.detail.display?.artifact_label && this.detail.artifacts.length
+                ? html`<p>Artifact: ${this.detail.display.artifact_label}</p>`
+                : nothing}
               <p class="argus-disposition">
                 ${this.detail.workContract?.independent_verification.covers_all_current_artifacts
                   ? this.detail.workContract.independent_verification
@@ -843,6 +891,9 @@ export class OperationalView extends LitElement {
                       ? "Open verified previous-attempt artifact"
                       : "Open verified artifact"}</a
                   >`
+                : nothing}
+              ${this.detail.display?.continuation_label
+                ? html`<p>${this.detail.display.continuation_label}</p>`
                 : nothing}
               <details>
                 <summary>Provenance, verification and history</summary>

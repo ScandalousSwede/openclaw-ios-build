@@ -127,3 +127,37 @@ it("preserves rendered scope, owner request and verification fields while stripp
   );
   expect(detail.work_contract?.owner_accepted).toBe(false);
 });
+
+it("admits only bounded display metadata without authority fields", () => {
+  const fixture = structuredClone(fixtures[0].list);
+  const display = {
+    label: "Technical result",
+    change_summary: "An admitted summary",
+    artifact_label: "Report",
+    continuation_label: "Inspect current evidence",
+  };
+  expect(
+    parsePage({ ...fixture, items: [{ ...fixture.items[0], display }] }).items[0].display,
+  ).toEqual(display);
+  for (const invalid of [
+    { ...display, label: "" },
+    { ...display, label: "x".repeat(161) },
+    { ...display, change_summary: "x".repeat(501) },
+    { ...display, owner_accepted: true },
+  ]) {
+    expect(() =>
+      parsePage({ ...fixture, items: [{ ...fixture.items[0], display: invalid }] }),
+    ).toThrow();
+  }
+});
+
+it("retains measured snapshot age without retaining snapshot filesystem metadata", () => {
+  const page = parsePage({
+    ...fixtures[0].list,
+    _authority_read: { snapshot_age_seconds: 123.4, snapshot_name: "not-for-ui" },
+  });
+  expect(page._authority_read).toEqual({ snapshot_age_seconds: 123.4 });
+  expect(() =>
+    parsePage({ ...fixtures[0].list, _authority_read: { snapshot_age_seconds: -31 } }),
+  ).toThrow();
+});
