@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import manifest from "../../extensions/anthropic/openclaw.plugin.json";
+import manifest from "../../extensions/anthropic/openclaw.plugin.json" with { type: "json" };
 import {
   resolveProviderAuthAliasMap,
   resolveProviderIdForAuth,
@@ -18,7 +18,11 @@ it("preserves exact shipped auth alias metadata with no registry and no shared m
       ?.provider,
   ).toBe(authLookupMaps.aliasMap["claude-cli"]);
   withExplicitProviderRuntimeScope(
-    { config: {}, provider: { id: "anthropic" }, authLookupMaps },
+    {
+      config: {},
+      provider: { id: "anthropic", label: "Anthropic fixture", auth: [] },
+      authLookupMaps,
+    },
     (a) => {
       expect(resolveProviderIdForAuth("CLAUDE-CLI", { config: a.config })).toBe("anthropic");
       expect(resolveProviderIdForAuth("anthropic")).toBe("anthropic");

@@ -13,7 +13,7 @@ vi.mock("./manifest-metadata-scan.js", () => ({
 }));
 const base = {
   config: {},
-  provider: { id: "anthropic" },
+  provider: { id: "anthropic", label: "Anthropic fixture", auth: [] },
   providerManifest: { id: "anthropic", providers: ["anthropic"] },
   authLookupMaps: createBundledAnthropicAuthLookupMaps(),
 };
@@ -41,6 +41,8 @@ it("synthetic auth uses actual scoped callback and absent hook stays absent", ()
       ...base,
       provider: {
         id: "anthropic",
+        label: "Anthropic fixture",
+        auth: [],
         resolveSyntheticAuth() {
           calls++;
           return undefined;

@@ -9,6 +9,7 @@ import {
 } from "../agents/provider-attribution.js";
 import { listOpenClawPluginManifestMetadata } from "./manifest-metadata-scan.js";
 import { withExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
+import type { ProviderExternalAuthProfile } from "./types.js";
 vi.mock("./manifest-metadata-scan.js", () => ({
   listOpenClawPluginManifestMetadata: vi.fn(() => {
     throw new Error("unrelated manifests attempted");
@@ -38,7 +39,7 @@ const manifest = {
 const scope = {
   manifestPlugins: [],
   config: {},
-  provider: { id: "anthropic" },
+  provider: { id: "anthropic", label: "Anthropic fixture", auth: [] },
   providerManifest: manifest,
 };
 it("uses exact attribution metadata without global scanning", () => {
@@ -116,13 +117,15 @@ it("rejects manifest identity or ownership mismatch before callback", () => {
 
 it("scoped external auth preserves admitted callback and rejects conflicting config", async () => {
   const { resolveExternalAuthProfilesWithPlugins } = await import("./provider-runtime.js");
-  const returned = [];
+  const returned: ProviderExternalAuthProfile[] = [];
   let calls = 0;
   withExplicitProviderRuntimeScope(
     {
       ...scope,
       provider: {
         id: "anthropic",
+        label: "Anthropic fixture",
+        auth: [],
         resolveExternalAuthProfiles(context) {
           calls++;
           expect(context.config).toBeDefined();
@@ -182,6 +185,8 @@ it("external auth keeps nullish fallback preference and no-hook result", async (
         ...scope,
         provider: {
           id: "anthropic",
+          label: "Anthropic fixture",
+          auth: [],
           resolveExternalAuthProfiles: primary,
           resolveExternalOAuthProfiles() {
             fallback++;
