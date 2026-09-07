@@ -419,6 +419,11 @@ async function mountContract(
   contract: unknown,
   current: Omit<typeof item, "artifacts"> & {
     artifacts: { sha256: string; bytes: number | null }[];
+    artifact_context?: {
+      relation: "current_attempt" | "previous_attempt" | "federation_observation" | "unknown";
+      current_attempt_id: string | null;
+      artifact_attempt_id: string | null;
+    };
     evidence_scope?: string;
     executor_id?: string;
     capability_id?: string;
@@ -667,4 +672,44 @@ it("names structural-only verification in the primary summary without hiding its
   expect(summary.textContent).toContain("Semantic correctness is not established by this receipt.");
   expect(summary.textContent).not.toContain("Independent PASS");
   expect(element.querySelector(".argus-detail details")?.hasAttribute("open")).toBe(false);
+});
+
+it("keeps previous-attempt artifacts inspectable without labeling them a current result", async () => {
+  const artifact = { sha256: "a".repeat(64), bytes: 3 };
+  const artifact_context = {
+    relation: "previous_attempt" as const,
+    current_attempt_id: "retry-two",
+    artifact_attempt_id: "attempt-one",
+  };
+  const { element } = await mountContract(
+    {
+      ...workContract,
+      continuation: {
+        ...workContract.continuation,
+        artifact_sha256: [artifact.sha256],
+        artifact_context,
+      },
+    },
+    { ...item, state: "running", artifacts: [artifact], artifact_context },
+  );
+  expect(element.querySelector(".argus-artifact-attempt")?.textContent).toContain(
+    "No artifact from the current attempt is available",
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "Inspect previous-attempt evidence",
+  );
+  expect(
+    [...element.querySelectorAll("button")].some((button) =>
+      button.textContent?.includes("Verify previous-attempt artifact"),
+    ),
+  ).toBe(true);
+  expect(element.querySelector(".argus-detail")?.textContent).not.toContain("Inspect the result");
+});
+
+it("labels legacy missing attempt attribution as available evidence", async () => {
+  const { element } = await mountContract(workContract);
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "Inspect available evidence",
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).not.toContain("Inspect the result");
 });

@@ -6,6 +6,15 @@ import {
   type ApplicationContext,
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
+import {
+  parsePage,
+  parseDetail,
+  parseArtifactResponse,
+  type Artifact,
+  type Operation,
+  type Page,
+  type WorkContract,
+} from "./operational-contract.ts";
 
 type EvidenceFilters = {
   project: string;
@@ -47,89 +56,6 @@ function validateFilters(filters: EvidenceFilters): string | null {
   return null;
 }
 
-type Artifact = { sha256: string; bytes: number | null };
-type Operation = {
-  operation_id: string;
-  task_id: string;
-  event_id: string;
-  title: string;
-  source: string;
-  kind: string;
-  state: string;
-  occurred_at: string;
-  observed_at: string;
-  artifacts: Artifact[];
-  owner_accepted: boolean;
-  evidence_scope?: string;
-  executor_id?: string | null;
-  capability_id?: string | null;
-};
-type Page = {
-  items: Operation[];
-  coverage: {
-    scope: {
-      corpus: string;
-      project: string;
-      task_id?: string | null;
-      source?: string | null;
-      recorded_from?: string | null;
-      recorded_before?: string | null;
-    };
-    complete: boolean;
-    has_more: boolean;
-    snapshot_sequence: number;
-    observed_at: string;
-  };
-  next_cursor: string | null;
-};
-type WorkContract = {
-  schema: "argus.work.read-contract.v1";
-  operation_id: string;
-  requested_operation_id: string;
-  requested_event_id: string;
-  latest_event_id: string;
-  native_observations: { event_id: string; adapter: string | null; outcome: string | null }[];
-  structural_verification: {
-    status: "not_established" | "passed_recorded" | "failed_recorded";
-    semantic_correctness_established: false;
-  };
-  independent_verification: {
-    semantic_correctness_established?: boolean;
-    artifacts: {
-      event_id: string;
-      outcome: "PASS" | "FAIL";
-      artifact_sha256: string;
-      verifier_report_sha256: string;
-      verification_kind?: string;
-      semantic_correctness_established?: boolean;
-    }[];
-    covers_all_current_artifacts: boolean;
-  };
-  owner_disposition: { status: "not_established" };
-  owner_accepted: false;
-  pending_owner_feedback: { event_id: string; owner: string | null; reason: string | null }[];
-  continuation: {
-    mode: "read_only";
-    action: "inspect_current_evidence";
-    operation_id: string;
-    event_id: string;
-    artifact_sha256: string[];
-    dispatch_enabled: false;
-  };
-  coverage: {
-    scope: "canonical_operation_trace" | "canonical_federation_observation";
-    complete: boolean;
-    cross_scope_absence_established: false;
-  };
-  is_state_transition: false;
-};
-type DetailResponse = {
-  work_contract?: WorkContract;
-  item: Operation;
-  requested: Operation;
-  timeline: Operation[];
-  coverage: { complete: boolean; has_more: boolean };
-};
 type Detail = Operation & {
   workContract: WorkContract | null;
   timeline: Operation[];
@@ -309,15 +235,17 @@ export class OperationalView extends LitElement {
     this.busy = true;
     this.error = null;
     try {
-      const page = await client.request<Page>("argus.operations.list", {
-        project: this.appliedFilters.project,
-        ...(this.appliedFilters.task ? { task_id: this.appliedFilters.task } : {}),
-        ...(this.appliedFilters.source ? { source: this.appliedFilters.source } : {}),
-        ...(this.appliedFilters.from ? { recorded_from: this.appliedFilters.from } : {}),
-        ...(this.appliedFilters.before ? { recorded_before: this.appliedFilters.before } : {}),
-        limit: 30,
-        ...(more && this.page?.next_cursor ? { cursor: this.page.next_cursor } : {}),
-      });
+      const page = parsePage(
+        await client.request<unknown>("argus.operations.list", {
+          project: this.appliedFilters.project,
+          ...(this.appliedFilters.task ? { task_id: this.appliedFilters.task } : {}),
+          ...(this.appliedFilters.source ? { source: this.appliedFilters.source } : {}),
+          ...(this.appliedFilters.from ? { recorded_from: this.appliedFilters.from } : {}),
+          ...(this.appliedFilters.before ? { recorded_before: this.appliedFilters.before } : {}),
+          limit: 30,
+          ...(more && this.page?.next_cursor ? { cursor: this.page.next_cursor } : {}),
+        }),
+      );
       if (generation !== this.generation) return;
       const previous = more ? (this.page?.items ?? []) : [];
       const items = new Map(previous.map((item) => [item.operation_id, item]));
@@ -354,39 +282,16 @@ export class OperationalView extends LitElement {
       this.writeLocation();
     }
     try {
-      const detail = await client.request<DetailResponse>("argus.operations.detail", {
-        operation_id: operationId,
-      });
-      if (detail.requested.operation_id !== operationId)
-        throw new Error("Operation identity mismatch");
-      const contract = detail.work_contract;
-      const currentArtifacts = new Set(detail.item.artifacts.map((artifact) => artifact.sha256));
-      // The read model must describe this exact requested/current pair. Never
-      // attach verification or continuation from another observation to its artifacts.
-      if (
-        contract &&
-        (contract.schema !== "argus.work.read-contract.v1" ||
-          contract.operation_id !== detail.item.operation_id ||
-          contract.latest_event_id !== detail.item.event_id ||
-          contract.requested_operation_id !== detail.requested.operation_id ||
-          contract.requested_event_id !== detail.requested.event_id ||
-          contract.continuation.operation_id !== detail.item.operation_id ||
-          contract.continuation.event_id !== detail.item.event_id ||
-          contract.continuation.mode !== "read_only" ||
-          contract.continuation.action !== "inspect_current_evidence" ||
-          contract.continuation.dispatch_enabled !== false ||
-          contract.continuation.artifact_sha256.some((digest) => !currentArtifacts.has(digest)) ||
-          contract.independent_verification.artifacts.some(
-            (verification) => !currentArtifacts.has(verification.artifact_sha256),
-          ) ||
-          contract.is_state_transition !== false ||
-          contract.owner_accepted !== false)
-      )
-        throw new Error("Work contract identity or authority mismatch");
+      const detail = parseDetail(
+        await client.request<unknown>("argus.operations.detail", {
+          operation_id: operationId,
+        }),
+        operationId,
+      );
       if (generation === this.generation) {
         this.detail = {
           ...detail.item,
-          workContract: contract ?? null,
+          workContract: detail.work_contract ?? null,
           timeline: detail.timeline,
           newerObservation: detail.item.operation_id !== detail.requested.operation_id,
           historyComplete: detail.coverage.complete,
@@ -410,15 +315,12 @@ export class OperationalView extends LitElement {
     this.error = null;
     this.clearArtifact();
     try {
-      const result = await client.request<{
-        sha256: string;
-        bytes: number;
-        mime_type: string;
-        content_base64: string;
-      }>("argus.operations.artifact", {
-        operation_id: this.detail.operation_id,
-        sha256: artifact.sha256,
-      });
+      const result = parseArtifactResponse(
+        await client.request<unknown>("argus.operations.artifact", {
+          operation_id: this.detail.operation_id,
+          sha256: artifact.sha256,
+        }),
+      );
       if (generation !== this.generation) return;
       if (
         result.sha256 !== artifact.sha256 ||
@@ -838,7 +740,20 @@ export class OperationalView extends LitElement {
                     </ul>
                   </section>`
                 : nothing}
-              <h3>Inspect the result</h3>
+              ${this.detail.artifact_context?.relation === "previous_attempt"
+                ? html`<p class="argus-artifact-attempt">
+                    No artifact from the current attempt is available. The evidence below belongs to
+                    a previous attempt.
+                  </p>`
+                : nothing}
+              <h3>
+                ${this.detail.artifact_context?.relation === "previous_attempt"
+                  ? "Inspect previous-attempt evidence"
+                  : this.detail.artifact_context?.relation === "current_attempt" ||
+                      this.detail.artifact_context?.relation === "federation_observation"
+                    ? "Inspect the result"
+                    : "Inspect available evidence"}
+              </h3>
               ${!this.detail.artifacts.length
                 ? html`<p>
                     No artifact references were returned. Inspect provenance for the recorded
@@ -853,15 +768,14 @@ export class OperationalView extends LitElement {
                       ?disabled=${!connected || this.busy}
                       @click=${() => this.openArtifact(artifact)}
                     >
-                      Verify artifact ${artifact.sha256.slice(0, 12)}
-                      (${artifact.bytes === null
-                        ? "size checked on open"
-                        : `${artifact.bytes} bytes`})
+                      ${`Verify ${this.detail?.artifact_context?.relation === "previous_attempt" ? "previous-attempt artifact" : "artifact"} ${artifact.sha256.slice(0, 12)} (${artifact.bytes === null ? "size checked on open" : `${artifact.bytes} bytes`})`}
                     </button>
                   </p>`,
               )}${this.artifactUrl
                 ? html`<a class="btn" href=${this.artifactUrl} target="_blank" rel="noopener"
-                    >Open verified artifact</a
+                    >${this.detail.artifact_context?.relation === "previous_attempt"
+                      ? "Open verified previous-attempt artifact"
+                      : "Open verified artifact"}</a
                   >`
                 : nothing}
               <details>
@@ -870,6 +784,14 @@ export class OperationalView extends LitElement {
                 <p>${this.detail.title}</p>
                 <p>${this.detail.kind} · ${this.detail.source}</p>
                 <p>Task: ${this.detail.task_id}</p>
+                ${this.detail.artifact_context
+                  ? html`<p>
+                      Artifact relation: ${this.detail.artifact_context.relation} · current attempt
+                      ${this.detail.artifact_context.current_attempt_id ?? "not recorded"} ·
+                      artifact attempt
+                      ${this.detail.artifact_context.artifact_attempt_id ?? "not recorded"}
+                    </p>`
+                  : nothing}
                 <p>Scope: ${this.detail.evidence_scope ?? "canonical_federation_observation"}</p>
                 ${this.detail.executor_id
                   ? html`<p>Executor: ${this.detail.executor_id}</p>`

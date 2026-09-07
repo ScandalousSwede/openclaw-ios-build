@@ -1,0 +1,1068 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:argus:operational-read-response:v1",
+  "$defs": {
+    "list": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "title": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "occurred_at": {
+                "type": "string"
+              },
+              "observed_at": {
+                "type": "string"
+              },
+              "artifacts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "sha256",
+                    "bytes"
+                  ]
+                }
+              },
+              "owner_accepted": {
+                "type": "boolean",
+                "const": false
+              },
+              "evidence_scope": {
+                "type": "string"
+              },
+              "executor_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capability_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "artifact_context": {
+                "type": "object",
+                "properties": {
+                  "relation": {
+                    "type": "string",
+                    "enum": [
+                      "current_attempt",
+                      "previous_attempt",
+                      "federation_observation",
+                      "unknown"
+                    ]
+                  },
+                  "current_attempt_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "artifact_attempt_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "relation",
+                  "current_attempt_id",
+                  "artifact_attempt_id"
+                ]
+              }
+            },
+            "required": [
+              "operation_id",
+              "task_id",
+              "event_id",
+              "title",
+              "source",
+              "kind",
+              "state",
+              "occurred_at",
+              "observed_at",
+              "artifacts",
+              "owner_accepted"
+            ]
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "object",
+              "properties": {
+                "corpus": {
+                  "type": "string"
+                },
+                "project": {
+                  "type": "string"
+                },
+                "task_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "source": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recorded_from": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "recorded_before": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "corpus",
+                "project"
+              ]
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "has_more": {
+              "type": "boolean"
+            },
+            "snapshot_sequence": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "observed_at": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "complete",
+            "has_more",
+            "snapshot_sequence",
+            "observed_at"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "next_cursor",
+        "coverage"
+      ]
+    },
+    "detail": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "item": {
+          "type": "object",
+          "properties": {
+            "operation_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "event_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "title": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "occurred_at": {
+              "type": "string"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bytes": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "sha256",
+                  "bytes"
+                ]
+              }
+            },
+            "owner_accepted": {
+              "type": "boolean",
+              "const": false
+            },
+            "evidence_scope": {
+              "type": "string"
+            },
+            "executor_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "capability_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "artifact_context": {
+              "type": "object",
+              "properties": {
+                "relation": {
+                  "type": "string",
+                  "enum": [
+                    "current_attempt",
+                    "previous_attempt",
+                    "federation_observation",
+                    "unknown"
+                  ]
+                },
+                "current_attempt_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "artifact_attempt_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "relation",
+                "current_attempt_id",
+                "artifact_attempt_id"
+              ]
+            }
+          },
+          "required": [
+            "operation_id",
+            "task_id",
+            "event_id",
+            "title",
+            "source",
+            "kind",
+            "state",
+            "occurred_at",
+            "observed_at",
+            "artifacts",
+            "owner_accepted"
+          ]
+        },
+        "requested": {
+          "type": "object",
+          "properties": {
+            "operation_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "task_id": {
+              "type": "string"
+            },
+            "event_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "title": {
+              "type": "string"
+            },
+            "source": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            },
+            "occurred_at": {
+              "type": "string"
+            },
+            "observed_at": {
+              "type": "string"
+            },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bytes": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "sha256",
+                  "bytes"
+                ]
+              }
+            },
+            "owner_accepted": {
+              "type": "boolean",
+              "const": false
+            },
+            "evidence_scope": {
+              "type": "string"
+            },
+            "executor_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "capability_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "artifact_context": {
+              "type": "object",
+              "properties": {
+                "relation": {
+                  "type": "string",
+                  "enum": [
+                    "current_attempt",
+                    "previous_attempt",
+                    "federation_observation",
+                    "unknown"
+                  ]
+                },
+                "current_attempt_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "artifact_attempt_id": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "relation",
+                "current_attempt_id",
+                "artifact_attempt_id"
+              ]
+            }
+          },
+          "required": [
+            "operation_id",
+            "task_id",
+            "event_id",
+            "title",
+            "source",
+            "kind",
+            "state",
+            "occurred_at",
+            "observed_at",
+            "artifacts",
+            "owner_accepted"
+          ]
+        },
+        "timeline": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "operation_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "task_id": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "title": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string"
+              },
+              "occurred_at": {
+                "type": "string"
+              },
+              "observed_at": {
+                "type": "string"
+              },
+              "artifacts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "sha256",
+                    "bytes"
+                  ]
+                }
+              },
+              "owner_accepted": {
+                "type": "boolean",
+                "const": false
+              },
+              "evidence_scope": {
+                "type": "string"
+              },
+              "executor_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capability_id": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "artifact_context": {
+                "type": "object",
+                "properties": {
+                  "relation": {
+                    "type": "string",
+                    "enum": [
+                      "current_attempt",
+                      "previous_attempt",
+                      "federation_observation",
+                      "unknown"
+                    ]
+                  },
+                  "current_attempt_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "artifact_attempt_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "relation",
+                  "current_attempt_id",
+                  "artifact_attempt_id"
+                ]
+              }
+            },
+            "required": [
+              "operation_id",
+              "task_id",
+              "event_id",
+              "title",
+              "source",
+              "kind",
+              "state",
+              "occurred_at",
+              "observed_at",
+              "artifacts",
+              "owner_accepted"
+            ]
+          }
+        },
+        "work_contract": {
+          "type": "object",
+          "properties": {
+            "schema": {
+              "type": "string",
+              "const": "argus.work.read-contract.v1"
+            },
+            "operation_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "requested_operation_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "requested_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "latest_event_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 300
+            },
+            "native_observations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "event_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "adapter": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "outcome": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "event_id",
+                  "adapter",
+                  "outcome"
+                ]
+              }
+            },
+            "structural_verification": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "not_established",
+                    "passed_recorded",
+                    "failed_recorded"
+                  ]
+                },
+                "semantic_correctness_established": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "status",
+                "semantic_correctness_established"
+              ]
+            },
+            "independent_verification": {
+              "type": "object",
+              "properties": {
+                "semantic_correctness_established": {
+                  "type": "boolean"
+                },
+                "artifacts": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "event_id": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 300
+                      },
+                      "outcome": {
+                        "type": "string",
+                        "enum": [
+                          "PASS",
+                          "FAIL"
+                        ]
+                      },
+                      "artifact_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "verifier_report_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "verification_kind": {
+                        "type": "string"
+                      },
+                      "semantic_correctness_established": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "event_id",
+                      "outcome",
+                      "artifact_sha256",
+                      "verifier_report_sha256"
+                    ]
+                  }
+                },
+                "covers_all_current_artifacts": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "artifacts",
+                "covers_all_current_artifacts"
+              ]
+            },
+            "owner_disposition": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "const": "not_established"
+                }
+              },
+              "required": [
+                "status"
+              ]
+            },
+            "owner_accepted": {
+              "type": "boolean",
+              "const": false
+            },
+            "pending_owner_feedback": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "event_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300
+                  },
+                  "owner": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "reason": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "event_id",
+                  "owner",
+                  "reason"
+                ]
+              }
+            },
+            "continuation": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "const": "read_only"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "inspect_current_evidence"
+                },
+                "operation_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "event_id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                },
+                "artifact_sha256": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "dispatch_enabled": {
+                  "type": "boolean",
+                  "const": false
+                },
+                "artifact_context": {
+                  "type": "object",
+                  "properties": {
+                    "relation": {
+                      "type": "string",
+                      "enum": [
+                        "current_attempt",
+                        "previous_attempt",
+                        "federation_observation",
+                        "unknown"
+                      ]
+                    },
+                    "current_attempt_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "artifact_attempt_id": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "relation",
+                    "current_attempt_id",
+                    "artifact_attempt_id"
+                  ]
+                }
+              },
+              "required": [
+                "mode",
+                "action",
+                "operation_id",
+                "event_id",
+                "artifact_sha256",
+                "dispatch_enabled"
+              ]
+            },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "canonical_operation_trace",
+                    "canonical_federation_observation"
+                  ]
+                },
+                "complete": {
+                  "type": "boolean"
+                },
+                "cross_scope_absence_established": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "scope",
+                "complete",
+                "cross_scope_absence_established"
+              ]
+            },
+            "is_state_transition": {
+              "type": "boolean",
+              "const": false
+            }
+          },
+          "required": [
+            "schema",
+            "operation_id",
+            "requested_operation_id",
+            "requested_event_id",
+            "latest_event_id",
+            "native_observations",
+            "structural_verification",
+            "independent_verification",
+            "owner_disposition",
+            "owner_accepted",
+            "pending_owner_feedback",
+            "continuation",
+            "coverage",
+            "is_state_transition"
+          ]
+        },
+        "coverage": {
+          "type": "object",
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            },
+            "has_more": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "complete",
+            "has_more"
+          ]
+        }
+      },
+      "required": [
+        "item",
+        "requested",
+        "timeline",
+        "coverage"
+      ]
+    },
+    "artifact": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "content_base64": {
+          "type": "string",
+          "maxLength": 1398104
+        },
+        "operation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      },
+      "required": [
+        "sha256",
+        "bytes",
+        "mime_type",
+        "content_base64"
+      ]
+    }
+  }
+}

@@ -1,0 +1,941 @@
+[
+  {
+    "name": "ordinary-current",
+    "requested_operation_id": "wire-contract",
+    "list": {
+      "items": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+          "observed_at": "2026-09-07T02:01:47.305865+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        }
+      ],
+      "next_cursor": null,
+      "coverage": {
+        "scope": {
+          "corpus": "canonical_federation_and_admitted_technical_operations",
+          "project": "Argus",
+          "task_id": "task-wire-contract",
+          "source": null,
+          "recorded_from": null,
+          "recorded_before": null
+        },
+        "complete": true,
+        "has_more": false,
+        "snapshot_sequence": 2,
+        "observed_at": "2026-09-07T02:01:47.310960+00:00"
+      }
+    },
+    "detail": {
+      "item": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "codex.completion.artifact_produced",
+        "state": "artifact_produced",
+        "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+        "observed_at": "2026-09-07T02:01:47.305865+00:00",
+        "artifacts": [
+          {
+            "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "current_attempt",
+          "current_attempt_id": "one",
+          "artifact_attempt_id": "one"
+        }
+      },
+      "requested": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "codex.completion.artifact_produced",
+        "state": "artifact_produced",
+        "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+        "observed_at": "2026-09-07T02:01:47.305865+00:00",
+        "artifacts": [
+          {
+            "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "current_attempt",
+          "current_attempt_id": "one",
+          "artifact_attempt_id": "one"
+        }
+      },
+      "timeline": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+          "observed_at": "2026-09-07T02:01:47.305865+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        }
+      ],
+      "work_contract": {
+        "schema": "argus.work.read-contract.v1",
+        "operation_id": "wire-contract",
+        "requested_operation_id": "wire-contract",
+        "requested_event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+        "latest_event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+        "native_observations": [],
+        "structural_verification": {
+          "status": "not_established",
+          "semantic_correctness_established": false
+        },
+        "independent_verification": {
+          "semantic_correctness_established": false,
+          "artifacts": [],
+          "covers_all_current_artifacts": false
+        },
+        "owner_disposition": {
+          "status": "not_established"
+        },
+        "owner_accepted": false,
+        "pending_owner_feedback": [],
+        "continuation": {
+          "mode": "read_only",
+          "action": "inspect_current_evidence",
+          "operation_id": "wire-contract",
+          "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+          "artifact_sha256": [
+            "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7"
+          ],
+          "dispatch_enabled": false,
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        },
+        "coverage": {
+          "scope": "canonical_operation_trace",
+          "complete": false,
+          "cross_scope_absence_established": false
+        },
+        "is_state_transition": false
+      },
+      "coverage": {
+        "complete": true,
+        "has_more": false
+      }
+    },
+    "artifact": {
+      "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+      "bytes": 27,
+      "mime_type": "text/plain; charset=utf-8",
+      "content_base64": "U3ludGhldGljIHRlY2huaWNhbCByZXN1bHQu",
+      "operation_id": "wire-contract"
+    }
+  },
+  {
+    "name": "ordinary-previous-attempt",
+    "requested_operation_id": "wire-contract",
+    "list": {
+      "items": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.running",
+          "state": "running",
+          "occurred_at": "2026-09-07T02:01:47.320872+00:00",
+          "observed_at": "2026-09-07T02:01:47.320872+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        }
+      ],
+      "next_cursor": null,
+      "coverage": {
+        "scope": {
+          "corpus": "canonical_federation_and_admitted_technical_operations",
+          "project": "Argus",
+          "task_id": "task-wire-contract",
+          "source": null,
+          "recorded_from": null,
+          "recorded_before": null
+        },
+        "complete": true,
+        "has_more": false,
+        "snapshot_sequence": 5,
+        "observed_at": "2026-09-07T02:01:47.325055+00:00"
+      }
+    },
+    "detail": {
+      "item": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "operation.running",
+        "state": "running",
+        "occurred_at": "2026-09-07T02:01:47.320872+00:00",
+        "observed_at": "2026-09-07T02:01:47.320872+00:00",
+        "artifacts": [
+          {
+            "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "previous_attempt",
+          "current_attempt_id": "two",
+          "artifact_attempt_id": "one"
+        }
+      },
+      "requested": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "operation.running",
+        "state": "running",
+        "occurred_at": "2026-09-07T02:01:47.320872+00:00",
+        "observed_at": "2026-09-07T02:01:47.320872+00:00",
+        "artifacts": [
+          {
+            "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "previous_attempt",
+          "current_attempt_id": "two",
+          "artifact_attempt_id": "one"
+        }
+      },
+      "timeline": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.running",
+          "state": "running",
+          "occurred_at": "2026-09-07T02:01:47.320872+00:00",
+          "observed_at": "2026-09-07T02:01:47.320872+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "d335b577-2513-5086-a31f-3c0766c47571",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.retry_scheduled",
+          "state": "retry_scheduled",
+          "occurred_at": "2026-09-07T02:01:47.316809+00:00",
+          "observed_at": "2026-09-07T02:01:47.316809+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "b04e45c2-b808-599a-bb89-2abd10faa9a1",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.blocked",
+          "state": "blocked",
+          "occurred_at": "2026-09-07T02:01:47.313651+00:00",
+          "observed_at": "2026-09-07T02:01:47.313651+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+          "observed_at": "2026-09-07T02:01:47.305865+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        }
+      ],
+      "work_contract": {
+        "schema": "argus.work.read-contract.v1",
+        "operation_id": "wire-contract",
+        "requested_operation_id": "wire-contract",
+        "requested_event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+        "latest_event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+        "native_observations": [],
+        "structural_verification": {
+          "status": "not_established",
+          "semantic_correctness_established": false
+        },
+        "independent_verification": {
+          "semantic_correctness_established": false,
+          "artifacts": [],
+          "covers_all_current_artifacts": false
+        },
+        "owner_disposition": {
+          "status": "not_established"
+        },
+        "owner_accepted": false,
+        "pending_owner_feedback": [],
+        "continuation": {
+          "mode": "read_only",
+          "action": "inspect_current_evidence",
+          "operation_id": "wire-contract",
+          "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+          "artifact_sha256": [
+            "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7"
+          ],
+          "dispatch_enabled": false,
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        },
+        "coverage": {
+          "scope": "canonical_operation_trace",
+          "complete": false,
+          "cross_scope_absence_established": false
+        },
+        "is_state_transition": false
+      },
+      "coverage": {
+        "complete": true,
+        "has_more": false
+      }
+    },
+    "artifact": {
+      "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+      "bytes": 27,
+      "mime_type": "text/plain; charset=utf-8",
+      "content_base64": "U3ludGhldGljIHRlY2huaWNhbCByZXN1bHQu",
+      "operation_id": "wire-contract"
+    }
+  },
+  {
+    "name": "ordinary-corrected",
+    "requested_operation_id": "wire-contract",
+    "list": {
+      "items": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.328125+00:00",
+          "observed_at": "2026-09-07T02:01:47.328125+00:00",
+          "artifacts": [
+            {
+              "sha256": "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "two"
+          }
+        }
+      ],
+      "next_cursor": null,
+      "coverage": {
+        "scope": {
+          "corpus": "canonical_federation_and_admitted_technical_operations",
+          "project": "Argus",
+          "task_id": "task-wire-contract",
+          "source": null,
+          "recorded_from": null,
+          "recorded_before": null
+        },
+        "complete": true,
+        "has_more": false,
+        "snapshot_sequence": 6,
+        "observed_at": "2026-09-07T02:01:47.333310+00:00"
+      }
+    },
+    "detail": {
+      "item": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "codex.completion.artifact_produced",
+        "state": "artifact_produced",
+        "occurred_at": "2026-09-07T02:01:47.328125+00:00",
+        "observed_at": "2026-09-07T02:01:47.328125+00:00",
+        "artifacts": [
+          {
+            "sha256": "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "current_attempt",
+          "current_attempt_id": "two",
+          "artifact_attempt_id": "two"
+        }
+      },
+      "requested": {
+        "operation_id": "wire-contract",
+        "task_id": "task-wire-contract",
+        "event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+        "title": "task wire contract",
+        "source": "canonical:codex-completion-adapter",
+        "kind": "codex.completion.artifact_produced",
+        "state": "artifact_produced",
+        "occurred_at": "2026-09-07T02:01:47.328125+00:00",
+        "observed_at": "2026-09-07T02:01:47.328125+00:00",
+        "artifacts": [
+          {
+            "sha256": "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb",
+            "bytes": null
+          }
+        ],
+        "owner_accepted": false,
+        "evidence_scope": "admitted_canonical_technical_operation",
+        "executor_id": "synthetic-executor",
+        "capability_id": "codex.completion",
+        "artifact_context": {
+          "relation": "current_attempt",
+          "current_attempt_id": "two",
+          "artifact_attempt_id": "two"
+        }
+      },
+      "timeline": [
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.328125+00:00",
+          "observed_at": "2026-09-07T02:01:47.328125+00:00",
+          "artifacts": [
+            {
+              "sha256": "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "two"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "122941b6-a1b4-572a-a113-7af859ee8f2d",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.running",
+          "state": "running",
+          "occurred_at": "2026-09-07T02:01:47.320872+00:00",
+          "observed_at": "2026-09-07T02:01:47.320872+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "d335b577-2513-5086-a31f-3c0766c47571",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.retry_scheduled",
+          "state": "retry_scheduled",
+          "occurred_at": "2026-09-07T02:01:47.316809+00:00",
+          "observed_at": "2026-09-07T02:01:47.316809+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "previous_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "b04e45c2-b808-599a-bb89-2abd10faa9a1",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "operation.blocked",
+          "state": "blocked",
+          "occurred_at": "2026-09-07T02:01:47.313651+00:00",
+          "observed_at": "2026-09-07T02:01:47.313651+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        },
+        {
+          "operation_id": "wire-contract",
+          "task_id": "task-wire-contract",
+          "event_id": "cb1162cd-ce44-585c-9082-809a7f989f4f",
+          "title": "task wire contract",
+          "source": "canonical:codex-completion-adapter",
+          "kind": "codex.completion.artifact_produced",
+          "state": "artifact_produced",
+          "occurred_at": "2026-09-07T02:01:47.305865+00:00",
+          "observed_at": "2026-09-07T02:01:47.305865+00:00",
+          "artifacts": [
+            {
+              "sha256": "96b7986fdf1ce1010b4c5539564186e0aae84132bc28d0935ce52cf13784a2f7",
+              "bytes": null
+            }
+          ],
+          "owner_accepted": false,
+          "evidence_scope": "admitted_canonical_technical_operation",
+          "executor_id": "synthetic-executor",
+          "capability_id": "codex.completion",
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "one",
+            "artifact_attempt_id": "one"
+          }
+        }
+      ],
+      "work_contract": {
+        "schema": "argus.work.read-contract.v1",
+        "operation_id": "wire-contract",
+        "requested_operation_id": "wire-contract",
+        "requested_event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+        "latest_event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+        "native_observations": [],
+        "structural_verification": {
+          "status": "not_established",
+          "semantic_correctness_established": false
+        },
+        "independent_verification": {
+          "semantic_correctness_established": false,
+          "artifacts": [],
+          "covers_all_current_artifacts": false
+        },
+        "owner_disposition": {
+          "status": "not_established"
+        },
+        "owner_accepted": false,
+        "pending_owner_feedback": [],
+        "continuation": {
+          "mode": "read_only",
+          "action": "inspect_current_evidence",
+          "operation_id": "wire-contract",
+          "event_id": "6c97bfd7-86fa-5a99-9b50-646253817565",
+          "artifact_sha256": [
+            "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb"
+          ],
+          "dispatch_enabled": false,
+          "artifact_context": {
+            "relation": "current_attempt",
+            "current_attempt_id": "two",
+            "artifact_attempt_id": "two"
+          }
+        },
+        "coverage": {
+          "scope": "canonical_operation_trace",
+          "complete": false,
+          "cross_scope_absence_established": false
+        },
+        "is_state_transition": false
+      },
+      "coverage": {
+        "complete": true,
+        "has_more": false
+      }
+    },
+    "artifact": {
+      "sha256": "0230242bdf4f5f69a7170465309e9ba341cc2f0e464493ab531bb3f472d120cb",
+      "bytes": 27,
+      "mime_type": "text/plain; charset=utf-8",
+      "content_base64": "U3ludGhldGljIGNvcnJlY3RlZCByZXN1bHQu",
+      "operation_id": "wire-contract"
+    }
+  },
+  {
+    "name": "federation-requested-current",
+    "requested_operation_id": "federation:test-producer:native-6bbb6c0e729beb4a957e3cb4c69502ebae586f62311dc420ba5831f72a00ae15",
+    "list": {
+      "items": [
+        {
+          "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe",
+          "task_id": "synthetic-federation-contract",
+          "event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+          "title": "Synthetic correction",
+          "source": "federation:test-producer",
+          "kind": "result.proposed",
+          "state": "observed",
+          "occurred_at": "2026-09-07T02:01:47.851454+00:00",
+          "observed_at": "2026-09-07T02:01:47.865095+00:00",
+          "artifacts": [
+            {
+              "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+              "bytes": 30
+            }
+          ],
+          "owner_accepted": false,
+          "artifact_context": {
+            "relation": "federation_observation",
+            "current_attempt_id": null,
+            "artifact_attempt_id": null
+          }
+        }
+      ],
+      "next_cursor": null,
+      "coverage": {
+        "scope": {
+          "corpus": "canonical_federation_and_admitted_technical_operations",
+          "project": "Argus",
+          "task_id": "synthetic-federation-contract",
+          "source": null,
+          "recorded_from": null,
+          "recorded_before": null
+        },
+        "complete": true,
+        "has_more": false,
+        "snapshot_sequence": 2,
+        "observed_at": "2026-09-07T02:01:47.870323+00:00"
+      }
+    },
+    "detail": {
+      "item": {
+        "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe",
+        "task_id": "synthetic-federation-contract",
+        "event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+        "title": "Synthetic correction",
+        "source": "federation:test-producer",
+        "kind": "result.proposed",
+        "state": "observed",
+        "occurred_at": "2026-09-07T02:01:47.851454+00:00",
+        "observed_at": "2026-09-07T02:01:47.865095+00:00",
+        "artifacts": [
+          {
+            "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+            "bytes": 30
+          }
+        ],
+        "owner_accepted": false,
+        "artifact_context": {
+          "relation": "federation_observation",
+          "current_attempt_id": null,
+          "artifact_attempt_id": null
+        }
+      },
+      "requested": {
+        "operation_id": "federation:test-producer:native-6bbb6c0e729beb4a957e3cb4c69502ebae586f62311dc420ba5831f72a00ae15",
+        "task_id": "synthetic-federation-contract",
+        "event_id": "459ecd58-e2bb-5459-9a5d-12aa5b824f87",
+        "title": "Technical result",
+        "source": "federation:test-producer",
+        "kind": "result.proposed",
+        "state": "observed",
+        "occurred_at": "2026-09-07T02:01:47.819680+00:00",
+        "observed_at": "2026-09-07T02:01:47.846150+00:00",
+        "artifacts": [
+          {
+            "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+            "bytes": 30
+          }
+        ],
+        "owner_accepted": false,
+        "artifact_context": {
+          "relation": "federation_observation",
+          "current_attempt_id": null,
+          "artifact_attempt_id": null
+        }
+      },
+      "timeline": [
+        {
+          "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe",
+          "task_id": "synthetic-federation-contract",
+          "event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+          "title": "Synthetic correction",
+          "source": "federation:test-producer",
+          "kind": "result.proposed",
+          "state": "observed",
+          "occurred_at": "2026-09-07T02:01:47.851454+00:00",
+          "observed_at": "2026-09-07T02:01:47.865095+00:00",
+          "artifacts": [
+            {
+              "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+              "bytes": 30
+            }
+          ],
+          "owner_accepted": false,
+          "artifact_context": {
+            "relation": "federation_observation",
+            "current_attempt_id": null,
+            "artifact_attempt_id": null
+          }
+        },
+        {
+          "operation_id": "federation:test-producer:native-6bbb6c0e729beb4a957e3cb4c69502ebae586f62311dc420ba5831f72a00ae15",
+          "task_id": "synthetic-federation-contract",
+          "event_id": "459ecd58-e2bb-5459-9a5d-12aa5b824f87",
+          "title": "Technical result",
+          "source": "federation:test-producer",
+          "kind": "result.proposed",
+          "state": "observed",
+          "occurred_at": "2026-09-07T02:01:47.819680+00:00",
+          "observed_at": "2026-09-07T02:01:47.846150+00:00",
+          "artifacts": [
+            {
+              "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+              "bytes": 30
+            }
+          ],
+          "owner_accepted": false,
+          "artifact_context": {
+            "relation": "federation_observation",
+            "current_attempt_id": null,
+            "artifact_attempt_id": null
+          }
+        }
+      ],
+      "work_contract": {
+        "schema": "argus.work.read-contract.v1",
+        "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe",
+        "requested_operation_id": "federation:test-producer:native-6bbb6c0e729beb4a957e3cb4c69502ebae586f62311dc420ba5831f72a00ae15",
+        "requested_event_id": "459ecd58-e2bb-5459-9a5d-12aa5b824f87",
+        "latest_event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+        "native_observations": [
+          {
+            "event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+            "adapter": "codex-exec",
+            "outcome": "completed"
+          }
+        ],
+        "structural_verification": {
+          "status": "not_established",
+          "semantic_correctness_established": false
+        },
+        "independent_verification": {
+          "semantic_correctness_established": false,
+          "artifacts": [],
+          "covers_all_current_artifacts": false
+        },
+        "owner_disposition": {
+          "status": "not_established"
+        },
+        "owner_accepted": false,
+        "pending_owner_feedback": [],
+        "continuation": {
+          "mode": "read_only",
+          "action": "inspect_current_evidence",
+          "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe",
+          "event_id": "8f680d7f-fb72-5f5b-81f1-4433160a2dea",
+          "artifact_sha256": [
+            "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3"
+          ],
+          "dispatch_enabled": false,
+          "artifact_context": {
+            "relation": "federation_observation",
+            "current_attempt_id": null,
+            "artifact_attempt_id": null
+          }
+        },
+        "coverage": {
+          "scope": "canonical_federation_observation",
+          "complete": true,
+          "cross_scope_absence_established": false
+        },
+        "is_state_transition": false
+      },
+      "coverage": {
+        "complete": true,
+        "has_more": false
+      }
+    },
+    "artifact": {
+      "sha256": "0ab4052748b6b5162195db4daf49c803131eed583114b2b9ea979d7ee1e4a2d3",
+      "bytes": 30,
+      "mime_type": "text/plain; charset=utf-8",
+      "content_base64": "QSByZWFsLXNoYXBlZCB0ZWNobmljYWwgcmVzdWx0",
+      "operation_id": "federation:test-producer:native-729e5b3e4afd6a3a9a4977f88fb6f58cc712185eab798a75bd0c837b989ccebe"
+    }
+  }
+]
