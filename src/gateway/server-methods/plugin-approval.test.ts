@@ -974,3 +974,40 @@ describe("plugin approval generated Swift compatibility", () => {
     }
   });
 });
+
+it("keeps artifact pending lists opt-in and binds list authorization to the authenticated client", async () => {
+  const list = vi.fn().mockResolvedValue([]);
+  const handlers = createPluginApprovalHandlers(createManager(), {
+    artifactReview: { request: vi.fn(), resolve: vi.fn(), list },
+  });
+  const client = createClient({ deviceId: "device-owner", scopes: ["operator.approvals"] })!;
+  client.connect.role = "operator";
+  const legacy = createMockOptions("plugin.approval.list", {}, { client });
+  await handlers["plugin.approval.list"](legacy);
+  expect(legacy.respond).toHaveBeenCalledWith(true, [], undefined);
+  expect(list).not.toHaveBeenCalled();
+  const selected = createMockOptions(
+    "plugin.approval.list",
+    { kind: "artifact_review" },
+    { client },
+  );
+  await handlers["plugin.approval.list"](selected);
+  expect(list).toHaveBeenCalledWith(
+    expect.objectContaining({ device_id: "device-owner", connection_id: "conn-test-client" }),
+  );
+  expect(selected.respond).toHaveBeenCalledWith(true, { available: true, items: [] }, undefined);
+  const spoofed = createMockOptions(
+    "plugin.approval.list",
+    { kind: "artifact_review", actor: "other" },
+    { client },
+  );
+  await handlers["plugin.approval.list"](spoofed);
+  expect(spoofed.respond).toHaveBeenCalledWith(
+    false,
+    undefined,
+    expect.objectContaining({ message: "Artifact review unavailable or invalid" }),
+  );
+  const unbound = createMockOptions("plugin.approval.list", { kind: "artifact_review" });
+  await handlers["plugin.approval.list"](unbound);
+  expect(list).toHaveBeenCalledTimes(1);
+});

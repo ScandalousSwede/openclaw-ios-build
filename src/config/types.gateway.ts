@@ -499,6 +499,9 @@ export type GatewayToolsConfig = {
 };
 
 export type GatewayConfig = {
+  /** Opt-in trusted local canonical artifact-review helper; no shell or client-controlled arguments. */
+  artifactReview?: { command: string; args?: string[]; timeoutMs?: number };
+
   /** Single multiplexed port for Gateway WS + HTTP (default: 18789). */
   port?: number;
   /**

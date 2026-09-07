@@ -26,7 +26,11 @@ import {
   registerPendingApprovalRecord,
   resolveApprovalDecisionParams,
 } from "./approval-shared.js";
-import { routeArtifactReview, type ArtifactReviewAdapter } from "./artifact-review.js";
+import {
+  artifactReviewActorFromClient,
+  routeArtifactReview,
+  type ArtifactReviewAdapter,
+} from "./artifact-review.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
 /** Create plugin approval handlers backed by the shared approval manager. */
@@ -35,7 +39,23 @@ export function createPluginApprovalHandlers(
   opts?: { forwarder?: ExecApprovalForwarder; artifactReview?: ArtifactReviewAdapter },
 ): GatewayRequestHandlers {
   return {
-    "plugin.approval.list": async ({ respond, client }) => {
+    "plugin.approval.list": async ({ params, respond, client }) => {
+      if (params && typeof params === "object" && "kind" in params) {
+        try {
+          if (params.kind !== "artifact_review" || Object.keys(params).length !== 1)
+            throw new Error();
+          const actor = artifactReviewActorFromClient(client);
+          const items = opts?.artifactReview?.list ? await opts.artifactReview.list(actor) : [];
+          respond(true, { available: Boolean(opts?.artifactReview?.list), items }, undefined);
+        } catch {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+          );
+        }
+        return;
+      }
       respond(true, listVisiblePendingApprovalRequests({ manager, client }), undefined);
     },
     "plugin.approval.request": async ({ params, client, respond, context }) => {

@@ -853,6 +853,7 @@ class OpenClawShell extends LitElement {
             queue: this.overlaySnapshot.approvalQueue,
             busy: this.overlaySnapshot.approvalBusy,
             error: this.overlaySnapshot.approvalError,
+            onDefer: () => context.overlays.deferApproval?.(),
             onDecision: (decision: Parameters<typeof context.overlays.decideApproval>[0]) =>
               context.overlays.decideApproval(decision),
           }}

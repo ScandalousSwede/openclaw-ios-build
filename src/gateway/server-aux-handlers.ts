@@ -1,5 +1,6 @@
 // Gateway auxiliary method handlers.
 // Wires reload, secrets, exec approval, and plugin approval RPC handlers.
+import type { GatewayConfig } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { createExecApprovalForwarder } from "../infra/exec-approval-forwarder.js";
@@ -22,6 +23,7 @@ import {
 import { createExecApprovalIosPushDelivery } from "./exec-approval-ios-push.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import type { ChannelAutostartSuppression } from "./server-channels.js";
+import { createArtifactReviewHelperAdapter } from "./server-methods/artifact-review-helper.js";
 import type { GatewayRequestHandler, GatewayRequestHandlers } from "./server-methods/types.js";
 import {
   disconnectStaleSharedGatewayAuthClients,
@@ -66,6 +68,7 @@ function createLazyHandler(
 /** Create auxiliary gateway handlers that are not part of the core descriptor set. */
 export function createGatewayAuxHandlers(params: {
   log: GatewayAuxHandlerLogger;
+  artifactReview?: GatewayConfig["artifactReview"];
   activateRuntimeSecrets: ActivateRuntimeSecrets;
   buildReloadPlan?: (changedPaths: string[]) => GatewayReloadPlan;
   sharedGatewaySessionGenerationState: SharedGatewaySessionGenerationState;
@@ -96,6 +99,7 @@ export function createGatewayAuxHandlers(params: {
       import("./server-methods/plugin-approval.js").then(({ createPluginApprovalHandlers }) =>
         createPluginApprovalHandlers(pluginApprovalManager, {
           forwarder: execApprovalForwarder,
+          artifactReview: createArtifactReviewHelperAdapter(params.artifactReview),
         }),
       ),
     { cacheRejections: true },

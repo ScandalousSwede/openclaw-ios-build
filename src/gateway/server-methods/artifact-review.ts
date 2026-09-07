@@ -29,12 +29,21 @@ export type ArtifactReviewReceipt = Readonly<{
 }>;
 /**
  * Installed by trusted server composition only. Both calls MUST authorize the authenticated
- * device against the real owner policy and bind/recheck the exact current event and artifact
+ * device against the incumbent operator approval policy and bind/recheck the exact current event and artifact
  * set inside the canonical transaction. Resolve must atomically reject stale/conflicting
  * decisions, enforce expiry and durable idempotency, and commit before returning a receipt.
- * A gateway scope or requester identity alone is not an owner mapping. No default adapter.
+ * This records an authenticated operator disposition, not a named owner's acceptance. No default adapter.
  */
+export type ArtifactReviewPending = Readonly<{
+  id: string;
+  binding: ArtifactReviewBinding;
+  created_at_ms: number;
+  expires_at_ms: number;
+  requested_by_device_id: string;
+  reviewer_device_ids: readonly string[];
+}>;
 export type ArtifactReviewAdapter = {
+  list?(actor: ArtifactReviewActor): Promise<readonly ArtifactReviewPending[]>;
   request(
     command: ArtifactReviewCommand,
     actor: ArtifactReviewActor,
@@ -63,7 +72,7 @@ const id = (value: unknown): string => {
   if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,512}$/.test(value)) return fail();
   return value;
 };
-function binding(value: unknown): ArtifactReviewBinding {
+export function parseArtifactReviewBinding(value: unknown): ArtifactReviewBinding {
   const item = record(value);
   exact(item, ["operation_id", "event_id", "artifact_sha256"]);
   if (
@@ -83,7 +92,7 @@ function binding(value: unknown): ArtifactReviewBinding {
     artifact_sha256: Object.freeze(hashes.sort()),
   });
 }
-function actor(client: Client): ArtifactReviewActor {
+export function artifactReviewActorFromClient(client: Client): ArtifactReviewActor {
   if (client?.connect?.role !== "operator") return fail();
   const scopes = client.connect.scopes;
   if (
@@ -136,8 +145,11 @@ export async function routeArtifactReview(params: {
         item.description.length > 512)
     )
       return fail();
-    const trustedActor = actor(params.client);
-    const base = { binding: binding(item.binding), idempotency_key: id(item.idempotency_key) };
+    const trustedActor = artifactReviewActorFromClient(params.client);
+    const base = {
+      binding: parseArtifactReviewBinding(item.binding),
+      idempotency_key: id(item.idempotency_key),
+    };
     let command: ArtifactReviewCommand | ArtifactReviewResolution;
     let returned: ArtifactReviewReceipt;
     if (params.method === "request") {
@@ -157,7 +169,7 @@ export async function routeArtifactReview(params: {
       "idempotency_key",
       "state",
     ]);
-    const receiptBinding = binding(receipt.binding);
+    const receiptBinding = parseArtifactReviewBinding(receipt.binding);
     const expectedState = !("decision" in command)
       ? "pending"
       : command.decision === "accept_artifact"

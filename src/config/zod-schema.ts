@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { isHttpsUrl, isHttpUrl } from "@openclaw/net-policy/url-protocol";
 // Assembles the canonical Zod schema for OpenClaw config parsing.
 import {
@@ -1088,6 +1089,26 @@ export const OpenClawSchema = z
     talk: TalkSchema.optional(),
     gateway: z
       .object({
+        artifactReview: z
+          .object({
+            command: z
+              .string()
+              .min(1)
+              .max(4096)
+              .refine(isAbsolute, "Absolute trusted executable required"),
+            args: z
+              .array(
+                z
+                  .string()
+                  .max(4096)
+                  .refine((value) => !value.includes("\0")),
+              )
+              .max(32)
+              .optional(),
+            timeoutMs: z.number().int().min(100).max(15000).optional(),
+          })
+          .strict()
+          .optional(),
         port: z.number().int().positive().optional(),
         mode: z.union([z.literal("local"), z.literal("remote")]).optional(),
         bind: z

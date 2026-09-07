@@ -108,6 +108,11 @@ export class OperationalView extends LitElement {
   @state() private lastCheckedAt: string | null = null;
   private refreshTimer?: number;
   @state() private artifactUrl: string | null = null;
+  @state() private reviewAvailable = false;
+  @state() private reviewBusy = false;
+  @state() private reviewMessage: string | null = null;
+  private unsubscribeOverlays?: () => void;
+  private reviewRequestIdentity: { binding: string; key: string } | null = null;
   private unsubscribe?: () => void;
   private generation = 0;
   private connectionClient: unknown = null;
@@ -118,6 +123,10 @@ export class OperationalView extends LitElement {
   }
   override connectedCallback() {
     super.connectedCallback();
+    this.reviewAvailable = this.context.overlays?.snapshot.artifactReviewAvailable === true;
+    this.unsubscribeOverlays = this.context.overlays?.subscribe((snapshot) => {
+      this.reviewAvailable = snapshot.artifactReviewAvailable === true;
+    });
     this.readLocation();
     window.addEventListener("popstate", this.onPopState);
     window.addEventListener("focus", this.onReturn);
@@ -146,6 +155,7 @@ export class OperationalView extends LitElement {
   }
   override disconnectedCallback() {
     this.unsubscribe?.();
+    this.unsubscribeOverlays?.();
     if (this.refreshTimer !== undefined) window.clearInterval(this.refreshTimer);
     this.refreshTimer = undefined;
     window.removeEventListener("popstate", this.onPopState);
@@ -156,6 +166,8 @@ export class OperationalView extends LitElement {
     this.busy = false;
     this.clearArtifact();
     super.disconnectedCallback();
+    this.unsubscribeOverlays?.();
+    this.unsubscribeOverlays = undefined;
   }
   private readLocation() {
     const query = new URLSearchParams(window.location.search);
@@ -312,6 +324,11 @@ export class OperationalView extends LitElement {
             JSON.stringify(previousDetail.artifacts) !== JSON.stringify(detail.item.artifacts))
         )
           this.clearArtifact();
+        if (
+          this.detail?.event_id !== detail.item.event_id ||
+          this.detail?.operation_id !== detail.item.operation_id
+        )
+          this.reviewMessage = null;
         this.detail = {
           ...detail.item,
           workContract: detail.work_contract ?? null,
@@ -452,6 +469,68 @@ export class OperationalView extends LitElement {
       </p>
     </section>`;
   }
+  private canRequestArtifactReview(): boolean {
+    return (
+      this.reviewAvailable &&
+      this.detail?.evidence_scope === "admitted_canonical_technical_operation" &&
+      this.detail.capability_id === "codex.completion" &&
+      this.detail.artifact_context?.relation === "current_attempt" &&
+      this.detail.artifacts.length > 0 &&
+      this.detail.artifacts.length <= 64
+    );
+  }
+
+  private async requestArtifactReview() {
+    const client = this.context.gateway.snapshot.client;
+    if (
+      !client ||
+      !this.context.gateway.snapshot.connected ||
+      !this.detail ||
+      !this.canRequestArtifactReview() ||
+      this.reviewBusy
+    )
+      return;
+    const generation = this.generation;
+    const binding = {
+      operation_id: this.detail.operation_id,
+      event_id: this.detail.event_id,
+      artifact_sha256: this.detail.artifacts.map((a) => a.sha256).sort(),
+    };
+    const identity = JSON.stringify(binding);
+    if (this.reviewRequestIdentity?.binding !== identity)
+      this.reviewRequestIdentity = {
+        binding: identity,
+        key: `artifact-review:${crypto.randomUUID()}`,
+      };
+    this.reviewBusy = true;
+    this.reviewMessage = null;
+    try {
+      await client.request("plugin.approval.request", {
+        kind: "artifact_review",
+        binding,
+        idempotency_key: this.reviewRequestIdentity.key,
+        title: "Review current artifact",
+        description:
+          "Record an authenticated operator disposition for this exact current artifact.",
+      });
+      if (
+        generation !== this.generation ||
+        this.context.gateway.snapshot.client !== client ||
+        this.detail?.event_id !== binding.event_id
+      )
+        return;
+      this.reviewMessage =
+        "Review request recorded. This action does not submit an artifact decision.";
+      await this.context.overlays.refreshApprovals?.();
+    } catch {
+      if (generation === this.generation && this.detail?.event_id === binding.event_id)
+        this.reviewMessage =
+          "Artifact review unavailable or evidence changed. Refresh evidence and try again.";
+    } finally {
+      this.reviewBusy = false;
+    }
+  }
+
   override render() {
     const connected = this.context.gateway.snapshot.connected;
     const items =
@@ -897,6 +976,18 @@ export class OperationalView extends LitElement {
               ${this.detail.display?.continuation_label
                 ? html`<p>${this.detail.display.continuation_label}</p>`
                 : nothing}
+              ${this.canRequestArtifactReview()
+                ? html`<p>
+                    <button
+                      class="btn"
+                      ?disabled=${this.reviewBusy || this.busy}
+                      @click=${() => this.requestArtifactReview()}
+                    >
+                      Request operator review
+                    </button>
+                  </p>`
+                : nothing}
+              ${this.reviewMessage ? html`<p role="status">${this.reviewMessage}</p>` : nothing}
               <details>
                 <summary>Provenance, verification and history</summary>
                 <h4>Producer narrative</h4>

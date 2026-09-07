@@ -1,8 +1,11 @@
 // Control UI tests cover application-owned overlay races.
-import { describe, expect, it, vi } from "vitest";
+import { webcrypto } from "node:crypto";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../api/gateway.ts";
 import type { ApplicationGateway, ApplicationGatewaySnapshot } from "./gateway.ts";
 import { createApplicationOverlays } from "./overlays.ts";
+
+afterEach(() => vi.unstubAllGlobals());
 
 type RequestFn = (method: string, params?: unknown) => Promise<unknown>;
 
@@ -164,4 +167,85 @@ describe("application update overlays", () => {
     expect(overlays.snapshot.updateRunning).toBe(false);
     overlays.dispose();
   });
+});
+
+it("resolves artifact reviews with bound identity and can defer without recording a decision", async () => {
+  vi.stubGlobal("crypto", webcrypto);
+  const binding = {
+    operation_id: "operation",
+    event_id: "event",
+    artifact_sha256: ["a".repeat(64)],
+  };
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (
+      method === "plugin.approval.list" &&
+      (params as { kind?: string })?.kind === "artifact_review"
+    )
+      return {
+        available: true,
+        items: [{ id: "review", binding, created_at_ms: 1000, expires_at_ms: Date.now() + 60000 }],
+      };
+    return [];
+  });
+  const harness = createGatewayHarness({ request } as unknown as GatewayBrowserClient);
+  const overlays = createApplicationOverlays(harness.gateway);
+  harness.update({ connected: true });
+  await vi.waitFor(() => expect(overlays.snapshot.approvalQueue[0]?.kind).toBe("artifact_review"));
+  overlays.deferApproval?.();
+  expect(overlays.snapshot.approvalQueue).toHaveLength(0);
+  expect(request.mock.calls.some(([method]) => method === "plugin.approval.resolve")).toBe(false);
+  await overlays.refreshApprovals?.();
+  await overlays.decideApproval("accept_artifact");
+  expect(request).toHaveBeenCalledWith("plugin.approval.resolve", {
+    kind: "artifact_review",
+    id: "review",
+    decision: "accept_artifact",
+    binding,
+    idempotency_key: expect.stringMatching(/^artifact-review:[a-f0-9]{64}$/),
+  });
+  overlays.dispose();
+});
+
+it("refreshes durable pending reviews on a same-client reconnect", async () => {
+  const request = vi.fn<RequestFn>().mockResolvedValue([]);
+  const harness = createGatewayHarness(client(request));
+  const overlays = createApplicationOverlays(harness.gateway);
+  await overlays.refreshApprovals?.();
+  request.mockClear();
+  harness.update({ connected: false });
+  harness.update({ connected: true });
+  await vi.waitFor(() =>
+    expect(request).toHaveBeenCalledWith("plugin.approval.list", { kind: "artifact_review" }),
+  );
+  overlays.dispose();
+});
+
+it("uses bounded deterministic resolution keys for maximum-length review IDs", async () => {
+  vi.stubGlobal("crypto", webcrypto);
+  const row = {
+    id: "r".repeat(512),
+    binding: { operation_id: "operation", event_id: "event", artifact_sha256: ["a".repeat(64)] },
+    created_at_ms: 1000,
+    expires_at_ms: Date.now() + 60000,
+  };
+  const request = vi.fn<RequestFn>(async (method, params) => {
+    if (method === "plugin.approval.resolve") throw new Error("retryable unavailable");
+    if ((params as { kind?: string })?.kind === "artifact_review")
+      return { available: true, items: [row] };
+    return [];
+  });
+  const harness = createGatewayHarness(client(request));
+  const overlays = createApplicationOverlays(harness.gateway);
+  await vi.waitFor(() => expect(overlays.snapshot.approvalQueue).toHaveLength(1));
+  await overlays.decideApproval("accept_artifact");
+  await overlays.decideApproval("accept_artifact");
+  await overlays.decideApproval("reject_artifact");
+  const keys = request.mock.calls
+    .filter(([method]) => method === "plugin.approval.resolve")
+    .map(([, params]) => (params as { idempotency_key: string }).idempotency_key);
+  expect(keys).toHaveLength(3);
+  expect(keys[0]).toMatch(/^artifact-review:[a-f0-9]{64}$/);
+  expect(keys[0]).toBe(keys[1]);
+  expect(keys[2]).not.toBe(keys[0]);
+  overlays.dispose();
 });

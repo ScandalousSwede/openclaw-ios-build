@@ -26,7 +26,11 @@ const page = {
   },
   next_cursor: "next",
 };
-async function mount(request = vi.fn().mockResolvedValue(page), connected = true) {
+async function mount(
+  request = vi.fn().mockResolvedValue(page),
+  connected = true,
+  reviewAvailable = false,
+) {
   const element = new OperationalView();
   type Snapshot = { connected: boolean; client: { request: typeof request } };
   const listeners = new Set<(snapshot: Snapshot) => void>();
@@ -37,7 +41,16 @@ async function mount(request = vi.fn().mockResolvedValue(page), connected = true
       return () => listeners.delete(listener);
     }),
   };
-  Object.assign(element, { context: { gateway } });
+  Object.assign(element, {
+    context: {
+      gateway,
+      overlays: {
+        snapshot: { artifactReviewAvailable: reviewAvailable },
+        subscribe: () => () => {},
+        refreshApprovals: vi.fn(),
+      },
+    },
+  });
   document.body.append(element);
   await vi.waitFor(() =>
     expect(element.textContent).toContain(connected ? "Reader correction" : "Disconnected"),
@@ -974,4 +987,105 @@ it("does not label an active federation observation without artifacts as a resul
   expect(element.querySelector(".argus-detail details")?.textContent).not.toContain(
     "current attempt not recorded",
   );
+});
+
+describe("current artifact operator review", () => {
+  const ordinary = {
+    ...item,
+    evidence_scope: "admitted_canonical_technical_operation",
+    capability_id: "codex.completion",
+    artifacts: [{ sha256: "a".repeat(64), bytes: 3 }],
+    artifact_context: {
+      relation: "current_attempt",
+      current_attempt_id: "attempt",
+      artifact_attempt_id: "attempt",
+    },
+  };
+  async function openReview(
+    value: typeof ordinary,
+    available = true,
+    resolve = vi.fn().mockRejectedValue(new Error("unknown result")),
+  ) {
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (method === "argus.operations.list") return { ...page, items: [value] };
+      if (method === "argus.operations.detail")
+        return {
+          item: value,
+          requested: value,
+          timeline: [value],
+          coverage: { complete: true, has_more: false },
+        };
+      return resolve(method, params);
+    });
+    const result = await mount(request, true, available);
+    [...result.element.querySelectorAll("button")]
+      .find((b) => b.textContent?.includes("Open work"))
+      ?.click();
+    await vi.waitFor(() => expect(result.element.querySelector(".argus-detail")).not.toBeNull());
+    await result.element.updateComplete;
+    return {
+      ...result,
+      resolve,
+      button: () =>
+        [...result.element.querySelectorAll("button")].find((b) =>
+          b.textContent?.includes("Request operator review"),
+        ),
+    };
+  }
+  it("retries the exact binding with one stable request key after an unknown result", async () => {
+    const { button, resolve, element } = await openReview(ordinary);
+    expect(button()).toBeDefined();
+    button()!.click();
+    await vi.waitFor(() => expect(element.textContent).toContain("Artifact review unavailable"));
+    button()!.click();
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalledTimes(2));
+    expect(resolve.mock.calls[0][1]).toEqual(resolve.mock.calls[1][1]);
+    expect(resolve.mock.calls[0][1].binding).toEqual({
+      operation_id: item.operation_id,
+      event_id: item.event_id,
+      artifact_sha256: ["a".repeat(64)],
+    });
+  });
+  it("does not offer review for federation, prior artifacts, or an unavailable adapter", async () => {
+    for (const [value, available] of [
+      [{ ...ordinary, evidence_scope: "canonical_federation_observation" }, true],
+      [
+        {
+          ...ordinary,
+          artifact_context: {
+            ...ordinary.artifact_context,
+            relation: "previous_attempt",
+            artifact_attempt_id: "earlier-attempt",
+          },
+        },
+        true,
+      ],
+      [ordinary, false],
+    ] as const) {
+      window.history.replaceState({}, "", "/overview");
+      const result = await openReview(value as typeof ordinary, available);
+      expect(result.button()).toBeUndefined();
+      result.element.remove();
+    }
+  });
+  it("prevents duplicate concurrent requests and does not record an operator decision", async () => {
+    let finish!: (value: unknown) => void;
+    const resolve = vi.fn(
+      () =>
+        new Promise((r) => {
+          finish = r;
+        }),
+    );
+    const { button, request, element } = await openReview(ordinary, true, resolve);
+    button()!.click();
+    await element.updateComplete;
+    expect(button()!.disabled).toBe(true);
+    button()!.click();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    finish({ id: "pending" });
+    await vi.waitFor(() =>
+      expect(element.textContent).toContain("This action does not submit an artifact decision"),
+    );
+    expect(request.mock.calls.some(([method]) => method === "plugin.approval.resolve")).toBe(false);
+  });
 });

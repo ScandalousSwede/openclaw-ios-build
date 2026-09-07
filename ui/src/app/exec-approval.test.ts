@@ -5,6 +5,7 @@ import {
   isStaleApprovalResolutionError,
   parseExecApprovalRequested,
   parsePluginApprovalRequested,
+  parseArtifactReviewPending,
   clearResolvedExecApprovalPrompt,
   refreshPendingApprovalQueue,
   type ExecApprovalPromptState,
@@ -454,5 +455,43 @@ describe("refreshPendingApprovalQueue", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("artifact review pending queue", () => {
+  const pending = {
+    id: "review",
+    binding: { operation_id: "operation", event_id: "event", artifact_sha256: ["a".repeat(64)] },
+    created_at_ms: 1000,
+    expires_at_ms: Date.now() + 60000,
+  };
+  it("keeps artifact review distinct from execution approval and rejects malformed binding", () => {
+    const parsed = parseArtifactReviewPending(pending)!;
+    expect(parsed.kind).toBe("artifact_review");
+    expect(parsed.request.allowedDecisions).toBeUndefined();
+    expect(parsed.artifactReview?.binding).toEqual(pending.binding);
+    expect(parsed.pluginDescription).toContain("authenticated operator disposition");
+    expect(
+      parseArtifactReviewPending({
+        ...pending,
+        binding: { ...pending.binding, artifact_sha256: ["bad"] },
+      }),
+    ).toBeNull();
+  });
+  it("uses kind-specific existing list while retaining legacy execution and plugin requests", async () => {
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (
+        method === "plugin.approval.list" &&
+        (params as { kind?: string })?.kind === "artifact_review"
+      )
+        return { available: true, items: [pending] };
+      return [];
+    });
+    const state = createPromptState(request, []);
+    await refreshPendingApprovalQueue(state);
+    expect(state.artifactReviewAvailable).toBe(true);
+    expect(state.execApprovalQueue[0]?.kind).toBe("artifact_review");
+    expect(request).toHaveBeenCalledWith("plugin.approval.list", {});
+    expect(request).toHaveBeenCalledWith("plugin.approval.list", { kind: "artifact_review" });
   });
 });

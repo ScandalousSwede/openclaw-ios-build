@@ -18,10 +18,17 @@ export type ExecApprovalRequestPayload = {
 };
 
 export type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
+export type ApprovalDecision = ExecApprovalDecision | "accept_artifact" | "reject_artifact";
+export type ArtifactReviewBinding = {
+  operation_id: string;
+  event_id: string;
+  artifact_sha256: string[];
+};
 
 export type ExecApprovalRequest = {
   id: string;
-  kind: "exec" | "plugin";
+  kind: "exec" | "plugin" | "artifact_review";
+  artifactReview?: { binding: ArtifactReviewBinding };
   request: ExecApprovalRequestPayload;
   pluginTitle?: string;
   pluginDescription?: string | null;
@@ -44,6 +51,7 @@ export type ExecApprovalPromptState = {
   } | null;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalBusy: boolean;
+  artifactReviewAvailable?: boolean;
   execApprovalError: string | null;
   execApprovalRefreshes?: Set<{ removedIds: Set<string> }>;
   execApprovalExpiryTimers?: Map<string, ReturnType<typeof globalThis.setTimeout>>;
@@ -197,6 +205,50 @@ export function parsePluginApprovalRequested(payload: unknown): ExecApprovalRequ
     pluginId,
     createdAtMs,
     expiresAtMs,
+  };
+}
+
+export function parseArtifactReviewPending(payload: unknown): ExecApprovalRequest | null {
+  if (
+    !isRecord(payload) ||
+    typeof payload.id !== "string" ||
+    !/^[A-Za-z0-9_.:-]{1,512}$/.test(payload.id) ||
+    !Number.isSafeInteger(payload.created_at_ms) ||
+    !Number.isSafeInteger(payload.expires_at_ms) ||
+    (payload.created_at_ms as number) <= 0 ||
+    (payload.expires_at_ms as number) <= (payload.created_at_ms as number) ||
+    !isRecord(payload.binding)
+  )
+    return null;
+  const binding = payload.binding;
+  if (
+    typeof binding.operation_id !== "string" ||
+    !/^[A-Za-z0-9_.:-]{1,512}$/.test(binding.operation_id) ||
+    typeof binding.event_id !== "string" ||
+    !/^[A-Za-z0-9_.:-]{1,512}$/.test(binding.event_id) ||
+    !Array.isArray(binding.artifact_sha256) ||
+    !binding.artifact_sha256.length ||
+    binding.artifact_sha256.length > 64 ||
+    !binding.artifact_sha256.every(
+      (hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash),
+    ) ||
+    new Set(binding.artifact_sha256).size !== binding.artifact_sha256.length
+  )
+    return null;
+  const copied = {
+    operation_id: binding.operation_id,
+    event_id: binding.event_id,
+    artifact_sha256: [...binding.artifact_sha256] as string[],
+  };
+  return {
+    id: payload.id,
+    kind: "artifact_review",
+    request: { command: "Review current artifact" },
+    pluginTitle: "Review current artifact",
+    pluginDescription: `Operation: ${copied.operation_id}\nEvent: ${copied.event_id}\nSHA-256: ${copied.artifact_sha256.join(", ")}\nThis records your authenticated operator disposition; it does not approve execution or establish scientific correctness.`,
+    createdAtMs: payload.created_at_ms as number,
+    expiresAtMs: payload.expires_at_ms as number,
+    artifactReview: { binding: copied },
   };
 }
 
@@ -364,9 +416,10 @@ export async function refreshPendingApprovalQueue(
   refreshes.add(refresh);
   const refreshStartedWith = pruneExecApprovalQueue(state.execApprovalQueue);
   try {
-    const [execResult, pluginResult] = await Promise.allSettled([
+    const [execResult, pluginResult, artifactResult] = await Promise.allSettled([
       client.request("exec.approval.list", {}),
       client.request("plugin.approval.list", {}),
+      client.request("plugin.approval.list", { kind: "artifact_review" }),
     ]);
     const execApprovals =
       execResult.status === "fulfilled"
@@ -376,8 +429,17 @@ export async function refreshPendingApprovalQueue(
       pluginResult.status === "fulfilled"
         ? (parseApprovalList(pluginResult.value, parsePluginApprovalRequested) ?? [])
         : currentApprovalsForKind(state.execApprovalQueue, "plugin");
+    const artifactPayload =
+      artifactResult.status === "fulfilled" && isRecord(artifactResult.value)
+        ? artifactResult.value
+        : null;
+    const artifactApprovals =
+      artifactPayload && Array.isArray(artifactPayload.items)
+        ? (parseApprovalList(artifactPayload.items, parseArtifactReviewPending) ?? [])
+        : currentApprovalsForKind(state.execApprovalQueue, "artifact_review");
+    const artifactAvailable = artifactPayload?.available === true;
     const refreshed = mergeRefreshedApprovalQueue(
-      sortApprovalsNewestFirst([...execApprovals, ...pluginApprovals]),
+      sortApprovalsNewestFirst([...execApprovals, ...pluginApprovals, ...artifactApprovals]),
       refreshStartedWith,
       state.execApprovalQueue,
       refresh.removedIds,
@@ -385,6 +447,7 @@ export async function refreshPendingApprovalQueue(
     if (options?.isCurrentClient && !options.isCurrentClient(client)) {
       return false;
     }
+    state.artifactReviewAvailable = artifactAvailable;
     state.execApprovalQueue = refreshed;
     const refreshedIds = new Set(refreshed.map((entry) => entry.id));
     for (const id of state.execApprovalExpiryTimers?.keys() ?? []) {

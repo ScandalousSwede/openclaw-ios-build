@@ -20,7 +20,7 @@ import {
   parseExecApprovalResolved,
   parsePluginApprovalRequested,
   refreshPendingApprovalQueue,
-  type ExecApprovalDecision,
+  type ApprovalDecision,
   type ExecApprovalPromptState,
   type ExecApprovalRequest,
 } from "./exec-approval.ts";
@@ -37,6 +37,7 @@ export type ApplicationOverlaySnapshot = {
   updateStatusBanner: ApplicationStatusBanner | null;
   approvalQueue: readonly ExecApprovalRequest[];
   approvalBusy: boolean;
+  artifactReviewAvailable?: boolean;
   approvalError: string | null;
   devicePairSetupOpen: boolean;
   devicePairSetupLoading: boolean;
@@ -50,7 +51,9 @@ export type ApplicationOverlays = {
   subscribe: (listener: (snapshot: ApplicationOverlaySnapshot) => void) => () => void;
   runUpdate: () => Promise<void>;
   dismissUpdate: () => void;
-  decideApproval: (decision: ExecApprovalDecision) => Promise<void>;
+  refreshApprovals?: () => Promise<void>;
+  deferApproval?: () => void;
+  decideApproval: (decision: ApprovalDecision) => Promise<void>;
   openDevicePairSetup: () => Promise<void>;
   refreshDevicePairSetup: () => Promise<void>;
   closeDevicePairSetup: () => void;
@@ -242,6 +245,7 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       updateStatusBanner: snapshot.updateStatusBanner,
       approvalQueue: promptState.execApprovalQueue,
       approvalBusy: promptState.execApprovalBusy,
+      artifactReviewAvailable: promptState.artifactReviewAvailable === true,
       approvalError: promptState.execApprovalError,
       devicePairSetupOpen: devicePairSetupState.devicePairSetupOpen,
       devicePairSetupLoading: devicePairSetupState.devicePairSetupLoading,
@@ -405,7 +409,10 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
     );
   };
 
+  let activeConnected = gateway.snapshot.connected;
   const stopGateway = gateway.subscribe((next) => {
+    const wasConnected = activeConnected;
+    activeConnected = next.connected;
     updateRunGeneration += 1;
     cancelUpdateVerification();
     const previousClient = activeClient;
@@ -432,7 +439,7 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       return;
     }
     snapshot = { ...snapshot, updateAvailable: readUpdateAvailable(next.hello) };
-    if (previousClient !== next.client) {
+    if (previousClient !== next.client || !wasConnected) {
       void refreshApprovals(next.client);
       if (next.client) {
         void verifyPendingUpdateVersion(next.client);
@@ -480,6 +487,8 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       }
     }
   });
+
+  if (activeClient && gateway.snapshot.connected) void refreshApprovals(activeClient);
 
   return {
     get snapshot() {
@@ -576,6 +585,16 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       snapshot = { ...snapshot, updateAvailable: null };
       publish();
     },
+    deferApproval() {
+      const active = promptState.execApprovalQueue[0];
+      if (active?.kind === "artifact_review" && !promptState.execApprovalBusy) {
+        dismissExecApprovalPrompt(promptState, active.id);
+        publish();
+      }
+    },
+    async refreshApprovals() {
+      if (activeClient && isCurrentClient(activeClient)) await refreshApprovals(activeClient);
+    },
     async decideApproval(decision) {
       const active = promptState.execApprovalQueue[0];
       const client = gateway.snapshot.client;
@@ -589,8 +608,33 @@ export function createApplicationOverlays(gateway: ApplicationGateway): Applicat
       publish();
       try {
         const method =
-          active.kind === "plugin" ? "plugin.approval.resolve" : "exec.approval.resolve";
-        await client.request(method, { id: active.id, decision });
+          active.kind === "plugin" || active.kind === "artifact_review"
+            ? "plugin.approval.resolve"
+            : "exec.approval.resolve";
+        if (active.kind === "artifact_review") {
+          if (
+            !active.artifactReview ||
+            (decision !== "accept_artifact" && decision !== "reject_artifact")
+          )
+            throw new Error("Invalid artifact review decision");
+          const digest = await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(JSON.stringify([active.id, decision])),
+          );
+          const resolutionKey = `artifact-review:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+          if (!isCurrentClient(client) || approvalDecision !== operation) return;
+          await client.request(method, {
+            kind: "artifact_review",
+            id: active.id,
+            decision,
+            binding: active.artifactReview.binding,
+            idempotency_key: resolutionKey,
+          });
+        } else {
+          if (decision === "accept_artifact" || decision === "reject_artifact")
+            throw new Error("Invalid execution approval decision");
+          await client.request(method, { id: active.id, decision });
+        }
         if (!isCurrentClient(client)) {
           return;
         }

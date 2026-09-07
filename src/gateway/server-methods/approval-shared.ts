@@ -131,10 +131,17 @@ function normalizeApprovalIdentities(values: readonly string[] | null | undefine
   return [...normalized];
 }
 
+/** Identity fields consumed by approval policy, independent of sockets or display labels. */
+export type ApprovalIdentityClient = {
+  connId?: string;
+  connect?: { scopes?: readonly string[]; device?: { id?: string } };
+  internal?: { approvalRuntime?: boolean };
+};
+
 /** Checks whether a client can observe or resolve an approval record. */
 export function isApprovalRecordVisibleToClient<TPayload>(params: {
   record: ExecApprovalRecord<TPayload>;
-  client: GatewayClient | null;
+  client: ApprovalIdentityClient | null;
 }): boolean {
   const scopes = Array.isArray(params.client?.connect?.scopes) ? params.client.connect.scopes : [];
   if (scopes.includes(ADMIN_SCOPE)) {

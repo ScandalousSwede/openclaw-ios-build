@@ -1214,6 +1214,7 @@ export async function startGatewayServer(
         return {
           ...createGatewayAuxHandlers({
             log,
+            artifactReview: cfgAtStart.gateway?.artifactReview,
             activateRuntimeSecrets,
             sharedGatewaySessionGenerationState,
             resolveSharedGatewaySessionGenerationForConfig,

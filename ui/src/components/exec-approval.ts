@@ -3,6 +3,7 @@ import { LitElement, html, nothing } from "lit";
 import { property } from "lit/decorators.js";
 import { formatApprovalDisplayPath } from "../../../src/infra/approval-display-paths.ts";
 import type {
+  ApprovalDecision,
   ExecApprovalDecision,
   ExecApprovalRequest,
   ExecApprovalRequestPayload,
@@ -20,7 +21,8 @@ type ExecApprovalProps = {
   queue: readonly ExecApprovalRequest[];
   busy: boolean;
   error: string | null;
-  onDecision: (decision: ExecApprovalDecision) => void | Promise<void>;
+  onDefer?: () => void;
+  onDecision: (decision: ApprovalDecision) => void | Promise<void>;
 };
 
 function formatRemaining(ms: number): string {
@@ -122,8 +124,12 @@ ${active.pluginDescription}</pre
   `;
 }
 
-function approvalDecisionLabel(decision: ExecApprovalDecision): string {
+function approvalDecisionLabel(decision: ApprovalDecision): string {
   switch (decision) {
+    case "accept_artifact":
+      return "Accept artifact";
+    case "reject_artifact":
+      return "Reject artifact";
     case "allow-once":
       return t("execApproval.allowOnce");
     case "allow-always":
@@ -134,8 +140,12 @@ function approvalDecisionLabel(decision: ExecApprovalDecision): string {
   return t("execApproval.deny");
 }
 
-function approvalDecisionClass(decision: ExecApprovalDecision): string {
+function approvalDecisionClass(decision: ApprovalDecision): string {
   switch (decision) {
+    case "accept_artifact":
+      return "btn primary";
+    case "reject_artifact":
+      return "btn danger";
     case "allow-once":
       return "btn primary";
     case "allow-always":
@@ -146,7 +156,8 @@ function approvalDecisionClass(decision: ExecApprovalDecision): string {
   return "btn danger";
 }
 
-function resolveApprovalDecisions(active: ExecApprovalRequest): readonly ExecApprovalDecision[] {
+function resolveApprovalDecisions(active: ExecApprovalRequest): readonly ApprovalDecision[] {
+  if (active.kind === "artifact_review") return ["accept_artifact", "reject_artifact"];
   if (active.request.allowedDecisions?.length) {
     return active.request.allowedDecisions;
   }
@@ -158,7 +169,7 @@ function resolveApprovalDecisions(active: ExecApprovalRequest): readonly ExecApp
 
 function renderUnavailableDecisionWarning(
   active: ExecApprovalRequest,
-  decisions: readonly ExecApprovalDecision[],
+  decisions: readonly ApprovalDecision[],
 ) {
   return active.kind !== "exec" || decisions.includes("allow-always")
     ? nothing
@@ -177,7 +188,7 @@ function renderExecApprovalPrompt(props: ExecApprovalProps) {
       ? t("execApproval.expiresIn", { time: formatRemaining(remainingMs) })
       : t("execApproval.expired");
   const queueCount = props.queue.length;
-  const isPlugin = active.kind === "plugin";
+  const isPlugin = active.kind === "plugin" || active.kind === "artifact_review";
   const title = isPlugin
     ? (active.pluginTitle ?? t("execApproval.pluginApprovalNeeded"))
     : t("execApproval.execApprovalNeeded");
@@ -185,6 +196,10 @@ function renderExecApprovalPrompt(props: ExecApprovalProps) {
   const descriptionId = "exec-approval-description";
   const decisions = resolveApprovalDecisions(active);
   const handleCancel = () => {
+    if (!props.busy && active.kind === "artifact_review") {
+      props.onDefer?.();
+      return;
+    }
     if (!props.busy && decisions.includes("deny")) {
       void props.onDecision("deny");
     }
@@ -207,6 +222,11 @@ function renderExecApprovalPrompt(props: ExecApprovalProps) {
         ${renderUnavailableDecisionWarning(active, decisions)}
         ${props.error ? html`<div class="exec-approval-error">${props.error}</div>` : nothing}
         <div class="exec-approval-actions">
+          ${active.kind === "artifact_review"
+            ? html`<button class="btn" ?disabled=${props.busy} @click=${() => props.onDefer?.()}>
+                Not now
+              </button>`
+            : nothing}
           ${decisions.map(
             (decision) => html`
               <button
