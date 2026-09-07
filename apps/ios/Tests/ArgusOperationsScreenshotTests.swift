@@ -22,7 +22,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         for (name, size) in [("standard", DynamicTypeSize.large), ("offline-accessibility", .accessibility1)] {
             if name == "offline-accessibility" { store.markUnavailable() }
             let root = VStack(alignment: .leading, spacing: 12) {
-                Text("SIMULATOR FIXTURE â€” NOT LIVE EVIDENCE")
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
                     .font(.caption.bold()).padding(.horizontal)
                 ArgusOperationsContent(store: store, client: nil)
             }
