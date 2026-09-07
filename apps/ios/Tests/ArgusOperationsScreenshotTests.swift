@@ -171,10 +171,43 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         self.add(attachment)
     }
 
+    @MainActor
+    func testProductionNamedArtifactLabels() throws {
+        let artifacts = [
+            ArgusOperation.Artifact(sha256: String(repeating: "a", count: 64), bytes: 47,
+                                    displayName: "review.json"),
+            ArgusOperation.Artifact(sha256: String(repeating: "b", count: 64), bytes: 93,
+                                    displayName: "validation.txt"),
+        ]
+        XCTAssertNotEqual(artifacts[0].id, artifacts[1].id)
+        let root = VStack(alignment: .leading, spacing: 20) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            Text("Artifact evidence").font(.headline)
+            ForEach(artifacts) { artifact in
+                Button {} label: {
+                    ArgusArtifactButtonLabel(artifact: artifact, operationLabel: "Run output")
+                }
+            }
+        }
+        .padding()
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.dynamicTypeSize, .accessibility1)
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let image = try self.hostedImage(root, artifactNames: ["review.json", "validation.txt"])
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-named-artifact-labels-simulator-fixture-accessibility"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
     /// ImageRenderer replaces UIKit-backed menu controls with placeholders. Keep the
     /// production control and capture its real hosted view hierarchy instead.
     @MainActor
-    private func hostedImage(_ content: some View, selectedProject: String) throws -> UIImage {
+    private func hostedImage(
+        _ content: some View, selectedProject: String? = nil, artifactNames: [String] = []) throws -> UIImage
+    {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
         let host = UIHostingController(rootView: content)
@@ -208,7 +241,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
-        request.customWords = [selectedProject]
+        request.customWords = selectedProject.map { [$0] } ?? artifactNames
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
         let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
             guard let text = observation.topCandidates(1).first?.string else { return nil }
@@ -216,12 +249,18 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         }
         // Card text alone must not satisfy the menu assertion: the selected project
         // must be visible ABOVE the observation timestamp, where the control lives.
-        let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
-        let aboveTimestamp = words.filter { $0.1.minY > timestamp.1.maxY }
-        XCTAssertTrue(aboveTimestamp.contains {
-            Self.containsProjectLabel($0.0, project: selectedProject)
-        }, "The selected project menu label must be visible above the timestamp; fixture OCR: " +
-            aboveTimestamp.prefix(12).map { String($0.0.prefix(160)) }.joined(separator: " | "))
+        if let selectedProject {
+            let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
+            let aboveTimestamp = words.filter { $0.1.minY > timestamp.1.maxY }
+            XCTAssertTrue(aboveTimestamp.contains {
+                Self.containsProjectLabel($0.0, project: selectedProject)
+            }, "The selected project menu label must be visible above the timestamp; fixture OCR: " +
+                aboveTimestamp.prefix(12).map { String($0.0.prefix(160)) }.joined(separator: " | "))
+        }
+        for name in artifactNames {
+            XCTAssertTrue(words.contains { Self.containsProjectLabel($0.0, project: name) },
+                          "Each corresponding artifact filename must render: \(name)")
+        }
         return image
     }
 

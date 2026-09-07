@@ -122,6 +122,16 @@ private struct ArgusOperationRow: View {
     }
 }
 
+struct ArgusArtifactButtonLabel: View {
+    let artifact: ArgusOperation.Artifact
+    let operationLabel: String?
+
+    var body: some View {
+        Label("\(self.artifact.buttonLabel(operationLabel: self.operationLabel)) · \(self.artifact.bytes) bytes",
+              systemImage: "doc.viewfinder")
+    }
+}
+
 private struct ArgusArtifactPreview: Identifiable {
     let id: String
     let data: Data
@@ -170,7 +180,7 @@ private struct ArgusOperationDetailView: View {
                                 Button {
                                     Task { await self.openArtifact(artifact, item: item) }
                                 } label: {
-                                    Label("\(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) · \(artifact.bytes) bytes", systemImage: "doc.viewfinder")
+                                    ArgusArtifactButtonLabel(artifact: artifact, operationLabel: item.display?.artifactLabel)
                                 }
                                 .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.title), \(artifact.bytes) bytes")
                                 .disabled(self.loadingArtifact || !self.appModel.isOperatorGatewayConnected)
