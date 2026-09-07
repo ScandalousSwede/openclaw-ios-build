@@ -1225,3 +1225,37 @@ it("shows the entire admitted surface-result limitations outside collapsed prove
   expect(element.querySelector(".argus-selected-title")?.closest("details")).toBeNull();
   expect(element.querySelector<HTMLDetailsElement>(".argus-detail > details")?.open).toBe(false);
 });
+
+it("distinguishes named artifacts with escaped labels while retaining hash and size", async () => {
+  const selected = {
+    ...item,
+    artifacts: [
+      { sha256: "a".repeat(64), bytes: 100, display_name: "native-test-receipt.json" },
+      { sha256: "b".repeat(64), bytes: 200, display_name: "<img onerror=alert(1)>.json" },
+      { sha256: "c".repeat(64), bytes: null },
+    ],
+  };
+  const request = vi
+    .fn()
+    .mockResolvedValueOnce({ ...page, items: [selected] })
+    .mockResolvedValueOnce({
+      item: selected,
+      requested: selected,
+      timeline: [selected],
+      coverage: { complete: true, has_more: false },
+    });
+  const { element } = await mount(request);
+  element.querySelector<HTMLButtonElement>(".argus-work-row")!.click();
+  await vi.waitFor(() =>
+    expect(element.querySelector(".argus-detail")?.textContent).toContain(
+      "native-test-receipt.json · aaaaaaaaaaaa (100 bytes)",
+    ),
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "<img onerror=alert(1)>.json · bbbbbbbbbbbb (200 bytes)",
+  );
+  expect(element.querySelector(".argus-detail")?.textContent).toContain(
+    "Verify artifact cccccccccccc (size checked on open)",
+  );
+  expect(element.querySelector(".argus-detail img")).toBeNull();
+});

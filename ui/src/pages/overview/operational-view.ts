@@ -1112,7 +1112,7 @@ export class OperationalView extends LitElement {
                       ?disabled=${!connected || this.busy}
                       @click=${() => this.openArtifact(artifact)}
                     >
-                      ${`Verify ${this.detail?.artifact_context?.relation === "previous_attempt" ? "previous-attempt artifact" : "artifact"} ${artifact.sha256.slice(0, 12)} (${artifact.bytes === null ? "size checked on open" : `${artifact.bytes} bytes`})`}
+                      ${`Verify ${this.detail?.artifact_context?.relation === "previous_attempt" ? "previous-attempt artifact" : "artifact"} ${artifact.display_name ? `${artifact.display_name} · ` : ""}${artifact.sha256.slice(0, 12)} (${artifact.bytes === null ? "size checked on open" : `${artifact.bytes} bytes`})`}
                     </button>
                   </p>`,
               )}${this.artifactUrl

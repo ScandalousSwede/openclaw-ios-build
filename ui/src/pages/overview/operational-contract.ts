@@ -3,6 +3,15 @@ import { z } from "zod";
 const identity = z.string().min(1).max(300);
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const artifactSchema = z.object({
+  display_name: z
+    .string()
+    .min(1)
+    .refine((value) => Array.from(value).length <= 160)
+    .meta({ maxLength: 160 })
+    .regex(
+      /^(?!\.{1,2}$)(?![\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]*$)[^/\\\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]+$/u,
+    )
+    .optional(),
   sha256: digest,
   bytes: z.number().int().nonnegative().nullable(),
 });

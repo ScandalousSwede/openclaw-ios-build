@@ -258,3 +258,66 @@ it("rejects malformed, foreign and false-current operator history", () => {
     parseDetail(fixtures[0].detail, fixtures[0].requested_operation_id).review_history,
   ).toBeUndefined();
 });
+
+it("accepts bounded artifact basenames and rejects paths, controls and bidi labels", () => {
+  const fixture = fixtures[0].list;
+  for (const display_name of [
+    "native-test-receipt.json",
+    "Screenshot QA.json",
+    "résultat.json",
+    "<img>.txt",
+  ]) {
+    expect(
+      parsePage({
+        ...fixture,
+        items: [
+          { ...fixture.items[0], artifacts: [{ sha256: "a".repeat(64), bytes: 3, display_name }] },
+        ],
+      }).items[0].artifacts[0].display_name,
+    ).toBe(display_name);
+  }
+  for (const display_name of [
+    "",
+    ".",
+    "..",
+    "   ",
+    "\ufeff",
+    "../receipt.json",
+    "folder/receipt.json",
+    "folder\\receipt.json",
+    "bad\nname",
+    "bad\u0000name",
+    "bad\u0085name",
+    "bad\u202ename",
+    "bad\u2066name",
+    "bad\u200fname",
+    "bad\u061cname",
+    "x".repeat(161),
+    3,
+    null,
+  ]) {
+    expect(() =>
+      parsePage({
+        ...fixture,
+        items: [
+          { ...fixture.items[0], artifacts: [{ sha256: "a".repeat(64), bytes: 3, display_name }] },
+        ],
+      }),
+    ).toThrow();
+  }
+  expect(parsePage(fixture).items[0].artifacts[0]?.display_name).toBeUndefined();
+});
+
+it("counts artifact display names as Unicode code points like the shared JSON schema", () => {
+  const fixture = fixtures[0].list;
+  const named = (display_name: string) => ({
+    ...fixture,
+    items: [
+      { ...fixture.items[0], artifacts: [{ sha256: "a".repeat(64), bytes: 3, display_name }] },
+    ],
+  });
+  expect(parsePage(named("😀".repeat(160))).items[0].artifacts[0].display_name).toBe(
+    "😀".repeat(160),
+  );
+  expect(() => parsePage(named("😀".repeat(161)))).toThrow();
+});
