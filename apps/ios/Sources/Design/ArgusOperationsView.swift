@@ -170,9 +170,9 @@ private struct ArgusOperationDetailView: View {
                                 Button {
                                     Task { await self.openArtifact(artifact, item: item) }
                                 } label: {
-                                    Label("\(item.display?.artifactLabel ?? "Open artifact") · \(artifact.bytes) bytes", systemImage: "doc.viewfinder")
+                                    Label("\(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) · \(artifact.bytes) bytes", systemImage: "doc.viewfinder")
                                 }
-                                .accessibilityLabel("Open verified artifact for \(item.title), \(artifact.bytes) bytes")
+                                .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.title), \(artifact.bytes) bytes")
                                 .disabled(self.loadingArtifact || !self.appModel.isOperatorGatewayConnected)
                             }
                         }

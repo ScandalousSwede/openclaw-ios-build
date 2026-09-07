@@ -13,7 +13,52 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     struct Artifact: Decodable, Identifiable, Sendable {
         let sha256: String
         let bytes: Int
+        let displayName: String?
         var id: String { self.sha256 }
+
+        init(sha256: String, bytes: Int, displayName: String? = nil) {
+            self.sha256 = sha256
+            self.bytes = bytes
+            self.displayName = displayName
+        }
+
+        private enum CodingKeys: String, CodingKey { case sha256, bytes, displayName }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            self.sha256 = try values.decode(String.self, forKey: .sha256)
+            self.bytes = try values.decode(Int.self, forKey: .bytes)
+            self.displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+            if let name = self.displayName, !Self.isValidDisplayName(name) {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .displayName, in: values, debugDescription: "Invalid artifact display name")
+            }
+        }
+
+        static func isValidDisplayName(_ name: String) -> Bool {
+            let scalars = name.unicodeScalars
+            // Match the gateway/desktop ECMAScript trim whitespace-only predicate.
+            let whitespaceOnly = scalars.allSatisfy {
+                let value = $0.value
+                return (9...13).contains(value) || value == 0x20 || value == 0xA0 || value == 0x1680
+                    || (0x2000...0x200A).contains(value) || value == 0x2028 || value == 0x2029
+                    || value == 0x202F || value == 0x205F || value == 0x3000 || value == 0xFEFF
+            }
+            guard (1...160).contains(scalars.count), name != ".", name != "..", !whitespaceOnly else {
+                return false
+            }
+            return !scalars.contains {
+                let value = $0.value
+                return value == 47 || value == 92 || value <= 31 || (127...159).contains(value)
+                    || value == 0x061C || value == 0x200E || value == 0x200F
+                    || (0x202A...0x202E).contains(value) || (0x2066...0x2069).contains(value)
+            }
+        }
+
+        func buttonLabel(operationLabel: String?) -> String {
+            // Display metadata never changes the digest used for retrieval or review binding.
+            self.displayName ?? operationLabel ?? "Artifact \(self.sha256.prefix(12))"
+        }
     }
 
     let operationId: String

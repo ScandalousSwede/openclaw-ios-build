@@ -52,7 +52,7 @@ struct ArgusOperationsTests {
     @Test func artifactMustMatchRequestedIdentityDigestAndBytes() throws {
         let data = Data("synthetic technical result".utf8)
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let reference = ArgusOperation.Artifact(sha256: hash, bytes: data.count)
+        let reference = ArgusOperation.Artifact(sha256: hash, bytes: data.count, displayName: "result.txt")
         let response = ArgusOperationArtifact(
             sha256: hash, bytes: data.count, mimeType: "text/plain",
             contentBase64: data.base64EncodedString(), operationId: "operation-47")
@@ -66,6 +66,40 @@ struct ArgusOperationsTests {
         #expect(throws: ArgusOperationsError.self) {
             try tampered.validatedData(for: "operation-47", artifact: reference)
         }
+    }
+
+    private func artifactReference(name: Any? = nil, bytes: Any = 4) throws -> ArgusOperation.Artifact {
+        var payload: [String: Any] = ["sha256": String(repeating: "a", count: 64), "bytes": bytes]
+        if let name { payload["display_name"] = name }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ArgusOperation.Artifact.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+
+    @Test func artifactNamesDecodeAdditivelyAndLabelCorrespondingArtifact() throws {
+        let named = try self.artifactReference(name: "result.pdf")
+        let other = try self.artifactReference(name: "checks.json")
+        let legacy = try self.artifactReference()
+        #expect(named.buttonLabel(operationLabel: "Run output") == "result.pdf")
+        #expect(other.buttonLabel(operationLabel: "Run output") == "checks.json")
+        #expect(legacy.buttonLabel(operationLabel: "Run output") == "Run output")
+        #expect(legacy.buttonLabel(operationLabel: nil) == "Artifact aaaaaaaaaaaa")
+        #expect(try self.artifactReference(name: NSNull()).displayName == nil)
+        #expect(named.id == legacy.id && named.bytes == legacy.bytes)
+        #expect(throws: DecodingError.self) { try self.artifactReference(bytes: NSNull()) }
+    }
+
+    @Test func artifactNamesRejectPathsControlsBidiAndOversizeScalars() throws {
+        let invalid = ["", " ", "\u{FEFF}", "\u{00A0}\u{3000}", ".", "..", "a/b", "a\\b", "\u{0000}", "\u{001F}", "\u{007F}", "\u{009F}",
+                       "\u{061C}", "\u{200E}", "\u{200F}", "\u{202A}", "\u{202E}", "\u{2066}", "\u{2069}",
+                       String(repeating: "😀", count: 161)]
+        for value in invalid {
+            #expect(throws: DecodingError.self) { try self.artifactReference(name: value) }
+        }
+        #expect(throws: DecodingError.self) { try self.artifactReference(name: 3) }
+        #expect(try self.artifactReference(name: String(repeating: "😀", count: 160)).displayName != nil)
+        #expect(try self.artifactReference(name: "résultat 技術.txt").displayName == "résultat 技術.txt")
+        #expect(try self.artifactReference(name: "a\u{FEFF}.txt").displayName != nil)
     }
 
     @Test func activeMarkupIsNeverAnArtifactPreviewType() {
