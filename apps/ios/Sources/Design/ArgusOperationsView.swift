@@ -5,6 +5,7 @@ import SwiftUI
 struct ArgusOperationsSection: View {
     @Environment(NodeAppModel.self) private var appModel
     @State private var store = ArgusOperationsStore()
+    @Environment(\.scenePhase) private var scenePhase
 
     private var client: ArgusOperationsClient? {
         guard !self.appModel.isAppleReviewDemoModeEnabled,
@@ -15,10 +16,16 @@ struct ArgusOperationsSection: View {
 
     var body: some View {
         ArgusOperationsContent(store: self.store, client: self.client)
-            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)") {
+            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)") {
                 self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
-                if let client { await self.store.refresh(using: client) }
-                else { self.store.markUnavailable() }
+                // Invalidate suspended work from the previous visibility/route scope.
+                self.store.markUnavailable()
+                guard self.scenePhase == .active, let client else { return }
+                while !Task.isCancelled {
+                    await self.store.refresh(using: client)
+                    do { try await Task.sleep(for: .seconds(60)) }
+                    catch { return }
+                }
             }
     }
 }
@@ -90,6 +97,7 @@ private struct ArgusOperationRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(self.item.display?.label ?? self.item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+            if let summary = self.item.display?.changeSummary { Text(summary).font(.subheadline) }
             Text("\(self.item.source) · \(self.item.kind)").font(.caption).foregroundStyle(.secondary)
             Label(self.item.supersedesEventId == nil ? self.item.state.replacingOccurrences(of: "_", with: " ").capitalized : "Correction observed", systemImage: "doc.text")
                 .font(.caption)
@@ -116,6 +124,7 @@ private struct ArgusOperationDetailView: View {
     @State private var error: String?
     @State private var preview: ArgusArtifactPreview?
     @State private var loadingArtifact = false
+    @State private var detailLoadGeneration = 0
 
     private var sameGateway: Bool { self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID }
 
@@ -146,7 +155,7 @@ private struct ArgusOperationDetailView: View {
                                 Button {
                                     Task { await self.openArtifact(artifact, item: item) }
                                 } label: {
-                                    Label("Open artifact · \(artifact.bytes) bytes", systemImage: "doc.viewfinder")
+                                    Label("\(item.display?.artifactLabel ?? "Open artifact") · \(artifact.bytes) bytes", systemImage: "doc.viewfinder")
                                 }
                                 .accessibilityLabel("Open verified artifact for \(item.title), \(artifact.bytes) bytes")
                                 .disabled(self.loadingArtifact || !self.appModel.isOperatorGatewayConnected)
@@ -162,7 +171,10 @@ private struct ArgusOperationDetailView: View {
         }
         .navigationTitle("Evidence")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await self.load() }
+        .task(id: "\(self.sameGateway)|\(self.appModel.isOperatorGatewayConnected)") {
+            self.detailLoadGeneration += 1
+            if self.sameGateway, self.appModel.isOperatorGatewayConnected { await self.load() }
+        }
         .refreshable { await self.load() }
         .sheet(item: self.$preview) { preview in
             NavigationStack {
@@ -178,15 +190,20 @@ private struct ArgusOperationDetailView: View {
     }
 
     private func load() async {
-        guard self.sameGateway else { return }
+        guard self.sameGateway, !Task.isCancelled else { return }
+        self.detailLoadGeneration += 1
+        let generation = self.detailLoadGeneration
         do {
             let response = try await self.client.request(
                 "argus.operations.detail", params: ["operation_id": self.operation.id], as: ArgusOperationDetail.self)
-            guard self.sameGateway else { return }
+            guard self.sameGateway, generation == self.detailLoadGeneration, !Task.isCancelled else { return }
             try response.validate(for: self.operation)
             self.detail = response
             self.error = nil
-        } catch { self.error = "Detail unavailable. Previously observed evidence remains visible." }
+        } catch {
+            guard generation == self.detailLoadGeneration, !Task.isCancelled else { return }
+            self.error = "Detail unavailable. Previously observed evidence remains visible."
+        }
     }
 
     private func openArtifact(_ artifact: ArgusOperation.Artifact, item: ArgusOperation) async {

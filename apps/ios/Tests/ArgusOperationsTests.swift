@@ -117,4 +117,43 @@ struct ArgusOperationsTests {
         #expect(throws: ArgusOperationsError.self) { try detail.validate(for: foreign) }
     }
 
+    @Test func suspendedRefreshCannotOverwriteNewObservationScope() async throws {
+        let store = ArgusOperationsStore()
+        store.selectGateway("gateway-a")
+        let old = try self.page(id: "old")
+        let fresh = try self.page(id: "fresh")
+        var pending: CheckedContinuation<ArgusOperationsPage, Never>?
+        let first = Task { @MainActor in
+            await store.refresh(gatewayID: "gateway-a") { _ in
+                await withCheckedContinuation { pending = $0 }
+            }
+        }
+        while pending == nil { await Task.yield() }
+        store.markUnavailable() // background/disconnect invalidates the active observation
+        await store.refresh(gatewayID: "gateway-a") { _ in fresh }
+        pending?.resume(returning: old)
+        await first.value
+        #expect(store.items.map(\.id) == ["fresh"])
+        #expect(!store.isLoading)
+        #expect(!store.unavailable)
+    }
+
+    @Test func cancelledRefreshCannotPublishLateResponse() async throws {
+        let store = ArgusOperationsStore()
+        store.selectGateway("gateway-a")
+        let page = try self.page()
+        var pending: CheckedContinuation<ArgusOperationsPage, Never>?
+        let task = Task { @MainActor in
+            await store.refresh(gatewayID: "gateway-a") { _ in
+                await withCheckedContinuation { pending = $0 }
+            }
+        }
+        while pending == nil { await Task.yield() }
+        task.cancel()
+        pending?.resume(returning: page)
+        await task.value
+        #expect(store.items.isEmpty)
+        #expect(!store.isLoading)
+    }
+
 }

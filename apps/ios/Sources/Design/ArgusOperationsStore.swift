@@ -165,7 +165,17 @@ final class ArgusOperationsStore {
     }
 
     func refresh(using client: ArgusOperationsClient, more: Bool = false) async {
-        guard !self.isLoading, self.gatewayID == client.gatewayID else { return }
+        await self.refresh(gatewayID: client.gatewayID, more: more) { params in
+            try await client.request("argus.operations.list", params: params, as: ArgusOperationsPage.self)
+        }
+    }
+
+    func refresh(
+        gatewayID: String,
+        more: Bool = false,
+        fetch: ([String: String]) async throws -> ArgusOperationsPage
+    ) async {
+        guard !self.isLoading, self.gatewayID == gatewayID, !Task.isCancelled else { return }
         if more, self.nextCursor == nil { return }
         self.isLoading = true
         let generation = self.generation
@@ -173,11 +183,11 @@ final class ArgusOperationsStore {
         do {
             var params = ["project": "Argus"]
             if more { params["cursor"] = self.nextCursor }
-            let page = try await client.request("argus.operations.list", params: params, as: ArgusOperationsPage.self)
-            guard generation == self.generation else { return }
+            let page = try await fetch(params)
+            guard generation == self.generation, !Task.isCancelled else { return }
             try self.accept(page, more: more)
         } catch {
-            guard generation == self.generation else { return }
+            guard generation == self.generation, !Task.isCancelled else { return }
             self.unavailable = true
         }
     }
