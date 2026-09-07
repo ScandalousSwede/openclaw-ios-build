@@ -64,7 +64,7 @@ describe("operational evidence overview", () => {
   it("keeps partial scope and owner acceptance separate from verified execution", async () => {
     const { element } = await mount();
     expect(element.textContent).toContain("Partial coverage");
-    expect(element.textContent).toContain("Owner acceptance not recorded");
+    expect(element.textContent).not.toContain("Owner approval required");
     expect(element.textContent).not.toContain("all systems nominal");
     expect(element.querySelector('input[type="search"]')).not.toBeNull();
   });
@@ -418,7 +418,10 @@ const workContract = {
 async function mountContract(
   contract: unknown,
   current: Omit<typeof item, "artifacts"> & {
-    artifacts: { sha256: string; bytes: number }[];
+    artifacts: { sha256: string; bytes: number | null }[];
+    evidence_scope?: string;
+    executor_id?: string;
+    capability_id?: string;
   } = item,
 ) {
   const request = vi
@@ -495,7 +498,9 @@ describe("read-only work evidence contract", () => {
     expect(text).toContain("Unknown producer: outcome not recorded");
     expect(text).toContain("do not establish a pass for all current artifacts");
     expect(text).toContain("FAIL · artifact " + artifact.sha256);
-    expect(text).toContain("Technical owner: Inspect the failed check");
+    expect(
+      element.querySelector(".argus-owner-request")?.textContent?.replace(/\s+/g, " "),
+    ).toContain("Technical owner: Inspect the failed check");
     expect(text).toContain("Partial returned scope");
     expect(text).toContain("Owner acceptance not recorded");
   });
@@ -522,4 +527,107 @@ describe("read-only work evidence contract", () => {
     expect(element.querySelector(".argus-work-contract")).toBeNull();
     expect(element.querySelector(".argus-detail")).toBeNull();
   });
+});
+
+describe("result-first evidence hierarchy", () => {
+  it("keeps full producer text in collapsed provenance and puts artifacts first", async () => {
+    const title = "Reader correction " + "detailed producer narrative ".repeat(30);
+    const { element } = await mountContract(workContract, { ...item, title });
+    const detail = element.querySelector(".argus-detail")!;
+    expect(detail.querySelector("h3")!.textContent!.length).toBeLessThanOrEqual(140);
+    const provenance = detail.querySelector("details")!;
+    expect(provenance.open).toBe(false);
+    expect(provenance.textContent).toContain(title);
+    expect(provenance.textContent).toContain("Owner acceptance not recorded");
+    expect(detail.querySelector(".argus-owner-request")).toBeNull();
+    expect(detail.textContent).not.toContain("approval required");
+    expect(detail.querySelector(".argus-disposition")?.textContent).toContain("not established");
+  });
+
+  it("shows ordinary admitted operations through the same detail contract", async () => {
+    const { element } = await mountContract(
+      {
+        ...workContract,
+        native_observations: [],
+        coverage: { ...workContract.coverage, scope: "canonical_operation_trace" },
+      },
+      {
+        ...item,
+        title: "Technical completion · observed",
+        source: "canonical:codex-completion-adapter",
+        evidence_scope: "admitted_canonical_technical_operation",
+        executor_id: "synthetic-executor",
+        capability_id: "codex.completion",
+      },
+    );
+    const provenance = element.querySelector(".argus-detail details")!;
+    expect(provenance.textContent).toContain("admitted_canonical_technical_operation");
+    expect(provenance.textContent).toContain("synthetic-executor");
+    expect(provenance.textContent).toContain("No native outcome included in this scope");
+    expect(element.querySelector(".argus-disposition")?.textContent).toContain("not established");
+  });
+
+  it.each([
+    [null, 3, true, true],
+    [null, 3, false, false],
+    [3, 3, true, true],
+    [2, 3, false, true],
+    [null, 2, false, true],
+    [null, -1, false, true],
+  ])(
+    "verifies declared size %s against returned size %s",
+    async (declared, returned, succeeds, hashMatches) => {
+      const digest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+      const artifact = { sha256: digest, bytes: declared };
+      const cryptoMock = {
+        subtle: {
+          digest: vi
+            .fn()
+            .mockResolvedValue(
+              Uint8Array.from(digest.match(/../g)!, (pair) =>
+                hashMatches ? parseInt(pair, 16) : 0,
+              ).buffer,
+            ),
+        },
+      };
+      vi.stubGlobal("crypto", cryptoMock);
+      const create = vi.fn().mockReturnValue("blob:verified-synthetic");
+      vi.stubGlobal(
+        "URL",
+        class extends URL {
+          static override createObjectURL = create;
+          static override revokeObjectURL = vi.fn();
+        },
+      );
+      try {
+        const { element, request } = await mountContract(
+          {
+            ...workContract,
+            continuation: { ...workContract.continuation, artifact_sha256: [digest] },
+          },
+          { ...item, artifacts: [artifact] },
+        );
+        request.mockResolvedValueOnce({
+          sha256: digest,
+          bytes: returned,
+          mime_type: "text/plain; charset=utf-8",
+          content_base64: "YWJj",
+        });
+        const button = [...element.querySelectorAll("button")].find((node) =>
+          node.textContent?.includes("Verify artifact"),
+        )!;
+        if (declared === null) expect(button.textContent).toContain("size checked on open");
+        expect(button.closest("details")).toBeNull();
+        button.click();
+        await vi.waitFor(() =>
+          expect(element.textContent).toContain(
+            succeeds ? "Open verified artifact" : "Artifact could not be verified",
+          ),
+        );
+        expect(create).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

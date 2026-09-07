@@ -47,7 +47,7 @@ function validateFilters(filters: EvidenceFilters): string | null {
   return null;
 }
 
-type Artifact = { sha256: string; bytes: number };
+type Artifact = { sha256: string; bytes: number | null };
 type Operation = {
   operation_id: string;
   task_id: string;
@@ -60,6 +60,9 @@ type Operation = {
   observed_at: string;
   artifacts: Artifact[];
   owner_accepted: boolean;
+  evidence_scope?: string;
+  executor_id?: string | null;
+  capability_id?: string | null;
 };
 type Page = {
   items: Operation[];
@@ -131,6 +134,11 @@ type Detail = Operation & {
   historyComplete: boolean;
   requestedOperation: Operation;
 };
+
+function conciseTitle(value: string): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > 140 ? `${text.slice(0, 137).trimEnd()}…` : text;
+}
 
 function operationTime(value: string): string {
   const date = new Date(value);
@@ -411,6 +419,9 @@ export class OperationalView extends LitElement {
       if (generation !== this.generation) return;
       if (
         result.sha256 !== artifact.sha256 ||
+        !Number.isSafeInteger(result.bytes) ||
+        result.bytes < 0 ||
+        result.bytes > 1_048_576 ||
         result.content_base64.length > 1_398_104 ||
         !["text/plain", "text/markdown", "application/pdf", "image/png", "image/jpeg"].includes(
           result.mime_type.split(";")[0].trim(),
@@ -424,7 +435,7 @@ export class OperationalView extends LitElement {
       if (
         hash !== artifact.sha256 ||
         bytes.length !== result.bytes ||
-        bytes.length !== artifact.bytes
+        (artifact.bytes !== null && bytes.length !== artifact.bytes)
       )
         throw new Error("Artifact integrity failed");
       if (generation === this.generation)
@@ -494,18 +505,6 @@ export class OperationalView extends LitElement {
         <dt>Owner disposition</dt>
         <dd>Unknown in this reader. Owner acceptance not recorded.</dd>
       </dl>
-      ${contract.pending_owner_feedback.length
-        ? html`<h4>Pending owner feedback</h4>
-            <ul>
-              ${contract.pending_owner_feedback.map(
-                (feedback) =>
-                  html`<li>
-                    ${feedback.owner ?? "Owner unspecified"}:
-                    ${feedback.reason ?? "Reason not included"}
-                  </li>`,
-              )}
-            </ul>`
-        : nothing}
       <p>
         ${contract.coverage.complete ? "Complete returned scope" : "Partial returned scope"} ·
         ${contract.coverage.scope === "canonical_federation_observation"
@@ -517,7 +516,7 @@ export class OperationalView extends LitElement {
       <p>
         <a href=${this.observationLink(contract.continuation.operation_id)}
           >Inspect current evidence</a
-        >. Use the verified artifact controls below. Continuing execution requires the owning
+        >. Use the verified artifact controls above. Continuing execution requires the owning
         workflow; this view does not dispatch work or record a state transition.
       </p>
     </section>`;
@@ -653,10 +652,7 @@ export class OperationalView extends LitElement {
       >
         <p>ARGUS · Technical evidence</p>
         <h2 id="argus-evidence-heading">Here's what matters now.</h2>
-        <p>
-          External technical work captured through federation. This view does not cover every Argus
-          task.
-        </p>
+        <p>Recorded technical work and its artifacts. Coverage is limited to admitted evidence.</p>
         <p role="status">
           ${!connected
             ? "Disconnected — reconnect to verify current work."
@@ -669,27 +665,30 @@ export class OperationalView extends LitElement {
                   : "Coverage unavailable."}
         </p>
         ${this.page
-          ? html`<p>
-              Observed ${operationTime(this.page.coverage.observed_at)} · Federated technical
-              evidence ·
-              ${this.page.coverage.scope.project}${this.page.coverage.scope.task_id
-                ? ` · Task ${this.page.coverage.scope.task_id}`
-                : ""}${this.page.coverage.scope.source
-                ? ` · Source ${this.page.coverage.scope.source}`
-                : ""}
-              ${this.page.coverage.scope.recorded_from
-                ? ` · From ${this.page.coverage.scope.recorded_from} (inclusive)`
-                : ""}
-              ${this.page.coverage.scope.recorded_before
-                ? ` · Before ${this.page.coverage.scope.recorded_before} (exclusive)`
-                : ""}
-            </p>`
+          ? html`<details>
+              <summary>Evidence scope and freshness</summary>
+              <p>
+                Observed ${operationTime(this.page.coverage.observed_at)} · Technical evidence ·
+                ${this.page.coverage.scope.project}${this.page.coverage.scope.task_id
+                  ? ` · Task ${this.page.coverage.scope.task_id}`
+                  : ""}${this.page.coverage.scope.source
+                  ? ` · Source ${this.page.coverage.scope.source}`
+                  : ""}
+                ${this.page.coverage.scope.recorded_from
+                  ? ` · From ${this.page.coverage.scope.recorded_from} (inclusive)`
+                  : ""}
+                ${this.page.coverage.scope.recorded_before
+                  ? ` · Before ${this.page.coverage.scope.recorded_before} (exclusive)`
+                  : ""}
+              </p>
+              <p>
+                Snapshot evidence, not a live activity feed. Refreshes on reconnect and when
+                returning after a minute.
+              </p>
+              <p>Corpus: ${this.page.coverage.scope.corpus}</p>
+            </details>`
           : nothing}
         ${this.error ? html`<p role="alert">${this.error}</p>` : nothing}
-        <p>
-          Snapshot evidence, not a live activity feed. Refreshes on reconnect and when returning
-          after a minute.
-        </p>
         <details>
           <summary>Filter evidence by project, task, source or time</summary>
           <form @submit=${(event: Event) => this.applyFilters(event)}>
@@ -766,15 +765,10 @@ export class OperationalView extends LitElement {
           ${items.map(
             (item) =>
               html`<li>
-                <h3>${item.title}</h3>
-                <p>${item.state} · ${item.kind} · ${item.source}</p>
+                <h3>${conciseTitle(item.title)}</h3>
+                <p>Recorded state: ${item.state}</p>
                 <p>Observed ${operationTime(item.observed_at)}</p>
-                <p>
-                  ${item.artifacts.length} artifact references ·
-                  ${item.owner_accepted
-                    ? "Owner acceptance recorded"
-                    : "Owner acceptance not recorded"}
-                </p>
+                <p>${item.artifacts.length} artifact references</p>
                 <button
                   class="btn"
                   ?disabled=${!connected || this.busy}
@@ -803,42 +797,44 @@ export class OperationalView extends LitElement {
           : nothing}
         ${this.detail
           ? html`<section class="argus-detail" aria-label="Work details">
-              <h3 tabindex="-1">${this.detail.title}</h3>
+              <h3 tabindex="-1">${conciseTitle(this.detail.title)}</h3>
+              <p>Recorded state: ${this.detail.state}</p>
+              <p class="argus-disposition">
+                ${this.detail.workContract?.independent_verification.covers_all_current_artifacts
+                  ? "Independent PASS receipts cover the current artifacts."
+                  : this.detail.workContract?.independent_verification.artifacts.some(
+                        (entry) => entry.outcome === "FAIL",
+                      )
+                    ? "An independent check reported a failure. Inspect the evidence."
+                    : "Independent verification is not established for all current artifacts."}
+              </p>
               ${this.detail.newerObservation
                 ? html`<p>
-                    A newer observation is available for this task. Its evidence and artifacts are
-                    shown below. This does not establish that the earlier observation was
-                    superseded. Requested: ${this.detail.requestedOperation.title}
-                    (${operationTime(this.detail.requestedOperation.observed_at)}).
+                    A newer observation is available for this task. Showing current evidence; the
+                    requested observation remains in provenance.
                   </p>`
                 : nothing}
-              <p>${this.detail.state} · ${this.detail.source}</p>
-              <p>Task: ${this.detail.task_id}</p>
-              <p>
-                Detail follows this task and producer, including newer observations outside the
-                list's time window.
-              </p>
-              <p>
-                <a href=${this.observationLink(this.detail.requestedOperation.operation_id)}
-                  >Link to requested observation</a
-                >
-                ${this.detail.newerObservation
-                  ? html` ·
-                      <a href=${this.observationLink(this.detail.operation_id)}
-                        >Link to current observation</a
-                      >`
-                  : nothing}
-              </p>
-              <p>
-                Read-only evidence. Continuing work requires the owning workflow; opening this view
-                does not dispatch work.
-              </p>
-              <p>
-                Event ${operationTime(this.detail.occurred_at)} · observed
-                ${operationTime(this.detail.observed_at)}
-              </p>
-              ${this.renderWorkContract(this.detail)}
-              <h3>Artifacts</h3>
+              ${this.detail.workContract?.pending_owner_feedback.length
+                ? html`<section class="argus-owner-request" aria-label="Requested owner feedback">
+                    <h4>Requested owner feedback</h4>
+                    <ul>
+                      ${this.detail.workContract.pending_owner_feedback.map(
+                        (feedback) =>
+                          html`<li>
+                            ${feedback.owner ?? "Owner unspecified"}:
+                            ${feedback.reason ?? "Reason not included"}
+                          </li>`,
+                      )}
+                    </ul>
+                  </section>`
+                : nothing}
+              <h3>Inspect the result</h3>
+              ${!this.detail.artifacts.length
+                ? html`<p>
+                    No artifact references were returned. Inspect provenance for the recorded
+                    evidence.
+                  </p>`
+                : nothing}
               ${this.detail.artifacts.map(
                 (artifact) =>
                   html`<p>
@@ -847,7 +843,10 @@ export class OperationalView extends LitElement {
                       ?disabled=${!connected || this.busy}
                       @click=${() => this.openArtifact(artifact)}
                     >
-                      Verify artifact ${artifact.sha256.slice(0, 12)} (${artifact.bytes} bytes)
+                      Verify artifact ${artifact.sha256.slice(0, 12)}
+                      (${artifact.bytes === null
+                        ? "size checked on open"
+                        : `${artifact.bytes} bytes`})
                     </button>
                   </p>`,
               )}${this.artifactUrl
@@ -856,7 +855,48 @@ export class OperationalView extends LitElement {
                   >`
                 : nothing}
               <details>
-                <summary>Evidence references and timeline</summary>
+                <summary>Provenance, verification and history</summary>
+                <h4>Producer narrative</h4>
+                <p>${this.detail.title}</p>
+                <p>${this.detail.kind} · ${this.detail.source}</p>
+                <p>Task: ${this.detail.task_id}</p>
+                <p>Scope: ${this.detail.evidence_scope ?? "canonical_federation_observation"}</p>
+                ${this.detail.executor_id
+                  ? html`<p>Executor: ${this.detail.executor_id}</p>`
+                  : nothing}
+                ${this.detail.capability_id
+                  ? html`<p>Capability: ${this.detail.capability_id}</p>`
+                  : nothing}
+                <p>
+                  Event ${operationTime(this.detail.occurred_at)} · observed
+                  ${operationTime(this.detail.observed_at)}
+                </p>
+                <p>
+                  Detail follows this task and producer, including newer observations outside the
+                  list's time window.
+                </p>
+                <p>
+                  Read-only evidence. Continuing work requires the owning workflow; opening this
+                  view does not dispatch work.
+                </p>
+                ${this.detail.newerObservation
+                  ? html`<p>
+                      This does not establish that the earlier observation was superseded.
+                      Requested: ${this.detail.requestedOperation.title}
+                      (${operationTime(this.detail.requestedOperation.observed_at)}).
+                    </p>`
+                  : nothing}
+                <p>
+                  <a href=${this.observationLink(this.detail.requestedOperation.operation_id)}
+                    >Link to requested observation</a
+                  >${this.detail.newerObservation
+                    ? html` ·
+                        <a href=${this.observationLink(this.detail.operation_id)}
+                          >Link to current observation</a
+                        >`
+                    : nothing}
+                </p>
+                ${this.renderWorkContract(this.detail)}
                 <p>
                   ${this.detail.historyComplete
                     ? "Complete returned history within this task and producer."
