@@ -12,11 +12,11 @@ enum ArgusEvidenceProject: String, CaseIterable, Sendable {
 struct ArgusOperation: Decodable, Identifiable, Sendable {
     struct Artifact: Decodable, Identifiable, Sendable {
         let sha256: String
-        let bytes: Int
+        let bytes: Int?
         let displayName: String?
         var id: String { self.sha256 }
 
-        init(sha256: String, bytes: Int, displayName: String? = nil) {
+        init(sha256: String, bytes: Int?, displayName: String? = nil) {
             self.sha256 = sha256
             self.bytes = bytes
             self.displayName = displayName
@@ -27,7 +27,7 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             self.sha256 = try values.decode(String.self, forKey: .sha256)
-            self.bytes = try values.decode(Int.self, forKey: .bytes)
+            self.bytes = try values.decode(Int?.self, forKey: .bytes)
             self.displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
             if let name = self.displayName, !Self.isValidDisplayName(name) {
                 throw DecodingError.dataCorruptedError(
@@ -54,6 +54,8 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
                     || (0x202A...0x202E).contains(value) || (0x2066...0x2069).contains(value)
             }
         }
+
+        var byteCountLabel: String { self.bytes.map { "\($0) bytes" } ?? "Size unknown" }
 
         func buttonLabel(operationLabel: String?) -> String {
             // Display metadata never changes the digest used for retrieval or review binding.
@@ -130,8 +132,17 @@ struct ArgusOperationDetail: Decodable, Sendable {
     var workContract: ArgusWorkContract? = nil
     var reviewHistory: ArgusReviewHistory? = nil
 
+    static func requestParameters(for operation: ArgusOperation) -> [String: String] {
+        ["operation_id": operation.id, "event_id": operation.eventId]
+    }
+
+    var displayTimeline: [ArgusOperation] {
+        var seen = Set<String>()
+        return ([self.item] + self.timeline + [self.requested]).filter { seen.insert($0.eventId).inserted }
+    }
+
     func validate(for operation: ArgusOperation) throws {
-        guard self.requested.id == operation.id, !self.ownerAccepted,
+        guard self.requested.id == operation.id, self.requested.eventId == operation.eventId, !self.ownerAccepted,
               self.timeline.count <= 256,
               ([self.item, self.requested] + self.timeline).allSatisfy({
                   $0.isAdmitted && $0.project == operation.project
@@ -148,17 +159,87 @@ struct ArgusOperationArtifact: Decodable, Identifiable, Sendable {
     let mimeType: String
     let contentBase64: String
     let operationId: String
+    var eventId: String? = nil
     var id: String { self.sha256 }
 
-    func validatedData(for operation: String, artifact: ArgusOperation.Artifact) throws -> Data {
-        guard self.operationId == operation, self.sha256 == artifact.sha256,
-              self.bytes == artifact.bytes, (0...1_048_576).contains(self.bytes),
-              ["text/plain", "application/pdf", "image/png", "image/jpeg"].contains(self.mimeType),
+    var previewMimeType: String? {
+        switch self.mimeType {
+        case "text/plain", "text/plain; charset=utf-8": "text/plain"
+        case "application/pdf", "image/png", "image/jpeg": self.mimeType
+        default: nil
+        }
+    }
+
+    func validatedData(
+        for operation: String, eventID: String? = nil, artifact: ArgusOperation.Artifact) throws -> Data
+    {
+        guard self.operationId == operation, eventID == nil || self.eventId == eventID,
+              self.sha256 == artifact.sha256,
+              artifact.bytes.map({ self.bytes == $0 }) ?? true, (0...1_048_576).contains(self.bytes),
+              self.previewMimeType != nil,
               self.contentBase64.utf8.count <= 1_398_104,
               let data = Data(base64Encoded: self.contentBase64), data.count == self.bytes,
+              self.previewMimeType != "text/plain" || String(data: data, encoding: .utf8) != nil,
               SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == self.sha256
         else { throw ArgusOperationsError.invalidResponse }
         return data
+    }
+}
+
+struct ArgusArtifactPreview: Identifiable {
+    let id: String
+    let data: Data
+    let mimeType: String
+}
+
+@MainActor
+@Observable
+final class ArgusArtifactOpenStore {
+    private(set) var preview: ArgusArtifactPreview?
+    private(set) var isLoading = false
+    private(set) var error: String?
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var isAvailable = false
+
+    func setAvailable(_ available: Bool) {
+        self.invalidate()
+        self.isAvailable = available
+    }
+
+    func invalidate() {
+        self.generation += 1
+        self.preview = nil
+        self.isLoading = false
+        self.error = nil
+    }
+
+    func dismissPreview() { self.preview = nil }
+
+    func open(
+        _ artifact: ArgusOperation.Artifact,
+        item: ArgusOperation,
+        fetch: ([String: String]) async throws -> ArgusOperationArtifact) async
+    {
+        guard self.isAvailable, !self.isLoading, !Task.isCancelled else { return }
+        self.generation += 1
+        let generation = self.generation
+        self.isLoading = true
+        self.preview = nil
+        self.error = nil
+        defer { if generation == self.generation { self.isLoading = false } }
+        do {
+            let response = try await fetch([
+                "operation_id": item.id, "event_id": item.eventId, "sha256": artifact.sha256,
+            ])
+            guard generation == self.generation, !Task.isCancelled else { return }
+            let data = try response.validatedData(for: item.id, eventID: item.eventId, artifact: artifact)
+            guard let previewMimeType = response.previewMimeType else { throw ArgusOperationsError.invalidResponse }
+            self.preview = ArgusArtifactPreview(id: "\(item.eventId):\(artifact.sha256)", data: data,
+                                               mimeType: previewMimeType)
+        } catch {
+            guard generation == self.generation, !Task.isCancelled else { return }
+            self.error = "Artifact unavailable or integrity verification failed. Nothing was opened."
+        }
     }
 }
 

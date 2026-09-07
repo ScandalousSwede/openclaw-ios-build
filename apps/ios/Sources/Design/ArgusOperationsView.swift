@@ -127,15 +127,9 @@ struct ArgusArtifactButtonLabel: View {
     let operationLabel: String?
 
     var body: some View {
-        Label("\(self.artifact.buttonLabel(operationLabel: self.operationLabel)) · \(self.artifact.bytes) bytes",
+        Label("\(self.artifact.buttonLabel(operationLabel: self.operationLabel)) · \(self.artifact.byteCountLabel)",
               systemImage: "doc.viewfinder")
     }
-}
-
-private struct ArgusArtifactPreview: Identifiable {
-    let id: String
-    let data: Data
-    let mimeType: String
 }
 
 private struct ArgusOperationDetailView: View {
@@ -144,8 +138,8 @@ private struct ArgusOperationDetailView: View {
     let client: ArgusOperationsClient
     @State private var detail: ArgusOperationDetail?
     @State private var error: String?
-    @State private var preview: ArgusArtifactPreview?
-    @State private var loadingArtifact = false
+    @State private var artifactOpen = ArgusArtifactOpenStore()
+    @State private var isVisible = false
     @State private var detailLoadGeneration = 0
 
     private var sameGateway: Bool { self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID }
@@ -163,6 +157,7 @@ private struct ArgusOperationDetailView: View {
                         Label("Offline — last observed detail", systemImage: "wifi.slash")
                     }
                     if let error { Text(error).foregroundStyle(.secondary) }
+                    if let error = self.artifactOpen.error { Text(error).foregroundStyle(.secondary) }
                     if let detail {
                         if let work = detail.workContract {
                             ArgusWorkSummary(work: work, artifactContext: detail.item.artifactContext)
@@ -171,10 +166,13 @@ private struct ArgusOperationDetailView: View {
                             ArgusReviewHistorySummary(history: history)
                         }
                         Text("Evidence timeline").font(.headline).accessibilityAddTraits(.isHeader)
-                        if detail.item.id != detail.requested.id {
+                        if detail.item.eventId != detail.requested.eventId {
                             Text("A newer observation is available for this task.").font(.subheadline)
                         }
-                        ForEach(detail.timeline, id: \.eventId) { item in
+                        ForEach(detail.displayTimeline, id: \.eventId) { item in
+                            if item.eventId != detail.item.eventId {
+                                Text("Earlier observation — artifacts belong to this recorded event.").font(.caption)
+                            }
                             ArgusOperationRow(item: item)
                             ForEach(item.artifacts) { artifact in
                                 Button {
@@ -182,8 +180,8 @@ private struct ArgusOperationDetailView: View {
                                 } label: {
                                     ArgusArtifactButtonLabel(artifact: artifact, operationLabel: item.display?.artifactLabel)
                                 }
-                                .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.title), \(artifact.bytes) bytes")
-                                .disabled(self.loadingArtifact || !self.appModel.isOperatorGatewayConnected)
+                                .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.title), \(artifact.byteCountLabel)")
+                                .disabled(self.artifactOpen.isLoading || !self.appModel.isOperatorGatewayConnected)
                             }
                         }
                         if detail.coverage.hasMore {
@@ -201,16 +199,28 @@ private struct ArgusOperationDetailView: View {
             if self.sameGateway, self.appModel.isOperatorGatewayConnected { await self.load() }
         }
         .refreshable { await self.load() }
-        .sheet(item: self.$preview) { preview in
+        .sheet(item: Binding(get: { self.artifactOpen.preview }, set: { _ in self.artifactOpen.dismissPreview() })) { preview in
             NavigationStack {
                 ArgusArtifactView(preview: preview)
                     .navigationTitle("Verified artifact")
                     .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { Button("Done") { self.preview = nil } }
+                    .toolbar { Button("Done") { self.artifactOpen.dismissPreview() } }
             }
         }
         .onChange(of: self.sameGateway) { _, same in
-            if !same { self.detail = nil; self.preview = nil }
+            self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
+            if !same { self.detail = nil }
+        }
+        .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
+            self.artifactOpen.setAvailable(self.isVisible && self.sameGateway && connected)
+        }
+        .onAppear {
+            self.isVisible = true
+            self.artifactOpen.setAvailable(self.sameGateway && self.appModel.isOperatorGatewayConnected)
+        }
+        .onDisappear {
+            self.isVisible = false
+            self.artifactOpen.setAvailable(false)
         }
     }
 
@@ -220,7 +230,7 @@ private struct ArgusOperationDetailView: View {
         let generation = self.detailLoadGeneration
         do {
             let response = try await self.client.request(
-                "argus.operations.detail", params: ["operation_id": self.operation.id], as: ArgusOperationDetail.self)
+                "argus.operations.detail", params: ArgusOperationDetail.requestParameters(for: self.operation), as: ArgusOperationDetail.self)
             guard self.sameGateway, generation == self.detailLoadGeneration, !Task.isCancelled else { return }
             try response.validate(for: self.operation)
             self.detail = response
@@ -232,19 +242,12 @@ private struct ArgusOperationDetailView: View {
     }
 
     private func openArtifact(_ artifact: ArgusOperation.Artifact, item: ArgusOperation) async {
-        guard self.sameGateway, !self.loadingArtifact else { return }
-        self.loadingArtifact = true
-        defer { self.loadingArtifact = false }
-        do {
-            let response = try await self.client.request(
-                "argus.operations.artifact", params: ["operation_id": item.id, "sha256": artifact.sha256],
-                as: ArgusOperationArtifact.self)
-            let data = try response.validatedData(for: item.id, artifact: artifact)
-            guard self.sameGateway else { return }
-            self.preview = ArgusArtifactPreview(id: artifact.sha256, data: data, mimeType: response.mimeType)
-            self.error = nil
-        } catch { self.error = "Artifact unavailable or integrity verification failed. Nothing was opened." }
+        guard self.sameGateway, self.appModel.isOperatorGatewayConnected else { return }
+        await self.artifactOpen.open(artifact, item: item) { params in
+            try await self.client.request("argus.operations.artifact", params: params, as: ArgusOperationArtifact.self)
+        }
     }
+
 }
 
 private struct ArgusArtifactView: View {

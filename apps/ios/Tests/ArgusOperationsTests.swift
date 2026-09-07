@@ -5,14 +5,14 @@ import Testing
 
 @MainActor
 struct ArgusOperationsTests {
-    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil, project: String = "Argus") throws -> ArgusOperationsPage {
+    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil, project: String = "Argus", artifacts: [[String: Any]] = []) throws -> ArgusOperationsPage {
         let payload: [String: Any] = [
             "items": [[
                 "operation_id": id, "task_id": "technical-result-47", "event_id": "event-47",
                 "title": "Synthetic external result", "source": source, "evidence_scope": scope as Any? ?? NSNull(),
                 "project": project, "kind": "evidence", "state": state,
                 "occurred_at": "2026-09-06T00:00:00Z", "observed_at": "2026-09-06T00:01:00Z",
-                "artifacts": [], "owner_accepted": false,
+                "artifacts": artifacts, "owner_accepted": false,
             ]],
             "coverage": ["complete": cursor == nil, "has_more": cursor != nil,
                          "observed_at": "2026-09-06T00:01:00Z"],
@@ -86,7 +86,7 @@ struct ArgusOperationsTests {
         #expect(legacy.buttonLabel(operationLabel: nil) == "Artifact aaaaaaaaaaaa")
         #expect(try self.artifactReference(name: NSNull()).displayName == nil)
         #expect(named.id == legacy.id && named.bytes == legacy.bytes)
-        #expect(throws: DecodingError.self) { try self.artifactReference(bytes: NSNull()) }
+        #expect(try self.artifactReference(bytes: NSNull()).bytes == nil)
     }
 
     @Test func artifactNamesRejectPathsControlsBidiAndOversizeScalars() throws {
@@ -100,6 +100,105 @@ struct ArgusOperationsTests {
         #expect(try self.artifactReference(name: String(repeating: "😀", count: 160)).displayName != nil)
         #expect(try self.artifactReference(name: "résultat 技術.txt").displayName == "résultat 技術.txt")
         #expect(try self.artifactReference(name: "a\u{FEFF}.txt").displayName != nil)
+    }
+
+    @Test func nullArtifactSizeDecodesWholePageAndRendersUnknown() throws {
+        let page = try self.page(artifacts: [[
+            "sha256": String(repeating: "a", count: 64), "bytes": NSNull(), "display_name": "before.json",
+        ]])
+        let store = ArgusOperationsStore()
+        try store.accept(page, more: false)
+        let reference = try #require(store.items.first?.artifacts.first)
+        #expect(reference.bytes == nil)
+        #expect(reference.byteCountLabel == "Size unknown")
+        #expect(reference.buttonLabel(operationLabel: nil) == "before.json")
+        #expect(try self.artifactReference(bytes: 0).byteCountLabel == "0 bytes")
+        #expect(try self.artifactReference(bytes: 2654).byteCountLabel == "2654 bytes")
+        #expect(throws: DecodingError.self) { try self.artifactReference(bytes: "unknown") }
+    }
+
+    @Test func unknownReferenceSizeStillRequiresActualBytesDigestAndEvent() throws {
+        let data = Data("original historical technical bytes".utf8)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let reference = ArgusOperation.Artifact(sha256: hash, bytes: nil, displayName: "before.txt")
+        func response(bytes: Int, body: Data, digest: String? = nil, mime: String = "text/plain",
+                      event: String = "historical-event") -> ArgusOperationArtifact {
+            ArgusOperationArtifact(sha256: digest ?? hash, bytes: bytes, mimeType: mime,
+                contentBase64: body.base64EncodedString(), operationId: "historical-operation", eventId: event)
+        }
+        let valid = response(bytes: data.count, body: data)
+        #expect(try valid.validatedData(for: "historical-operation", eventID: "historical-event",
+                                       artifact: reference) == data)
+        for invalid in [
+            response(bytes: data.count + 1, body: data),
+            response(bytes: data.count, body: Data(repeating: 0, count: data.count)),
+            response(bytes: data.count, body: data, digest: String(repeating: "f", count: 64)),
+            response(bytes: 1_048_577, body: data),
+            response(bytes: data.count, body: data, mime: "text/html"),
+            response(bytes: data.count, body: data, event: "current-event"),
+        ] {
+            #expect(throws: ArgusOperationsError.self) {
+                try invalid.validatedData(for: "historical-operation", eventID: "historical-event", artifact: reference)
+            }
+        }
+        let wrongKnownSize = ArgusOperation.Artifact(sha256: hash, bytes: data.count + 1)
+        #expect(throws: ArgusOperationsError.self) {
+            try valid.validatedData(for: "historical-operation", eventID: "historical-event", artifact: wrongKnownSize)
+        }
+    }
+
+    @Test func unknownReferenceSizeOpensThroughEventBoundLoader() async throws {
+        let (item, known, response) = try self.historicalArtifactFixture()
+        let reference = ArgusOperation.Artifact(sha256: known.sha256, bytes: nil, displayName: "prior.txt")
+        let store = ArgusArtifactOpenStore()
+        store.setAvailable(true)
+        await store.open(reference, item: item) { params in
+            #expect(params["event_id"] == item.eventId)
+            return response
+        }
+        #expect(store.preview?.data == Data("historical technical result".utf8))
+        #expect(store.error == nil)
+    }
+
+    @Test func canonicalUTF8TextWireNormalizesOnlyAllowedPreviewMIME() async throws {
+        let (item, artifact, original) = try self.historicalArtifactFixture()
+        let payload: [String: Any] = [
+            "operation_id": item.id, "event_id": item.eventId, "sha256": artifact.sha256,
+            "bytes": original.bytes, "mime_type": "text/plain; charset=utf-8",
+            "content_base64": original.contentBase64,
+        ]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(ArgusOperationArtifact.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+        let store = ArgusArtifactOpenStore()
+        store.setAvailable(true)
+        await store.open(artifact, item: item) { _ in response }
+        #expect(store.preview?.mimeType == "text/plain")
+        #expect(store.preview.flatMap { String(data: $0.data, encoding: .utf8) } == "historical technical result")
+        #expect(store.error == nil)
+        let invalidUTF8 = Data([0xff])
+        let invalidHash = SHA256.hash(data: invalidUTF8).map { String(format: "%02x", $0) }.joined()
+        var malformed = payload
+        malformed["content_base64"] = invalidUTF8.base64EncodedString()
+        malformed["bytes"] = 1
+        malformed["sha256"] = invalidHash
+        let badText = try decoder.decode(ArgusOperationArtifact.self,
+            from: JSONSerialization.data(withJSONObject: malformed))
+        #expect(throws: ArgusOperationsError.self) {
+            try badText.validatedData(for: item.id, eventID: item.eventId,
+                artifact: .init(sha256: invalidHash, bytes: nil))
+        }
+        for mime in ["text/plain; charset=iso-8859-1", "text/html; charset=utf-8", "text/plain; charset=utf-8; extra=1"] {
+            var invalid = payload
+            invalid["mime_type"] = mime
+            let rejected = try decoder.decode(ArgusOperationArtifact.self,
+                from: JSONSerialization.data(withJSONObject: invalid))
+            #expect(rejected.previewMimeType == nil)
+            #expect(throws: ArgusOperationsError.self) {
+                try rejected.validatedData(for: item.id, eventID: item.eventId, artifact: artifact)
+            }
+        }
     }
 
     @Test func activeMarkupIsNeverAnArtifactPreviewType() {
@@ -188,6 +287,92 @@ struct ArgusOperationsTests {
         await task.value
         #expect(store.items.isEmpty)
         #expect(!store.isLoading)
+    }
+
+    private func historicalArtifactFixture() throws -> (ArgusOperation, ArgusOperation.Artifact, ArgusOperationArtifact) {
+        let item = try self.page().items[0]
+        let data = Data("historical technical result".utf8)
+        let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let artifact = ArgusOperation.Artifact(sha256: hash, bytes: data.count, displayName: "prior.txt")
+        let response = ArgusOperationArtifact(sha256: hash, bytes: data.count, mimeType: "text/plain",
+            contentBase64: data.base64EncodedString(), operationId: item.id, eventId: item.eventId)
+        return (item, artifact, response)
+    }
+
+    @Test func historicalArtifactRequestAndResponseBindExactEvent() async throws {
+        let (item, artifact, response) = try self.historicalArtifactFixture()
+        let store = ArgusArtifactOpenStore()
+        store.setAvailable(true)
+        await store.open(artifact, item: item) { params in
+            #expect(params == ["operation_id": item.id, "event_id": item.eventId, "sha256": artifact.sha256])
+            return response
+        }
+        #expect(store.preview?.data == Data("historical technical result".utf8))
+        var wrong = response
+        wrong.eventId = "newer-event"
+        await store.open(artifact, item: item) { _ in wrong }
+        #expect(store.preview == nil && store.error != nil)
+        wrong.eventId = nil
+        await store.open(artifact, item: item) { _ in wrong }
+        #expect(store.preview == nil && store.error != nil)
+    }
+
+    @Test func delayedArtifactCannotReappearAfterScopeLossAndReturn() async throws {
+        let (item, artifact, response) = try self.historicalArtifactFixture()
+        // Same state transition covers disconnect, gateway-away/back and dismissed/reopened detail.
+        let store = ArgusArtifactOpenStore()
+        store.setAvailable(true)
+        var pending: CheckedContinuation<ArgusOperationArtifact, Never>?
+        let task = Task { @MainActor in
+            await store.open(artifact, item: item) { _ in
+                await withCheckedContinuation { pending = $0 }
+            }
+        }
+        while pending == nil { await Task.yield() }
+        store.setAvailable(false)
+        var unavailableFetchCalled = false
+        await store.open(artifact, item: item) { _ in unavailableFetchCalled = true; return response }
+        #expect(!unavailableFetchCalled)
+        store.setAvailable(true)
+        pending?.resume(returning: response)
+        await task.value
+        #expect(store.preview == nil && !store.isLoading && store.error == nil)
+        await store.open(artifact, item: item) { _ in response }
+        #expect(store.preview?.data == Data("historical technical result".utf8))
+    }
+
+    @Test func cancelledArtifactOpenCannotPublishPreview() async throws {
+        let (item, artifact, response) = try self.historicalArtifactFixture()
+        let store = ArgusArtifactOpenStore()
+        store.setAvailable(true)
+        var pending: CheckedContinuation<ArgusOperationArtifact, Never>?
+        let task = Task { @MainActor in
+            await store.open(artifact, item: item) { _ in await withCheckedContinuation { pending = $0 } }
+        }
+        while pending == nil { await Task.yield() }
+        task.cancel()
+        pending?.resume(returning: response)
+        await task.value
+        #expect(store.preview == nil && !store.isLoading && store.error == nil)
+    }
+
+    @Test func selectedHistoricalDetailSurvivesBoundedTimelineWithoutDuplicateEvents() throws {
+        let (base, artifact, _) = try self.historicalArtifactFixture()
+        let old = ArgusOperation(operationId: base.id, taskId: base.taskId, eventId: base.eventId,
+            title: base.title, source: base.source, project: base.project, kind: base.kind, state: base.state,
+            occurredAt: base.occurredAt, observedAt: base.observedAt, artifacts: [artifact],
+            supersedesEventId: nil, ownerAccepted: false)
+        let newer = ArgusOperation(operationId: old.id, taskId: old.taskId, eventId: "newer-event",
+            title: old.title, source: old.source, project: old.project, kind: old.kind, state: old.state,
+            occurredAt: old.occurredAt, observedAt: old.observedAt, artifacts: [],
+            supersedesEventId: nil, ownerAccepted: false)
+        let detail = ArgusOperationDetail(item: newer, requested: old, timeline: [newer, newer],
+            coverage: .init(complete: false, hasMore: true, observedAt: nil), ownerAccepted: false)
+        try detail.validate(for: old)
+        #expect(detail.displayTimeline.map(\.eventId) == ["newer-event", old.eventId])
+        #expect(detail.displayTimeline.last?.artifacts.first?.sha256 == artifact.sha256)
+        #expect(ArgusOperationDetail.requestParameters(for: old)["event_id"] == old.eventId)
+        #expect(throws: ArgusOperationsError.self) { try detail.validate(for: newer) }
     }
 
     static func reviewHistoryFixture() throws -> (ArgusOperation, [String: Any]) {
