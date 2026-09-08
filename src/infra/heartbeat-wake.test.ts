@@ -160,6 +160,65 @@ describe("heartbeat-wake", () => {
     });
   });
 
+  it("delayed session wake does not block another ready target", async () => {
+    vi.useFakeTimers();
+    const delayed = "agent:main:cron:delayed:run:1";
+    const ready = "agent:other:main";
+    let first = true;
+    const handler = vi.fn().mockImplementation(async (request) => {
+      if (request.sessionKey === delayed && first) {
+        first = false;
+        return { status: "skipped", reason: "not-due", retryAfterMs: 30_000 };
+      }
+      return { status: "ran", durationMs: 1 };
+    });
+    setHeartbeatWakeHandler(handler);
+    const request = wake("cron:delayed", { sessionKey: delayed, heartbeat: { target: "last" } });
+    requestHeartbeat({ ...request, coalesceMs: 0 });
+    await vi.advanceTimersByTimeAsync(1);
+    requestHeartbeat(wake("manual", { intent: "manual", sessionKey: ready, coalesceMs: 0 }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1]?.[0].sessionKey).toBe(ready);
+    await vi.advanceTimersByTimeAsync(29_997);
+    expect(handler).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handler).toHaveBeenCalledTimes(3);
+    expectWakeCall(handler, 2, request);
+    expect(hasPendingHeartbeatWake()).toBe(false);
+  });
+
+  it("delayed session wake yields to a newer manual request for its target", async () => {
+    vi.useFakeTimers();
+    const handler = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "skipped", reason: "flood", retryAfterMs: 60_000 })
+      .mockResolvedValue({ status: "ran", durationMs: 1 });
+    setHeartbeatWakeHandler(handler);
+    const sessionKey = "agent:main:cron:delayed:run:2";
+    requestHeartbeat(wake("cron:delayed", { sessionKey, coalesceMs: 0 }));
+    await vi.advanceTimersByTimeAsync(1);
+    requestHeartbeat(wake("manual", { intent: "manual", sessionKey, coalesceMs: 0 }));
+    await vi.advanceTimersByTimeAsync(1);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expectWakeCall(handler, 1, wake("manual", { intent: "manual", sessionKey }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(hasPendingHeartbeatWake()).toBe(false);
+  });
+
+  it("terminal failed wake is not replayed as deferred work", async () => {
+    vi.useFakeTimers();
+    const handler = vi.fn().mockResolvedValue({ status: "failed", reason: "provider-failed" });
+    setHeartbeatWakeHandler(handler);
+    requestHeartbeat(
+      wake("cron:failed", { sessionKey: "agent:main:cron:failed:run:1", coalesceMs: 0 }),
+    );
+    await vi.advanceTimersByTimeAsync(60_001);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(hasPendingHeartbeatWake()).toBe(false);
+  });
+
   it("stale disposer does not clear a newer handler", async () => {
     vi.useFakeTimers();
     const handlerA = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });

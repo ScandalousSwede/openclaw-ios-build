@@ -112,7 +112,13 @@ import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 import { formatErrorMessage, hasErrnoCode } from "./errors.js";
 import { resolveMainScopedEventSessionKey } from "./event-session-routing.js";
 import { isWithinActiveHours, resolveActiveHoursTimezone } from "./heartbeat-active-hours.js";
-import { recordRunStart, shouldDeferWake, type DeferDecision } from "./heartbeat-cooldown.js";
+import {
+  DEFAULT_FLOOD_WINDOW_MS,
+  DEFAULT_MIN_WAKE_SPACING_MS,
+  recordRunStart,
+  shouldDeferWake,
+  type DeferDecision,
+} from "./heartbeat-cooldown.js";
 import {
   buildCronEventPrompt,
   buildExecEventPrompt,
@@ -2657,7 +2663,24 @@ export function startHeartbeatRunner(opts: {
         const deferral = evaluateWakeDeferral(targetAgent, now, reason, intent);
         if (deferral.defer) {
           advanceStaleScheduleAfterDeferral(targetAgent, now, reason, deferral);
-          return { status: "skipped", reason: deferral.reason };
+          // A scheduled heartbeat runs the default session, so it cannot take
+          // custody of a deferred child-session wake. Retain that exact target
+          // in the wake layer until the existing gate allows it to run.
+          const retryAfterMs = requestedSessionKey
+            ? deferral.reason === "not-due"
+              ? Math.max(1, targetAgent.nextDueMs - now)
+              : deferral.reason === "min-spacing"
+                ? Math.max(
+                    1,
+                    (targetAgent.lastRunStartedAtMs ?? now) + DEFAULT_MIN_WAKE_SPACING_MS - now,
+                  )
+                : DEFAULT_FLOOD_WINDOW_MS + 1
+            : undefined;
+          return {
+            status: "skipped",
+            reason: deferral.reason,
+            ...(retryAfterMs ? { retryAfterMs } : {}),
+          };
         }
         try {
           const res = await runOnce({

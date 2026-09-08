@@ -168,6 +168,61 @@ describe("startHeartbeatRunner", () => {
     return runner;
   }
 
+  it.each(["event", "immediate"] as const)(
+    "retains deferred cron child wake after %s cooldown without bypassing it",
+    async (intent) => {
+      useFakeHeartbeatTime();
+      const runSpy = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 } as const);
+      const runner = startHeartbeatRunner({
+        cfg: heartbeatConfig([{ id: "main", heartbeat: { every: "2m" } }]),
+        runOnce: runSpy,
+        stableSchedulerSeed: TEST_SCHEDULER_SEED,
+      });
+      try {
+        // Next-heartbeat work waits for cadence; immediate work still honors
+        // the existing five-start flood guard. Neither can lose its child key.
+        const warmups = intent === "immediate" ? 5 : 1;
+        for (let i = 0; i < warmups; i++) {
+          requestHeartbeat({
+            source: "manual",
+            intent: "manual",
+            sessionKey: "agent:main:main",
+            coalesceMs: 0,
+          });
+          await vi.advanceTimersByTimeAsync(1);
+        }
+        const sessionKey = `agent:main:cron:qualification-${intent}:run:1`;
+        requestHeartbeat({
+          source: "cron",
+          intent,
+          reason: `cron:qualification-${intent}`,
+          agentId: "main",
+          sessionKey,
+          heartbeat: { target: "last" },
+          coalesceMs: 0,
+        });
+        await vi.advanceTimersByTimeAsync(1);
+        const childCalls = () =>
+          runSpy.mock.calls.filter(([opts]) => opts.sessionKey === sessionKey);
+        expect(childCalls()).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(intent === "immediate" ? 60_010 : 120_010);
+        expect(childCalls()).toHaveLength(1);
+        expect(childCalls()[0]?.[0]).toMatchObject({
+          source: "cron",
+          intent,
+          reason: `cron:qualification-${intent}`,
+          agentId: "main",
+          sessionKey,
+          heartbeat: { target: "last" },
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(childCalls()).toHaveLength(1);
+      } finally {
+        runner.stop();
+      }
+    },
+  );
+
   afterEach(() => {
     resetHeartbeatWakeStateForTests();
     resetConfigRuntimeState();

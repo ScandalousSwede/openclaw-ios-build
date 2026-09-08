@@ -5,7 +5,7 @@ import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
 
 export type HeartbeatRunResult =
   | { status: "ran"; durationMs: number }
-  | { status: "skipped"; reason: string }
+  | { status: "skipped"; reason: string; retryAfterMs?: number }
   | { status: "failed"; reason: string };
 
 export const HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT = "requests-in-flight";
@@ -77,6 +77,7 @@ type PendingWakeReason = {
   reason: string;
   priority: number;
   requestedAt: number;
+  notBefore: number;
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
@@ -141,6 +142,7 @@ function queuePendingWakeReason(params: {
   intent: HeartbeatWakeIntent;
   reason?: string;
   requestedAt?: number;
+  notBefore?: number;
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
@@ -163,6 +165,7 @@ function queuePendingWakeReason(params: {
       reason: normalizedReason,
     }),
     requestedAt,
+    notBefore: params.notBefore ?? Date.now(),
     agentId: normalizedAgentId,
     sessionKey: normalizedSessionKey,
     heartbeat: params.heartbeat,
@@ -222,8 +225,15 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
         return;
       }
 
-      const pendingBatch = Array.from(pendingWakes.values());
-      pendingWakes.clear();
+      // A deferred session keeps its own due time. It must not delay ready
+      // work for other sessions or agents behind one global cooldown timer.
+      const pendingBatch: PendingWakeReason[] = [];
+      for (const [key, pendingWake] of pendingWakes) {
+        if (pendingWake.notBefore <= Date.now()) {
+          pendingBatch.push(pendingWake);
+          pendingWakes.delete(key);
+        }
+      }
       running = true;
       try {
         for (const pendingWake of pendingBatch) {
@@ -236,8 +246,16 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
             ...(pendingWake.heartbeat ? { heartbeat: pendingWake.heartbeat } : {}),
           };
           const res = await active(wakeOpts);
-          if (res.status === "skipped" && isRetryableHeartbeatBusySkipReason(res.reason)) {
-            // The target runtime is busy; retry this wake target soon.
+          const cooldownDelay =
+            res.status === "skipped" &&
+            Number.isFinite(res.retryAfterMs) &&
+            (res.retryAfterMs ?? 0) > 0
+              ? resolveTimerTimeoutMs(res.retryAfterMs, DEFAULT_RETRY_MS, 1)
+              : undefined;
+          const busy = res.status === "skipped" && isRetryableHeartbeatBusySkipReason(res.reason);
+          if (busy || cooldownDelay !== undefined) {
+            // Preserve arrival order so a retry cannot replace newer pending
+            // work for the same target. Busy retries retain their existing floor.
             queuePendingWakeReason({
               source: pendingWake.source,
               intent: pendingWake.intent,
@@ -245,8 +263,12 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
               agentId: pendingWake.agentId,
               sessionKey: pendingWake.sessionKey,
               heartbeat: pendingWake.heartbeat,
+              requestedAt: pendingWake.requestedAt,
+              notBefore: Date.now() + (cooldownDelay ?? DEFAULT_RETRY_MS),
             });
-            schedule(DEFAULT_RETRY_MS, "retry");
+            if (busy) {
+              schedule(DEFAULT_RETRY_MS, "retry");
+            }
           }
         }
       } catch {
@@ -265,7 +287,15 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
       } finally {
         running = false;
         if (pendingWakes.size > 0 || scheduled) {
-          schedule(delay, "normal");
+          const nextDelay =
+            pendingWakes.size > 0
+              ? Math.max(
+                  0,
+                  Math.min(...Array.from(pendingWakes.values(), (wake) => wake.notBefore)) -
+                    Date.now(),
+                )
+              : delay;
+          schedule(nextDelay, "normal");
         }
       }
     })();
