@@ -9,14 +9,23 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     func testProductionEvidenceCardsAtStandardAndAccessibilitySizes() throws {
         let store = ArgusOperationsStore()
         store.selectGateway("simulator-fixture")
-        let item = ArgusOperation(
+        var item = ArgusOperation(
             operationId: "fixture-operation", taskId: "fixture-task", eventId: "fixture-event",
             title: "Synthetic result: checkpoint retry verified",
             source: "federation:fixture-simulator", project: "Argus", kind: "test fixture", state: "observed",
             occurredAt: "2026-09-06T00:00:00Z", observedAt: "2026-09-06T00:01:00Z",
             artifacts: [], supersedesEventId: nil, ownerAccepted: false)
+        item.display = .init(label: "Checkpoint retry repaired",
+            changeSummary: "A retry now resumes the recorded batch. The validation artifact is available in detail.",
+            artifactLabel: nil, continuationLabel: nil)
+        let earlier = ArgusOperation(
+            operationId: "fixture-earlier", taskId: "fixture-earlier-task", eventId: "fixture-earlier-event",
+            title: "Synthetic unfamiliar producer observation with a long title that must remain readable and available in full.",
+            source: "federation:fixture-simulator", project: "Argus", kind: "test fixture", state: "observed",
+            occurredAt: "2026-09-06T00:00:00Z", observedAt: "2026-09-06T00:00:30Z",
+            artifacts: [], supersedesEventId: "fixture-previous-event", ownerAccepted: false)
         try store.accept(ArgusOperationsPage(
-            items: [item],
+            items: [item, earlier],
             coverage: ArgusOperationsCoverage(complete: true, hasMore: false, observedAt: item.observedAt),
             nextCursor: nil, automaticDispatchEnabled: false), more: false)
 
@@ -69,26 +78,36 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     }
     @MainActor
     func testProductionCanonicalWorkSummary() throws {
-        let (item, work) = try ArgusWorkContractTests.fixture(relation: "previous_attempt")
-        try work.validate(for: item)
-        let root = VStack(alignment: .leading, spacing: 12) {
-            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
-            ArgusWorkSummary(work: work, artifactContext: item.artifactContext)
+        for (relation, heading) in [
+            ("previous_attempt", "Previous attempt artifacts"),
+            ("current_attempt", "Current attempt artifacts"),
+            ("unknown", "Recorded artifacts"),
+            ("federation_observation", "Recorded artifacts"),
+            ("missing", "Recorded artifacts"),
+        ] {
+            var (item, work) = try ArgusWorkContractTests.fixture(relation: relation)
+            if relation == "missing" { item.artifactContext = nil }
+            try work.validate(for: item)
+            let root = VStack(alignment: .leading, spacing: 12) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusOperationEvidenceContent(
+                    detail: .init(item: item, requested: item, timeline: [],
+                        coverage: .init(complete: false, hasMore: true, observedAt: item.observedAt),
+                        ownerAccepted: false, workContract: work),
+                    artifactsAvailable: true, openArtifact: { _, _ in })
+            }
+            .padding()
+            .background(Color(uiColor: .systemBackground))
+            .environment(\.dynamicTypeSize, .accessibility1)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [heading, "Verification and scope"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-work-simulator-fixture-\(relation)-accessibility"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
         }
-        .padding()
-        .background(Color(uiColor: .systemBackground))
-        .environment(\.dynamicTypeSize, .accessibility1)
-        .environment(\.colorScheme, .dark)
-        .frame(width: 390)
-        .fixedSize(horizontal: false, vertical: true)
-        let renderer = ImageRenderer(content: root)
-        renderer.scale = 2
-        let image = try XCTUnwrap(renderer.uiImage)
-        XCTAssertGreaterThan(image.size.height, 300)
-        let attachment = XCTAttachment(image: image)
-        attachment.name = "argus-work-simulator-fixture-previous-attempt-accessibility"
-        attachment.lifetime = .keepAlways
-        self.add(attachment)
     }
 
     @MainActor
@@ -97,19 +116,52 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         try work.validate(for: item)
         let root = VStack(alignment: .leading, spacing: 12) {
             Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
-            ArgusWorkSummary(work: work, artifactContext: item.artifactContext)
+            ArgusOperationEvidenceContent(
+                detail: .init(item: item, requested: item, timeline: [],
+                    coverage: .init(complete: false, hasMore: true, observedAt: item.observedAt),
+                    ownerAccepted: false, workContract: work),
+                artifactsAvailable: true, openArtifact: { _, _ in })
         }
         .padding()
         .background(Color(uiColor: .systemBackground))
         .environment(\.colorScheme, .dark)
         .frame(width: 390)
         .fixedSize(horizontal: false, vertical: true)
-        let renderer = ImageRenderer(content: root)
-        renderer.scale = 2
-        let image = try XCTUnwrap(renderer.uiImage)
-        XCTAssertGreaterThan(image.size.height, 200)
+        let image = try self.hostedImage(root, requiredText: ["No artifact is recorded yet", "Verification and scope"])
         let attachment = XCTAttachment(image: image)
         attachment.name = "argus-work-simulator-fixture-running-no-artifact"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
+    @MainActor
+    func testProductionOwnerRequestAndFailureRemainVisibleWithoutOpeningDisclosure() throws {
+        let (item, original) = try ArgusWorkContractTests.fixture()
+        let work = ArgusWorkContract(
+            schema: original.schema, operationId: original.operationId, latestEventId: original.latestEventId,
+            canonicalState: original.canonicalState,
+            structuralVerification: .init(status: "failed_recorded", semanticCorrectnessEstablished: false,
+                                          coversAllCurrentArtifacts: false),
+            independentVerification: original.independentVerification,
+            pendingOwnerFeedback: [.init(eventId: "fixture-request", reason: "Choose the next validation target.")],
+            continuation: original.continuation, coverage: original.coverage, ownerAccepted: false, isStateTransition: false)
+        try work.validate(for: item)
+        let root = ArgusOperationEvidenceContent(
+            detail: .init(item: item, requested: item, timeline: [],
+                coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
+                ownerAccepted: false, workContract: work),
+            artifactsAvailable: true, openArtifact: { _, _ in })
+            .padding()
+            .background(Color(uiColor: .systemBackground))
+            .environment(\.dynamicTypeSize, .accessibility1)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+        let image = try self.hostedImage(root, requiredText: [
+            "Choose the next validation target", "Structural check failed", "Verification and scope",
+        ])
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-detail-simulator-fixture-owner-request-failure-accessibility"
         attachment.lifetime = .keepAlways
         self.add(attachment)
     }
@@ -206,7 +258,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     /// production control and capture its real hosted view hierarchy instead.
     @MainActor
     private func hostedImage(
-        _ content: some View, selectedProject: String? = nil, artifactNames: [String] = []) throws -> UIImage
+        _ content: some View, selectedProject: String? = nil, artifactNames: [String] = [],
+        requiredText: [String] = []) throws -> UIImage
     {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
@@ -260,6 +313,11 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         for name in artifactNames {
             XCTAssertTrue(words.contains { Self.containsProjectLabel($0.0, project: name) },
                           "Each corresponding artifact filename must render: \(name)")
+        }
+        let renderedText = words.map(\.0).joined(separator: " ")
+        for phrase in requiredText {
+            XCTAssertTrue(renderedText.localizedCaseInsensitiveContains(phrase),
+                          "The production detail must visibly render: \(phrase)")
         }
         return image
     }

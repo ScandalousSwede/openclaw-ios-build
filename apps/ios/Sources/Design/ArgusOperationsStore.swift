@@ -110,6 +110,25 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     ]
 }
 
+// Presentation uses admitted metadata only; it never changes canonical state or artifact identity.
+extension ArgusOperation {
+    var heading: String { self.display?.label ?? self.title }
+
+    var stateLabel: String {
+        let state = self.state.replacingOccurrences(of: "_", with: " ").capitalized
+        return self.supersedesEventId == nil ? state : "Correction observed · \(state)"
+    }
+
+    static func observationLabel(_ value: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let fractional = parser.date(from: value)
+        parser.formatOptions = [.withInternetDateTime]
+        guard let date = fractional ?? parser.date(from: value) else { return value }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
 struct ArgusOperationsCoverage: Decodable, Sendable {
     let complete: Bool
     let hasMore: Bool

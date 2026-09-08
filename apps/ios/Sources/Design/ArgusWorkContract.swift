@@ -95,35 +95,49 @@ struct ArgusWorkSummary: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Current evidence").font(.headline).accessibilityAddTraits(.isHeader)
-            Text("Recorded state: \(self.work.canonicalState.replacingOccurrences(of: "_", with: " "))")
-            if let context = self.artifactContext {
-                Text(context.relation == "previous_attempt"
-                     ? "Artifact belongs to a previous attempt. It does not establish this attempt's result."
-                     : context.relation == "current_attempt" ? "Artifact belongs to the current attempt."
-                     : "Artifact attempt relationship: \(context.relation.replacingOccurrences(of: "_", with: " "))")
-            }
-            Text("Structural check: \(self.work.structuralVerification.status.replacingOccurrences(of: "_", with: " "))")
-            ForEach(self.work.independentVerification.artifacts, id: \.eventId) { assessment in
-                Text("\(assessment.verificationKind == "structural_artifact_contract" ? "Independent structural contract" : "Bound verifier assessment"): \(assessment.outcome)")
-            }
-            Text(self.work.independentVerification.coversAllCurrentArtifacts
-                 ? "Recorded assessments cover all current artifacts. Semantic correctness and owner acceptance remain unestablished."
-                 : "Complete independent coverage of current artifacts is not established.")
-                .font(.caption).foregroundStyle(.secondary)
-            if self.work.pendingOwnerFeedback.isEmpty {
-                Text("No owner request recorded in this returned scope. Other scopes may contain requests.")
-            } else {
-                Text("Recorded owner requests").font(.headline)
+            if !self.work.pendingOwnerFeedback.isEmpty {
+                Text("Recorded owner requests").font(.headline).accessibilityAddTraits(.isHeader)
                 ForEach(self.work.pendingOwnerFeedback, id: \.eventId) { request in
                     Text(request.reason ?? "Inspect the recorded evidence.")
                 }
             }
-            Text(self.work.continuation.artifactSha256.isEmpty
-                 ? "No artifact is recorded yet. Inspect the current status and refresh for new evidence. No work is dispatched."
-                 : "Continuation: inspect the current evidence and open its verified artifact below. No work is dispatched.")
-            Text("Scope: \(self.work.coverage.scope). \(self.work.coverage.complete ? "Returned scope complete." : "Coverage is partial.")")
-                .font(.caption).foregroundStyle(.secondary)
+            if self.work.structuralVerification.status == "failed_recorded" {
+                Label("Structural check failed", systemImage: "exclamationmark.triangle")
+            } else if self.work.structuralVerification.status == "passed_recorded" {
+                Text("Structural check passed. This does not establish semantic correctness or owner acceptance.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if self.work.independentVerification.artifacts.contains(where: { $0.outcome == "FAIL" }) {
+                Label("A recorded verifier assessment failed", systemImage: "exclamationmark.triangle")
+            }
+            if self.work.continuation.artifactSha256.isEmpty {
+                Text("No artifact is recorded yet. Refresh for new evidence.")
+            }
+            DisclosureGroup("Verification and scope") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Recorded state: \(self.work.canonicalState.replacingOccurrences(of: "_", with: " "))")
+                    if let context = self.artifactContext {
+                        Text(context.relation == "previous_attempt"
+                             ? "Artifact belongs to a previous attempt. It does not establish this attempt's result."
+                             : context.relation == "current_attempt" ? "Artifact belongs to the current attempt."
+                             : "Artifact attempt relationship: \(context.relation.replacingOccurrences(of: "_", with: " "))")
+                    }
+                    Text("Structural check: \(self.work.structuralVerification.status.replacingOccurrences(of: "_", with: " "))")
+                    ForEach(self.work.independentVerification.artifacts, id: \.eventId) { assessment in
+                        Text("\(assessment.verificationKind == "structural_artifact_contract" ? "Independent structural contract" : "Bound verifier assessment"): \(assessment.outcome)")
+                    }
+                    Text(self.work.independentVerification.coversAllCurrentArtifacts
+                         ? "Recorded assessments cover all current artifacts. Semantic correctness and owner acceptance remain unestablished."
+                         : "Complete independent coverage of current artifacts is not established.")
+                    if self.work.pendingOwnerFeedback.isEmpty {
+                        Text("No owner request recorded in this returned scope. Other scopes may contain requests.")
+                    }
+                    Text("Continuation inspects recorded evidence. No work is dispatched.")
+                    Text("Scope: \(self.work.coverage.scope). \(self.work.coverage.complete ? "Returned scope complete." : "Coverage is partial.")")
+                }
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

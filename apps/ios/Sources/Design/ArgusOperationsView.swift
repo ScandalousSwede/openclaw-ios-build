@@ -62,7 +62,7 @@ struct ArgusOperationsContent: View {
                         .font(.subheadline)
                 }
                 if let observed = self.store.coverage?.observedAt {
-                    Text("Last observed: \(observed)").font(.caption).foregroundStyle(.secondary)
+                    Text("Last observed: \(ArgusOperation.observationLabel(observed))").font(.caption).foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
                     Text("No evidence found in this returned \(self.store.project.rawValue) scope.")
@@ -108,12 +108,11 @@ private struct ArgusOperationRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(self.item.display?.label ?? self.item.title).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+            Text(self.item.heading).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
             if let summary = self.item.display?.changeSummary { Text(summary).font(.subheadline) }
-            Text("\(self.item.project) · \(self.item.source) · \(self.item.kind)").font(.caption).foregroundStyle(.secondary)
-            Label(self.item.supersedesEventId == nil ? self.item.state.replacingOccurrences(of: "_", with: " ").capitalized : "Correction observed", systemImage: "doc.text")
+            Label(self.item.stateLabel, systemImage: "doc.text")
                 .font(.caption)
-            Text("Observed \(self.item.observedAt)").font(.caption).foregroundStyle(.secondary)
+            Text("Observed \(ArgusOperation.observationLabel(self.item.observedAt))").font(.caption).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -151,42 +150,18 @@ private struct ArgusOperationDetailView: View {
                     Text("The paired gateway changed. Return Home to load its evidence.")
                 } else {
                     ArgusOperationRow(item: self.detail?.item ?? self.operation)
-                    Text("Owner acceptance has not been established. This view reports scoped recorded evidence.")
-                        .font(.subheadline)
                     if !self.appModel.isOperatorGatewayConnected {
                         Label("Offline — last observed detail", systemImage: "wifi.slash")
                     }
                     if let error { Text(error).foregroundStyle(.secondary) }
                     if let error = self.artifactOpen.error { Text(error).foregroundStyle(.secondary) }
                     if let detail {
-                        if let work = detail.workContract {
-                            ArgusWorkSummary(work: work, artifactContext: detail.item.artifactContext)
-                        }
-                        if let history = detail.reviewHistory {
-                            ArgusReviewHistorySummary(history: history)
-                        }
-                        Text("Evidence timeline").font(.headline).accessibilityAddTraits(.isHeader)
-                        if detail.item.eventId != detail.requested.eventId {
-                            Text("A newer observation is available for this task.").font(.subheadline)
-                        }
-                        ForEach(detail.displayTimeline, id: \.eventId) { item in
-                            if item.eventId != detail.item.eventId {
-                                Text("Earlier observation — artifacts belong to this recorded event.").font(.caption)
-                            }
-                            ArgusOperationRow(item: item)
-                            ForEach(item.artifacts) { artifact in
-                                Button {
-                                    Task { await self.openArtifact(artifact, item: item) }
-                                } label: {
-                                    ArgusArtifactButtonLabel(artifact: artifact, operationLabel: item.display?.artifactLabel)
-                                }
-                                .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.title), \(artifact.byteCountLabel)")
-                                .disabled(self.artifactOpen.isLoading || !self.appModel.isOperatorGatewayConnected)
-                            }
-                        }
-                        if detail.coverage.hasMore {
-                            Text("Timeline coverage is partial.").font(.caption)
-                        }
+                        ArgusOperationEvidenceContent(
+                            detail: detail,
+                            artifactsAvailable: !self.artifactOpen.isLoading && self.appModel.isOperatorGatewayConnected,
+                            openArtifact: { artifact, item in
+                                Task { await self.openArtifact(artifact, item: item) }
+                            })
                     } else if self.error == nil { ProgressView("Loading detail") }
                 }
             }
@@ -246,6 +221,83 @@ private struct ArgusOperationDetailView: View {
         await self.artifactOpen.open(artifact, item: item) { params in
             try await self.client.request("argus.operations.artifact", params: params, as: ArgusOperationArtifact.self)
         }
+    }
+
+}
+
+// The detail screen and synthetic visual fixtures share this exact evidence hierarchy.
+struct ArgusOperationEvidenceContent: View {
+    let detail: ArgusOperationDetail
+    let artifactsAvailable: Bool
+    let openArtifact: (ArgusOperation.Artifact, ArgusOperation) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if self.detail.item.eventId != self.detail.requested.eventId {
+                Text("A newer observation is available for this task.").font(.subheadline)
+            }
+            if self.detail.item.artifactContext?.relation == "previous_attempt" {
+                Text("These artifacts belong to a previous attempt, not the current result.")
+                    .font(.subheadline)
+            }
+            if !self.detail.item.artifacts.isEmpty {
+                Text(self.detail.item.artifactContext?.relation == "previous_attempt" ? "Previous attempt artifacts"
+                     : self.detail.item.artifactContext?.relation == "current_attempt" ? "Current attempt artifacts"
+                     : "Recorded artifacts").font(.headline).accessibilityAddTraits(.isHeader)
+                self.artifactButtons(for: self.detail.item)
+            }
+            if let work = self.detail.workContract {
+                ArgusWorkSummary(work: work, artifactContext: self.detail.item.artifactContext)
+            }
+            DisclosureGroup("Source and provenance") {
+                self.provenance(for: self.detail.item)
+            }
+            if let history = self.detail.reviewHistory {
+                DisclosureGroup("Recorded reviews") {
+                    ArgusReviewHistorySummary(history: history)
+                }
+            }
+            DisclosureGroup("Earlier observations") {
+                ForEach(self.detail.displayTimeline.filter { $0.eventId != self.detail.item.eventId }, id: \.eventId) { item in
+                    Text("Earlier observation — artifacts belong to this recorded event.").font(.caption)
+                    ArgusOperationRow(item: item)
+                    self.artifactButtons(for: item)
+                    DisclosureGroup("Source and provenance") { self.provenance(for: item) }
+                }
+            }
+            if self.detail.coverage.hasMore {
+                Text("Timeline coverage is partial.").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func artifactButtons(for item: ArgusOperation) -> some View {
+        ForEach(item.artifacts) { artifact in
+            Button {
+                self.openArtifact(artifact, item)
+            } label: {
+                ArgusArtifactButtonLabel(artifact: artifact, operationLabel: item.display?.artifactLabel)
+            }
+            .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.heading), \(artifact.byteCountLabel)")
+            .disabled(!self.artifactsAvailable)
+        }
+    }
+
+    private func provenance(for item: ArgusOperation) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(item.title)
+            Text("\(item.project) · \(item.source) · \(item.kind)")
+            Text("Operation: \(item.id)")
+            Text("Task: \(item.taskId)")
+            Text("Event: \(item.eventId)")
+            Text("Recorded state: \(item.state.replacingOccurrences(of: "_", with: " "))")
+            Text("Observed: \(item.observedAt)")
+            Text("Owner acceptance is not established by this evidence.")
+        }
+        .font(.subheadline)
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
 }

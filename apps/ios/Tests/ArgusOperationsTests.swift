@@ -5,7 +5,7 @@ import Testing
 
 @MainActor
 struct ArgusOperationsTests {
-    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil, project: String = "Argus", artifacts: [[String: Any]] = []) throws -> ArgusOperationsPage {
+    private func page(id: String = "external-unfamiliar-47", cursor: String? = nil, state: String = "observed", source: String = "federation:external-test", scope: String? = nil, project: String = "Argus", supersedes: String? = nil, artifacts: [[String: Any]] = []) throws -> ArgusOperationsPage {
         let payload: [String: Any] = [
             "items": [[
                 "operation_id": id, "task_id": "technical-result-47", "event_id": "event-47",
@@ -13,6 +13,7 @@ struct ArgusOperationsTests {
                 "project": project, "kind": "evidence", "state": state,
                 "occurred_at": "2026-09-06T00:00:00Z", "observed_at": "2026-09-06T00:01:00Z",
                 "artifacts": artifacts, "owner_accepted": false,
+                "supersedes_event_id": supersedes as Any? ?? NSNull(),
             ]],
             "coverage": ["complete": cursor == nil, "has_more": cursor != nil,
                          "observed_at": "2026-09-06T00:01:00Z"],
@@ -21,6 +22,28 @@ struct ArgusOperationsTests {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(ArgusOperationsPage.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+
+    @Test func presentationPreservesFailedCorrectionAndAdmittedHeadingWithoutChangingIdentity() throws {
+        var item = try #require(self.page(state: "failed", source: "canonical:codex-completion-adapter",
+            scope: "admitted_canonical_technical_operation", supersedes: "previous-event").items.first)
+        #expect(item.isAdmitted)
+        #expect(item.stateLabel == "Correction observed · Failed")
+        #expect(item.heading == item.title)
+        let event = item.eventId
+        item.display = .init(label: "Collector retry repaired", changeSummary: "Disabled features remain disabled.",
+                             artifactLabel: nil, continuationLabel: nil)
+        #expect(item.heading == "Collector retry repaired")
+        #expect(item.state == "failed" && item.eventId == event && item.isAdmitted)
+    }
+
+    @Test func observationTimesFormatISOInstantsAndPreserveUnrecognizedEvidence() {
+        let instant = Date(timeIntervalSince1970: 1_788_825_600)
+        let iso = ISO8601DateFormatter().string(from: instant)
+        #expect(ArgusOperation.observationLabel(iso) == instant.formatted(date: .abbreviated, time: .shortened))
+        #expect(ArgusOperation.observationLabel(iso.replacingOccurrences(of: "Z", with: ".123Z"))
+            == instant.formatted(date: .abbreviated, time: .shortened))
+        #expect(ArgusOperation.observationLabel("source timestamp unavailable") == "source timestamp unavailable")
     }
 
     @Test func pagingDeduplicatesAndOfflinePreservesOnlySameGatewayEvidence() throws {
