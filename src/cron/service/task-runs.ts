@@ -8,6 +8,7 @@ import {
 import {
   completeTaskRunByRunId,
   createRunningTaskRun,
+  createQueuedTaskRun,
   failTaskRunByRunId,
 } from "../../tasks/detached-task-runtime.js";
 import { resolveCronAgentSessionKey } from "../isolated-agent/session-key.js";
@@ -15,7 +16,7 @@ import { createCronExecutionId } from "../run-id.js";
 import type { CronJob, CronRunStatus } from "../types.js";
 import { normalizeCronRunErrorText, timeoutErrorMessage } from "./execution-errors.js";
 import type { CronServiceState } from "./state.js";
-import { CRON_TASK_RUNNING_PROGRESS_SUMMARY } from "./task-ledger.js";
+import { CRON_HEARTBEAT_TASK_KIND, CRON_TASK_RUNNING_PROGRESS_SUMMARY } from "./task-ledger.js";
 
 /** Converts cron ids into bounded session-key path segments with a fallback for empty input. */
 export function normalizeCronLaneSegment(value: string | undefined, fallback: string): string {
@@ -66,22 +67,30 @@ export function tryCreateCronTaskRun(params: {
 }): string | undefined {
   const runId = createCronExecutionId(params.job.id, params.startedAt);
   try {
-    const task = createRunningTaskRun({
-      runtime: "cron",
+    const taskParams = {
+      runtime: "cron" as const,
+      taskKind: params.job.sessionTarget === "main" ? CRON_HEARTBEAT_TASK_KIND : undefined,
       sourceId: params.job.id,
       ownerKey: "",
-      scopeKind: "system",
+      scopeKind: "system" as const,
       childSessionKey: resolveCronTaskChildSessionKey(params),
       agentId: params.job.agentId,
       runId,
       label: params.job.name,
       task: params.job.name || params.job.id,
-      deliveryStatus: "not_applicable",
-      notifyPolicy: "silent",
-      startedAt: params.startedAt,
-      lastEventAt: params.startedAt,
-      progressSummary: CRON_TASK_RUNNING_PROGRESS_SUMMARY,
-    });
+      deliveryStatus: "not_applicable" as const,
+      notifyPolicy: "silent" as const,
+    };
+    // Main work may be accepted by cron long before the child heartbeat runs.
+    const task =
+      params.job.sessionTarget === "main"
+        ? createQueuedTaskRun(taskParams)
+        : createRunningTaskRun({
+            ...taskParams,
+            startedAt: params.startedAt,
+            lastEventAt: params.startedAt,
+            progressSummary: CRON_TASK_RUNNING_PROGRESS_SUMMARY,
+          });
     if (!task) {
       params.state.deps.log.warn(
         { jobId: params.job.id },
@@ -104,13 +113,14 @@ export function tryFinishCronTaskRun(
   state: CronServiceState,
   result: {
     taskRunId?: string;
+    executionDeferred?: boolean;
     status: CronRunStatus;
     error?: unknown;
     endedAt: number;
     summary?: string;
   },
 ): void {
-  if (!result.taskRunId) {
+  if (!result.taskRunId || result.executionDeferred) {
     return;
   }
   try {

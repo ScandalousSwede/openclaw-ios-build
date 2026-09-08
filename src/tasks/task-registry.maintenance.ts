@@ -20,9 +20,11 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isCronJobActive } from "../cron/active-jobs.js";
 import { readCronRunLogEntriesSync } from "../cron/run-log.js";
 import type { CronRunLogEntry } from "../cron/run-log.js";
+import { CRON_HEARTBEAT_TASK_KIND } from "../cron/service/task-ledger.js";
 import { loadCronJobsStoreSync, resolveCronJobsStorePath } from "../cron/store.js";
 import type { CronJob, CronStoreFile } from "../cron/types.js";
 import { getAgentRunContext } from "../infra/agent-events.js";
+import { hasHeartbeatWakeForExecution } from "../infra/heartbeat-wake.js";
 import { getSessionBindingService } from "../infra/outbound/session-binding-service.js";
 import { parseStrictNonNegativeInteger } from "../infra/parse-finite-number.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -462,7 +464,13 @@ function resolveDurableCronTaskRecovery(
   task: TaskRecord,
   context: CronRecoveryContext,
 ): CronTerminalRecovery | undefined {
-  if (task.runtime !== "cron" || (!isActiveTask(task) && !isRecoverableLostCronTask(task))) {
+  // Scheduler receipts only prove admission for a main-session heartbeat task,
+  // including after a restart has lost the in-memory wake and marked it lost.
+  if (
+    task.taskKind === CRON_HEARTBEAT_TASK_KIND ||
+    task.runtime !== "cron" ||
+    (!isActiveTask(task) && !isRecoverableLostCronTask(task))
+  ) {
     return undefined;
   }
   const execution = parseCronExecutionId(task);
@@ -492,6 +500,9 @@ function hasCliRunIdentity(task: TaskRecord): boolean {
 function hasBackingSession(task: TaskRecord, context?: BackingSessionLookupContext): boolean {
   if (task.runtime === "cron") {
     if (!taskRegistryMaintenanceRuntime.isRuntimeAuthoritative()) {
+      return true;
+    }
+    if (task.taskKind === CRON_HEARTBEAT_TASK_KIND && hasHeartbeatWakeForExecution(task.runId)) {
       return true;
     }
     const jobId = task.sourceId?.trim();
@@ -913,27 +924,27 @@ configureTaskAuditTaskProvider(reconcileInspectableTasks);
 
 export type ActiveTaskRestartBlocker = {
   taskId: string;
-  status: Extract<TaskStatus, "running">;
+  status: Extract<TaskStatus, "running" | "queued">;
   runtime: TaskRecord["runtime"];
   runId?: string;
   label?: string;
   title?: string;
 };
 
-function isActiveTaskRestartBlockerStatus(
-  status: TaskStatus,
-): status is ActiveTaskRestartBlocker["status"] {
-  return status === "running";
-}
-
 function isTaskRestartBlocker(task: TaskRecord): task is TaskRecord & {
   status: ActiveTaskRestartBlocker["status"];
 } {
-  // A task that is merely queued has not started user work yet; durable queued
-  // work can survive a gateway restart and should not indefinitely block one.
-  // Likewise, stale records that still say "running" but already have endedAt
-  // are registry inconsistencies, not live restart blockers.
-  return isActiveTaskRestartBlockerStatus(task.status) && !task.endedAt;
+  if (task.endedAt) {
+    return false;
+  }
+  // Ordinary durable queued tasks can survive restart. A queued heartbeat
+  // cannot: the wake and its completion observers still live in this process.
+  return (
+    task.status === "running" ||
+    (task.status === "queued" &&
+      task.taskKind === CRON_HEARTBEAT_TASK_KIND &&
+      hasHeartbeatWakeForExecution(task.runId))
+  );
 }
 
 export function getInspectableActiveTaskRestartBlockers(): ActiveTaskRestartBlocker[] {

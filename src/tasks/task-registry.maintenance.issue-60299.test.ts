@@ -3,7 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AcpSessionStoreEntry } from "../acp/runtime/session-meta.js";
 import type { SessionEntry } from "../config/sessions.js";
 import type { CronRunLogEntry } from "../cron/run-log.js";
+import { CRON_HEARTBEAT_TASK_KIND } from "../cron/service/task-ledger.js";
 import type { CronStoreFile } from "../cron/types.js";
+import {
+  requestHeartbeat,
+  resetHeartbeatWakeStateForTests,
+  setHeartbeatWakeHandler,
+} from "../infra/heartbeat-wake.js";
 import type { ParsedAgentSessionKey } from "../routing/session-key.js";
 import {
   resetDetachedTaskLifecycleRuntimeForTests,
@@ -48,6 +54,7 @@ type TaskRegistryMaintenanceRuntime = Parameters<
 >[0];
 
 afterEach(() => {
+  resetHeartbeatWakeStateForTests();
   stopTaskRegistryMaintenance();
   resetTaskRegistryMaintenanceRuntimeForTests();
   resetDetachedTaskLifecycleRuntimeForTests();
@@ -214,6 +221,63 @@ function expectTaskStatus(
 }
 
 describe("task-registry maintenance issue #60299", () => {
+  it("retains a queued or in-flight heartbeat and never recovers it from scheduler acceptance", async () => {
+    vi.useFakeTimers();
+    const startedAt = Date.now() - GRACE_EXPIRED_MS;
+    const task = makeStaleTask({
+      taskKind: CRON_HEARTBEAT_TASK_KIND,
+      status: "queued",
+      startedAt: undefined,
+      sourceId: "cron-deferred",
+      runId: `cron:cron-deferred:${startedAt}`,
+      childSessionKey: "agent:main:cron:cron-deferred:run:123",
+    });
+    const { currentTasks } = createTaskRegistryMaintenanceHarness({
+      tasks: [task],
+      cronRunLogEntries: {
+        "cron-deferred": [
+          {
+            ts: startedAt + 1,
+            jobId: "cron-deferred",
+            action: "finished",
+            status: "ok",
+            runAtMs: startedAt,
+            durationMs: 1,
+          },
+        ],
+      },
+    });
+    let finish: (() => void) | undefined;
+    setHeartbeatWakeHandler(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { status: "ran", durationMs: 1 };
+    });
+    requestHeartbeat({
+      source: "cron",
+      intent: "event",
+      sessionKey: "global",
+      completion: { executionId: task.runId!, onResult: () => {} },
+      coalesceMs: 0,
+    });
+    expect(reconcileInspectableTasks()[0].status).toBe("queued");
+    expect(getInspectableActiveTaskRestartBlockers()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(finish).toBeTypeOf("function");
+    expect(reconcileInspectableTasks()[0].status).toBe("queued");
+    expect(getInspectableActiveTaskRestartBlockers()).toHaveLength(1);
+    finish!();
+    await vi.advanceTimersByTimeAsync(1);
+    // No terminal task receipt was written by this synthetic handler. Missing
+    // custody must become lost, never success reconstructed from the cron log.
+    expect(reconcileInspectableTasks()[0].status).toBe("lost");
+    expect(reconcileInspectableTasks()[0].status).toBe("lost");
+    await runTaskRegistryMaintenance();
+    expect(currentTasks.get(task.taskId)?.status).toBe("lost");
+    expect(getInspectableActiveTaskRestartBlockers()).toHaveLength(0);
+  });
+
   it("reuses session store reads across stale subagent task checks in one pass", async () => {
     const tasks = Array.from({ length: 10 }, (_, index) =>
       makeStaleTask({

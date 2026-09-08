@@ -5,6 +5,7 @@ import {
   HEARTBEAT_SKIP_LANES_BUSY,
   HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
   hasHeartbeatWakeHandler,
+  hasHeartbeatWakeForExecution,
   hasPendingHeartbeatWake,
   requestHeartbeat,
   resetHeartbeatWakeStateForTests,
@@ -492,5 +493,113 @@ describe("heartbeat-wake", () => {
         sessionKey: "agent:main:forum:group:-1001",
       },
     ]);
+  });
+  it("preserves completion observers through busy retry and coalesced manual override", async () => {
+    vi.useFakeTimers();
+    const first = vi.fn();
+    const second = vi.fn();
+    const firstCompletion = { executionId: "first", onResult: first };
+    const secondCompletion = { executionId: "second", onResult: second };
+    const handler = setRetryOnceHeartbeatHandler();
+    requestHeartbeat(
+      wake("cron:deferred", {
+        sessionKey: "agent:main:cron:example:run:1",
+        coalesceMs: 0,
+        completion: firstCompletion,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first).not.toHaveBeenCalled();
+    requestHeartbeat(
+      wake("manual", {
+        sessionKey: "agent:main:cron:example:run:1",
+        coalesceMs: 0,
+        completion: secondCompletion,
+      }),
+    );
+    requestHeartbeat(
+      wake("cron:duplicate", {
+        sessionKey: "agent:main:cron:example:run:1",
+        coalesceMs: 0,
+        completion: firstCompletion,
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handler).toHaveBeenCalledTimes(2);
+    expect(handler.mock.calls[1][0].reason).toBe("manual");
+    expect(handler.mock.calls[1][0]).not.toHaveProperty("completion");
+    expect(first).toHaveBeenCalledExactlyOnceWith({ status: "ran", durationMs: 1 });
+    expect(second).toHaveBeenCalledExactlyOnceWith({ status: "ran", durationMs: 1 });
+  });
+
+  it("does not replay completed targets when a later handler or observer throws", async () => {
+    vi.useFakeTimers();
+    const first = vi.fn(() => {
+      throw new Error("synthetic receipt failure");
+    });
+    const second = vi.fn();
+    const firstCompletion = { executionId: "first", onResult: first };
+    const secondCompletion = { executionId: "second", onResult: second };
+    const handler = vi
+      .fn()
+      .mockResolvedValueOnce({ status: "ran", durationMs: 1 })
+      .mockRejectedValueOnce(new Error("synthetic handler failure"))
+      .mockResolvedValue({ status: "ran", durationMs: 2 });
+    setHeartbeatWakeHandler(handler);
+    requestHeartbeat(
+      wake("cron:first", { sessionKey: "first", coalesceMs: 0, completion: firstCompletion }),
+    );
+    requestHeartbeat(
+      wake("cron:second", { sessionKey: "second", coalesceMs: 0, completion: secondCompletion }),
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handler.mock.calls.map(([opts]) => opts.sessionKey)).toEqual([
+      "first",
+      "second",
+      "second",
+    ]);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledExactlyOnceWith({ status: "ran", durationMs: 2 });
+    expect(hasPendingHeartbeatWake()).toBe(false);
+  });
+  it("retires abandoned in-flight execution custody when a new handler is installed", async () => {
+    vi.useFakeTimers();
+    let release: (() => void) | undefined;
+    setHeartbeatWakeHandler(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { status: "ran", durationMs: 1 };
+    });
+    requestHeartbeat(
+      wake("cron:old", {
+        sessionKey: "old",
+        coalesceMs: 0,
+        completion: { executionId: "old-execution", onResult: vi.fn() },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hasHeartbeatWakeForExecution("old-execution")).toBe(true);
+    const next = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });
+    setHeartbeatWakeHandler(next);
+    expect(hasHeartbeatWakeForExecution("old-execution")).toBe(false);
+    requestHeartbeat(
+      wake("cron:new", {
+        sessionKey: "new",
+        coalesceMs: 0,
+        completion: { executionId: "new-execution", onResult: vi.fn() },
+      }),
+    );
+    expect(hasHeartbeatWakeForExecution("new-execution")).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0][0].sessionKey).toBe("new");
+    expect(hasHeartbeatWakeForExecution("new-execution")).toBe(false);
+    release!();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(hasHeartbeatWakeForExecution("old-execution")).toBe(false);
   });
 });

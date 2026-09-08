@@ -35,6 +35,7 @@ import {
   normalizeCronRunDiagnostics,
   summarizeCronRunDiagnostics,
 } from "../run-diagnostics.js";
+import { createCronExecutionId } from "../run-id.js";
 import { computeNextRunAtMs } from "../schedule.js";
 import { sweepCronRunSessions } from "../session-reaper.js";
 import type {
@@ -1879,6 +1880,12 @@ async function runStartupCatchupCandidate(
   candidate: StartupCatchupCandidate,
 ): Promise<TimedCronRunOutcome> {
   const startedAt = state.deps.nowMs();
+  // Keep the persisted reservation intact, but bind execution and task identity
+  // to the actual start after any earlier catch-up jobs have finished.
+  const executionJob = {
+    ...candidate.job,
+    state: { ...candidate.job.state, runningAtMs: startedAt },
+  };
   const taskRunId = tryCreateCronTaskRun({
     state,
     job: candidate.job,
@@ -1894,7 +1901,7 @@ async function runStartupCatchupCandidate(
     runAtMs: startedAt,
   });
   try {
-    const result = await executeJobCoreWithTimeout(state, candidate.job, {
+    const result = await executeJobCoreWithTimeout(state, executionJob, {
       runId: taskRunId,
       activeJobMarker,
     });
@@ -1904,6 +1911,7 @@ async function runStartupCatchupCandidate(
       taskRunId,
       activeJobMarker,
       status: result.status,
+      executionDeferred: result.executionDeferred,
       error: result.error,
       summary: result.summary,
       diagnostics: result.diagnostics,
@@ -2165,6 +2173,33 @@ async function executeMainSessionCronJob(
       ...(deliveryContext ? { deliveryContext } : {}),
     }),
   );
+  const deferHeartbeat = (intent: "immediate" | "event"): CronRunOutcome => {
+    state.deps.requestHeartbeat({
+      source: "cron",
+      intent,
+      reason: `cron:${job.id}`,
+      agentId: job.agentId,
+      sessionKey: cronRunSessionKey,
+      heartbeat: { target: "last" },
+      completion: {
+        executionId: createCronExecutionId(job.id, cronStartedAt),
+        onResult: (result) => {
+          if (result.status !== "ran") {
+            removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
+          }
+          tryFinishCronTaskRun(state, {
+            taskRunId: createCronExecutionId(job.id, cronStartedAt),
+            status: result.status === "ran" ? "ok" : "error",
+            error:
+              result.status === "ran" ? undefined : `heartbeat ${result.status}: ${result.reason}`,
+            summary: result.status === "ran" ? "Heartbeat execution completed" : undefined,
+            endedAt: state.deps.nowMs(),
+          });
+        },
+      },
+    });
+    return { status: "ok", executionDeferred: true, summary: text, sessionKey: cronRunSessionKey };
+  };
   if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
     const reason = `cron:${job.id}`;
     const maxWaitMs = state.deps.wakeNowHeartbeatBusyMaxWaitMs ?? 2 * 60_000;
@@ -2197,15 +2232,7 @@ async function executeMainSessionCronJob(
       }
       if (heartbeatResult.reason === HEARTBEAT_SKIP_CRON_IN_PROGRESS) {
         // The active cron marker blocks direct wake-now until this job returns.
-        state.deps.requestHeartbeat({
-          source: "cron",
-          intent: "immediate",
-          reason,
-          agentId: job.agentId,
-          sessionKey: cronRunSessionKey,
-          heartbeat: { target: "last" },
-        });
-        return { status: "ok", summary: text, sessionKey: cronRunSessionKey };
+        return deferHeartbeat("immediate");
       }
       if (abortSignal?.aborted) {
         removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
@@ -2216,15 +2243,7 @@ async function executeMainSessionCronJob(
           removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
           return { status: "error", error: timeoutErrorMessage() };
         }
-        state.deps.requestHeartbeat({
-          source: "cron",
-          intent: "immediate",
-          reason,
-          agentId: job.agentId,
-          sessionKey: cronRunSessionKey,
-          heartbeat: { target: "last" },
-        });
-        return { status: "ok", summary: text, sessionKey: cronRunSessionKey };
+        return deferHeartbeat("immediate");
       }
       await waitWithAbort(retryDelayMs);
     }
@@ -2254,15 +2273,7 @@ async function executeMainSessionCronJob(
     removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
     return { status: "error", error: timeoutErrorMessage() };
   }
-  state.deps.requestHeartbeat({
-    source: "cron",
-    intent: job.wakeMode === "now" ? "immediate" : "event",
-    reason: `cron:${job.id}`,
-    agentId: job.agentId,
-    sessionKey: cronRunSessionKey,
-    heartbeat: { target: "last" },
-  });
-  return { status: "ok", summary: text, sessionKey: cronRunSessionKey };
+  return deferHeartbeat(job.wakeMode === "now" ? "immediate" : "event");
 }
 
 async function executeDetachedCronJob(

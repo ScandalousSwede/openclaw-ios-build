@@ -161,6 +161,7 @@ describe("cron service timer seam coverage", () => {
       agentId: undefined,
       sessionKey: cronRunSessionKey,
       heartbeat: { target: "last" },
+      completion: { executionId: `cron:main-heartbeat-job:${now}`, onResult: expect.any(Function) },
     });
 
     const persisted = await loadCronStore(storePath);
@@ -183,13 +184,15 @@ describe("cron service timer seam coverage", () => {
     expect(task.runId).toBe(`cron:main-heartbeat-job:${now}`);
     expect(task.label).toBe("main heartbeat job");
     expect(task.task).toBe("main heartbeat job");
-    expect(task.status).toBe("succeeded");
+    expect(task.status).toBe("queued");
     expect(task.deliveryStatus).toBe("not_applicable");
     expect(task.notifyPolicy).toBe("silent");
-    expect(task.startedAt).toBe(now);
-    expect(task.lastEventAt).toBe(now);
-    expect(task.endedAt).toBe(now);
-    expect(task?.cleanupAfter).toBe(now + 7 * 24 * 60 * 60_000);
+    expect(task.startedAt).toBeUndefined();
+    expect(task.lastEventAt).toBe(task.createdAt);
+    expect(task.endedAt).toBeUndefined();
+    expect(task.cleanupAfter).toBeUndefined();
+    requestHeartbeat.mock.calls[0][0].completion.onResult({ status: "ran", durationMs: 10 });
+    expect(findTaskByRunId(task.runId!)?.status).toBe("succeeded");
 
     const delays = timeoutSpy.mock.calls
       .map(([, delay]) => delay)
@@ -331,7 +334,7 @@ describe("cron service timer seam coverage", () => {
     });
 
     const createTaskRecordSpy = vi
-      .spyOn(detachedTaskRuntime, "createRunningTaskRun")
+      .spyOn(detachedTaskRuntime, "createQueuedTaskRun")
       .mockImplementation(() => {
         throw ledgerError;
       });

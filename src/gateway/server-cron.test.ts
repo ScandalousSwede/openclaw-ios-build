@@ -873,53 +873,60 @@ describe("buildGatewayCronService", () => {
     }
   });
 
-  it("forwards heartbeat overrides through the cron wake adapter", () => {
-    const cfg = createCronConfig("server-cron-heartbeat-override");
-    loadConfigMock.mockReturnValue(cfg);
+  it.each(["per-sender", "global"] as const)(
+    "forwards heartbeat overrides and completion identity through %s routing",
+    (scope) => {
+      const completion = { executionId: "cron:synthetic:1", onResult: vi.fn() };
+      const cfg = { ...createCronConfig("server-cron-heartbeat-override"), session: { scope } };
+      loadConfigMock.mockReturnValue(cfg);
 
-    const state = buildGatewayCronService({
-      cfg,
-      deps: {} as CliDeps,
-      broadcast: () => {},
-    });
-    try {
-      const cronDeps = (
-        state.cron as unknown as {
-          state?: {
-            deps?: {
-              requestHeartbeat?: (opts?: {
-                agentId?: string;
-                sessionKey?: string | null;
-                reason?: string;
-                source?: string;
-                intent?: string;
-                heartbeat?: { target?: string };
-              }) => void;
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const cronDeps = (
+          state.cron as unknown as {
+            state?: {
+              deps?: {
+                requestHeartbeat?: (opts?: {
+                  agentId?: string;
+                  sessionKey?: string | null;
+                  reason?: string;
+                  source?: string;
+                  intent?: string;
+                  heartbeat?: { target?: string };
+                  completion?: { executionId: string; onResult: () => void };
+                }) => void;
+              };
             };
-          };
-        }
-      ).state?.deps;
+          }
+        ).state?.deps;
 
-      cronDeps?.requestHeartbeat?.({
-        source: "cron",
-        intent: "event",
-        reason: "cron:test",
-        sessionKey: "discord:channel:ops",
-        heartbeat: { target: "last" },
-      });
+        cronDeps?.requestHeartbeat?.({
+          source: "cron",
+          intent: "event",
+          reason: "cron:test",
+          sessionKey: "agent:main:cron:test:run:1",
+          heartbeat: { target: "last" },
+          completion,
+        });
 
-      expect(requestHeartbeatMock).toHaveBeenCalledWith({
-        source: "cron",
-        intent: "event",
-        reason: "cron:test",
-        agentId: "main",
-        sessionKey: "agent:main:discord:channel:ops",
-        heartbeat: { target: "last", to: undefined, accountId: undefined },
-      });
-    } finally {
-      state.cron.stop();
-    }
-  });
+        expect(requestHeartbeatMock).toHaveBeenCalledWith({
+          source: "cron",
+          intent: "event",
+          reason: "cron:test",
+          agentId: "main",
+          sessionKey: scope === "global" ? "global" : "agent:main:cron:test:run:1",
+          heartbeat: { target: "last", to: undefined, accountId: undefined },
+          completion,
+        });
+      } finally {
+        state.cron.stop();
+      }
+    },
+  );
 
   it("does not inherit explicit heartbeat destinations for direct target-last wakes", async () => {
     const cfg = {

@@ -1,5 +1,6 @@
 // Tracks heartbeat wake requests, busy skips, and retry timing.
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveTimerTimeoutMs } from "../shared/number-coercion.js";
 import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
 
@@ -49,6 +50,11 @@ export type HeartbeatWakeOverride = {
   accountId?: string | undefined;
 };
 
+type HeartbeatWakeCompletion = {
+  executionId: string;
+  onResult: (result: HeartbeatRunResult) => void;
+};
+
 export type HeartbeatWakeRequest = {
   source: HeartbeatWakeSource;
   intent: HeartbeatWakeIntent;
@@ -56,9 +62,13 @@ export type HeartbeatWakeRequest = {
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
+  /** Local completion bookkeeping, never part of the model request. */
+  completion?: HeartbeatWakeCompletion;
 };
 
-export type HeartbeatWakeHandler = (opts: HeartbeatWakeRequest) => Promise<HeartbeatRunResult>;
+export type HeartbeatWakeHandler = (
+  opts: Omit<HeartbeatWakeRequest, "completion">,
+) => Promise<HeartbeatRunResult>;
 
 let heartbeatsEnabled = true;
 
@@ -78,6 +88,7 @@ type PendingWakeReason = {
   priority: number;
   requestedAt: number;
   notBefore: number;
+  completions: Set<HeartbeatWakeCompletion>;
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
@@ -86,6 +97,7 @@ type PendingWakeReason = {
 let handler: HeartbeatWakeHandler | null = null;
 let handlerGeneration = 0;
 const pendingWakes = new Map<string, PendingWakeReason>();
+const inFlightWakes = new Set<PendingWakeReason>();
 let scheduled = false;
 let running = false;
 let timer: NodeJS.Timeout | null = null;
@@ -143,6 +155,7 @@ function queuePendingWakeReason(params: {
   reason?: string;
   requestedAt?: number;
   notBefore?: number;
+  completions?: Iterable<HeartbeatWakeCompletion>;
   agentId?: string;
   sessionKey?: string;
   heartbeat?: HeartbeatWakeOverride;
@@ -166,6 +179,7 @@ function queuePendingWakeReason(params: {
     }),
     requestedAt,
     notBefore: params.notBefore ?? Date.now(),
+    completions: new Set(params.completions),
     agentId: normalizedAgentId,
     sessionKey: normalizedSessionKey,
     heartbeat: params.heartbeat,
@@ -175,6 +189,11 @@ function queuePendingWakeReason(params: {
     pendingWakes.set(wakeTargetKey, next);
     return;
   }
+  // Priority selects the wake, not the owners awaiting that session outcome.
+  for (const observer of next.completions) {
+    previous.completions.add(observer);
+  }
+  next.completions = previous.completions;
   const merged =
     (next.heartbeat ?? previous.heartbeat)
       ? { ...next, heartbeat: next.heartbeat ?? previous.heartbeat }
@@ -234,7 +253,11 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
           pendingWakes.delete(key);
         }
       }
+      for (const wake of pendingBatch) {
+        inFlightWakes.add(wake);
+      }
       running = true;
+      let processedCount = 0;
       try {
         for (const pendingWake of pendingBatch) {
           const wakeOpts = {
@@ -263,17 +286,28 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
               agentId: pendingWake.agentId,
               sessionKey: pendingWake.sessionKey,
               heartbeat: pendingWake.heartbeat,
+              completions: pendingWake.completions,
               requestedAt: pendingWake.requestedAt,
               notBefore: Date.now() + (cooldownDelay ?? DEFAULT_RETRY_MS),
             });
             if (busy) {
               schedule(DEFAULT_RETRY_MS, "retry");
             }
+          } else {
+            for (const completion of pendingWake.completions) {
+              try {
+                completion.onResult(res);
+              } catch {
+                // A failed observer must never replay already executed work.
+                createSubsystemLogger("heartbeat").error("wake result observer failed");
+              }
+            }
           }
+          processedCount += 1;
         }
       } catch {
         // Error is already logged by the heartbeat runner; schedule a retry.
-        for (const pendingWake of pendingBatch) {
+        for (const pendingWake of pendingBatch.slice(processedCount)) {
           queuePendingWakeReason({
             source: pendingWake.source,
             intent: pendingWake.intent,
@@ -281,10 +315,15 @@ function schedule(coalesceMs: number, kind: WakeTimerKind = "normal") {
             agentId: pendingWake.agentId,
             sessionKey: pendingWake.sessionKey,
             heartbeat: pendingWake.heartbeat,
+            completions: pendingWake.completions,
+            requestedAt: pendingWake.requestedAt,
           });
         }
         schedule(DEFAULT_RETRY_MS, "retry");
       } finally {
+        for (const wake of pendingBatch) {
+          inFlightWakes.delete(wake);
+        }
         running = false;
         if (pendingWakes.size > 0 || scheduled) {
           const nextDelay =
@@ -329,6 +368,9 @@ export function setHeartbeatWakeHandler(next: HeartbeatWakeHandler | null): () =
     // `scheduled === true` can cause spurious immediate re-runs.
     running = false;
     scheduled = false;
+    // A replaced handler no longer owns its abandoned execution bookkeeping.
+    // Do not replay it: the old provider attempt may already have executed.
+    inFlightWakes.clear();
   }
   if (handler && pendingWakes.size > 0) {
     schedule(DEFAULT_COALESCE_MS, "normal");
@@ -345,15 +387,7 @@ export function setHeartbeatWakeHandler(next: HeartbeatWakeHandler | null): () =
   };
 }
 
-export function requestHeartbeat(opts: {
-  source: HeartbeatWakeSource;
-  intent: HeartbeatWakeIntent;
-  reason?: string;
-  coalesceMs?: number;
-  agentId?: string;
-  sessionKey?: string;
-  heartbeat?: HeartbeatWakeOverride;
-}) {
+export function requestHeartbeat(opts: HeartbeatWakeRequest & { coalesceMs?: number }) {
   queuePendingWakeReason({
     source: opts.source,
     intent: opts.intent,
@@ -361,12 +395,23 @@ export function requestHeartbeat(opts: {
     agentId: opts.agentId,
     sessionKey: opts.sessionKey,
     heartbeat: opts.heartbeat,
+    completions: opts.completion ? [opts.completion] : undefined,
   });
   schedule(opts.coalesceMs ?? DEFAULT_COALESCE_MS, "normal");
 }
 
 export function hasHeartbeatWakeHandler() {
   return handler !== null;
+}
+
+/** Execution custody survives routing aliases and coalescing into a shared session. */
+export function hasHeartbeatWakeForExecution(executionId: string | undefined): boolean {
+  if (!executionId) {
+    return false;
+  }
+  return [...pendingWakes.values(), ...inFlightWakes].some((wake) =>
+    [...wake.completions].some((completion) => completion.executionId === executionId),
+  );
 }
 
 export function hasPendingHeartbeatWake() {
@@ -381,6 +426,7 @@ export function resetHeartbeatWakeStateForTests() {
   timerDueAt = null;
   timerKind = null;
   pendingWakes.clear();
+  inFlightWakes.clear();
   scheduled = false;
   running = false;
   handlerGeneration += 1;

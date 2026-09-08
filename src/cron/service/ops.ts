@@ -9,11 +9,6 @@ import { CommandLane } from "../../process/lanes.js";
 import { DEFAULT_AGENT_ID } from "../../routing/session-key.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import {
-  completeTaskRunByRunId,
-  createRunningTaskRun,
-  failTaskRunByRunId,
-} from "../../tasks/detached-task-runtime.js";
-import {
   clearCronJobActive,
   isCronActiveJobMarkerCurrent,
   markCronJobActive,
@@ -21,7 +16,6 @@ import {
 } from "../active-jobs.js";
 import { resolveCronDeliveryPlan, resolveFailureDestination } from "../delivery-plan.js";
 import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
-import { createCronExecutionId } from "../run-id.js";
 import { normalizeCronRunLogJobId } from "../run-log.js";
 import { cronSchedulingInputsEqual } from "../schedule-identity.js";
 import type { CronJob, CronJobCreate, CronJobPatch, CronPayload, CronStoreFile } from "../types.js";
@@ -58,7 +52,7 @@ import type {
   CronWakeMode,
 } from "./state.js";
 import { ensureLoaded, persist, warnIfDisabled } from "./store.js";
-import { CRON_TASK_RUNNING_PROGRESS_SUMMARY } from "./task-ledger.js";
+import { tryCreateCronTaskRun, tryFinishCronTaskRun } from "./task-runs.js";
 import {
   applyJobResult,
   applyTriggerNoFireResult,
@@ -876,91 +870,6 @@ async function skipInvalidPersistedManualRun(params: {
   armTimer(params.state);
 }
 
-function tryCreateManualTaskRun(params: {
-  state: CronServiceState;
-  job: CronJob;
-  startedAt: number;
-}): string | undefined {
-  const runId = createCronExecutionId(params.job.id, params.startedAt);
-  try {
-    const task = createRunningTaskRun({
-      runtime: "cron",
-      sourceId: params.job.id,
-      ownerKey: "",
-      scopeKind: "system",
-      childSessionKey: params.job.sessionKey,
-      agentId: params.job.agentId,
-      runId,
-      label: params.job.name,
-      task: params.job.name || params.job.id,
-      deliveryStatus: "not_applicable",
-      notifyPolicy: "silent",
-      startedAt: params.startedAt,
-      lastEventAt: params.startedAt,
-      progressSummary: CRON_TASK_RUNNING_PROGRESS_SUMMARY,
-    });
-    if (!task) {
-      params.state.deps.log.warn(
-        { jobId: params.job.id },
-        "cron: task ledger record was not persisted",
-      );
-      return undefined;
-    }
-    return runId;
-  } catch (error) {
-    params.state.deps.log.warn(
-      { jobId: params.job.id, error },
-      "cron: failed to create task ledger record",
-    );
-    return undefined;
-  }
-}
-
-function tryFinishManualTaskRun(
-  state: CronServiceState,
-  params: {
-    taskRunId?: string;
-    coreResult: Awaited<ReturnType<typeof executeJobCoreWithTimeout>>;
-    endedAt: number;
-  },
-): void {
-  if (!params.taskRunId) {
-    return;
-  }
-  try {
-    if (params.coreResult.status === "ok" || params.coreResult.status === "skipped") {
-      completeTaskRunByRunId({
-        runId: params.taskRunId,
-        runtime: "cron",
-        endedAt: params.endedAt,
-        lastEventAt: params.endedAt,
-        terminalSummary: params.coreResult.summary ?? undefined,
-      });
-      return;
-    }
-    failTaskRunByRunId({
-      runId: params.taskRunId,
-      runtime: "cron",
-      status:
-        normalizeCronRunErrorText(params.coreResult.error) === "cron: job execution timed out"
-          ? "timed_out"
-          : "failed",
-      endedAt: params.endedAt,
-      lastEventAt: params.endedAt,
-      error:
-        params.coreResult.status === "error"
-          ? normalizeCronRunErrorText(params.coreResult.error)
-          : undefined,
-      terminalSummary: params.coreResult.summary ?? undefined,
-    });
-  } catch (error) {
-    state.deps.log.warn(
-      { runId: params.taskRunId, jobStatus: params.coreResult.status, error },
-      "cron: failed to update task ledger record",
-    );
-  }
-}
-
 async function inspectManualRunPreflight(
   state: CronServiceState,
   id: string,
@@ -1057,7 +966,7 @@ async function prepareManualRun(
       return { ok: true, ran: false, reason: "stopped" as const };
     }
     emit(state, { jobId: job.id, action: "started", job, runAtMs: preflight.now });
-    const taskRunId = tryCreateManualTaskRun({
+    const taskRunId = tryCreateCronTaskRun({
       state,
       job,
       startedAt: preflight.now,
@@ -1109,9 +1018,9 @@ async function finishPreparedManualRun(
       coreResult = { status: "error", error: normalizeCronRunErrorText(err) };
     }
     const endedAt = state.deps.nowMs();
-    tryFinishManualTaskRun(state, {
+    tryFinishCronTaskRun(state, {
+      ...coreResult,
       taskRunId,
-      coreResult,
       endedAt,
     });
     if (!isCronActiveJobMarkerCurrent(prepared.activeJobMarker)) {

@@ -186,6 +186,8 @@ export type CronRunDiagnostics = {
 /** Execution result persisted on cron state, run logs, and isolated turn results. */
 export type CronRunOutcome = {
   status: CronRunStatus;
+  /** Local handoff: heartbeat owns the task outcome after queue acceptance. */
+  executionDeferred?: boolean;
   error?: string;
   /** Optional classifier for execution errors to guide fallback behavior. */
   errorKind?: "delivery-target";

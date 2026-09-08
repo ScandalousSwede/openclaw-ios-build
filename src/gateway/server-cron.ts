@@ -459,6 +459,7 @@ export function buildGatewayCronService(params: {
         agentId,
         sessionKey,
         heartbeat: sanitizeCronHeartbeatOverride(opts?.heartbeat),
+        completion: opts.completion,
       });
     },
     runHeartbeatOnce: async (opts) => {
