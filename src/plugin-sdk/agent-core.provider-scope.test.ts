@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const owners = vi.hoisted(() => ({
+  google: vi.fn(() => ({ id: "google", resolveDynamicModel: () => undefined })),
   openai: vi.fn(() => ({ id: "openai", resolveDynamicModel: () => undefined })),
   anthropic: vi.fn(() => ({ id: "anthropic", resolveDynamicModel: () => undefined })),
 }));
+vi.mock("../../extensions/google/api.js", () => ({ buildGoogleProvider: owners.google }));
 vi.mock("../../extensions/openai/api.js", () => ({ buildOpenAIProvider: owners.openai }));
 vi.mock("../../extensions/anthropic/api.js", () => ({ buildAnthropicProvider: owners.anthropic }));
 vi.mock("../plugins/plugin-metadata-snapshot.js", () => ({
@@ -24,6 +26,7 @@ import {
 
 describe("explicit bundled provider metadata", () => {
   beforeEach(() => {
+    owners.google.mockClear();
     owners.openai.mockClear();
     owners.anthropic.mockClear();
   });
@@ -62,6 +65,34 @@ describe("explicit bundled provider metadata", () => {
       createBundledProviderRuntimeScopeMetadata({}, "../unreviewed" as "openai"),
     ).rejects.toThrow(/Unsupported/);
     expect(owners.openai).not.toHaveBeenCalled();
+  });
+
+  it("uses the shipped Google provider and manifest without registry discovery", async () => {
+    const config = { plugins: { allow: ["google"], entries: { google: { enabled: true } } } };
+    const before = structuredClone(config);
+    const metadata = await createBundledProviderRuntimeScopeMetadata(config, "google");
+    expect(metadata.provider.id).toBe("google");
+    expect(metadata.providerManifest?.id).toBe("google");
+    expect(metadata.authLookupMaps?.envCandidateMap.google).toEqual([
+      "GEMINI_API_KEY",
+      "GOOGLE_API_KEY",
+    ]);
+    expect(owners.google).toHaveBeenCalledOnce();
+    expect(owners.openai).not.toHaveBeenCalled();
+    expect(owners.anthropic).not.toHaveBeenCalled();
+    expect(config).toEqual(before);
+  });
+
+  it.each([
+    { plugins: { enabled: false } },
+    { plugins: { deny: ["google"] } },
+    { plugins: { allow: ["anthropic"] } },
+    { plugins: { entries: { google: { enabled: false } } } },
+  ])("rejects denied Google before importing its owner: %j", async (config) => {
+    await expect(createBundledProviderRuntimeScopeMetadata(config, "google")).rejects.toThrow(
+      /disabled or denied/,
+    );
+    expect(owners.google).not.toHaveBeenCalled();
   });
 
   it("preserves Anthropic declarations and immutable explicit-scope behavior", async () => {

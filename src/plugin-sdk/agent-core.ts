@@ -107,30 +107,40 @@ export async function createBundledAnthropicModelMetadata(
 /** Prepare shipped provider metadata for an explicit scope without registry discovery. */
 export async function createBundledProviderRuntimeScopeMetadata(
   config: import("../config/types.openclaw.js").OpenClawConfig,
-  providerId: "anthropic" | "openai",
+  providerId: "anthropic" | "openai" | "google",
 ): Promise<
   Omit<import("../plugins/provider-runtime-scope.js").ExplicitProviderRuntimeScope, "config">
 > {
-  if (providerId !== "anthropic" && providerId !== "openai") {
+  if (providerId !== "anthropic" && providerId !== "openai" && providerId !== "google") {
     throw new Error("Unsupported bundled provider scope");
   }
   const { assertExplicitProviderAdmission } = await import("../plugins/provider-runtime-scope.js");
   assertExplicitProviderAdmission(config, providerId);
   const { buildAdmittedProviderAuthLookupMaps } = await import("../secrets/provider-env-vars.js");
-  const [provider, manifest] =
-    providerId === "anthropic"
-      ? await Promise.all([
-          import("../../extensions/anthropic/api.js").then((api) => api.buildAnthropicProvider()),
-          import("../../extensions/anthropic/openclaw.plugin.json", {
-            with: { type: "json" },
-          }).then((value) => value.default),
-        ])
-      : await Promise.all([
-          import("../../extensions/openai/api.js").then((api) => api.buildOpenAIProvider()),
-          import("../../extensions/openai/openclaw.plugin.json", { with: { type: "json" } }).then(
-            (value) => value.default,
-          ),
-        ]);
+  const loaders = {
+    anthropic: () =>
+      Promise.all([
+        import("../../extensions/anthropic/api.js").then((api) => api.buildAnthropicProvider()),
+        import("../../extensions/anthropic/openclaw.plugin.json", { with: { type: "json" } }).then(
+          (value) => value.default,
+        ),
+      ] as const),
+    openai: () =>
+      Promise.all([
+        import("../../extensions/openai/api.js").then((api) => api.buildOpenAIProvider()),
+        import("../../extensions/openai/openclaw.plugin.json", { with: { type: "json" } }).then(
+          (value) => value.default,
+        ),
+      ] as const),
+    google: () =>
+      Promise.all([
+        import("../../extensions/google/api.js").then((api) => api.buildGoogleProvider()),
+        import("../../extensions/google/openclaw.plugin.json", { with: { type: "json" } }).then(
+          (value) => value.default,
+        ),
+      ] as const),
+  };
+  const [provider, manifest] = await loaders[providerId]();
   // These are the shipped manifests checked by bundled-plugin contract tests,
   // not fabricated registry/index records. Keep auth reduction on real declarations.
   type AuthManifest = Parameters<
