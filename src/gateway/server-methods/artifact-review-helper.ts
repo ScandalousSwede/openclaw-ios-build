@@ -15,7 +15,9 @@ const MAX_BYTES = 65536;
 export function createArtifactReviewHelperAdapter(
   config: GatewayConfig["artifactReview"],
 ): ArtifactReviewAdapter | undefined {
-  if (!config) return undefined;
+  if (!config) {
+    return undefined;
+  }
   if (
     !isAbsolute(config.command) ||
     config.command.includes("\0") ||
@@ -23,8 +25,9 @@ export function createArtifactReviewHelperAdapter(
     config.args?.some((arg) => arg.length > 4096 || arg.includes("\0")) ||
     (config.timeoutMs !== undefined &&
       (!Number.isInteger(config.timeoutMs) || config.timeoutMs < 100 || config.timeoutMs > 15000))
-  )
+  ) {
     throw unavailable();
+  }
   const command = config.command;
   const args = [...(config.args ?? [])];
   const timeoutMs = config.timeoutMs ?? 5000;
@@ -38,7 +41,9 @@ export function createArtifactReviewHelperAdapter(
       actor,
       ...(request === undefined ? {} : { command: request }),
     });
-    if (Buffer.byteLength(input) > MAX_BYTES) throw unavailable();
+    if (Buffer.byteLength(input) > MAX_BYTES) {
+      throw unavailable();
+    }
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         shell: false,
@@ -47,42 +52,47 @@ export function createArtifactReviewHelperAdapter(
       });
       let bytes = 0;
       const chunks: Buffer[] = [];
-      let settled = false;
+      let failed = false;
       let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-      const finish = (value?: unknown, failed = false) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
+      const abort = () => {
         if (failed) {
-          child.kill();
-          forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 250);
-          forceKillTimer.unref();
-          reject(unavailable());
-        } else resolve(value);
+          return;
+        }
+        failed = true;
+        child.kill();
+        forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 250);
+        forceKillTimer.unref();
       };
-      const timer = setTimeout(() => finish(undefined, true), timeoutMs);
-      child.on("error", () => finish(undefined, true));
-      child.stdin.on("error", () => finish(undefined, true));
+      const timer = setTimeout(abort, timeoutMs);
+      child.on("error", abort);
+      child.stdin.on("error", abort);
       child.stdout.on("data", (chunk: Buffer) => {
+        if (failed) {
+          return;
+        }
         bytes += chunk.length;
         if (bytes > MAX_BYTES) {
-          finish(undefined, true);
+          abort();
           return;
         }
         chunks.push(chunk);
       });
+      // Keep the RPC pending until the helper closes; a signal alone is not termination.
+      // A timeout can follow a canonical commit, so callers must reconcile/retry
+      // with the same exact idempotency identity rather than infer no effect.
       child.on("close", (code) => {
+        clearTimeout(timer);
         clearTimeout(forceKillTimer);
-        if (code !== 0) {
-          finish(undefined, true);
+        if (failed || code !== 0) {
+          reject(unavailable());
           return;
         }
         try {
-          finish(
+          resolve(
             JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks))),
           );
         } catch {
-          finish(undefined, true);
+          reject(unavailable());
         }
       });
       child.stdin.end(input);
@@ -105,11 +115,14 @@ export function createArtifactReviewHelperAdapter(
         !("items" in result) ||
         !Array.isArray(result.items) ||
         result.items.length > 100
-      )
+      ) {
         throw unavailable();
+      }
       return result.items
         .map((raw: unknown): ArtifactReviewPending => {
-          if (!raw || typeof raw !== "object") throw unavailable();
+          if (!raw || typeof raw !== "object") {
+            throw unavailable();
+          }
           const row = raw as Record<string, unknown>;
           if (
             typeof row.id !== "string" ||
@@ -123,8 +136,9 @@ export function createArtifactReviewHelperAdapter(
             !Number.isSafeInteger(row.expires_at_ms) ||
             (row.created_at_ms as number) <= 0 ||
             (row.expires_at_ms as number) <= (row.created_at_ms as number)
-          )
+          ) {
             throw unavailable();
+          }
           return {
             id: row.id,
             binding: parseArtifactReviewBinding(row.binding),

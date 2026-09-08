@@ -78,12 +78,25 @@ it("terminates a bounded timed-out child without exposing its command", async ()
   );
 });
 
-it("force-terminates a timed-out helper that ignores SIGTERM", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "artifact-helper-test-")), "pid");
-  const source = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(path)},String(process.pid));setInterval(()=>{},1000);`;
-  await expect(helper(source, 300).list!(actor)).rejects.toThrow(
-    /^Artifact review unavailable or invalid$/,
-  );
-  const pid = Number(readFileSync(path, "utf8"));
-  await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 1500 });
-});
+it.each(["timeout", "output limit"])(
+  "keeps %s failure pending until the helper terminates",
+  async (failure) => {
+    const path = join(mkdtempSync(join(tmpdir(), "artifact-helper-test-")), "pid");
+    const trigger = failure === "output limit" ? "process.stdout.write('x'.repeat(65537));" : "";
+    const source = `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(path)},String(process.pid));${trigger}setInterval(()=>{},1000);`;
+    await expect(helper(source, 300).list!(actor)).rejects.toThrow(
+      /^Artifact review unavailable or invalid$/,
+    );
+    const pid = Number(readFileSync(path, "utf8"));
+    try {
+      // A rejected operation must not leave its helper able to commit a later effect.
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      // Join the synthetic helper even when checking an unfixed implementation.
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+      await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), { timeout: 1500 });
+    }
+  },
+);
