@@ -57,4 +57,31 @@ class ReadToken(unittest.TestCase):
    class Opener:
     def open(self,*args,**kwargs):return io.BytesIO(json.dumps({'data':rows}).encode())
    with self.subTest(rows=rows),patch.object(m,'build_opener',return_value=Opener()),self.assertRaises(ValueError):m.recent_crash_scopes(b'synthetic-token',m.scopes('1234567890')[1])
+ def test_internal_audience_capability_is_app_bound_read_only_without_private_tester_fields(self):
+  from urllib.parse import urlparse,parse_qs
+  packet=m.mint(self.pem,'00000000-1111-2222-3333-444444444444','ABCD123456','1234567890',self.pub,now=1000,purpose='internal-audience')
+  part=self.decrypt(packet).split(b'.')[1];claims=json.loads(base64.urlsafe_b64decode(part+b'='*(-len(part)%4)))
+  self.assertEqual(claims['scope'],m.scopes('1234567890','internal-audience'));self.assertEqual(len(claims['scope']),2)
+  for scope in claims['scope']:
+   self.assertTrue(scope.startswith('GET '));query=parse_qs(urlparse(scope[4:]).query);self.assertEqual(query['filter[app]'],['1234567890'])
+  q=parse_qs(urlparse(claims['scope'][1][4:]).query)
+  self.assertEqual(q['filter[isInternalGroup]'],['true']);self.assertEqual(q['fields[betaTesters]'],['state'])
+  self.assertIn('builds',q['fields[betaGroups]'][0].split(','));self.assertIn('builds',q['include'][0].split(','));self.assertEqual(q['fields[builds]'],['version'])
+  self.assertNotIn('email',json.dumps(claims));self.assertNotIn('firstName',json.dumps(claims));self.assertNotIn('crashLog',json.dumps(claims))
+  self.assertLess(len(json.dumps(claims['scope'],separators=(',',':'))),600)
+ def test_invalid_purpose_and_mixed_discovery_rejected(self):
+  for purpose in ['all','POST','internal-audience/../']:
+   with self.subTest(purpose=purpose),self.assertRaises(ValueError):m.scopes('1234567890',purpose)
+  with self.assertRaises(ValueError):m.mint(self.pem,'00000000-1111-2222-3333-444444444444','ABCD123456','1234567890',self.pub,purpose='internal-audience',discover=lambda *a:[])
+ def test_actual_internal_audience_cli_does_not_call_crash_discovery(self):
+  with tempfile.TemporaryDirectory() as directory:
+   shim=Path(directory)/'shim';shim.mkdir();(shim/'sitecustomize.py').write_text("import urllib.request\ndef denied(*a,**k):raise RuntimeError('unexpected-network')\nurllib.request.build_opener=denied\n")
+   env={**os.environ,'PYTHONPATH':str(shim),'ASC_PRIVATE_KEY_P8':self.pem.decode(),'ASC_ISSUER_ID':'00000000-1111-2222-3333-444444444444','ASC_KEY_ID':'ABCD123456','APP_STORE_CONNECT_APP_ID':'1234567890','ASC_READ_RECIPIENT_PUBLIC':self.pub,'ASC_READ_PURPOSE':'internal-audience','RUNNER_TEMP':directory}
+   r=subprocess.run(['python3',str(ROOT/'scripts/ios-asc-read-token.py')],env=env,capture_output=True,text=True,timeout=10);self.assertEqual(r.returncode,0,r.stderr)
+   token=self.decrypt(json.loads((Path(directory)/'asc-read-capability.json').read_text()));part=token.split(b'.')[1];claims=json.loads(base64.urlsafe_b64decode(part+b'='*(-len(part)%4)));self.assertEqual(claims['scope'],m.scopes('1234567890','internal-audience'));self.assertNotIn(token.decode(),r.stdout+r.stderr)
+ def test_workflow_exposes_only_two_read_purposes_in_existing_protected_job(self):
+  workflow=yaml.load((ROOT/'.github/workflows/ios-build-ipa.yml').read_text(),Loader=yaml.BaseLoader)
+  self.assertEqual(workflow['on']['workflow_dispatch']['inputs']['read_purpose']['options'],['crash-feedback','internal-audience'])
+  job=workflow['jobs']['scoped-read-token'];self.assertEqual(job['environment'],'aies-testflight-internal')
+  steps=[s for s in job['steps'] if 'ios-asc-read-token.py' in s.get('run','')];self.assertEqual(len(steps),1);self.assertIn('inputs.read_purpose',steps[0]['env']['ASC_READ_PURPOSE'])
 if __name__=='__main__':unittest.main()

@@ -12,6 +12,14 @@ on:
           - unsigned-diagnostic
           - signed-internal-testflight
           - scoped-read-token
+      read_purpose:
+        description: Read-only API purpose (no tester or group changes)
+        required: false
+        default: crash-feedback
+        type: choice
+        options:
+          - crash-feedback
+          - internal-audience
       read_recipient_public:
         description: Base64 X25519 public key for scoped-read-token (never a private key)
         required: false
@@ -2367,6 +2375,7 @@ jobs:
           ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
           APP_STORE_CONNECT_APP_ID: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+          ASC_READ_PURPOSE: ${{ inputs.read_purpose || 'crash-feedback' }}
           ASC_READ_RECIPIENT_PUBLIC: ${{ inputs.read_recipient_public }}
         run: python3 scripts/ios-asc-read-token.py
       - name: Return encrypted capability

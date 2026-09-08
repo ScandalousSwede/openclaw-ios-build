@@ -30,14 +30,25 @@ def b64(data):
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 
-def scopes(app_id):
+def scopes(app_id, purpose="crash-feedback"):
     if not re.fullmatch(r'[0-9]{6,12}', app_id):
         raise ValueError('Invalid configured app identity')
+    if purpose not in ('crash-feedback', 'internal-audience'):
+        raise ValueError('Unsupported read purpose')
     feedback = '/v1/apps/' + app_id + '/betaFeedbackCrashSubmissions?'
     feedback += urlencode({'include': 'build', 'fields[betaFeedbackCrashSubmissions]':
                            'createdDate,deviceModel,osVersion,appUptimeInMilliseconds,build,crashLog'})
     builds = '/v1/builds?' + urlencode({'filter[app]': app_id,
                                       'fields[builds]': 'version,processingState,uploadedDate,buildAudienceType'})
+    if purpose == 'internal-audience':
+        # App-bound existing internal groups only. Tester attributes intentionally
+        # exclude names, email addresses and device details. No write capability.
+        groups = '/v1/betaGroups?' + urlencode({
+            'filter[app]': app_id, 'filter[isInternalGroup]': 'true',
+            'fields[betaGroups]': 'name,isInternalGroup,hasAccessToAllBuilds,betaTesters,builds',
+            'include': 'betaTesters,builds', 'fields[betaTesters]': 'state',
+            'fields[builds]': 'version'})
+        return ['GET ' + builds, 'GET ' + groups]
     return ['GET ' + builds, 'GET ' + feedback]
 
 
@@ -70,7 +81,7 @@ def recent_crash_scopes(token, feedback_scope):
     return result
 
 
-def mint(private_pem, issuer, key_id, app_id, recipient_b64, *, now=None, discover=None):
+def mint(private_pem, issuer, key_id, app_id, recipient_b64, *, now=None, discover=None, purpose="crash-feedback"):
     if not re.fullmatch(r'[A-Z0-9]{10}', key_id) or not re.fullmatch(r'[0-9a-fA-F-]{36}', issuer):
         raise ValueError('Invalid configured key identity')
     recipient = x25519.X25519PublicKey.from_public_bytes(base64.b64decode(recipient_b64, validate=True))
@@ -80,7 +91,7 @@ def mint(private_pem, issuer, key_id, app_id, recipient_b64, *, now=None, discov
     issued = int(time.time() if now is None else now)
     header = {'alg': 'ES256', 'kid': key_id, 'typ': 'JWT'}
     payload = {'iss': issuer, 'iat': issued, 'exp': issued + LIFETIME_SECONDS,
-               'aud': 'appstoreconnect-v1', 'scope': scopes(app_id)}
+               'aud': 'appstoreconnect-v1', 'scope': scopes(app_id, purpose)}
     def sign(claims):
         message = (b64(json.dumps(header, separators=(',', ':')).encode()) + '.' +
                    b64(json.dumps(claims, separators=(',', ':')).encode())).encode()
@@ -88,6 +99,8 @@ def mint(private_pem, issuer, key_id, app_id, recipient_b64, *, now=None, discov
         return message + b'.' + b64(r.to_bytes(32, 'big') + s.to_bytes(32, 'big')).encode()
     token = sign(payload)
     if discover is not None:
+        if purpose != "crash-feedback":
+            raise ValueError("Crash discovery is not valid for the selected read purpose")
         # Apple supplies concrete IDs from this app's index. No wildcard or
         # user-provided URL widens the returned capability to other resources.
         payload['scope'] += discover(token, payload['scope'][1])
@@ -104,9 +117,11 @@ def mint(private_pem, issuer, key_id, app_id, recipient_b64, *, now=None, discov
 
 def main():
     try:
+        purpose = os.environ.get('ASC_READ_PURPOSE', 'crash-feedback')
         result = mint(os.environ.pop('ASC_PRIVATE_KEY_P8').encode(), os.environ['ASC_ISSUER_ID'],
                       os.environ['ASC_KEY_ID'], os.environ['APP_STORE_CONNECT_APP_ID'],
-                      os.environ['ASC_READ_RECIPIENT_PUBLIC'], discover=recent_crash_scopes)
+                      os.environ['ASC_READ_RECIPIENT_PUBLIC'], purpose=purpose,
+                      discover=recent_crash_scopes if purpose == 'crash-feedback' else None)
         destination = Path(os.environ['RUNNER_TEMP']) / 'asc-read-capability.json'
         with destination.open('x', encoding='utf-8') as stream:
             json.dump(result, stream)
