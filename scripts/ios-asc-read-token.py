@@ -62,7 +62,7 @@ def recent_crash_scopes(token, feedback_scope):
         if not isinstance(row, dict) or row.get('type') != 'betaFeedbackCrashSubmissions':
             raise ValueError('Unexpected crash submission resource')
         identity = row.get('id')
-        if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9-]{1,128}', identity):
+        if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identity):
             raise ValueError('Unexpected crash submission identity')
         path = 'GET /v1/betaFeedbackCrashSubmissions/' + identity + '/crashLog'
         if path not in result:
@@ -110,9 +110,11 @@ def main():
         destination = Path(os.environ['RUNNER_TEMP']) / 'asc-read-capability.json'
         with destination.open('x', encoding='utf-8') as stream:
             json.dump(result, stream)
-    except Exception:
+    except Exception as error:
         # Never echo exception inputs, key material, plaintext token or provider bodies.
-        print('Read-only capability preparation failed.', file=sys.stderr)
+        print('Read-only capability preparation failed: ' + type(error).__name__ +
+              (' HTTP ' + str(error.code) if isinstance(getattr(error, 'code', None), int) else ''),
+              file=sys.stderr)
         return 1
     print('Encrypted read-only capability prepared; expires ten minutes after issuance.')
     return 0
