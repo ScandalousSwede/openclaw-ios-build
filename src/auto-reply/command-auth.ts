@@ -55,10 +55,59 @@ type OwnerAuthorizationState = {
   ownerList: string[];
 };
 
+const scheduledSenderIdentityKeys = [
+  "Provider",
+  "From",
+  "To",
+  "SenderId",
+  "SenderE164",
+  "AccountId",
+] as const;
+const scheduledSenderChannels = new WeakMap<
+  MsgContext,
+  {
+    channel: ChannelId;
+    identity: unknown[];
+  }
+>();
+
+function isScheduledSenderContext(ctx: MsgContext): boolean {
+  return (
+    ctx.Provider === "heartbeat" || ctx.Provider === "cron-event" || ctx.Provider === "exec-event"
+  );
+}
+
+/** Attach a trusted, process-local sender channel without adding a reply route or owner grant. */
+export function bindScheduledSenderChannel(ctx: MsgContext, channel: string | undefined): void {
+  if (!isScheduledSenderContext(ctx)) {
+    return;
+  }
+  const normalized = normalizeAnyChannelId(channel);
+  if (!normalized || !getLoadedChannelPluginById(normalized)) {
+    return;
+  }
+  scheduledSenderChannels.set(ctx, {
+    channel: normalized,
+    identity: scheduledSenderIdentityKeys.map((key) => ctx[key]),
+  });
+}
+
 function resolveProviderFromContext(
   ctx: MsgContext,
   cfg: OpenClawConfig,
 ): { providerId: ChannelId | undefined; hadResolutionError: boolean } {
+  const scheduledSender = scheduledSenderChannels.get(ctx);
+  if (
+    scheduledSender &&
+    isScheduledSenderContext(ctx) &&
+    scheduledSenderIdentityKeys.every((key, index) => ctx[key] === scheduledSender.identity[index])
+  ) {
+    // The channel identifies the sender for the existing owner/command rules only.
+    // It is not serialized, copied into sessions, or exposed as reply-routing metadata.
+    return getLoadedChannelPluginById(scheduledSender.channel)
+      ? { providerId: scheduledSender.channel, hadResolutionError: false }
+      : { providerId: undefined, hadResolutionError: true };
+  }
   const explicitMessageChannels = [ctx.Surface, ctx.OriginatingChannel, ctx.Provider]
     .map((value) => normalizeMessageChannel(value))
     .filter((value): value is string => Boolean(value));

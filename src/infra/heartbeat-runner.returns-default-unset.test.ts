@@ -3,7 +3,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { resolveCommandAuthorization } from "../auto-reply/command-auth.js";
 import { HEARTBEAT_PROMPT } from "../auto-reply/heartbeat.js";
+import { finalizeInboundContext } from "../auto-reply/reply/inbound-context.js";
 import type { ChannelOutboundAdapter } from "../channels/plugins/types.public.js";
 import type { OpenClawConfig } from "../config/config.js";
 import {
@@ -721,6 +723,76 @@ describe("runHeartbeatOnce", () => {
       ? { listActiveEmbeddedRunSessionKeys: options.listActiveEmbeddedRunSessionKeys }
       : null),
   });
+
+  it.each([true, false])(
+    "keeps scheduled sender authorization with DM delivery blocked (owner=%s)",
+    async (owner) => {
+      const tmpDir = await createCaseDir("hb-scheduled-auth");
+      const storePath = path.join(tmpDir, "sessions.json");
+      const sender = "+15551234567";
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            workspace: tmpDir,
+            heartbeat: {
+              every: "5m",
+              target: "last",
+              directPolicy: "block",
+              prompt: "Synthetic scheduled check",
+            },
+          },
+        },
+        channels: { whatsapp: { allowFrom: [sender] } },
+        commands: { ownerAllowFrom: [owner ? `whatsapp:${sender}` : "whatsapp:+15557654321"] },
+        session: { store: storePath },
+      };
+      const sessionKey = resolveAgentMainSessionKey({ cfg, agentId: "main" });
+      await fs.writeFile(
+        storePath,
+        JSON.stringify({
+          [sessionKey]: {
+            sessionId: "scheduled-auth",
+            updatedAt: Date.now(),
+            chatType: "direct",
+            lastChannel: "whatsapp",
+            lastTo: sender,
+          },
+        }),
+      );
+      enqueueSystemEvent("Synthetic scheduled authorization check", {
+        sessionKey,
+        contextKey: "cron:auth-fixture",
+      });
+      const replySpy = vi.fn<NonNullable<HeartbeatDeps["getReplyFromConfig"]>>(async () => ({
+        text: "Synthetic reply must not be delivered",
+      }));
+      const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "must-not-send", toJid: sender });
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "main",
+        sessionKey,
+        source: "cron",
+        reason: "cron:auth-fixture",
+        heartbeat: { target: "last" },
+        deps: createHeartbeatDeps(sendWhatsApp, {
+          getReplyFromConfig: replySpy,
+          nowMs: Date.now(),
+        }),
+      });
+      expect(result).toMatchObject({ status: "ran" });
+      expect(replySpy).toHaveBeenCalledOnce();
+      const ctx = replySpy.mock.calls[0]![0];
+      const finalized = finalizeInboundContext(ctx);
+      expect(
+        resolveCommandAuthorization({ cfg, ctx: finalized, commandAuthorized: true }).senderIsOwner,
+      ).toBe(owner);
+      expect(ctx.OriginatingChannel).toBeUndefined();
+      expect(ctx.OriginatingTo).toBeUndefined();
+      expect(ctx.Surface).toBeUndefined();
+      expect(ctx.Provider).toBe("cron-event");
+      expect(sendWhatsApp).not.toHaveBeenCalled();
+    },
+  );
 
   it("skips when agent heartbeat is not enabled", async () => {
     const cfg: OpenClawConfig = {

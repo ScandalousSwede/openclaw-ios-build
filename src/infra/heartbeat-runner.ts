@@ -27,6 +27,7 @@ import { resolveModelRefFromString, type ModelRef } from "../agents/model-select
 import { STREAM_ERROR_FALLBACK_TEXT } from "../agents/stream-message-shared.js";
 import { resolveEffectiveAgentRuntime } from "../agents/thinking-runtime.js";
 import { DEFAULT_HEARTBEAT_FILENAME } from "../agents/workspace.js";
+import { bindScheduledSenderChannel } from "../auto-reply/command-auth.js";
 import { resolveHeartbeatReplyPayload } from "../auto-reply/heartbeat-reply-payload.js";
 import {
   getHeartbeatToolNotificationText,
@@ -1637,7 +1638,11 @@ export async function runHeartbeatOnce(opts: {
           accountId: delivery.accountId,
         })
       : { showOk: false, showAlerts: true, useIndicator: true };
-  const { sender } = resolveHeartbeatSenderContext({ cfg, entry, delivery });
+  const { sender, provider: senderProvider } = resolveHeartbeatSenderContext({
+    cfg,
+    entry,
+    delivery,
+  });
   const replyPrefix = createReplyPrefixContext({
     cfg,
     agentId,
@@ -1889,6 +1894,9 @@ export async function runHeartbeatOnce(opts: {
     Provider: hasExecCompletion ? "exec-event" : hasCronEvents ? "cron-event" : "heartbeat",
     SessionKey: runSessionKey,
   };
+  if (!suppressOriginatingContext) {
+    bindScheduledSenderChannel(ctx, senderProvider);
+  }
   if (!visibility.showAlerts && !visibility.showOk && !visibility.useIndicator) {
     emitHeartbeatEvent({
       status: "skipped",
