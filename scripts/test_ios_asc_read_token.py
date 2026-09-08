@@ -47,13 +47,13 @@ class ReadToken(unittest.TestCase):
  def test_recent_crash_ids_are_app_discovered_and_scoped(self):
   class Opener:
    def open(inner,req,timeout):
-    self.assertEqual(req.get_method(),'GET');self.assertIn('/v1/apps/1234567890/',req.full_url);self.assertIn('limit=10',req.full_url)
+    self.assertEqual(req.get_method(),'GET');self.assertIn('/v1/apps/1234567890/',req.full_url);self.assertIn('limit=3',req.full_url)
     return io.BytesIO(json.dumps({'data':[{'type':'betaFeedbackCrashSubmissions','id':'synthetic_crash-123'}]}).encode())
   with patch.object(m,'build_opener',return_value=Opener()):
    packet=m.mint(self.pem,'00000000-1111-2222-3333-444444444444','ABCD123456','1234567890',self.pub,now=1000,discover=m.recent_crash_scopes)
   part=self.decrypt(packet).split(b'.')[1];claims=json.loads(base64.urlsafe_b64decode(part+b'='*(-len(part)%4)));self.assertEqual(claims['scope'][-1],'GET /v1/betaFeedbackCrashSubmissions/synthetic_crash-123/crashLog');self.assertEqual(len(claims['scope']),3)
  def test_crash_index_cannot_inject_a_path_or_unbounded_scope(self):
-  for rows in [[{'type':'betaFeedbackCrashSubmissions','id':'../apps'}],[{'type':'other','id':'123'}],[{'type':'betaFeedbackCrashSubmissions','id':str(n)} for n in range(11)]]:
+  for rows in [[{'type':'betaFeedbackCrashSubmissions','id':'../apps'}],[{'type':'other','id':'123'}],[{'type':'betaFeedbackCrashSubmissions','id':str(n)} for n in range(4)]]:
    class Opener:
     def open(self,*args,**kwargs):return io.BytesIO(json.dumps({'data':rows}).encode())
    with self.subTest(rows=rows),patch.object(m,'build_opener',return_value=Opener()),self.assertRaises(ValueError):m.recent_crash_scopes(b'synthetic-token',m.scopes('1234567890')[1])

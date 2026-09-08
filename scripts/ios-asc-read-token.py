@@ -3,7 +3,7 @@
 
 The existing protected workflow owns authorization. The long-lived signing key
 stays in CI; only the supplied recipient can decrypt the scoped token. This
-script discovers at most ten recent app-owned crash-log identities in memory;
+script discovers at most three recent app-owned crash-log identities in memory;
 only encrypted capabilities leave CI, never diagnostic responses.
 """
 import base64
@@ -46,7 +46,7 @@ def recent_crash_scopes(token, feedback_scope):
         def redirect_request(self, *args, **kwargs):
             return None
     # The scope is constructed from the protected app ID, never a caller URL.
-    url = 'https://api.appstoreconnect.apple.com' + feedback_scope[4:] + '&limit=10&sort=-createdDate'
+    url = 'https://api.appstoreconnect.apple.com' + feedback_scope[4:] + '&limit=3&sort=-createdDate'
     request = Request(url, headers={'Authorization': 'Bearer ' + token.decode(),
                                    'Accept': 'application/json'}, method='GET')
     with build_opener(NoRedirect()).open(request, timeout=20) as response:
@@ -55,7 +55,7 @@ def recent_crash_scopes(token, feedback_scope):
             raise ValueError('Crash index response exceeds the bounded read')
         document = json.loads(raw)
     rows = document.get('data') if isinstance(document, dict) else None
-    if not isinstance(rows, list) or len(rows) > 10:
+    if not isinstance(rows, list) or len(rows) > 3:
         raise ValueError('Unexpected crash index response')
     result = []
     for row in rows:
