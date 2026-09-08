@@ -1077,9 +1077,11 @@ export const sessionsHandlers: GatewayRequestHandlers = {
       store,
       key: target.canonicalKey,
       entry,
-      includeDerivedTitles: p.includeDerivedTitles,
-      includeLastMessage: p.includeLastMessage,
+      includeDerivedTitles: p.metadataOnly ? false : p.includeDerivedTitles,
+      includeLastMessage: p.metadataOnly ? false : p.includeLastMessage,
       transcriptUsageMaxBytes: 64 * 1024,
+      skipTranscriptUsageFallback: p.metadataOnly === true,
+      lightweightListRow: p.metadataOnly === true,
     });
     respond(true, { session: row }, undefined);
   },

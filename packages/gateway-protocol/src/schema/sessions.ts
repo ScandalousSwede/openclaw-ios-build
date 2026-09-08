@@ -219,6 +219,8 @@ export const SessionsPreviewParamsSchema = Type.Object(
 export const SessionsDescribeParamsSchema = Type.Object(
   {
     key: NonEmptyString,
+    /** Return stored metadata only; suppress all transcript reads, overriding preview flags. */
+    metadataOnly: Type.Optional(Type.Boolean()),
     includeDerivedTitles: Type.Optional(Type.Boolean()),
     includeLastMessage: Type.Optional(Type.Boolean()),
   },
