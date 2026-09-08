@@ -195,7 +195,9 @@ vi.mock("../process/supervisor/index.js", () => ({
 }));
 
 import type { CronJob } from "../cron/types.js";
+import { listTaskRecords } from "../tasks/task-registry.js";
 import { buildGatewayCronService, fireOnExitJob } from "./server-cron.js";
+import { mapTaskSummary } from "./server-methods/task-summary.js";
 
 function createCronConfig(name: string): OpenClawConfig {
   const tmpDir = path.join(os.tmpdir(), `${name}-${Date.now()}`);
@@ -239,6 +241,9 @@ function callArg(
 
 function expectMainCronRunSessionKey(value: unknown, jobId: string) {
   expect(value).toMatch(new RegExp(`^agent:main:cron:${jobId}:run:\\d+$`));
+  const task = listTaskRecords().find((entry) => entry.sourceId === jobId);
+  expect(task?.childSessionKey).toBe(value);
+  expect(task?.agentId).toBe("main");
 }
 
 function lastMockCall(mock: { mock: { calls: Array<Array<unknown>> } }, label: string) {
@@ -817,6 +822,13 @@ describe("buildGatewayCronService", () => {
         "options",
       );
       expect(eventOptions.sessionKey).toBe("global");
+      const task = listTaskRecords().find((entry) => entry.sourceId === job.id);
+      expect(task).toBeDefined();
+      expect(task?.childSessionKey).toBe(eventOptions.sessionKey);
+      expect(task?.agentId).toBe("main");
+      if (task) {
+        expect(mapTaskSummary(task).childSessionKey).toBe(eventOptions.sessionKey);
+      }
       const heartbeatRequest = requireRecord(
         callArg(requestHeartbeatMock, 0, 0, "heartbeat request"),
         "request",
@@ -857,6 +869,13 @@ describe("buildGatewayCronService", () => {
         "options",
       );
       expect(eventOptions.sessionKey).toBe("global");
+      const task = listTaskRecords().find((entry) => entry.sourceId === job.id);
+      expect(task).toBeDefined();
+      expect(task?.childSessionKey).toBe(eventOptions.sessionKey);
+      expect(task?.agentId).toBe("main");
+      if (task) {
+        expect(mapTaskSummary(task).childSessionKey).toBe(eventOptions.sessionKey);
+      }
       const heartbeatRun = requireRecord(
         callArg(runHeartbeatOnceMock, 0, 0, "heartbeat run options"),
         "heartbeat run options",

@@ -77,6 +77,11 @@ export type CronServiceDeps = {
   }) => Promise<CronTriggerEvaluationResult>;
   /** Default agent id for jobs without an agent id. */
   defaultAgentId?: string;
+  /** Share the host's main-cron execution target with task drill-down metadata. */
+  resolveMainSessionTarget?: (params: {
+    agentId?: string;
+    sessionKey: string;
+  }) => { agentId: string; sessionKey: string } | undefined;
   /** Resolve session store path for a given agent id. */
   resolveSessionStorePath?: (agentId?: string) => string;
   /** Path to the session store (sessions.json) for reaper use. */

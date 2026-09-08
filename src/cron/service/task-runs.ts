@@ -36,27 +36,38 @@ export function resolveMainSessionCronRunSessionKey(job: CronJob, startedAt: num
   return `agent:${agentId}:cron:${jobSegment}:run:${runSegment}`;
 }
 
-function resolveCronTaskChildSessionKey(params: {
+function resolveCronTaskTarget(params: {
   state: CronServiceState;
   job: CronJob;
   startedAt: number;
-}): string | undefined {
+}): { agentId?: string; sessionKey?: string } {
+  const agentId = params.job.agentId;
   if (params.job.sessionTarget === "main") {
-    return resolveMainSessionCronRunSessionKey(params.job, params.startedAt);
+    const sessionKey = resolveMainSessionCronRunSessionKey(params.job, params.startedAt);
+    // Share gateway resolution with execution. Global keys need an explicit
+    // agent identity too, otherwise agent-filtered task readers hide the run.
+    return (
+      params.state.deps.resolveMainSessionTarget?.({ agentId, sessionKey }) ?? {
+        agentId,
+        sessionKey,
+      }
+    );
   }
   const explicitSessionKey = params.job.sessionKey?.trim();
   if (explicitSessionKey) {
-    // Explicit session bindings must win over generated cron session keys so
-    // task drill-down opens the same transcript the cron run actually used.
-    return explicitSessionKey;
+    // Explicit isolated bindings must open the transcript the run actually used.
+    return { agentId, sessionKey: explicitSessionKey };
   }
   if (params.job.sessionTarget !== "isolated") {
-    return undefined;
+    return { agentId };
   }
-  return resolveCronAgentSessionKey({
-    sessionKey: `cron:${params.job.id}`,
-    agentId: params.job.agentId ?? params.state.deps.defaultAgentId ?? DEFAULT_AGENT_ID,
-  });
+  return {
+    agentId,
+    sessionKey: resolveCronAgentSessionKey({
+      sessionKey: `cron:${params.job.id}`,
+      agentId: agentId ?? params.state.deps.defaultAgentId ?? DEFAULT_AGENT_ID,
+    }),
+  };
 }
 
 /** Creates a best-effort detached task ledger row for a cron run. */
@@ -67,14 +78,15 @@ export function tryCreateCronTaskRun(params: {
 }): string | undefined {
   const runId = createCronExecutionId(params.job.id, params.startedAt);
   try {
+    const target = resolveCronTaskTarget(params);
     const taskParams = {
       runtime: "cron" as const,
       taskKind: params.job.sessionTarget === "main" ? CRON_HEARTBEAT_TASK_KIND : undefined,
       sourceId: params.job.id,
       ownerKey: "",
       scopeKind: "system" as const,
-      childSessionKey: resolveCronTaskChildSessionKey(params),
-      agentId: params.job.agentId,
+      childSessionKey: target.sessionKey,
+      agentId: target.agentId,
       runId,
       label: params.job.name,
       task: params.job.name || params.job.id,

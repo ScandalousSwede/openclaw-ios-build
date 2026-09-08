@@ -418,6 +418,10 @@ export function buildGatewayCronService(params: {
         }
       : {}),
     defaultAgentId,
+    resolveMainSessionTarget: (opts) => {
+      const { agentId, sessionKey } = resolveCronTarget(opts);
+      return agentId && sessionKey ? { agentId, sessionKey } : undefined;
+    },
     resolveSessionStorePath,
     sessionStorePath,
     enqueueSystemEvent: (text, opts) => {
