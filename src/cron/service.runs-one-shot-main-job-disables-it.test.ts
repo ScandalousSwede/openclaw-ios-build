@@ -64,6 +64,7 @@ function createCronEventHarness() {
 }
 
 type CronHarnessOptions = {
+  defaultAgentId?: string;
   runIsolatedAgentJob?: CronServiceDeps["runIsolatedAgentJob"];
   runHeartbeatOnce?: NonNullable<CronServiceDeps["runHeartbeatOnce"]>;
   nowMs?: () => number;
@@ -100,6 +101,7 @@ async function createCronHarness(options: CronHarnessOptions = {}) {
 
   const cron = new CronService({
     storePath: store.storePath,
+    defaultAgentId: options.defaultAgentId,
     cronEnabled: true,
     log: noopLogger,
     ...(options.nowMs ? { nowMs: options.nowMs } : {}),
@@ -325,6 +327,25 @@ async function expectNoMainSummaryForIsolatedRun(params: {
 }
 
 describe("CronService", () => {
+  it.each([undefined, "main"])(
+    "uses a standalone host default for session %s",
+    async (sessionKey) => {
+      const { cron, enqueueSystemEvent, requestHeartbeat } = await createCronHarness({
+        defaultAgentId: "primary",
+      });
+      try {
+        const job = await addWakeModeNowMainSystemEventJob(cron, { sessionKey });
+        await cron.run(job.id, "force");
+        const event = enqueueSystemEvent.mock.calls[0]?.[1] as { sessionKey?: string };
+        const wake = requestHeartbeat.mock.calls[0]?.[0] as { sessionKey?: string };
+        expect(event.sessionKey).toMatch(new RegExp(`^agent:primary:cron:${job.id}:run:\\d+$`));
+        expect(wake.sessionKey).toBe(event.sessionKey);
+      } finally {
+        cron.stop();
+      }
+    },
+  );
+
   it("runs a one-shot main job and disables it after success when requested", async () => {
     const { store, cron, enqueueSystemEvent, requestHeartbeat, events, atMs, job } =
       await createMainOneShotJobHarness({

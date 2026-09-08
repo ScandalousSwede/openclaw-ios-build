@@ -3,6 +3,7 @@ import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/s
 import {
   DEFAULT_AGENT_ID,
   normalizeAgentId,
+  parseAgentSessionKey,
   resolveAgentIdFromSessionKey,
 } from "../../routing/session-key.js";
 import {
@@ -28,9 +29,26 @@ export function normalizeCronLaneSegment(value: string | undefined, fallback: st
 }
 
 /** Builds the main-session child key used to isolate one cron run's task transcript. */
-export function resolveMainSessionCronRunSessionKey(job: CronJob, startedAt: number): string {
+export function resolveMainSessionCronRunSessionKey(
+  job: CronJob,
+  startedAt: number,
+  deps?: Pick<CronServiceState["deps"], "defaultAgentId" | "resolveMainSessionTarget">,
+): string {
   const explicitAgentId = job.agentId?.trim();
-  const agentId = normalizeAgentId(explicitAgentId || resolveAgentIdFromSessionKey(job.sessionKey));
+  const requestedSessionKey = job.sessionKey?.trim();
+  // Resolve before adding an agent prefix: a fabricated "main" prefix would
+  // override the host's configured default, including runtime config changes.
+  const resolvedAgentId = deps?.resolveMainSessionTarget?.({
+    agentId: explicitAgentId,
+    sessionKey: requestedSessionKey ?? "",
+  })?.agentId;
+  const agentId = normalizeAgentId(
+    resolvedAgentId ||
+      explicitAgentId ||
+      (requestedSessionKey && parseAgentSessionKey(requestedSessionKey)
+        ? resolveAgentIdFromSessionKey(requestedSessionKey)
+        : deps?.defaultAgentId),
+  );
   const jobSegment = normalizeCronLaneSegment(job.id, "job");
   const runSegment = normalizeCronLaneSegment(String(Math.max(0, Math.floor(startedAt))), "run");
   return `agent:${agentId}:cron:${jobSegment}:run:${runSegment}`;
@@ -43,7 +61,11 @@ function resolveCronTaskTarget(params: {
 }): { agentId?: string; sessionKey?: string } {
   const agentId = params.job.agentId;
   if (params.job.sessionTarget === "main") {
-    const sessionKey = resolveMainSessionCronRunSessionKey(params.job, params.startedAt);
+    const sessionKey = resolveMainSessionCronRunSessionKey(
+      params.job,
+      params.startedAt,
+      params.state.deps,
+    );
     // Share gateway resolution with execution. Global keys need an explicit
     // agent identity too, otherwise agent-filtered task readers hide the run.
     return (

@@ -2161,7 +2161,7 @@ async function executeMainSessionCronJob(
   }
   const cronStartedAt =
     typeof job.state.runningAtMs === "number" ? job.state.runningAtMs : state.deps.nowMs();
-  const cronRunSessionKey = resolveMainSessionCronRunSessionKey(job, cronStartedAt);
+  const cronRunSessionKey = resolveMainSessionCronRunSessionKey(job, cronStartedAt, state.deps);
   const deliveryContext = resolveMainSessionCronDeliveryContext(state, job);
   // Main-session jobs enqueue text into a per-run child session so each cron
   // execution has its own transcript and task drill-down target.

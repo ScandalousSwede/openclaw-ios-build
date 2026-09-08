@@ -892,6 +892,86 @@ describe("buildGatewayCronService", () => {
     }
   });
 
+  describe.each(["per-sender", "global"] as const)("effective cron agent in %s scope", (scope) => {
+    describe.each(["next-heartbeat", "now"] as const)("%s wake", (wakeMode) => {
+      it.each([
+        { label: "default", agentId: undefined, sessionKey: undefined, expected: "primary" },
+        { label: "relative", agentId: undefined, sessionKey: "main", expected: "primary" },
+        { label: "canonical", agentId: undefined, sessionKey: "agent:ops:main", expected: "ops" },
+        { label: "explicit", agentId: "primary", sessionKey: undefined, expected: "primary" },
+        { label: "unknown", agentId: "missing", sessionKey: undefined, expected: "primary" },
+        { label: "reloaded", agentId: undefined, sessionKey: undefined, expected: "ops" },
+      ])("uses $label selection for execution and task discovery", async (binding) => {
+        const cfg = {
+          ...createCronConfig(`server-cron-agent-${scope}-${wakeMode}-${binding.label}`),
+          session: { mainKey: "main", scope },
+          agents: {
+            list: [{ id: "primary", default: true }, { id: "main" }, { id: "ops" }],
+          },
+        } as OpenClawConfig;
+        loadConfigMock.mockReturnValue(cfg);
+        const state = buildGatewayCronService({ cfg, deps: {} as CliDeps, broadcast: () => {} });
+        try {
+          if (binding.label === "unknown") {
+            await expect(
+              state.cron.add({
+                name: "rejected-agent",
+                enabled: true,
+                schedule: { kind: "at", at: new Date(1).toISOString() },
+                sessionTarget: "main",
+                wakeMode,
+                agentId: binding.agentId,
+                payload: { kind: "systemEvent", text: "synthetic rejected probe" },
+              }),
+            ).rejects.toThrow('sessionTarget "main" is only valid for the default agent');
+            expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+            return;
+          }
+          const job = await state.cron.add({
+            name: `agent-${binding.label}`,
+            enabled: true,
+            schedule: { kind: "at", at: new Date(1).toISOString() },
+            sessionTarget: "main",
+            wakeMode,
+            agentId: binding.agentId,
+            sessionKey: binding.sessionKey,
+            payload: { kind: "systemEvent", text: "synthetic agent routing probe" },
+          });
+          if (binding.label === "reloaded") {
+            loadConfigMock.mockReturnValue({
+              ...cfg,
+              agents: { list: [{ id: "primary" }, { id: "main" }, { id: "ops", default: true }] },
+            });
+          }
+          await state.cron.run(job.id, "force");
+          const event = requireRecord(callArg(enqueueSystemEventMock, 0, 1, "enqueue"), "enqueue");
+          const wake = requireRecord(
+            callArg(wakeMode === "now" ? runHeartbeatOnceMock : requestHeartbeatMock, 0, 0, "wake"),
+            "wake",
+          );
+          expect(wake.agentId).toBe(binding.expected);
+          expect(wake.sessionKey).toBe(event.sessionKey);
+          if (scope === "global") {
+            expect(event.sessionKey).toBe("global");
+          } else {
+            expect(event.sessionKey).toMatch(
+              new RegExp(`^agent:${binding.expected}:cron:${job.id}:run:\\d+$`),
+            );
+          }
+          const task = listTaskRecords().find((entry) => entry.sourceId === job.id);
+          expect(task?.agentId).toBe(binding.expected);
+          expect(task?.childSessionKey).toBe(event.sessionKey);
+          expect(task).toBeDefined();
+          if (task) {
+            expect(mapTaskSummary(task).childSessionKey).toBe(event.sessionKey);
+          }
+        } finally {
+          state.cron.stop();
+        }
+      });
+    });
+  });
+
   it.each(["per-sender", "global"] as const)(
     "forwards heartbeat overrides and completion identity through %s routing",
     (scope) => {
