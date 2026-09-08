@@ -1,4 +1,5 @@
 import { appendCronStyleCurrentTimeLine } from "../agents/current-time.js";
+import { bindScheduledSenderChannel } from "../auto-reply/command-auth.js";
 import type { InternalGetReplyOptions } from "../auto-reply/reply/get-reply.types.js";
 import { prepareReplyConversation } from "../auto-reply/reply/prompt-session-context.js";
 import {
@@ -88,6 +89,7 @@ export async function runHeartbeatOnce(opts: HeartbeatRunOptions): Promise<Heart
       SessionKey: runSessionKey,
       AgentId: agentId,
     } satisfies MsgContext;
+    bindScheduledSenderChannel(heartbeatContext, prepared.senderChannel);
     await dispatchInboundMessageWithRoutedChannelDispatcher({
       cfg,
       ctx: heartbeatContext,

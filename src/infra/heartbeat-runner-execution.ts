@@ -387,7 +387,11 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
           accountId: delivery.accountId,
         })
       : { showOk: false, showAlerts: true, useIndicator: true };
-  const { sender } = resolveHeartbeatSenderContext({ cfg, entry, delivery });
+  const { sender, provider: senderChannel } = resolveHeartbeatSenderContext({
+    cfg,
+    entry,
+    delivery,
+  });
   const replyPrefix = createReplyPrefixContext({
     cfg,
     agentId,
@@ -537,6 +541,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     delivery,
     visibility,
     sender,
+    senderChannel,
     replyPrefix,
     runSessionKey,
     outboundPolicySessionKey,

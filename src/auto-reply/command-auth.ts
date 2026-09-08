@@ -72,10 +72,63 @@ type OwnerAuthorizationState = {
   explicitOwners: string[];
 };
 
+const scheduledSenderIdentityKeys = [
+  "InternalTurnSource",
+  "Provider",
+  "Surface",
+  "OriginatingChannel",
+  "From",
+  "To",
+  "SenderId",
+  "SenderE164",
+  "AccountId",
+  "SessionKey",
+  "ChatType",
+] as const;
+const scheduledSenderChannels = new WeakMap<
+  MsgContext,
+  { channel: ChannelId; identity: unknown[] }
+>();
+
+function isScheduledSenderContext(ctx: MsgContext): boolean {
+  return (
+    ctx.InternalTurnSource === "heartbeat" ||
+    ctx.InternalTurnSource === "cron" ||
+    ctx.InternalTurnSource === "exec"
+  );
+}
+
+/** Preserve sender transport for authorization without creating an outbound route or owner grant. */
+export function bindScheduledSenderChannel(ctx: MsgContext, channel: string | undefined): void {
+  if (!isScheduledSenderContext(ctx)) {
+    return;
+  }
+  const normalized = normalizeAnyChannelId(channel);
+  if (!normalized || !getLoadedChannelPluginById(normalized)) {
+    return;
+  }
+  scheduledSenderChannels.set(ctx, {
+    channel: normalized,
+    identity: scheduledSenderIdentityKeys.map((key) => ctx[key]),
+  });
+}
+
 function resolveProviderFromContext(
   ctx: MsgContext,
   cfg: OpenClawConfig,
 ): { providerId: ChannelId | undefined; hadResolutionError: boolean } {
+  const scheduledSender = scheduledSenderChannels.get(ctx);
+  if (
+    scheduledSender &&
+    isScheduledSenderContext(ctx) &&
+    scheduledSenderIdentityKeys.every((key, index) => ctx[key] === scheduledSender.identity[index])
+  ) {
+    // Only the same admitted context retains custody. Copies and serialized turns
+    // must use ordinary transport resolution and current policy again.
+    return getLoadedChannelPluginById(scheduledSender.channel)
+      ? { providerId: scheduledSender.channel, hadResolutionError: false }
+      : { providerId: undefined, hadResolutionError: true };
+  }
   const explicitMessageChannels = [ctx.Surface, ctx.OriginatingChannel, ctx.Provider]
     .map((value) => normalizeMessageChannel(value))
     .filter((value): value is string => Boolean(value));
