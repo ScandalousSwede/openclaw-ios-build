@@ -1,5 +1,6 @@
 from pathlib import Path
-import importlib.util,os,unittest,json,base64,subprocess,tempfile,yaml
+import importlib.util,os,unittest,json,base64,subprocess,tempfile,yaml,io
+from unittest.mock import patch
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import ec,x25519
 from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
@@ -32,7 +33,8 @@ class ReadToken(unittest.TestCase):
   with self.assertRaises(ValueError):m.mint(other,'00000000-1111-2222-3333-444444444444','ABCD123456','1234567890',self.pub)
  def test_actual_cli_only_writes_ciphertext_and_generic_status(self):
   with tempfile.TemporaryDirectory() as directory:
-   env={**os.environ,'ASC_PRIVATE_KEY_P8':self.pem.decode(),'ASC_ISSUER_ID':'00000000-1111-2222-3333-444444444444','ASC_KEY_ID':'ABCD123456','APP_STORE_CONNECT_APP_ID':'1234567890','ASC_READ_RECIPIENT_PUBLIC':self.pub,'RUNNER_TEMP':directory}
+   shim=Path(directory)/'shim';shim.mkdir();(shim/'sitecustomize.py').write_text("import urllib.request,io\nclass Opener:\n def open(self,*a,**k):return io.BytesIO(b'{\"data\":[]}')\nurllib.request.build_opener=lambda *a:Opener()\n")
+   env={**os.environ,'PYTHONPATH':str(shim),'ASC_PRIVATE_KEY_P8':self.pem.decode(),'ASC_ISSUER_ID':'00000000-1111-2222-3333-444444444444','ASC_KEY_ID':'ABCD123456','APP_STORE_CONNECT_APP_ID':'1234567890','ASC_READ_RECIPIENT_PUBLIC':self.pub,'RUNNER_TEMP':directory}
    r=subprocess.run(['python3',str(ROOT/'scripts/ios-asc-read-token.py')],env=env,capture_output=True,text=True,timeout=10);self.assertEqual(r.returncode,0,r.stderr)
    packet=json.loads((Path(directory)/'asc-read-capability.json').read_text());token=self.decrypt(packet);self.assertNotIn(token.decode(),r.stdout+r.stderr);self.assertNotIn('ABCD123456',r.stdout+r.stderr)
    env['ASC_PRIVATE_KEY_P8']='synthetic-secret-that-must-not-leak';r=subprocess.run(['python3',str(ROOT/'scripts/ios-asc-read-token.py')],env=env,capture_output=True,text=True,timeout=10);self.assertNotEqual(r.returncode,0);self.assertNotIn(env['ASC_PRIVATE_KEY_P8'],r.stdout+r.stderr)
@@ -42,4 +44,17 @@ class ReadToken(unittest.TestCase):
   for change,code in cases:
    with self.subTest(change=change):
     r=subprocess.run(['bash','-c',script],env={**env,**change},capture_output=True,text=True,timeout=5);self.assertEqual(r.returncode,code)
+ def test_recent_crash_ids_are_app_discovered_and_scoped(self):
+  class Opener:
+   def open(inner,req,timeout):
+    self.assertEqual(req.get_method(),'GET');self.assertIn('/v1/apps/1234567890/',req.full_url);self.assertIn('limit=10',req.full_url)
+    return io.BytesIO(json.dumps({'data':[{'type':'betaFeedbackCrashSubmissions','id':'synthetic-123'}]}).encode())
+  with patch.object(m,'build_opener',return_value=Opener()):
+   packet=m.mint(self.pem,'00000000-1111-2222-3333-444444444444','ABCD123456','1234567890',self.pub,now=1000,discover=m.recent_crash_scopes)
+  part=self.decrypt(packet).split(b'.')[1];claims=json.loads(base64.urlsafe_b64decode(part+b'='*(-len(part)%4)));self.assertEqual(claims['scope'][-1],'GET /v1/betaFeedbackCrashSubmissions/synthetic-123/crashLog');self.assertEqual(len(claims['scope']),3)
+ def test_crash_index_cannot_inject_a_path_or_unbounded_scope(self):
+  for rows in [[{'type':'betaFeedbackCrashSubmissions','id':'../apps'}],[{'type':'other','id':'123'}],[{'type':'betaFeedbackCrashSubmissions','id':str(n)} for n in range(11)]]:
+   class Opener:
+    def open(self,*args,**kwargs):return io.BytesIO(json.dumps({'data':rows}).encode())
+   with self.subTest(rows=rows),patch.object(m,'build_opener',return_value=Opener()),self.assertRaises(ValueError):m.recent_crash_scopes(b'synthetic-token',m.scopes('1234567890')[1])
 if __name__=='__main__':unittest.main()
