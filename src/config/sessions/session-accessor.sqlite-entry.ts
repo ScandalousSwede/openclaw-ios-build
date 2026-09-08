@@ -191,10 +191,15 @@ export function listSessionChildEntriesReadOnly(
 ): SessionEntrySummary[] {
   const resolved = resolveSqliteScope(scope);
   const result = withOpenClawAgentDatabaseReadOnly((database) => {
-    assertCanonicalSqliteSessionKeysCurrent(database);
+    assertCanonicalSqliteSessionKeysCurrent(
+      database,
+      undefined,
+      false,
+      scope.projection === "metadata",
+    );
     const db = getSessionKysely(database.db);
     const query =
-      scope.projection === "list"
+      scope.projection !== undefined && scope.projection !== "full"
         ? selectSessionEntryRows(database, scope.projection).select([
             "current_session_id",
             "updated_at",

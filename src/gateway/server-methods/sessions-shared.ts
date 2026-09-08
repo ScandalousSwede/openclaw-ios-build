@@ -9,6 +9,7 @@ import {
 import type { SessionEntry } from "../../config/sessions.js";
 import { isInternalSessionEffectsKey } from "../../config/sessions/internal-session-key.js";
 import { resolveAgentMainSessionKey } from "../../config/sessions/main-session.js";
+import type { SessionEntryReadScope } from "../../config/sessions/session-accessor.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { parseAgentSessionKey } from "../../routing/session-key.js";
@@ -154,6 +155,7 @@ export function loadSessionEntriesForTarget(params: {
   cfg: OpenClawConfig;
   agentId?: string;
   includeStoreChildEntries?: boolean;
+  projection?: SessionEntryReadScope["projection"];
 }) {
   const target = resolveGatewaySessionStoreTargetWithStore({
     cfg: params.cfg,
@@ -161,6 +163,7 @@ export function loadSessionEntriesForTarget(params: {
     clone: false,
     exactRead: true,
     includeStoreChildEntries: params.includeStoreChildEntries,
+    projection: params.projection,
     ...(params.agentId ? { agentId: params.agentId } : {}),
   });
   const store = target.store;

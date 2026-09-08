@@ -44,7 +44,7 @@ describe("SQLite session participants", () => {
           { identity: profile(`person-${index}`), promptedAt: index + 1 },
         );
       }
-      const read = (sessionKeys: readonly string[], projection: "full" | "list") =>
+      const read = (sessionKeys: readonly string[], projection: "full" | "list" | "metadata") =>
         loadExactSessionEntryCandidatesReadOnlyBatch(
           sessionKeys.map((sessionKey) => ({ ...scope, sessionKeys: [sessionKey], projection })),
         );
@@ -66,7 +66,7 @@ describe("SQLite session participants", () => {
           },
         ],
       });
-      for (const projection of ["full", "list"] as const) {
+      for (const projection of ["full", "list", "metadata"] as const) {
         expect(read([keys[0], keys[1], "agent:main:missing", keys[2]], projection)).toMatchObject([
           expectedEntry(0),
           {

@@ -25,6 +25,8 @@ import {
 } from "../../state/openclaw-agent-db.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import * as transcriptReaders from "../session-transcript-readers.js";
+import * as titleReader from "../session-transcript-title-reader.js";
 import { testState } from "../test-helpers.js";
 import {
   getGatewayConfigModule,
@@ -851,4 +853,144 @@ test("searches rich displayed fields before selecting a page across visible agen
     });
     expect(later).toMatchObject({ count: 6, totalCount: 56, nextOffset: null });
   });
+});
+
+test.each([
+  {},
+  { includeDerivedTitles: true },
+  { includeLastMessage: true },
+  { includeDerivedTitles: true, includeLastMessage: true },
+])(
+  "metadata-only describe never decodes stored prompts or reads transcripts with preview options %j",
+  async (previews) => {
+    const agentId = "main";
+    const sessionKey = "agent:main:metadata-target";
+    const storePath = resolveStorePath(undefined, { agentId });
+    const prompt = "synthetic-metadata-only-prompt-sentinel";
+    await upsertSessionEntryCore(
+      { agentId, sessionKey, storePath },
+      {
+        sessionId: "metadata-target",
+        updatedAt: 42,
+        status: "done",
+        lastRunId: "metadata-run",
+        providerOverride: "openai",
+        modelOverride: "gpt-5.5",
+        modelProvider: "openai",
+        model: "gpt-5.4-mini",
+        fallbackNotice: {
+          kind: "active",
+          selectedModel: "openai/gpt-5.5",
+          activeModel: "openai/gpt-5.4-mini",
+        },
+        skillsSnapshot: { prompt, skills: [] },
+      },
+    );
+    await upsertSessionEntryCore(
+      { agentId, sessionKey: "agent:main:metadata-child", storePath },
+      {
+        sessionId: "metadata-child",
+        updatedAt: 43,
+        spawnedBy: sessionKey,
+        skillsSnapshot: { prompt, skills: [] },
+      },
+    );
+    const forbidden = () => {
+      throw new Error("Metadata scope attempted content enrichment");
+    };
+    const usage = vi
+      .spyOn(transcriptReaders, "readRecentSessionUsageFromTranscript")
+      .mockImplementation(forbidden);
+    const terminal = vi
+      .spyOn(transcriptReaders, "readSessionTerminalModelFromTranscript")
+      .mockImplementation(forbidden);
+    const titles = vi
+      .spyOn(titleReader, "readSessionTitleFieldsFromTranscript")
+      .mockImplementation(forbidden);
+    const plugin = vi
+      .spyOn(pluginHostState, "projectPluginSessionExtensionsSync")
+      .mockImplementation(forbidden);
+    const parse = JSON.parse;
+    let promptDecodes = 0;
+    vi.spyOn(JSON, "parse").mockImplementation((value, reviver) => {
+      if (typeof value === "string" && value.includes(prompt)) {
+        promptDecodes++;
+      }
+      return parse(value, reviver);
+    });
+    const described = await directSessionReq<{ session: Record<string, unknown> }>(
+      "sessions.describe",
+      {
+        key: sessionKey,
+        metadataOnly: true,
+        ...previews,
+      },
+    );
+    expect(described).toMatchObject({
+      ok: true,
+      payload: {
+        session: {
+          key: sessionKey,
+          sessionId: "metadata-target",
+          childSessions: ["agent:main:metadata-child"],
+        },
+      },
+    });
+    expect(promptDecodes).toBe(0);
+    for (const reader of [usage, terminal, titles, plugin]) {
+      expect(reader).not.toHaveBeenCalled();
+    }
+    expect(described.payload?.session.derivedTitle).toBeUndefined();
+    expect(described.payload?.session.lastMessagePreview).toBeUndefined();
+  },
+);
+
+test.each([undefined, false])(
+  "ordinary describe retains terminal model and preview reads with metadataOnly=%s",
+  async (metadataOnly) => {
+    const agentId = "main";
+    const sessionKey = "agent:main:ordinary-fallback";
+    const storePath = resolveStorePath(undefined, { agentId });
+    await upsertSessionEntryCore(
+      { agentId, sessionKey, storePath },
+      {
+        sessionId: "ordinary-fallback",
+        updatedAt: 42,
+        status: "done",
+        lastRunId: "ordinary-run",
+        fallbackNotice: {
+          kind: "active",
+          selectedModel: "openai/gpt-5.5",
+          activeModel: "openai/gpt-5.4-mini",
+        },
+      },
+    );
+    const terminal = vi
+      .spyOn(transcriptReaders, "readSessionTerminalModelFromTranscript")
+      .mockReturnValue(undefined);
+    const titles = vi.spyOn(titleReader, "readSessionTitleFieldsFromTranscript").mockReturnValue({
+      firstUserMessage: "Synthetic ordinary title",
+      lastMessagePreview: "Synthetic ordinary preview",
+    });
+    const described = await directSessionReq("sessions.describe", {
+      key: sessionKey,
+      ...(metadataOnly === undefined ? {} : { metadataOnly }),
+      includeDerivedTitles: true,
+      includeLastMessage: true,
+    });
+    expect(described).toMatchObject({
+      ok: true,
+      payload: { session: { lastMessagePreview: "Synthetic ordinary preview" } },
+    });
+    expect(terminal).toHaveBeenCalledOnce();
+    expect(titles).toHaveBeenCalledOnce();
+  },
+);
+
+test("metadata-only describe rejects a non-boolean before entry reads", async () => {
+  const described = await directSessionReq("sessions.describe", {
+    key: "agent:main:unknown-metadata",
+    metadataOnly: "true",
+  });
+  expect(described.ok).toBe(false);
 });

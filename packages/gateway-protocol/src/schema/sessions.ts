@@ -449,6 +449,7 @@ export const SessionsPreviewParamsSchema = closedObject({
 /** Describes one session and optional derived title/last-message previews. */
 export const SessionsDescribeParamsSchema = closedObject({
   key: NonEmptyString,
+  metadataOnly: Type.Optional(Type.Boolean()),
   agentId: Type.Optional(NonEmptyString),
   includeDerivedTitles: Type.Optional(Type.Boolean()),
   includeLastMessage: Type.Optional(Type.Boolean()),

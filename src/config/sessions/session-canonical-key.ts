@@ -21,7 +21,10 @@ import {
   hasSqliteSessionOwnerColumns,
   projectSqliteSessionOwner,
 } from "./session-accessor.sqlite-owner-projection.js";
-import { sessionEntryMetadataJson } from "./session-accessor.sqlite-status.js";
+import {
+  sessionEntryMetadataJson,
+  sessionEntryStrictMetadataJson,
+} from "./session-accessor.sqlite-status.js";
 import { parseSqliteSessionEntryRecord } from "./session-entry-json.js";
 import { projectCanonicalSessionEntryShape } from "./store-entry-shape.js";
 import {
@@ -139,6 +142,7 @@ export function scanCanonicalSqliteSessionEntries(
   visit?: (summary: { entry: SessionEntry; sessionKey: string }) => void,
   mainKey?: string,
   metadata?: CanonicalSessionMetadata,
+  strictMetadata = false,
 ): number {
   // This connection validates once. External direct-SQLite edits surface at the next
   // process start, not the next topology change; doctor owns live repair.
@@ -168,7 +172,13 @@ export function scanCanonicalSqliteSessionEntries(
         "retained_window.session_id as retained_window_id",
       ])
       // Key validation needs metadata; Doctor visitors still own complete saved entries.
-      .select(visit ? "session_nodes.entry_json" : sessionEntryMetadataJson)
+      .select(
+        strictMetadata
+          ? sessionEntryStrictMetadataJson
+          : visit
+            ? "session_nodes.entry_json"
+            : sessionEntryMetadataJson,
+      )
       .$if(Boolean(metadata), (query) => query.select("session_nodes.updated_at"))
       .$if(Boolean(metadata) && hasSqliteSessionOwnerColumns(database.db), (query) =>
         query.select([
@@ -268,6 +278,7 @@ export function assertCanonicalSqliteSessionKeysCurrent(
   database: { agentId: string; db: DatabaseSync },
   mainKey?: string,
   collectMetadata = false,
+  strictMetadata = false,
 ): ValidatedSessionMetadata | undefined {
   if (validatedDatabases.has(database.db)) {
     return undefined;
@@ -275,7 +286,7 @@ export function assertCanonicalSqliteSessionKeysCurrent(
   const metadata: ValidatedSessionMetadata | undefined = collectMetadata
     ? { dataVersion: readSqliteDataVersion(database.db), entries: new Map(), keys: [] }
     : undefined;
-  scanCanonicalSqliteSessionEntries(database, undefined, mainKey, metadata);
+  scanCanonicalSqliteSessionEntries(database, undefined, mainKey, metadata, strictMetadata);
   return metadata;
 }
 

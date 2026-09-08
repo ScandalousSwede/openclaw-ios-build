@@ -70,9 +70,12 @@ export type LogicalSessionAccessScope = {
   sessionKey: string;
 };
 
+/** Metadata rejects unsafe JSON before prompt snapshots can reach JavaScript. */
+export type SessionEntryProjection = "full" | "list" | "metadata";
+
 export type SessionEntryReadScope = SessionAccessScope & {
   /** Metadata views omit the large per-run prompt snapshots before decoding. */
-  projection?: "full" | "list";
+  projection?: SessionEntryProjection;
 };
 
 export type SessionEntryListScope = Partial<Omit<SessionEntryReadScope, "sessionKey">>;

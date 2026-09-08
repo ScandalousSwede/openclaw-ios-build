@@ -15,6 +15,7 @@ import {
   projectSqliteSessionOwner,
   type SqliteSessionOwnerRow,
 } from "./session-accessor.sqlite-owner-projection.js";
+import type { SessionEntryProjection } from "./session-accessor.types.js";
 import {
   hasValidSessionEntryIdentity,
   parseSqliteSessionEntryRecord,
@@ -35,16 +36,36 @@ export const sessionEntryMetadataJson =
     ELSE entry_json END
   ELSE entry_json END`.as("entry_json");
 
+// Unlike the compatibility list projection, unsafe JSON must never reach a decoder.
+// An empty result is invalid entry JSON, so existing exact-read errors fail closed.
+export const sessionEntryStrictMetadataJson =
+  /* kysely-allow-raw: enforce prompt-byte exclusion before returning SQLite values. */ sql<string>`CASE WHEN json_valid(entry_json)
+  THEN CASE WHEN instr(entry_json, char(0)) = 0
+    THEN CASE WHEN entry_json = '{}' THEN '{}'
+      WHEN json_type(entry_json, '$.sessionId') = 'text'
+        AND NOT EXISTS (
+          SELECT 1 FROM json_each(entry_json)
+          WHERE key IN ('skillsSnapshot', 'systemPromptReport')
+          GROUP BY key HAVING count(*) > 1
+        )
+      THEN json_remove(entry_json, '$.skillsSnapshot', '$.systemPromptReport')
+      ELSE '' END
+    ELSE '' END
+  ELSE '' END`.as("entry_json");
+
 export function selectSessionEntryRows(
   database: Pick<OpenClawAgentDatabase, "db">,
-  projection: "full" | "list",
+  projection: SessionEntryProjection,
   fullEntryKeys: readonly string[] = [],
 ) {
-  const metadata = fullEntryKeys.length
-    ? /* kysely-allow-raw: one row snapshot preserves complete selected entries beside sibling metadata. */ sql<string>`CASE WHEN session_key IN ${sqliteStringSet(fullEntryKeys)} THEN entry_json ELSE ${sessionEntryMetadataJson.expression} END`.as(
-        "entry_json",
-      )
-    : sessionEntryMetadataJson;
+  const metadata =
+    projection === "metadata"
+      ? sessionEntryStrictMetadataJson
+      : fullEntryKeys.length
+        ? /* kysely-allow-raw: one row snapshot preserves complete selected entries beside sibling metadata. */ sql<string>`CASE WHEN session_key IN ${sqliteStringSet(fullEntryKeys)} THEN entry_json ELSE ${sessionEntryMetadataJson.expression} END`.as(
+            "entry_json",
+          )
+        : sessionEntryMetadataJson;
   return getNodeSqliteKysely<SessionStatusDatabase>(database.db)
     .selectFrom("session_nodes")
     .select("session_key")
@@ -87,13 +108,13 @@ export function parseSessionEntryJson(
     entry_json: string;
     updated_at?: number;
   } & SqliteSessionOwnerRow,
-  projection: "full" | "list" = "full",
+  projection: SessionEntryProjection = "full",
 ): SessionEntry | null {
   const record = parseSqliteSessionEntryRecord(row);
   if (!record) {
     return null;
   }
-  if (projection === "list") {
+  if (projection !== "full") {
     // SQLite-overdepth JSON bypasses SQL projection but must keep the same metadata contract.
     delete record.skillsSnapshot;
     delete record.systemPromptReport;

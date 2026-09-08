@@ -12,6 +12,7 @@ import {
 } from "./session-accessor.sqlite-participant-projection.js";
 import { getSessionKysely } from "./session-accessor.sqlite-scope.js";
 import { parseSessionEntryJson, selectSessionEntryRows } from "./session-accessor.sqlite-status.js";
+import type { SessionEntryProjection } from "./session-accessor.types.js";
 import {
   assertCanonicalSqliteSessionKeysCurrent,
   type ValidatedSessionMetadata,
@@ -123,14 +124,17 @@ export function trackSessionEntryCacheWrite(
 
 function loadSessionEntrySnapshot(
   database: SessionEntryCacheDatabase,
-  projection: "full" | "list" = "list",
+  projection: SessionEntryProjection = "list",
   prepared?: ValidatedSessionMetadata,
   fullEntryKeys?: ReadonlySet<string>,
 ): SessionEntryCacheSnapshot {
   // Validation lends complete parsed facts only within this read. A concurrent external commit
   // requires the ordinary fresh SELECT, never a stale snapshot stamped with its newer version.
   const metadata =
-    !fullEntryKeys && prepared && prepared.dataVersion === readSqliteDataVersion(database.db)
+    projection !== "metadata" &&
+    !fullEntryKeys &&
+    prepared &&
+    prepared.dataVersion === readSqliteDataVersion(database.db)
       ? prepared
       : undefined;
   const parsedEntries = metadata?.entries ?? new Map<string, SessionEntry>();
@@ -146,7 +150,7 @@ function loadSessionEntrySnapshot(
       keys.push(row.session_key);
       const entry = parseSessionEntryJson(
         row,
-        fullEntryKeys?.has(row.session_key) ? "full" : projection,
+        projection !== "metadata" && fullEntryKeys?.has(row.session_key) ? "full" : projection,
       );
       if (entry) {
         parsedEntries.set(row.session_key, entry);
@@ -165,7 +169,7 @@ export function readSessionEntryCache(
   options: {
     cache: boolean;
     latest?: boolean;
-    projection?: "full" | "list";
+    projection?: SessionEntryProjection;
     /** Uncached mixed snapshot: retain complete selected rows beside sibling metadata. */
     fullEntryKeys?: readonly string[];
   },
@@ -173,13 +177,16 @@ export function readSessionEntryCache(
   const prepared = assertCanonicalSqliteSessionKeysCurrent(
     database,
     undefined,
-    options.projection !== "full" && !options.fullEntryKeys,
+    options.projection !== "full" && options.projection !== "metadata" && !options.fullEntryKeys,
+    options.projection === "metadata",
   );
   if (
     !options.cache ||
     options.fullEntryKeys ||
     options.latest ||
     options.projection === "full" ||
+    // Strict readers never inherit compatibility snapshots or mixed full-entry facts.
+    options.projection === "metadata" ||
     database.db.isTransaction
   ) {
     return loadSessionEntrySnapshot(

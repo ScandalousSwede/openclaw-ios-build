@@ -12,6 +12,7 @@ import {
   parseSessionEntryJson as parseSessionEntryRow,
   selectSessionEntryRows,
 } from "./session-accessor.sqlite-status.js";
+import type { SessionEntryProjection } from "./session-accessor.types.js";
 import {
   assertCanonicalSqliteSessionKeysCurrent,
   canonicalSessionKeyMigrationRequiredError,
@@ -34,7 +35,7 @@ export type ResolvedSessionEntryRow = {
 export function parseReadableSqliteSessionEntryRow(
   database: Pick<OpenClawAgentDatabase, "db">,
   row: ResolvedSessionEntryRow["row"],
-  projection: "full" | "list" = "full",
+  projection: SessionEntryProjection = "full",
 ): SessionEntry | null {
   const parsed = parseSessionEntryRow(row, projection);
   if (parsed) {
@@ -104,11 +105,11 @@ function readSessionEntryRowUnchecked(
 export function readExactSessionEntryRow(
   database: OpenClawAgentDatabaseReader,
   sessionKey: string,
-  projection: "full" | "list" = "full",
+  projection: SessionEntryProjection = "full",
 ): ResolvedSessionEntryRow | undefined {
   const db = getSessionKysely(database.db);
   const query =
-    projection === "list"
+    projection !== "full"
       ? selectSessionEntryRows(database, projection).select(["current_session_id", "updated_at"])
       : db.selectFrom("session_nodes").selectAll();
   const row = executeSqliteQueryTakeFirstSync(
@@ -136,8 +137,8 @@ export function readExactSessionEntryJson(
 export function readExactSessionEntryRowValidated(
   database: OpenClawAgentDatabaseReader,
   sessionKey: string,
-  projection: "full" | "list" = "full",
+  projection: SessionEntryProjection = "full",
 ): ResolvedSessionEntryRow | undefined {
-  assertCanonicalSqliteSessionKeysCurrent(database);
+  assertCanonicalSqliteSessionKeysCurrent(database, undefined, false, projection === "metadata");
   return readExactSessionEntryRow(database, sessionKey, projection);
 }

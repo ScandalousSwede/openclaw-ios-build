@@ -98,7 +98,12 @@ export function loadExactSessionEntryCandidatesReadOnlyBatch(
       withOpenClawAgentDatabaseReadOnly((database) => {
         // Admission failures affect this store; an invalid requested row must not
         // suppress healthy logical targets after a warm handle was validated.
-        assertCanonicalSqliteSessionKeysCurrent(database);
+        assertCanonicalSqliteSessionKeysCurrent(
+          database,
+          undefined,
+          false,
+          group.projection === "metadata",
+        );
         const entries = new Map<string, Result<ExactSessionEntry | undefined, unknown>>();
         const readEntry = (sessionKey: string): Result<ExactSessionEntry | undefined, unknown> => {
           const cached = entries.get(sessionKey);

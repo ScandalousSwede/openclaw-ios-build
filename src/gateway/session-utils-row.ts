@@ -91,6 +91,7 @@ export function buildGatewaySessionRow(params: {
   entry?: InternalSessionEntry;
   modelCatalog?: SessionListModelCatalog | ModelCatalogEntry[];
   now?: number;
+  metadataOnly?: boolean;
   includeDerivedTitles?: boolean;
   includeLastMessage?: boolean;
   transcriptUsageMaxBytes?: number;
@@ -103,7 +104,10 @@ export function buildGatewaySessionRow(params: {
   includeSwarmChildren?: boolean;
 }): GatewaySessionRow {
   const { cfg, storePath, store, key, entry } = params;
-  const lightweight = params.lightweightListRow === true;
+  // Scoped discovery must not invoke transcript or plugin enrichment, even when
+  // a caller also requests previews or the saved run ended on a fallback model.
+  const metadataOnly = params.metadataOnly === true;
+  const lightweight = metadataOnly || params.lightweightListRow === true;
   const now = params.now ?? Date.now();
   const agentStatus = resolveActiveSessionAgentStatus(entry?.agentStatus, now);
   const owner = projectSessionOwner(
@@ -146,7 +150,7 @@ export function buildGatewaySessionRow(params: {
     : undefined;
   const displayName = resolveGatewaySessionDisplayName(key, entry);
   const sessionAgentId = params.agentId;
-  const skipTranscriptUsage = params.skipTranscriptUsageFallback === true;
+  const skipTranscriptUsage = metadataOnly || params.skipTranscriptUsageFallback === true;
   const rowContext = params.rowContext;
   const {
     subagentRun,
@@ -212,7 +216,7 @@ export function buildGatewaySessionRow(params: {
   });
   // Display aliases do not change the selected route's catalog or runtime policy.
   const completedModel =
-    entry?.status === "done" && entry.lastRunId && entry.fallbackNotice
+    !metadataOnly && entry?.status === "done" && entry.lastRunId && entry.fallbackNotice
       ? readSessionTerminalModelFromTranscript(
           { agentId: sessionAgentId, sessionKey: key, sessionId: entry.sessionId, storePath },
           entry.lastRunId,
@@ -245,7 +249,11 @@ export function buildGatewaySessionRow(params: {
       }) ?? asNonNegativeFiniteNumber(transcriptUsage?.estimatedCostUsd));
   let derivedTitle: string | undefined;
   let lastMessagePreview: string | undefined;
-  if (entry?.sessionId && (params.includeDerivedTitles || params.includeLastMessage)) {
+  if (
+    !metadataOnly &&
+    entry?.sessionId &&
+    (params.includeDerivedTitles || params.includeLastMessage)
+  ) {
     const fields = readScopedSessionTitleFieldsFromTranscript({
       agentId: sessionAgentId,
       sessionEntry: entry,
@@ -356,7 +364,7 @@ export function buildGatewaySessionRow(params: {
     rowContext?.subagentRuns.swarmRunsByRequesterSessionKey.get(key) ?? [],
     key,
     sessionAgentId,
-    { includeChildren: params.includeSwarmChildren },
+    { includeChildren: !metadataOnly && params.includeSwarmChildren },
   );
   return {
     key,

@@ -327,19 +327,21 @@ test("sessions.describe and sessions.get hide foreign drafts at operator role bo
   ] as const;
 
   for (const { name, client, cfg, hidden } of cases) {
-    const described = await directSessionReq<{
-      session: { participants?: unknown[]; expandedParticipants?: unknown[] } | null;
-    }>(
-      "sessions.describe",
-      { key: sessionKey },
-      { client, context: { getRuntimeConfig: () => cfg } },
-    );
-    expect(described.ok, name).toBe(true);
-    if (hidden) {
-      expect(described.payload?.session, name).toBeNull();
-    } else {
-      expect(described.payload?.session?.participants, name).toHaveLength(4);
-      expect(described.payload?.session?.expandedParticipants, name).toHaveLength(5);
+    for (const metadataOnly of [false, true]) {
+      const described = await directSessionReq<{
+        session: { participants?: unknown[]; expandedParticipants?: unknown[] } | null;
+      }>(
+        "sessions.describe",
+        { key: sessionKey, metadataOnly, includeDerivedTitles: true, includeLastMessage: true },
+        { client, context: { getRuntimeConfig: () => cfg } },
+      );
+      expect(described.ok, name).toBe(true);
+      if (hidden) {
+        expect(described.payload?.session, name).toBeNull();
+      } else {
+        expect(described.payload?.session?.participants, name).toHaveLength(4);
+        expect(described.payload?.session?.expandedParticipants, name).toHaveLength(5);
+      }
     }
     const transcript = await directSessionReq<{ messages: Array<{ content?: unknown }> }>(
       "sessions.get",

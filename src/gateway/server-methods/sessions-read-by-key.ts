@@ -39,6 +39,8 @@ export const sessionByKeyReadHandlers: GatewayRequestHandlers = {
       key,
       cfg,
       includeStoreChildEntries: true,
+      // Enforce the read scope before decoding target or child prompt snapshots.
+      projection: params.metadataOnly ? "metadata" : "full",
       ...(requestedAgent.agentId ? { agentId: requestedAgent.agentId } : {}),
     });
     const boundaryFilter = createRoleVisibilityFilter(client, cfg);
@@ -53,6 +55,7 @@ export const sessionByKeyReadHandlers: GatewayRequestHandlers = {
       key: target.canonicalKey,
       entry,
       agentId: target.agentId,
+      metadataOnly: params.metadataOnly,
       includeDerivedTitles: params.includeDerivedTitles,
       includeLastMessage: params.includeLastMessage,
       transcriptUsageMaxBytes: 64 * 1024,
