@@ -11,6 +11,11 @@ on:
         options:
           - unsigned-diagnostic
           - signed-internal-testflight
+          - scoped-read-token
+      read_recipient_public:
+        description: Base64 X25519 public key for scoped-read-token (never a private key)
+        required: false
+        type: string
       expected_git_sha:
         description: Exact 40-character SHA required for signed internal TestFlight
         required: false
@@ -44,7 +49,7 @@ jobs:
           if [[ "${AIES_DISTRIBUTION}" == "unsigned-diagnostic" ]]; then
             exit 0
           fi
-          if [[ "${AIES_DISTRIBUTION}" != "signed-internal-testflight" ]]; then
+          if [[ "${AIES_DISTRIBUTION}" != "signed-internal-testflight" && "${AIES_DISTRIBUTION}" != "scoped-read-token" ]]; then
             echo "Unsupported distribution lane." >&2
             exit 1
           fi
@@ -78,6 +83,7 @@ jobs:
           fi
 
   xcodegen-conformance:
+    if: inputs.distribution != 'scoped-read-token'
     needs: dispatch-gate
     runs-on: macos-15
     steps:
@@ -2334,3 +2340,37 @@ jobs:
           path: ${{ runner.temp }}/aies-signing-security-cleanup.json
           retention-days: 90
           if-no-files-found: error
+
+  scoped-read-token:
+    needs: dispatch-gate
+    if: >-
+      inputs.distribution == 'scoped-read-token' &&
+      inputs.confirm_internal_only == true &&
+      github.actor == 'ScandalousSwede' &&
+      github.triggering_actor == 'ScandalousSwede' &&
+      github.ref == 'refs/heads/aies/ios-rc1-testflight' &&
+      inputs.expected_git_sha == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: aies-testflight-internal
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install isolated crypto dependency
+        run: python3 -m pip install --disable-pip-version-check cryptography==48.0.0
+      - name: Prepare encrypted read-only capability
+        env:
+          ASC_PRIVATE_KEY_P8: ${{ secrets.ASC_PRIVATE_KEY_P8 }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          APP_STORE_CONNECT_APP_ID: ${{ vars.APP_STORE_CONNECT_APP_ID }}
+          ASC_READ_RECIPIENT_PUBLIC: ${{ inputs.read_recipient_public }}
+        run: python3 scripts/ios-asc-read-token.py
+      - name: Return encrypted capability
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: asc-read-capability-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/asc-read-capability.json
+          if-no-files-found: error
+          retention-days: 1
