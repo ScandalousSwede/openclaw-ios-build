@@ -13,7 +13,7 @@
     },
     {
       "path": "apps/shared/OpenClawKit/Package.swift",
-      "sha256": "c29f14eabf4135eb26b81bd13557aeea2023d948e018455dabebef754a352507"
+      "sha256": "74fc63d38004c5eb3afe1967b32a0a3a15dd230538bae2238814e959f1400f3c"
     },
     {
       "path": "apps/swabble/Package.swift",
@@ -143,7 +143,7 @@
       "checksum": null,
       "aggregateRole": "transitive",
       "declarationRole": "transitive",
-      "sourceDeclaration": "textual@5b06b811c0f5313b6b84bbef98c635a630638c38:Package.swift:18",
+      "sourceDeclaration": "textual@01b51875a5406eefc95f52a058cb059e7bc94dc4:Package.swift:18",
       "requirement": {
         "kind": "from",
         "minimumVersion": "1.3.1"
@@ -191,7 +191,7 @@
       "checksum": null,
       "aggregateRole": "transitive",
       "declarationRole": "transitive",
-      "sourceDeclaration": "textual@5b06b811c0f5313b6b84bbef98c635a630638c38:Package.swift:20",
+      "sourceDeclaration": "textual@01b51875a5406eefc95f52a058cb059e7bc94dc4:Package.swift:20",
       "requirement": {
         "kind": "from",
         "minimumVersion": "0.1.0"
@@ -201,8 +201,8 @@
       "identity": "textual",
       "kind": "remoteSourceControl",
       "location": "https://github.com/gonzalezreal/textual",
-      "version": "0.3.1",
-      "revision": "5b06b811c0f5313b6b84bbef98c635a630638c38",
+      "version": "0.5.0",
+      "revision": "01b51875a5406eefc95f52a058cb059e7bc94dc4",
       "branch": null,
       "checksum": null,
       "aggregateRole": "transitive",
@@ -210,7 +210,7 @@
       "sourceDeclaration": "apps/shared/OpenClawKit/Package.swift:23",
       "requirement": {
         "kind": "exact",
-        "version": "0.3.1"
+        "version": "0.5.0"
       }
     },
     {

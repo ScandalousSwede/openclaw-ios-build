@@ -22,7 +22,7 @@ let package = Package(
             url: "https://github.com/ScandalousSwede/ElevenLabsKit.git",
             revision: "44a108904cbb652a876bfdb838362746631b8987"),
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
-        .package(url: "https://github.com/gonzalezreal/textual", exact: "0.3.1"),
+        .package(url: "https://github.com/gonzalezreal/textual", exact: "0.5.0"),
     ],
     targets: [
         .target(
