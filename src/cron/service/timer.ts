@@ -2162,6 +2162,13 @@ async function executeMainSessionCronJob(
   const cronStartedAt =
     typeof job.state.runningAtMs === "number" ? job.state.runningAtMs : state.deps.nowMs();
   const cronRunSessionKey = resolveMainSessionCronRunSessionKey(job, cronStartedAt, state.deps);
+  // History links must follow the host's execution target, while the request
+  // keeps its per-run key for the gateway's existing routing policy.
+  const resolvedRunSessionKey =
+    state.deps.resolveMainSessionTarget?.({
+      agentId: job.agentId,
+      sessionKey: cronRunSessionKey,
+    })?.sessionKey ?? cronRunSessionKey;
   const deliveryContext = resolveMainSessionCronDeliveryContext(state, job);
   // Main-session jobs enqueue text into a per-run child session so each cron
   // execution has its own transcript and task drill-down target.
@@ -2198,7 +2205,12 @@ async function executeMainSessionCronJob(
         },
       },
     });
-    return { status: "ok", executionDeferred: true, summary: text, sessionKey: cronRunSessionKey };
+    return {
+      status: "ok",
+      executionDeferred: true,
+      summary: text,
+      sessionKey: resolvedRunSessionKey,
+    };
   };
   if (job.wakeMode === "now" && state.deps.runHeartbeatOnce) {
     const reason = `cron:${job.id}`;
@@ -2249,7 +2261,7 @@ async function executeMainSessionCronJob(
     }
 
     if (heartbeatResult.status === "ran") {
-      return { status: "ok", summary: text, sessionKey: cronRunSessionKey };
+      return { status: "ok", summary: text, sessionKey: resolvedRunSessionKey };
     }
     if (heartbeatResult.status === "skipped") {
       removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
@@ -2257,7 +2269,7 @@ async function executeMainSessionCronJob(
         status: "skipped",
         error: heartbeatResult.reason,
         summary: text,
-        sessionKey: cronRunSessionKey,
+        sessionKey: resolvedRunSessionKey,
       };
     }
     removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
@@ -2265,7 +2277,7 @@ async function executeMainSessionCronJob(
       status: "error",
       error: heartbeatResult.reason,
       summary: text,
-      sessionKey: cronRunSessionKey,
+      sessionKey: resolvedRunSessionKey,
     };
   }
 

@@ -241,75 +241,86 @@ describe("cron view", () => {
     expect(onJobsFiltersReset).toHaveBeenCalledTimes(1);
   });
 
-  it("marks the selected job, routes history clicks, and sorts runs newest first", () => {
-    const container = document.createElement("div");
-    const onLoadRuns = vi.fn();
-    const job = createJob("job-1");
-    render(
-      renderCron(
-        createProps({
-          basePath: "/ui",
-          jobs: [job],
-          runsJobId: "job-1",
-          runsScope: "job",
-          runs: [
-            { ts: 1, jobId: "job-1", status: "ok", summary: "older run" },
-            {
-              ts: 2,
-              jobId: "job-1",
-              status: "ok",
-              summary: "newer run",
-              sessionKey: "agent:main:cron:job-1:run:abc",
-            },
-          ],
-          onLoadRuns,
-        }),
-      ),
-      container,
-    );
+  it.each([
+    {
+      sessionKey: "agent:main:cron:job-1:run:abc",
+      href: "/ui/chat?session=agent%3Amain%3Acron%3Ajob-1%3Arun%3Aabc",
+    },
+    { sessionKey: "global", href: "/ui/chat?session=global" },
+  ])(
+    "routes history navigation to $sessionKey and sorts runs newest first",
+    ({ sessionKey, href }) => {
+      const container = document.createElement("div");
+      const onLoadRuns = vi.fn();
+      const onNavigateToChat = vi.fn();
+      const job = createJob("job-1");
+      render(
+        renderCron(
+          createProps({
+            basePath: "/ui",
+            jobs: [job],
+            runsJobId: "job-1",
+            runsScope: "job",
+            runs: [
+              { ts: 1, jobId: "job-1", status: "ok", summary: "older run" },
+              {
+                ts: 2,
+                jobId: "job-1",
+                status: "ok",
+                summary: "newer run",
+                sessionKey,
+              },
+            ],
+            onLoadRuns,
+            onNavigateToChat,
+          }),
+        ),
+        container,
+      );
 
-    getElement(container, ".list-item-selected", HTMLElement);
+      getElement(container, ".list-item-selected", HTMLElement);
 
-    const row = getElement(container, ".list-item-clickable", HTMLElement);
-    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(onLoadRuns).toHaveBeenCalledWith("job-1");
+      const row = getElement(container, ".list-item-clickable", HTMLElement);
+      row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      expect(onLoadRuns).toHaveBeenCalledWith("job-1");
 
-    const historyButton = Array.from(container.querySelectorAll("button")).find(
-      (btn) => btn.textContent?.trim() === "History",
-    );
-    expect(historyButton).toBeInstanceOf(HTMLButtonElement);
-    if (!(historyButton instanceof HTMLButtonElement)) {
-      throw new Error("Expected History button");
-    }
-    historyButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      const historyButton = Array.from(container.querySelectorAll("button")).find(
+        (btn) => btn.textContent?.trim() === "History",
+      );
+      expect(historyButton).toBeInstanceOf(HTMLButtonElement);
+      if (!(historyButton instanceof HTMLButtonElement)) {
+        throw new Error("Expected History button");
+      }
+      historyButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(onLoadRuns).toHaveBeenCalledTimes(2);
-    expect(onLoadRuns).toHaveBeenNthCalledWith(1, "job-1");
-    expect(onLoadRuns).toHaveBeenNthCalledWith(2, "job-1");
+      expect(onLoadRuns).toHaveBeenCalledTimes(2);
+      expect(onLoadRuns).toHaveBeenNthCalledWith(1, "job-1");
+      expect(onLoadRuns).toHaveBeenNthCalledWith(2, "job-1");
 
-    const link = container.querySelector("a.session-link");
-    expect(link?.getAttribute("href")).toBe(
-      "/ui/chat?session=agent%3Amain%3Acron%3Ajob-1%3Arun%3Aabc",
-    );
+      const link = container.querySelector("a.session-link");
+      expect(link?.getAttribute("href")).toBe(href);
+      link?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      expect(onNavigateToChat).toHaveBeenCalledExactlyOnceWith(sessionKey);
 
-    const cards = Array.from(container.querySelectorAll(".card"));
-    const runHistoryCard = cards.find(
-      (card) => card.querySelector(".card-title")?.textContent?.trim() === "Run history",
-    );
-    expect(runHistoryCard).toBeInstanceOf(Element);
-    if (!(runHistoryCard instanceof Element)) {
-      throw new Error("Expected run history card");
-    }
-    expect(runHistoryCard.querySelector(".card-sub")?.textContent?.trim()).toBe(
-      "Latest runs for Daily ping.",
-    );
+      const cards = Array.from(container.querySelectorAll(".card"));
+      const runHistoryCard = cards.find(
+        (card) => card.querySelector(".card-title")?.textContent?.trim() === "Run history",
+      );
+      expect(runHistoryCard).toBeInstanceOf(Element);
+      if (!(runHistoryCard instanceof Element)) {
+        throw new Error("Expected run history card");
+      }
+      expect(runHistoryCard.querySelector(".card-sub")?.textContent?.trim()).toBe(
+        "Latest runs for Daily ping.",
+      );
 
-    const summaries = Array.from(runHistoryCard.querySelectorAll(".cron-run-entry__body")).map(
-      (el) => (el.textContent ?? "").trim(),
-    );
-    expect(summaries[0]).toBe("newer run");
-    expect(summaries[1]).toBe("older run");
-  });
+      const summaries = Array.from(runHistoryCard.querySelectorAll(".cron-run-entry__body")).map(
+        (el) => (el.textContent ?? "").trim(),
+      );
+      expect(summaries[0]).toBe("newer run");
+      expect(summaries[1]).toBe("older run");
+    },
+  );
 
   it("renders supported delivery options and normalizes stale announce selection", () => {
     const container = document.createElement("div");

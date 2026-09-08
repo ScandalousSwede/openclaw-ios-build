@@ -194,6 +194,7 @@ vi.mock("../process/supervisor/index.js", () => ({
   getProcessSupervisor: getProcessSupervisorMock,
 }));
 
+import { readCronRunLogEntriesPage } from "../cron/run-log.js";
 import type { CronJob } from "../cron/types.js";
 import { listTaskRecords } from "../tasks/task-registry.js";
 import { buildGatewayCronService, fireOnExitJob } from "./server-cron.js";
@@ -244,6 +245,17 @@ function expectMainCronRunSessionKey(value: unknown, jobId: string) {
   const task = listTaskRecords().find((entry) => entry.sourceId === jobId);
   expect(task?.childSessionKey).toBe(value);
   expect(task?.agentId).toBe("main");
+}
+
+async function expectMainCronHistoryTarget(storePath: string, jobId: string, sessionKey: unknown) {
+  const page = await readCronRunLogEntriesPage({ storePath, jobId, limit: 2 });
+  expect(page.entries).toHaveLength(1);
+  expect(page.entries[0]?.sessionKey).toBe(sessionKey);
+  const finished = runCronChangedMock.mock.calls
+    .map((call) => call[0] as { action?: string; jobId?: string; sessionKey?: string })
+    .find((event) => event.action === "finished" && event.jobId === jobId);
+  expect(finished).toBeDefined();
+  expect(finished?.sessionKey).toBe(sessionKey);
 }
 
 function lastMockCall(mock: { mock: { calls: Array<Array<unknown>> } }, label: string) {
@@ -822,6 +834,7 @@ describe("buildGatewayCronService", () => {
         "options",
       );
       expect(eventOptions.sessionKey).toBe("global");
+      await expectMainCronHistoryTarget(state.storePath, job.id, eventOptions.sessionKey);
       const task = listTaskRecords().find((entry) => entry.sourceId === job.id);
       expect(task).toBeDefined();
       expect(task?.childSessionKey).toBe(eventOptions.sessionKey);
@@ -869,6 +882,7 @@ describe("buildGatewayCronService", () => {
         "options",
       );
       expect(eventOptions.sessionKey).toBe("global");
+      await expectMainCronHistoryTarget(state.storePath, job.id, eventOptions.sessionKey);
       const task = listTaskRecords().find((entry) => entry.sourceId === job.id);
       expect(task).toBeDefined();
       expect(task?.childSessionKey).toBe(eventOptions.sessionKey);
@@ -951,6 +965,7 @@ describe("buildGatewayCronService", () => {
           );
           expect(wake.agentId).toBe(binding.expected);
           expect(wake.sessionKey).toBe(event.sessionKey);
+          await expectMainCronHistoryTarget(state.storePath, job.id, event.sessionKey);
           if (scope === "global") {
             expect(event.sessionKey).toBe("global");
           } else {
