@@ -15,9 +15,11 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             source: "federation:fixture-simulator", project: "Argus", kind: "test fixture", state: "observed",
             occurredAt: "2026-09-06T00:00:00Z", observedAt: "2026-09-06T00:01:00Z",
             artifacts: [], supersedesEventId: nil, ownerAccepted: false)
-        item.display = .init(label: "Checkpoint retry repaired",
+        item.display = .init(
+            label: "Checkpoint retry repaired",
             changeSummary: "A retry now resumes the recorded batch. The validation artifact is available in detail.",
-            artifactLabel: nil, continuationLabel: nil)
+            artifactLabel: nil,
+            continuationLabel: nil)
         let earlier = ArgusOperation(
             operationId: "fixture-earlier", taskId: "fixture-earlier-task", eventId: "fixture-earlier-event",
             title: "Synthetic unfamiliar producer observation with a long title that must remain readable and available in full.",
@@ -30,7 +32,9 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             nextCursor: nil, automaticDispatchEnabled: false), more: false)
 
         for (name, size) in [("standard", DynamicTypeSize.large), ("offline-accessibility", .accessibility1)] {
-            if name == "offline-accessibility" { store.markUnavailable() }
+            if name == "offline-accessibility" {
+                store.markUnavailable()
+            }
             let root = VStack(alignment: .leading, spacing: 12) {
                 Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
                     .font(.caption.bold()).padding(.horizontal)
@@ -64,18 +68,25 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 var darkPixels = 0
                 for offset in stride(from: 0, to: bytes.count, by: 4) {
                     let brightness = (Int(bytes[offset]) + Int(bytes[offset + 1]) + Int(bytes[offset + 2])) / 3
-                    if brightness > 180 { brightPixels += 1 }
-                    if brightness < 60 { darkPixels += 1 }
+                    if brightness > 180 {
+                        brightPixels += 1
+                    }
+                    if brightness < 60 {
+                        darkPixels += 1
+                    }
                 }
                 return brightPixels > 100 && darkPixels > 100
             }
-            XCTAssertTrue(hasVisibleContent, "Evidence below the fixture label must have visible text/background contrast")
+            XCTAssertTrue(
+                hasVisibleContent,
+                "Evidence below the fixture label must have visible text/background contrast")
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-home-simulator-fixture-\(name)"
             attachment.lifetime = .keepAlways
             self.add(attachment)
         }
     }
+
     @MainActor
     func testProductionCanonicalWorkSummary() throws {
         for (relation, heading) in [
@@ -86,14 +97,20 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             ("missing", "Recorded artifacts"),
         ] {
             var (item, work) = try ArgusWorkContractTests.fixture(relation: relation)
-            if relation == "missing" { item.artifactContext = nil }
+            if relation == "missing" {
+                item.artifactContext = nil
+            }
             try work.validate(for: item)
             let root = VStack(alignment: .leading, spacing: 12) {
                 Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
                 ArgusOperationEvidenceContent(
-                    detail: .init(item: item, requested: item, timeline: [],
+                    detail: .init(
+                        item: item,
+                        requested: item,
+                        timeline: [],
                         coverage: .init(complete: false, hasMore: true, observedAt: item.observedAt),
-                        ownerAccepted: false, workContract: work),
+                        ownerAccepted: false,
+                        workContract: work),
                     artifactsAvailable: true, openArtifact: { _, _ in })
             }
             .padding()
@@ -117,9 +134,13 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let root = VStack(alignment: .leading, spacing: 12) {
             Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
             ArgusOperationEvidenceContent(
-                detail: .init(item: item, requested: item, timeline: [],
+                detail: .init(
+                    item: item,
+                    requested: item,
+                    timeline: [],
                     coverage: .init(complete: false, hasMore: true, observedAt: item.observedAt),
-                    ownerAccepted: false, workContract: work),
+                    ownerAccepted: false,
+                    workContract: work),
                 artifactsAvailable: true, openArtifact: { _, _ in })
         }
         .padding()
@@ -140,16 +161,23 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let work = ArgusWorkContract(
             schema: original.schema, operationId: original.operationId, latestEventId: original.latestEventId,
             canonicalState: original.canonicalState,
-            structuralVerification: .init(status: "failed_recorded", semanticCorrectnessEstablished: false,
-                                          coversAllCurrentArtifacts: false),
+            structuralVerification: .init(
+                status: "failed_recorded",
+                semanticCorrectnessEstablished: false,
+                coversAllCurrentArtifacts: false),
             independentVerification: original.independentVerification,
             pendingOwnerFeedback: [.init(eventId: "fixture-request", reason: "Choose the next validation target.")],
-            continuation: original.continuation, coverage: original.coverage, ownerAccepted: false, isStateTransition: false)
+            continuation: original.continuation, coverage: original.coverage, ownerAccepted: false,
+            isStateTransition: false)
         try work.validate(for: item)
         let root = ArgusOperationEvidenceContent(
-            detail: .init(item: item, requested: item, timeline: [],
+            detail: .init(
+                item: item,
+                requested: item,
+                timeline: [],
                 coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
-                ownerAccepted: false, workContract: work),
+                ownerAccepted: false,
+                workContract: work),
             artifactsAvailable: true, openArtifact: { _, _ in })
             .padding()
             .background(Color(uiColor: .systemBackground))
@@ -202,9 +230,14 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             project: "MiKobots", kind: "test fixture", state: "observed",
             occurredAt: "2026-09-07T00:00:00Z", observedAt: "2026-09-07T00:01:00Z",
             artifacts: [], supersedesEventId: nil, ownerAccepted: false)
-        try store.accept(ArgusOperationsPage(items: [item],
-            coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
-            nextCursor: nil, automaticDispatchEnabled: false), more: false)
+        try store.accept(ArgusOperationsPage(
+            items: [item],
+            coverage: .init(
+                complete: true,
+                hasMore: false,
+                observedAt: item.observedAt),
+            nextCursor: nil,
+            automaticDispatchEnabled: false), more: false)
         let root = VStack(alignment: .leading, spacing: 12) {
             Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
             ArgusOperationsContent(store: store, client: nil)
@@ -226,10 +259,14 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
     func testProductionNamedArtifactLabels() throws {
         let artifacts = [
-            ArgusOperation.Artifact(sha256: String(repeating: "a", count: 64), bytes: 47,
-                                    displayName: "review.json"),
-            ArgusOperation.Artifact(sha256: String(repeating: "b", count: 64), bytes: 93,
-                                    displayName: "validation.txt"),
+            ArgusOperation.Artifact(
+                sha256: String(repeating: "a", count: 64),
+                bytes: 47,
+                displayName: "review.json"),
+            ArgusOperation.Artifact(
+                sha256: String(repeating: "b", count: 64),
+                bytes: 93,
+                displayName: "validation.txt"),
         ]
         XCTAssertNotEqual(artifacts[0].id, artifacts[1].id)
         let root = VStack(alignment: .leading, spacing: 20) {
@@ -305,19 +342,23 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         if let selectedProject {
             let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
             let aboveTimestamp = words.filter { $0.1.minY > timestamp.1.maxY }
-            XCTAssertTrue(aboveTimestamp.contains {
-                Self.containsProjectLabel($0.0, project: selectedProject)
-            }, "The selected project menu label must be visible above the timestamp; fixture OCR: " +
-                aboveTimestamp.prefix(12).map { String($0.0.prefix(160)) }.joined(separator: " | "))
+            XCTAssertTrue(
+                aboveTimestamp.contains {
+                    Self.containsProjectLabel($0.0, project: selectedProject)
+                },
+                "The selected project menu label must be visible above the timestamp; fixture OCR: " +
+                    aboveTimestamp.prefix(12).map { String($0.0.prefix(160)) }.joined(separator: " | "))
         }
         for name in artifactNames {
-            XCTAssertTrue(words.contains { Self.containsProjectLabel($0.0, project: name) },
-                          "Each corresponding artifact filename must render: \(name)")
+            XCTAssertTrue(
+                words.contains { Self.containsProjectLabel($0.0, project: name) },
+                "Each corresponding artifact filename must render: \(name)")
         }
         let renderedText = words.map(\.0).joined(separator: " ")
         for phrase in requiredText {
-            XCTAssertTrue(renderedText.localizedCaseInsensitiveContains(phrase),
-                          "The production detail must visibly render: \(phrase)")
+            XCTAssertTrue(
+                renderedText.localizedCaseInsensitiveContains(phrase),
+                "The production detail must visibly render: \(phrase)")
         }
         return image
     }
@@ -338,5 +379,4 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         XCTAssertFalse(Self.containsProjectLabel("EPC", project: "Argus"))
         XCTAssertFalse(Self.containsProjectLabel("🚫", project: "Argus"))
     }
-
 }

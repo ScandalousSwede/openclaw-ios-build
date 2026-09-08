@@ -13,6 +13,7 @@ struct ArgusWorkContract: Decodable, Sendable {
         let semanticCorrectnessEstablished: Bool
         let coversAllCurrentArtifacts: Bool
     }
+
     struct Assessment: Decodable, Sendable {
         let eventId: String
         let outcome: String
@@ -20,15 +21,18 @@ struct ArgusWorkContract: Decodable, Sendable {
         let verificationKind: String
         let semanticCorrectnessEstablished: Bool
     }
+
     struct Independent: Decodable, Sendable {
         let artifacts: [Assessment]
         let coversAllCurrentArtifacts: Bool
         let semanticCorrectnessEstablished: Bool
     }
+
     struct Feedback: Decodable, Sendable {
         let eventId: String
         let reason: String?
     }
+
     struct Continuation: Decodable, Sendable {
         let mode: String
         let action: String
@@ -37,11 +41,13 @@ struct ArgusWorkContract: Decodable, Sendable {
         let artifactSha256: [String]
         let dispatchEnabled: Bool
     }
+
     struct Coverage: Decodable, Sendable {
         let scope: String
         let complete: Bool
         let crossScopeAbsenceEstablished: Bool
     }
+
     let schema: String
     let operationId: String
     let latestEventId: String
@@ -77,10 +83,10 @@ struct ArgusWorkContract: Decodable, Sendable {
                   ? "canonical_federation_observation" : "canonical_operation_trace"),
               Set(assessments.map(\.eventId)).count == assessments.count,
               assessmentHashes.count == assessments.count,
-              (!self.independentVerification.coversAllCurrentArtifacts
-                  || (!hashes.isEmpty && assessmentHashes == hashes && assessments.allSatisfy { $0.outcome == "PASS" })),
-              (!previousAttempt || (assessments.isEmpty && !self.independentVerification.coversAllCurrentArtifacts
-                  && !self.structuralVerification.coversAllCurrentArtifacts)) ,
+              !self.independentVerification.coversAllCurrentArtifacts
+              || (!hashes.isEmpty && assessmentHashes == hashes && assessments.allSatisfy { $0.outcome == "PASS" }),
+              !previousAttempt || (assessments.isEmpty && !self.independentVerification.coversAllCurrentArtifacts
+                  && !self.structuralVerification.coversAllCurrentArtifacts),
               self.independentVerification.artifacts.count <= 100,
               self.independentVerification.artifacts.allSatisfy({
                   hashes.contains($0.artifactSha256) && ["PASS", "FAIL"].contains($0.outcome)
@@ -118,22 +124,26 @@ struct ArgusWorkSummary: View {
                     Text("Recorded state: \(self.work.canonicalState.replacingOccurrences(of: "_", with: " "))")
                     if let context = self.artifactContext {
                         Text(context.relation == "previous_attempt"
-                             ? "Artifact belongs to a previous attempt. It does not establish this attempt's result."
-                             : context.relation == "current_attempt" ? "Artifact belongs to the current attempt."
-                             : "Artifact attempt relationship: \(context.relation.replacingOccurrences(of: "_", with: " "))")
+                            ? "Artifact belongs to a previous attempt. It does not establish this attempt's result."
+                            : context.relation == "current_attempt" ? "Artifact belongs to the current attempt."
+                            :
+                            "Artifact attempt relationship: \(context.relation.replacingOccurrences(of: "_", with: " "))")
                     }
-                    Text("Structural check: \(self.work.structuralVerification.status.replacingOccurrences(of: "_", with: " "))")
+                    Text(
+                        "Structural check: \(self.work.structuralVerification.status.replacingOccurrences(of: "_", with: " "))")
                     ForEach(self.work.independentVerification.artifacts, id: \.eventId) { assessment in
-                        Text("\(assessment.verificationKind == "structural_artifact_contract" ? "Independent structural contract" : "Bound verifier assessment"): \(assessment.outcome)")
+                        Text(
+                            "\(assessment.verificationKind == "structural_artifact_contract" ? "Independent structural contract" : "Bound verifier assessment"): \(assessment.outcome)")
                     }
                     Text(self.work.independentVerification.coversAllCurrentArtifacts
-                         ? "Recorded assessments cover all current artifacts. Semantic correctness and owner acceptance remain unestablished."
-                         : "Complete independent coverage of current artifacts is not established.")
+                        ? "Recorded assessments cover all current artifacts. Semantic correctness and owner acceptance remain unestablished."
+                        : "Complete independent coverage of current artifacts is not established.")
                     if self.work.pendingOwnerFeedback.isEmpty {
                         Text("No owner request recorded in this returned scope. Other scopes may contain requests.")
                     }
                     Text("Continuation inspects recorded evidence. No work is dispatched.")
-                    Text("Scope: \(self.work.coverage.scope). \(self.work.coverage.complete ? "Returned scope complete." : "Coverage is partial.")")
+                    Text(
+                        "Scope: \(self.work.coverage.scope). \(self.work.coverage.complete ? "Returned scope complete." : "Coverage is partial.")")
                 }
                 .font(.subheadline)
                 .frame(maxWidth: .infinity, alignment: .leading)

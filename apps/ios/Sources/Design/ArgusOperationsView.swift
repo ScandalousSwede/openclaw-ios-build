@@ -16,7 +16,9 @@ struct ArgusOperationsSection: View {
 
     var body: some View {
         ArgusOperationsContent(store: self.store, client: self.client)
-            .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)|\(self.store.project.rawValue)") {
+            .task(
+                id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)|\(self.store.project.rawValue)")
+            {
                 self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
                 // Invalidate suspended work from the previous visibility/route scope.
                 self.store.markUnavailable()
@@ -44,7 +46,8 @@ struct ArgusOperationsContent: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker("Evidence project", selection: Binding(
-                    get: { self.store.project }, set: { self.store.selectProject($0) })) {
+                    get: { self.store.project }, set: { self.store.selectProject($0) }))
+                {
                     ForEach(ArgusEvidenceProject.allCases, id: \.self) { project in
                         Text(project.rawValue).tag(project)
                     }
@@ -52,17 +55,21 @@ struct ArgusOperationsContent: View {
                 .pickerStyle(.menu)
                 .accessibilityLabel("Evidence project")
                 if self.store.project != .argus {
-                    Text("Technical observations only. This view does not control equipment or establish scientific authority.")
+                    Text(
+                        "Technical observations only. This view does not control equipment or establish scientific authority.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if self.store.unavailable {
-                    Label(self.store.items.isEmpty
-                        ? "Evidence unavailable. Connect and refresh."
-                        : "Offline or unavailable — showing last observed evidence.", systemImage: "wifi.slash")
+                    Label(
+                        self.store.items.isEmpty
+                            ? "Evidence unavailable. Connect and refresh."
+                            : "Offline or unavailable — showing last observed evidence.",
+                        systemImage: "wifi.slash")
                         .font(.subheadline)
                 }
                 if let observed = self.store.coverage?.observedAt {
-                    Text("Last observed: \(ArgusOperation.observationLabel(observed))").font(.caption).foregroundStyle(.secondary)
+                    Text("Last observed: \(ArgusOperation.observationLabel(observed))").font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
                     Text("No evidence found in this returned \(self.store.project.rawValue) scope.")
@@ -80,12 +87,15 @@ struct ArgusOperationsContent: View {
                         ArgusOperationRow(item: item)
                     }
                 }
-                if self.store.isLoading { ProgressView("Loading evidence") }
+                if self.store.isLoading {
+                    ProgressView("Loading evidence")
+                }
                 if let client {
                     HStack {
                         Button("Refresh") { Task { await self.store.refresh(using: client) } }
                         if self.store.nextCursor != nil {
-                            Button("Load more evidence") { Task { await self.store.refresh(using: client, more: true) } }
+                            Button("Load more evidence") { Task { await self.store.refresh(using: client, more: true) }
+                            }
                         }
                     }
                     .buttonStyle(.bordered)
@@ -109,10 +119,13 @@ private struct ArgusOperationRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(self.item.heading).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-            if let summary = self.item.display?.changeSummary { Text(summary).font(.subheadline) }
+            if let summary = self.item.display?.changeSummary {
+                Text(summary).font(.subheadline)
+            }
             Label(self.item.stateLabel, systemImage: "doc.text")
                 .font(.caption)
-            Text("Observed \(ArgusOperation.observationLabel(self.item.observedAt))").font(.caption).foregroundStyle(.secondary)
+            Text("Observed \(ArgusOperation.observationLabel(self.item.observedAt))").font(.caption)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -126,8 +139,9 @@ struct ArgusArtifactButtonLabel: View {
     let operationLabel: String?
 
     var body: some View {
-        Label("\(self.artifact.buttonLabel(operationLabel: self.operationLabel)) · \(self.artifact.byteCountLabel)",
-              systemImage: "doc.viewfinder")
+        Label(
+            "\(self.artifact.buttonLabel(operationLabel: self.operationLabel)) · \(self.artifact.byteCountLabel)",
+            systemImage: "doc.viewfinder")
     }
 }
 
@@ -141,7 +155,9 @@ private struct ArgusOperationDetailView: View {
     @State private var isVisible = false
     @State private var detailLoadGeneration = 0
 
-    private var sameGateway: Bool { self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID }
+    private var sameGateway: Bool {
+        self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID
+    }
 
     var body: some View {
         ScrollView {
@@ -153,16 +169,23 @@ private struct ArgusOperationDetailView: View {
                     if !self.appModel.isOperatorGatewayConnected {
                         Label("Offline — last observed detail", systemImage: "wifi.slash")
                     }
-                    if let error { Text(error).foregroundStyle(.secondary) }
-                    if let error = self.artifactOpen.error { Text(error).foregroundStyle(.secondary) }
+                    if let error {
+                        Text(error).foregroundStyle(.secondary)
+                    }
+                    if let error = self.artifactOpen.error {
+                        Text(error).foregroundStyle(.secondary)
+                    }
                     if let detail {
                         ArgusOperationEvidenceContent(
                             detail: detail,
-                            artifactsAvailable: !self.artifactOpen.isLoading && self.appModel.isOperatorGatewayConnected,
+                            artifactsAvailable: !self.artifactOpen.isLoading && self.appModel
+                                .isOperatorGatewayConnected,
                             openArtifact: { artifact, item in
                                 Task { await self.openArtifact(artifact, item: item) }
                             })
-                    } else if self.error == nil { ProgressView("Loading detail") }
+                    } else if self.error == nil {
+                        ProgressView("Loading detail")
+                    }
                 }
             }
             .padding()
@@ -171,10 +194,15 @@ private struct ArgusOperationDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task(id: "\(self.sameGateway)|\(self.appModel.isOperatorGatewayConnected)") {
             self.detailLoadGeneration += 1
-            if self.sameGateway, self.appModel.isOperatorGatewayConnected { await self.load() }
+            if self.sameGateway, self.appModel.isOperatorGatewayConnected {
+                await self.load()
+            }
         }
         .refreshable { await self.load() }
-        .sheet(item: Binding(get: { self.artifactOpen.preview }, set: { _ in self.artifactOpen.dismissPreview() })) { preview in
+        .sheet(item: Binding(
+            get: { self.artifactOpen.preview },
+            set: { _ in self.artifactOpen.dismissPreview() }))
+        { preview in
             NavigationStack {
                 ArgusArtifactView(preview: preview)
                     .navigationTitle("Verified artifact")
@@ -183,20 +211,22 @@ private struct ArgusOperationDetailView: View {
             }
         }
         .onChange(of: self.sameGateway) { _, same in
-            self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
-            if !same { self.detail = nil }
-        }
-        .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
-            self.artifactOpen.setAvailable(self.isVisible && self.sameGateway && connected)
-        }
-        .onAppear {
-            self.isVisible = true
-            self.artifactOpen.setAvailable(self.sameGateway && self.appModel.isOperatorGatewayConnected)
-        }
-        .onDisappear {
-            self.isVisible = false
-            self.artifactOpen.setAvailable(false)
-        }
+                self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
+                if !same {
+                    self.detail = nil
+                }
+            }
+            .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
+                self.artifactOpen.setAvailable(self.isVisible && self.sameGateway && connected)
+            }
+            .onAppear {
+                self.isVisible = true
+                self.artifactOpen.setAvailable(self.sameGateway && self.appModel.isOperatorGatewayConnected)
+            }
+            .onDisappear {
+                self.isVisible = false
+                self.artifactOpen.setAvailable(false)
+            }
     }
 
     private func load() async {
@@ -205,7 +235,8 @@ private struct ArgusOperationDetailView: View {
         let generation = self.detailLoadGeneration
         do {
             let response = try await self.client.request(
-                "argus.operations.detail", params: ArgusOperationDetail.requestParameters(for: self.operation), as: ArgusOperationDetail.self)
+                "argus.operations.detail", params: ArgusOperationDetail.requestParameters(for: self.operation),
+                as: ArgusOperationDetail.self)
             guard self.sameGateway, generation == self.detailLoadGeneration, !Task.isCancelled else { return }
             try response.validate(for: self.operation)
             self.detail = response
@@ -222,10 +253,9 @@ private struct ArgusOperationDetailView: View {
             try await self.client.request("argus.operations.artifact", params: params, as: ArgusOperationArtifact.self)
         }
     }
-
 }
 
-// The detail screen and synthetic visual fixtures share this exact evidence hierarchy.
+/// The detail screen and synthetic visual fixtures share this exact evidence hierarchy.
 struct ArgusOperationEvidenceContent: View {
     let detail: ArgusOperationDetail
     let artifactsAvailable: Bool
@@ -242,8 +272,8 @@ struct ArgusOperationEvidenceContent: View {
             }
             if !self.detail.item.artifacts.isEmpty {
                 Text(self.detail.item.artifactContext?.relation == "previous_attempt" ? "Previous attempt artifacts"
-                     : self.detail.item.artifactContext?.relation == "current_attempt" ? "Current attempt artifacts"
-                     : "Recorded artifacts").font(.headline).accessibilityAddTraits(.isHeader)
+                    : self.detail.item.artifactContext?.relation == "current_attempt" ? "Current attempt artifacts"
+                    : "Recorded artifacts").font(.headline).accessibilityAddTraits(.isHeader)
                 self.artifactButtons(for: self.detail.item)
             }
             if let work = self.detail.workContract {
@@ -258,7 +288,10 @@ struct ArgusOperationEvidenceContent: View {
                 }
             }
             DisclosureGroup("Earlier observations") {
-                ForEach(self.detail.displayTimeline.filter { $0.eventId != self.detail.item.eventId }, id: \.eventId) { item in
+                ForEach(
+                    self.detail.displayTimeline.filter { $0.eventId != self.detail.item.eventId },
+                    id: \.eventId)
+                { item in
                     Text("Earlier observation — artifacts belong to this recorded event.").font(.caption)
                     ArgusOperationRow(item: item)
                     self.artifactButtons(for: item)
@@ -271,7 +304,6 @@ struct ArgusOperationEvidenceContent: View {
         }
     }
 
-    @ViewBuilder
     private func artifactButtons(for item: ArgusOperation) -> some View {
         ForEach(item.artifacts) { artifact in
             Button {
@@ -279,7 +311,8 @@ struct ArgusOperationEvidenceContent: View {
             } label: {
                 ArgusArtifactButtonLabel(artifact: artifact, operationLabel: item.display?.artifactLabel)
             }
-            .accessibilityLabel("Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.heading), \(artifact.byteCountLabel)")
+            .accessibilityLabel(
+                "Open artifact \(artifact.buttonLabel(operationLabel: item.display?.artifactLabel)) for \(item.heading), \(artifact.byteCountLabel)")
             .disabled(!self.artifactsAvailable)
         }
     }
@@ -299,7 +332,6 @@ struct ArgusOperationEvidenceContent: View {
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
-
 }
 
 private struct ArgusArtifactView: View {
@@ -338,7 +370,10 @@ private struct ArgusPDFView: UIViewRepresentable {
         view.document = self.document
         return view
     }
+
     func updateUIView(_ view: PDFView, context _: Context) {
-        if view.document !== self.document { view.document = self.document }
+        if view.document !== self.document {
+            view.document = self.document
+        }
     }
 }

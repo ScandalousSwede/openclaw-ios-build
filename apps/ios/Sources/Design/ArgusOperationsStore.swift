@@ -14,7 +14,9 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
         let sha256: String
         let bytes: Int?
         let displayName: String?
-        var id: String { self.sha256 }
+        var id: String {
+            self.sha256
+        }
 
         init(sha256: String, bytes: Int?, displayName: String? = nil) {
             self.sha256 = sha256
@@ -55,7 +57,9 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
             }
         }
 
-        var byteCountLabel: String { self.bytes.map { "\($0) bytes" } ?? "Size unknown" }
+        var byteCountLabel: String {
+            self.bytes.map { "\($0) bytes" } ?? "Size unknown"
+        }
 
         func buttonLabel(operationLabel: String?) -> String {
             // Display metadata never changes the digest used for retrieval or review binding.
@@ -88,16 +92,21 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
                 && (self.continuationLabel.map { (1...160).contains($0.count) } ?? true)
         }
     }
+
     var display: Display? = nil
     var evidenceScope: String? = nil
     var artifactContext: ArgusArtifactContext? = nil
-    var id: String { self.operationId }
+    var id: String {
+        self.operationId
+    }
 
     var isAdmitted: Bool {
         guard ArgusEvidenceProject(rawValue: self.project) != nil, !self.ownerAccepted,
               !self.operationId.isEmpty, !self.taskId.isEmpty, !self.eventId.isEmpty,
               self.artifacts.count <= 100, self.display?.isValid != false else { return false }
-        if self.source.hasPrefix("federation:") { return self.state == "observed" }
+        if self.source.hasPrefix("federation:") {
+            return self.state == "observed"
+        }
         return self.project == "Argus" && self.source == "canonical:codex-completion-adapter"
             && self.evidenceScope == "admitted_canonical_technical_operation"
             && Self.canonicalStates.contains(self.state)
@@ -110,9 +119,11 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     ]
 }
 
-// Presentation uses admitted metadata only; it never changes canonical state or artifact identity.
+/// Presentation uses admitted metadata only; it never changes canonical state or artifact identity.
 extension ArgusOperation {
-    var heading: String { self.display?.label ?? self.title }
+    var heading: String {
+        self.display?.label ?? self.title
+    }
 
     var stateLabel: String {
         let state = self.state.replacingOccurrences(of: "_", with: " ").capitalized
@@ -179,7 +190,9 @@ struct ArgusOperationArtifact: Decodable, Identifiable, Sendable {
     let contentBase64: String
     let operationId: String
     var eventId: String? = nil
-    var id: String { self.sha256 }
+    var id: String {
+        self.sha256
+    }
 
     var previewMimeType: String? {
         switch self.mimeType {
@@ -232,7 +245,9 @@ final class ArgusArtifactOpenStore {
         self.error = nil
     }
 
-    func dismissPreview() { self.preview = nil }
+    func dismissPreview() {
+        self.preview = nil
+    }
 
     func open(
         _ artifact: ArgusOperation.Artifact,
@@ -245,7 +260,11 @@ final class ArgusArtifactOpenStore {
         self.isLoading = true
         self.preview = nil
         self.error = nil
-        defer { if generation == self.generation { self.isLoading = false } }
+        defer {
+            if generation == self.generation {
+                self.isLoading = false
+            }
+        }
         do {
             let response = try await fetch([
                 "operation_id": item.id, "event_id": item.eventId, "sha256": artifact.sha256,
@@ -253,8 +272,10 @@ final class ArgusArtifactOpenStore {
             guard generation == self.generation, !Task.isCancelled else { return }
             let data = try response.validatedData(for: item.id, eventID: item.eventId, artifact: artifact)
             guard let previewMimeType = response.previewMimeType else { throw ArgusOperationsError.invalidResponse }
-            self.preview = ArgusArtifactPreview(id: "\(item.eventId):\(artifact.sha256)", data: data,
-                                               mimeType: previewMimeType)
+            self.preview = ArgusArtifactPreview(
+                id: "\(item.eventId):\(artifact.sha256)",
+                data: data,
+                mimeType: previewMimeType)
         } catch {
             guard generation == self.generation, !Task.isCancelled else { return }
             self.error = "Artifact unavailable or integrity verification failed. Nothing was opened."
@@ -300,8 +321,8 @@ final class ArgusOperationsStore {
     @ObservationIgnored private var gatewayID: String?
     @ObservationIgnored private var generation = 0
 
-    // Keep only in-memory last observation, scoped to the selected paired
-    // gateway. Switching pairings must not expose the previous gateway's work.
+    /// Keep only in-memory last observation, scoped to the selected paired
+    /// gateway. Switching pairings must not expose the previous gateway's work.
     func selectGateway(_ id: String?) {
         guard id != self.gatewayID else { return }
         self.gatewayID = id
@@ -338,16 +359,24 @@ final class ArgusOperationsStore {
     func refresh(
         gatewayID: String,
         more: Bool = false,
-        fetch: ([String: String]) async throws -> ArgusOperationsPage
-    ) async {
+        fetch: ([String: String]) async throws -> ArgusOperationsPage) async
+    {
         guard !self.isLoading, self.gatewayID == gatewayID, !Task.isCancelled else { return }
-        if more, self.nextCursor == nil { return }
+        if more, self.nextCursor == nil {
+            return
+        }
         self.isLoading = true
         let generation = self.generation
-        defer { if generation == self.generation { self.isLoading = false } }
+        defer {
+            if generation == self.generation {
+                self.isLoading = false
+            }
+        }
         do {
             var params = ["project": self.project.rawValue]
-            if more { params["cursor"] = self.nextCursor }
+            if more {
+                params["cursor"] = self.nextCursor
+            }
             let page = try await fetch(params)
             guard generation == self.generation, !Task.isCancelled else { return }
             try self.accept(page, more: more)
@@ -364,7 +393,9 @@ final class ArgusOperationsStore {
         else { throw ArgusOperationsError.invalidResponse }
         var merged = more ? self.items : []
         var ids = Set(merged.map(\.id))
-        for item in page.items where ids.insert(item.id).inserted { merged.append(item) }
+        for item in page.items where ids.insert(item.id).inserted {
+            merged.append(item)
+        }
         self.items = merged
         self.coverage = page.coverage
         self.nextCursor = page.nextCursor
