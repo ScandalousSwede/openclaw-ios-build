@@ -1393,8 +1393,9 @@ def write_aies_delivery_report!(build, release_context, evidence, asc_evidence)
     workflow_run_url: "#{required_env!("GITHUB_SERVER_URL")}/#{required_env!("GITHUB_REPOSITORY")}/actions/runs/#{required_env!("GITHUB_RUN_ID")}",
     processing_wait_timeout_seconds: 3600,
     internal_tester_group: release_context[:internal_group],
-    internal_tester_status: "manual_assignment_required",
-    manual_action: "Assign this processed build to the named internal group in App Store Connect, then verify Ethan is a member.",
+    internal_tester_status: "not_queried",
+    manual_action: nil,
+    verification_note: "This upload workflow does not query tester access. Inspect the existing internal group and build association before changing assignments.",
     build_manifest: File.basename(evidence[:build_manifest]),
     signing_report: File.basename(evidence[:signing_report])
   }
