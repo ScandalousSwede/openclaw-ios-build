@@ -1,7 +1,11 @@
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_CLIENT_IDS } from "../../packages/gateway-protocol/src/client-info.js";
 import { NODE_WORKER_ENVIRONMENT_STOP_COMMAND } from "../infra/node-commands.js";
 import { NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE } from "../infra/node-runner-inventory.js";
+import type { PluginApprovalRequestPayload } from "../infra/plugin-approvals.js";
 import {
   beginGatewayRestartSignalAdmission,
   getActiveGatewayRootWorkCount,
@@ -18,8 +22,10 @@ import { createNodeRegistryRuntime, updateNodeRunnerInventory } from "./node-reg
 import { NodeRegistry } from "./node-registry.js";
 import { QuestionManager } from "./question-manager.js";
 import { handleGatewayRequest } from "./server-methods.js";
+import { createArtifactReviewHelperAdapter } from "./server-methods/artifact-review-helper.js";
 import { handleNodeInvokeProgress } from "./server-methods/nodes.handlers.invoke-progress.js";
 import { handleNodeInvokeResult } from "./server-methods/nodes.handlers.invoke-result.js";
+import { createPluginApprovalHandlers } from "./server-methods/plugin-approval.js";
 import type { GatewayRequestContext, GatewayRequestHandler } from "./server-methods/types.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 
@@ -641,4 +647,174 @@ describe("restart lifecycle completion ownership", () => {
       }
     },
   );
+});
+
+it("keeps artifact helper ownership through termination and refuses unowned drain continuation", async (t) => {
+  const manager = createTestApprovalManager<PluginApprovalRequestPayload>(t, {
+    approvalKind: "plugin",
+  });
+  const path = join(mkdtempSync(join(tmpdir(), "artifact-root-ownership-")), "pid");
+  const helper = createArtifactReviewHelperAdapter({
+    command: process.execPath,
+    args: [
+      "-e",
+      `process.on('SIGTERM',()=>{});require('node:fs').writeFileSync(${JSON.stringify(path)},String(process.pid));setInterval(()=>{},1000);`,
+    ],
+    timeoutMs: 700,
+  })!;
+  const handlers = createPluginApprovalHandlers(manager, { artifactReview: helper });
+  const requestHandler = handlers["plugin.approval.request"];
+  if (!requestHandler) {
+    throw new Error("expected artifact request handler");
+  }
+  const client = createClient("operator");
+  client.connect.device = {
+    id: "artifact-device",
+    publicKey: "synthetic",
+    signature: "synthetic",
+    signedAt: 1,
+    nonce: "synthetic",
+  };
+  const context = createContext({});
+  context.pluginApprovalManager = manager;
+  const binding = {
+    operation_id: "operation:test",
+    event_id: "event:current",
+    artifact_sha256: ["a".repeat(64)],
+  };
+  const pending = dispatch({
+    method: "plugin.approval.request",
+    requestParams: {
+      kind: "artifact_review",
+      binding,
+      idempotency_key: "request:key",
+      title: "Review",
+      description: "Technical artifact",
+    },
+    context,
+    client,
+    handler: requestHandler,
+  });
+  await vi.waitFor(() => expect(existsSync(path)).toBe(true), { timeout: 2000 });
+  expect(getActiveGatewayRootWorkCount()).toBe(1);
+  markGatewayRestartDraining();
+  const resolutionHandler = vi.fn<GatewayRequestHandler>();
+  const refused = await dispatch({
+    method: "plugin.approval.resolve",
+    requestParams: {
+      kind: "artifact_review",
+      binding,
+      idempotency_key: "resolve:key",
+      id: "external-review",
+      decision: "accept_artifact",
+    },
+    context,
+    client,
+    handler: resolutionHandler,
+  });
+  expect(refused).toHaveBeenCalledWith(
+    false,
+    undefined,
+    expect.objectContaining({ code: "UNAVAILABLE" }),
+  );
+  expect(resolutionHandler).not.toHaveBeenCalled();
+  const respond = await pending;
+  expect(respond).toHaveBeenCalledWith(
+    false,
+    undefined,
+    expect.objectContaining({ message: "Artifact review unavailable or invalid" }),
+  );
+  expect(() => process.kill(Number(readFileSync(path, "utf8")), 0)).toThrow();
+  expect(getActiveGatewayRootWorkCount()).toBe(0);
+});
+
+it("rejects artifact ID collision with an ordinary approval during suspension drain", async (t) => {
+  const manager = createTestApprovalManager<PluginApprovalRequestPayload>(t, {
+    approvalKind: "plugin",
+  });
+  const client = createClient("operator");
+  client.connect.device = {
+    id: "review-device",
+    publicKey: "test",
+    signature: "test",
+    signedAt: 1,
+    nonce: "test",
+  };
+  const context = createContext({});
+  context.pluginApprovalManager = manager;
+  const root = tryBeginGatewayRootWorkAdmission();
+  if (!root) {
+    throw new Error("expected admitted approval owner");
+  }
+  const ready = deferred();
+  const owner = root
+    .run(async () => {
+      const record = manager.create(
+        { pluginId: "test", title: "Ordinary", description: "Execution" },
+        60_000,
+        "shared-id",
+      );
+      const decision = manager.register(record, 60_000);
+      ready.resolve();
+      return await decision;
+    })
+    .finally(root.release);
+  await ready.promise;
+  const suspension = tryBeginGatewaySuspendAdmission(() => {});
+  expect(suspension?.drain()).toBe(true);
+  const binding = {
+    operation_id: "op:test",
+    event_id: "event:test",
+    artifact_sha256: ["a".repeat(64)],
+  };
+  const resolveArtifact = vi.fn(async () => ({
+    id: "shared-id",
+    binding,
+    actor_device_id: "review-device",
+    canonical_event_id: "receipt:test",
+    idempotency_key: "resolve:test",
+    state: "accepted" as const,
+  }));
+  const handlers = createPluginApprovalHandlers(manager, {
+    artifactReview: { request: vi.fn(), resolve: resolveArtifact },
+  });
+  const artifactHandler = handlers["plugin.approval.resolve"];
+  if (!artifactHandler) {
+    throw new Error("expected artifact resolution handler");
+  }
+  try {
+    const rejected = await dispatch({
+      method: "plugin.approval.resolve",
+      requestParams: {
+        kind: "artifact_review",
+        id: "shared-id",
+        binding,
+        idempotency_key: "resolve:test",
+        decision: "accept_artifact",
+      },
+      context,
+      client,
+      handler: artifactHandler,
+    });
+    expect(rejected).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ code: "UNAVAILABLE" }),
+    );
+    expect(resolveArtifact).not.toHaveBeenCalled();
+    const accepted = await dispatch({
+      method: "plugin.approval.resolve",
+      requestParams: { id: "shared-id", decision: "allow-once" },
+      context,
+      client,
+      handler: ({ respond }) =>
+        respond(true, { applied: manager.resolve("shared-id", "allow-once") }),
+    });
+    expect(accepted).toHaveBeenCalledWith(true, { applied: true });
+    await expect(owner).resolves.toBe("allow-once");
+  } finally {
+    manager.resolve("shared-id", "deny");
+    await owner;
+    suspension?.release();
+  }
 });

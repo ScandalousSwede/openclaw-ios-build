@@ -3,80 +3,17 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
-import { afterEach, beforeEach, describe, expect, it, vi, type TestContext } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginApprovalRequestPayload } from "../../infra/plugin-approvals.js";
 import type { ExecApprovalManager } from "../exec-approval-manager.js";
-import { createTestApprovalManager } from "../exec-approval-manager.test-support.js";
 import { createPluginApprovalHandlers } from "./plugin-approval.js";
+import {
+  createApprovalContext,
+  createClient,
+  createManager,
+  createMockOptions,
+} from "./plugin-approval.test-support.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
-
-function createManager(testContext: TestContext) {
-  return createTestApprovalManager<PluginApprovalRequestPayload>(testContext, {
-    approvalKind: "plugin",
-  });
-}
-
-function createLogGatewayMock() {
-  return { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
-}
-
-function createApprovalContext(
-  params: {
-    broadcast?: ReturnType<typeof vi.fn>;
-    hasExecApprovalClients?: GatewayRequestHandlerOptions["context"]["hasExecApprovalClients"];
-  } = {},
-): GatewayRequestHandlerOptions["context"] {
-  return {
-    broadcast: params.broadcast ?? vi.fn(),
-    logGateway: createLogGatewayMock(),
-    hasExecApprovalClients: params.hasExecApprovalClients ?? (() => true),
-  } as unknown as GatewayRequestHandlerOptions["context"];
-}
-
-function createClient(
-  params: {
-    connId?: string;
-    clientId?: string;
-    displayName?: string;
-    deviceId?: string;
-    scopes?: string[];
-    approvalRuntime?: boolean;
-  } = {},
-): GatewayRequestHandlerOptions["client"] {
-  const connect: Record<string, unknown> = {
-    client: {
-      id: params.clientId ?? "test-client",
-      displayName: params.displayName ?? "Test Client",
-    },
-  };
-  if (params.deviceId) {
-    connect.device = { id: params.deviceId };
-  }
-  if (params.scopes) {
-    connect.scopes = params.scopes;
-  }
-  return {
-    connId: params.connId ?? "conn-test-client",
-    connect,
-    ...(params.approvalRuntime ? { internal: { approvalRuntime: true } } : {}),
-  } as unknown as GatewayRequestHandlerOptions["client"];
-}
-
-function createMockOptions(
-  method: string,
-  params: Record<string, unknown>,
-  overrides?: Partial<GatewayRequestHandlerOptions>,
-): GatewayRequestHandlerOptions {
-  return {
-    req: { method, params, id: "req-1" },
-    params,
-    client: createClient(),
-    isWebchatConnect: () => false,
-    respond: vi.fn(),
-    context: createApprovalContext(),
-    ...overrides,
-  } as unknown as GatewayRequestHandlerOptions;
-}
 
 function createNoExecApprovalContext(): GatewayRequestHandlerOptions["context"] {
   return createApprovalContext({ hasExecApprovalClients: () => false });

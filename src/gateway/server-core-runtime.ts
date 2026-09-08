@@ -305,6 +305,7 @@ export async function startGatewayCoreRuntime(input: {
     return {
       ...createGatewayAuxHandlers({
         log,
+        artifactReview: cfgAtStart.gateway?.artifactReview,
         chatAbortControllers,
         hasRunAbortMarker: (runId) => chatRunState.hasAbortMarker(runId),
         // Grant terms freeze at mint. This reads the live config so a policy

@@ -150,6 +150,66 @@ while the other requests it.
   `sessionKey` between prepare and the final approved `system.run` forward,
   the gateway rejects the run instead of trusting the mutated payload.
 
+## Canonical artifact review
+
+An existing external canonical writer can expose artifact review through the
+`artifact_review` branch of `plugin.approval.request`, `plugin.approval.list`, and
+`plugin.approval.resolve`. Configure the trusted helper explicitly:
+
+```json 5
+{
+  "gateway": {
+    "artifactReview": {
+      "command": "/usr/local/bin/artifact-review-helper",
+      "args": [],
+      "timeoutMs": 5000
+    }
+  }
+}
+```
+
+The command must be absolute. Arguments are fixed configuration, limited to 32
+entries of 4096 characters each; timeout defaults to 5000ms and accepts 100–15000ms.
+Restart the Gateway after changing this startup configuration. Omission disables
+artifact request/resolution; listing returns `{ available: false, items: [] }`.
+
+Requests contain `kind: "artifact_review"`, `binding`, `idempotency_key`, `title`
+(1–80 characters), and `description` (1–512 characters). The binding contains
+`operation_id`, `event_id`, and 1–64 unique lowercase SHA-256 strings in
+`artifact_sha 256`. Identifiers use 1–512 letters, digits, underscores, periods,
+colons, or hyphens. Resolution replaces the display fields with the exact review
+`id` and `decision: "accept_artifact"` or `"reject_artifact"`. Execution permission
+values and channel-reviewer claims are rejected. List selects only
+`{ kind: "artifact_review" }` and returns at most 100 unexpired authorized records.
+
+The authenticated connection must be an operator with a paired device and
+`operator.approvals` or `operator.admin`. Current profile restrictions still
+apply: a session-isolated profile cannot use these sessionless artifact records;
+the existing administrator override is preserved. Caller-supplied actor or owner
+claims never establish authority.
+
+The helper receives bounded JSON on stdin: `method`, the authenticated `actor`
+(`device_id`, `connection_id`, `scopes`), and `command` for request/resolution.
+Input and output each have a 65536-byte limit. The helper owns durable requester
+and reviewer authorization, expiry, current event/artifact binding, and atomic
+idempotency. It must commit before returning a receipt with `id`, `binding`,
+`actor_device_id`, `canonical_event_id`, `idempotency_key`, and `state` (`pending`,
+`accepted`, or `rejected`). List returns `{ items }`; every item includes `id`,
+`binding`, positive `created_at_ms`, later `expires_at_ms`,
+`requested_by_device_id`, and up to 64 `reviewer_device_ids`.
+
+These records stay with the canonical writer. They do not create execution
+approval records, grant permission to run a tool, or establish a named person's
+acceptance. Ordinary plugin approval requests keep their existing manager,
+channel delivery, push notifications, and decision behavior.
+
+A helper timeout terminates the process before releasing admitted request
+ownership. An error can follow a committed effect: reconcile or retry the exact
+same command and idempotency key instead of inventing a new request. While the
+Gateway drains, an external artifact review cannot borrow an execution
+approval's continuation ownership; retry after readiness. Private helper error
+text is never returned to the client.
+
 ## Agent delivery fallback
 
 - `agent` requests can include `deliver=true` to request outbound delivery.

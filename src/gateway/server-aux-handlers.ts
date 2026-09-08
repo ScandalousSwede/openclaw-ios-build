@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveProjectedMcpCodexToolApprovalMode } from "../agents/mcp-codex-tool-approval.js";
 import { getRuntimeConfig } from "../config/io.js";
+import type { GatewayConfig } from "../config/types.gateway.js";
 import {
   type AgentRunDelegatedAuthority,
   registerAgentRunDelegatedAuthorityClosedHandler,
@@ -53,6 +54,7 @@ import {
   cancelUnboundRunApprovals,
   cancelWorkerTurnClaimBoundApprovals,
 } from "./server-methods/approval-run-cancellation.js";
+import { createArtifactReviewHelperAdapter } from "./server-methods/artifact-review-helper.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import {
   createGatewaySecretsReloader,
@@ -75,6 +77,7 @@ type GatewayAuxHandlerLogger = {
 export function createGatewayAuxHandlers(
   params: GatewaySecretsReloaderParams & {
     log: GatewayAuxHandlerLogger;
+    artifactReview?: GatewayConfig["artifactReview"];
     onApprovalLifecycle?: (event: OperatorApprovalLifecycleEvent) => void;
     onAgentRunAuthorityClosed?: (authority: AgentRunDelegatedAuthority) => void;
     validateAgentRuntimeDelegatedAuthority?: (authority: AgentRuntimeDelegatedAuthority) => boolean;
@@ -353,6 +356,7 @@ export function createGatewayAuxHandlers(
         createPluginApprovalHandlers(pluginApprovalManager, {
           forwarder: execApprovalForwarder,
           iosPushDelivery: pluginApprovalIosPushDelivery,
+          artifactReview: createArtifactReviewHelperAdapter(params.artifactReview),
         }),
       ),
     { cacheRejections: true },

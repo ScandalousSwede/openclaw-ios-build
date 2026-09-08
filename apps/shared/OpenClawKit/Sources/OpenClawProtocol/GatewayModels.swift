@@ -6109,17 +6109,20 @@ public struct SessionsPreviewParams: Codable, Sendable {
 
 public struct SessionsDescribeParams: Codable, Sendable {
     public let key: String
+    public let metadataonly: Bool?
     public let agentid: String?
     public let includederivedtitles: Bool?
     public let includelastmessage: Bool?
 
     public init(
         key: String,
+        metadataonly: Bool? = nil,
         agentid: String? = nil,
         includederivedtitles: Bool? = nil,
         includelastmessage: Bool? = nil)
     {
         self.key = key
+        self.metadataonly = metadataonly
         self.agentid = agentid
         self.includederivedtitles = includederivedtitles
         self.includelastmessage = includelastmessage
@@ -6127,6 +6130,7 @@ public struct SessionsDescribeParams: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case key
+        case metadataonly = "metadataOnly"
         case agentid = "agentId"
         case includederivedtitles = "includeDerivedTitles"
         case includelastmessage = "includeLastMessage"
@@ -21461,6 +21465,9 @@ public struct HooksStatusParams: Codable, Sendable {
 }
 
 public struct PluginApprovalRequestParams: Codable, Sendable {
+    public let kind: String?
+    public let binding: [String: AnyCodable]?
+    public let idempotencyKey: String?
     public let pluginid: String?
     public let title: String
     public let description: String
@@ -21482,6 +21489,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     public let twophase: Bool?
 
     public init(
+        kind: String? = nil,
+        binding: [String: AnyCodable]? = nil,
+        idempotencyKey: String? = nil,
         pluginid: String? = nil,
         title: String,
         description: String,
@@ -21502,6 +21512,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
         timeoutms: Int? = nil,
         twophase: Bool? = nil)
     {
+        self.kind = kind
+        self.binding = binding
+        self.idempotencyKey = idempotencyKey
         self.pluginid = pluginid
         self.title = title
         self.description = description
@@ -21524,6 +21537,9 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case kind
+        case binding
+        case idempotencyKey = "idempotency_key"
         case pluginid = "pluginId"
         case title
         case description
@@ -21547,18 +21563,36 @@ public struct PluginApprovalRequestParams: Codable, Sendable {
 }
 
 public struct PluginApprovalResolveParams: Codable, Sendable {
+    public let kind: String?
+    public let binding: [String: AnyCodable]?
+    public let idempotencyKey: String?
     public let id: String
     public let decision: String
     public let reviewer: [String: AnyCodable]?
 
     public init(
+        kind: String? = nil,
+        binding: [String: AnyCodable]? = nil,
+        idempotencyKey: String? = nil,
         id: String,
         decision: String,
         reviewer: [String: AnyCodable]? = nil)
     {
+        self.kind = kind
+        self.binding = binding
+        self.idempotencyKey = idempotencyKey
         self.id = id
         self.decision = decision
         self.reviewer = reviewer
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case binding
+        case idempotencyKey = "idempotency_key"
+        case id
+        case decision
+        case reviewer
     }
 }
 

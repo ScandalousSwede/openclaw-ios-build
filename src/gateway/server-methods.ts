@@ -173,6 +173,11 @@ function runGatewayPendingWorkContinuation<T>(params: {
   if (params.method === "question.resolve" || params.method === "question.get") {
     return params.context.questionManager?.runPendingContinuation(request.id, params.run) ?? null;
   }
+  // Canonical artifact reviews are external roots, even if their ID happens
+  // to match a pending execution approval. Only that manager's work can resume.
+  if (params.method === "plugin.approval.resolve" && request.kind === "artifact_review") {
+    return null;
+  }
   const manager =
     params.method === "exec.approval.resolve"
       ? params.context.execApprovalManager

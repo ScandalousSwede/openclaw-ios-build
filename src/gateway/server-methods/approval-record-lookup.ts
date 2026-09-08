@@ -69,11 +69,20 @@ export function canAccessApprovalSession(params: {
   return Boolean(target && visibilityFilter(target.storeKey, target.entry));
 }
 
-export function isApprovalRecordVisibleToClient<TPayload>(params: {
-  record: ExecApprovalRecord<TPayload>;
-  client: GatewayClient | null;
-  cfg?: OpenClawConfig;
-}): boolean {
+type ApprovalVisibilityIdentity = {
+  connId?: string;
+  connect: { scopes?: readonly string[]; device?: { id: string } };
+  internal?: { approvalRuntime?: boolean };
+};
+
+export function isApprovalRecordVisibleToClient<TPayload>(
+  params: { record: ExecApprovalRecord<TPayload> } & (
+    | { client: GatewayClient | null; cfg?: OpenClawConfig }
+    // Identity-only adapters reuse device policy. Profile/session checks require
+    // the full authenticated client and remain mandatory at their Gateway caller.
+    | { client: ApprovalVisibilityIdentity | null; cfg?: undefined }
+  ),
+): boolean {
   const scopes = Array.isArray(params.client?.connect?.scopes) ? params.client.connect.scopes : [];
   if (scopes.includes(ADMIN_SCOPE)) {
     return true;

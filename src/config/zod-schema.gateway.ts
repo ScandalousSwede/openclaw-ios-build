@@ -172,6 +172,13 @@ export const GatewayConfigSchema = z
         }
       })
       .optional(),
+    artifactReview: z
+      .strictObject({
+        command: z.string().min(1).max(4096),
+        args: z.array(z.string().max(4096)).max(32).optional(),
+        timeoutMs: z.number().int().min(100).max(15000).optional(),
+      })
+      .optional(),
     trustedProxies: z.array(z.string()).optional(),
     allowRealIpFallback: z.boolean().optional(),
     tools: z

@@ -610,6 +610,8 @@ export type GatewayConfig = {
    * Default: false (safer fail-closed behavior).
    */
   allowRealIpFallback?: boolean;
+  /** Optional trusted canonical artifact-review helper; absent disables artifact review. */
+  artifactReview?: { command: string; args?: string[]; timeoutMs?: number };
   /** Tool access restrictions for HTTP /tools/invoke endpoint. */
   tools?: GatewayToolsConfig;
 };

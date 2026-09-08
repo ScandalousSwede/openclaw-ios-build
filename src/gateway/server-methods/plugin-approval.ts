@@ -29,6 +29,7 @@ import {
 import type { ExecApprovalManager } from "../exec-approval-manager.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { resolveStoredSessionKeyForAgentStore } from "../session-store-key.js";
+import { canAccessApprovalSession } from "./approval-record-lookup.js";
 import {
   bindApprovalRequesterMetadata,
   bindApprovalReviewerDeviceIds,
@@ -38,6 +39,11 @@ import {
   registerPendingApprovalRecord,
   resolveApprovalDecisionParams,
 } from "./approval-shared.js";
+import {
+  artifactReviewActorFromClient,
+  routeArtifactReview,
+  type ArtifactReviewAdapter,
+} from "./artifact-review.js";
 import { handlePendingPluginApprovalRequest } from "./plugin-approval-request-delivery.js";
 import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
@@ -48,13 +54,52 @@ type PluginApprovalIosPushDelivery = NonNullable<
   handleResolved?: (resolved: PluginApprovalResolved) => Promise<void>;
 };
 
+function assertArtifactProfileAccess(
+  client: Parameters<GatewayRequestHandlers[string]>[0]["client"],
+  context: GatewayRequestContext,
+): void {
+  if (
+    !client?.connect.scopes?.includes("operator.admin") &&
+    !canAccessApprovalSession({ client, cfg: context.getRuntimeConfig() })
+  ) {
+    throw new Error("Artifact review unavailable or invalid");
+  }
+}
+
 /** Create plugin approval handlers backed by the shared approval manager. */
 export function createPluginApprovalHandlers(
   manager: ExecApprovalManager<PluginApprovalRequestPayload>,
-  opts?: { forwarder?: ExecApprovalForwarder; iosPushDelivery?: PluginApprovalIosPushDelivery },
+  opts?: {
+    forwarder?: ExecApprovalForwarder;
+    iosPushDelivery?: PluginApprovalIosPushDelivery;
+    artifactReview?: ArtifactReviewAdapter;
+  },
 ): GatewayRequestHandlers {
   return {
-    "plugin.approval.list": async ({ respond, client, context }) => {
+    "plugin.approval.list": async ({ params, respond, client, context }) => {
+      if (params && typeof params === "object" && "kind" in params) {
+        try {
+          if (params.kind !== "artifact_review" || Object.keys(params).length !== 1) {
+            throw new Error();
+          }
+          assertArtifactProfileAccess(client, context);
+          const actor = artifactReviewActorFromClient(client);
+          const items = opts?.artifactReview?.list ? await opts.artifactReview.list(actor) : [];
+          assertArtifactProfileAccess(client, context);
+          respond(
+            true,
+            { available: typeof opts?.artifactReview?.list === "function", items },
+            undefined,
+          );
+        } catch {
+          respond(
+            false,
+            undefined,
+            errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+          );
+        }
+        return;
+      }
       respond(
         true,
         listVisiblePendingApprovalRequests({
@@ -67,6 +112,27 @@ export function createPluginApprovalHandlers(
       );
     },
     "plugin.approval.request": async ({ params, client, respond, context }) => {
+      try {
+        const receipt = await routeArtifactReview({
+          method: "request",
+          input: params,
+          client,
+          adapter: opts?.artifactReview,
+          authorize: () => assertArtifactProfileAccess(client, context),
+        });
+        if (receipt) {
+          respond(true, receipt, undefined);
+          return;
+        }
+      } catch {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+        );
+        return;
+      }
+
       if (
         !assertValidParams(
           params,
@@ -283,6 +349,27 @@ export function createPluginApprovalHandlers(
     },
 
     "plugin.approval.resolve": async ({ params, respond, client, context }) => {
+      try {
+        const receipt = await routeArtifactReview({
+          method: "resolve",
+          input: params,
+          client,
+          adapter: opts?.artifactReview,
+          authorize: () => assertArtifactProfileAccess(client, context),
+        });
+        if (receipt) {
+          respond(true, receipt, undefined);
+          return;
+        }
+      } catch {
+        respond(
+          false,
+          undefined,
+          errorShape(ErrorCodes.INVALID_REQUEST, "Artifact review unavailable or invalid"),
+        );
+        return;
+      }
+
       const resolveParams = resolveApprovalDecisionParams({
         rawParams: params,
         validate: validatePluginApprovalResolveParams,
