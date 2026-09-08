@@ -406,23 +406,37 @@ function resolveMainSessionCronDeliveryContext(
   state: CronServiceState,
   job: CronJob,
 ): DeliveryContext | undefined {
-  const targetSessionKey = job.sessionKey?.trim();
-  if (!targetSessionKey) {
-    return undefined;
-  }
-  const explicitAgentId = job.agentId?.trim();
-  const agentId = normalizeAgentId(
-    explicitAgentId || resolveAgentIdFromSessionKey(targetSessionKey),
-  );
-  const storePath = state.deps.resolveSessionStorePath?.(agentId) ?? state.deps.sessionStorePath;
-  if (!storePath) {
+  const requestedSessionKey = job.sessionKey?.trim();
+  if (!requestedSessionKey) {
     return undefined;
   }
   try {
+    // Use the same host resolution as the execution lane. Relative main keys
+    // and configured agent/global scopes are not literal session-store keys.
+    const target = state.deps.resolveMainSessionTarget
+      ? state.deps.resolveMainSessionTarget({
+          agentId: job.agentId,
+          sessionKey: requestedSessionKey,
+        })
+      : {
+          agentId: normalizeAgentId(
+            job.agentId?.trim() || resolveAgentIdFromSessionKey(requestedSessionKey),
+          ),
+          sessionKey: requestedSessionKey,
+        };
+    if (!target) {
+      return undefined;
+    }
+    const storePath =
+      state.deps.resolveSessionStorePath?.(target.agentId) ?? state.deps.sessionStorePath;
+    if (!storePath) {
+      return undefined;
+    }
     const sessionEntry = loadSessionEntry({
-      agentId,
-      sessionKey: targetSessionKey,
+      agentId: target.agentId,
+      sessionKey: target.sessionKey,
       storePath,
+      hydrateSkillPromptRefs: false,
     });
     return deliveryContextFromSession(sessionEntry);
   } catch {
