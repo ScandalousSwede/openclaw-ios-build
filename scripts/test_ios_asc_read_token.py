@@ -65,8 +65,11 @@ class ReadToken(unittest.TestCase):
   for scope in claims['scope']:
    self.assertTrue(scope.startswith('GET '));query=parse_qs(urlparse(scope[4:]).query);self.assertEqual(query['filter[app]'],['1234567890'])
   q=parse_qs(urlparse(claims['scope'][1][4:]).query)
-  self.assertEqual(q['filter[isInternalGroup]'],['true']);self.assertEqual(q['fields[betaTesters]'],['state'])
-  self.assertIn('builds',q['fields[betaGroups]'][0].split(','));self.assertIn('builds',q['include'][0].split(','));self.assertEqual(q['fields[builds]'],['version'])
+  self.assertEqual(q, {
+   'filter[app]': ['1234567890'], 'filter[isInternalGroup]': ['true'],
+   'fields[betaGroups]': ['name,isInternalGroup,hasAccessToAllBuilds,betaTesters,builds'],
+   'include': ['betaTesters,builds'], 'fields[betaTesters]': ['state'],
+   'fields[builds]': ['version'], 'limit[builds]': ['50']})
   self.assertNotIn('email',json.dumps(claims));self.assertNotIn('firstName',json.dumps(claims));self.assertNotIn('crashLog',json.dumps(claims))
   self.assertLess(len(json.dumps(claims['scope'],separators=(',',':'))),600)
  def test_invalid_purpose_and_mixed_discovery_rejected(self):

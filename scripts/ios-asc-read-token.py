@@ -47,7 +47,9 @@ def scopes(app_id, purpose="crash-feedback"):
             'filter[app]': app_id, 'filter[isInternalGroup]': 'true',
             'fields[betaGroups]': 'name,isInternalGroup,hasAccessToAllBuilds,betaTesters,builds',
             'include': 'betaTesters,builds', 'fields[betaTesters]': 'state',
-            'fields[builds]': 'version'})
+            # Bound the included build relationship; its default page can hide
+            # the target build even when the group itself is returned.
+            'fields[builds]': 'version', 'limit[builds]': '50'})
         return ['GET ' + builds, 'GET ' + groups]
     return ['GET ' + builds, 'GET ' + feedback]
 
