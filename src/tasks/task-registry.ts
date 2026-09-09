@@ -1680,26 +1680,6 @@ export function markTaskLostById(params: {
   });
 }
 
-function updateTasksByRunId(params: {
-  runId: string;
-  patch: Partial<TaskRecord>;
-  runtime?: TaskRuntime;
-  sessionKey?: string;
-}): TaskRecord[] {
-  const matches = getTasksByRunScope(params);
-  if (matches.length === 0) {
-    return [];
-  }
-  const updated: TaskRecord[] = [];
-  for (const match of matches) {
-    const task = updateTask(match.taskId, params.patch);
-    if (task) {
-      updated.push(task);
-    }
-  }
-  return updated;
-}
-
 function ensureListener() {
   if (listenerStarted) {
     return;
@@ -2056,18 +2036,24 @@ function updateTaskDeliveryByRunId(params: {
   error?: string;
 }) {
   ensureTaskRegistryReady();
-  const patch: Partial<TaskRecord> = {
-    deliveryStatus: params.deliveryStatus,
-  };
-  if (params.error !== undefined) {
-    patch.error = params.error;
+  const updated: TaskRecord[] = [];
+  for (const current of getTasksByRunScope(params)) {
+    const patch: Partial<TaskRecord> = { deliveryStatus: params.deliveryStatus };
+    // Delivery retries must not replace a known terminal execution cause. Keep
+    // the existing delivery-error fallback for successful runs or unknown causes.
+    const hasExecutionError =
+      isTerminalTaskStatus(current.status) &&
+      current.status !== "succeeded" &&
+      Boolean(current.error?.trim());
+    if (params.error !== undefined && !hasExecutionError) {
+      patch.error = params.error;
+    }
+    const task = updateTask(current.taskId, patch);
+    if (task) {
+      updated.push(task);
+    }
   }
-  return updateTasksByRunId({
-    runId: params.runId,
-    runtime: params.runtime,
-    sessionKey: params.sessionKey,
-    patch,
-  });
+  return updated;
 }
 
 export function markTaskRunningByRunId(params: {

@@ -50,6 +50,7 @@ export function mapTaskSummary(task: TaskRecord): TaskSummary {
     kind: task.taskKind ?? task.runtime,
     runtime: task.runtime,
     status: TASK_STATUS_TO_LEDGER_STATUS[task.status],
+    deliveryStatus: task.deliveryStatus,
     title: formatTaskStatusTitle(task),
     ...(task.agentId ? { agentId: task.agentId } : {}),
     sessionKey: task.requesterSessionKey,

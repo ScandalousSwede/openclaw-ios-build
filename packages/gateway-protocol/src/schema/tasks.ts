@@ -27,6 +27,16 @@ export const TaskSummarySchema = Type.Object(
     kind: Type.Optional(Type.String()),
     runtime: Type.Optional(Type.String()),
     status: TaskLedgerStatusSchema,
+    deliveryStatus: Type.Optional(
+      Type.Union([
+        Type.Literal("pending"),
+        Type.Literal("delivered"),
+        Type.Literal("session_queued"),
+        Type.Literal("failed"),
+        Type.Literal("parent_missing"),
+        Type.Literal("not_applicable"),
+      ]),
+    ),
     title: Type.Optional(Type.String()),
     agentId: Type.Optional(Type.String()),
     sessionKey: Type.Optional(Type.String()),

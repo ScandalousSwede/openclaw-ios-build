@@ -4,12 +4,15 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { Value } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TaskSummarySchema } from "../../../packages/gateway-protocol/src/schema/tasks.js";
 import {
   createTaskRecord as createTaskRecordOrNull,
   getTaskById,
   markTaskTerminalById,
   recordTaskProgressByRunId,
+  setTaskRunDeliveryStatusByRunId,
   reloadTaskRegistryFromStore,
   resetTaskRegistryControlRuntimeForTests,
   resetTaskRegistryForTests,
@@ -122,6 +125,50 @@ async function getTaskPayload(taskId: string) {
 }
 
 describe("tasks gateway handlers", () => {
+  it("exposes execution failure and delivery status independently in persisted task summaries", async () => {
+    const task = createTaskRecord({
+      runtime: "subagent",
+      requesterSessionKey: "agent:main:main",
+      ownerKey: "agent:main:main",
+      scopeKind: "session",
+      runId: "run-separate-outcomes",
+      task: "Inspect a provider failure",
+      status: "running",
+      deliveryStatus: "pending",
+    });
+    markTaskTerminalById({
+      taskId: task.taskId,
+      status: "timed_out",
+      endedAt: Date.now(),
+      error: "PROVIDER_FAILURE_SENTINEL",
+    });
+    setTaskRunDeliveryStatusByRunId({
+      runId: "run-separate-outcomes",
+      runtime: "subagent",
+      deliveryStatus: "failed",
+      error: "DELIVERY_FAILURE_SENTINEL",
+    });
+    reloadTaskRegistryFromStore();
+    const { payload } = await getTaskPayload(task.taskId);
+    expect(payload?.task).toMatchObject({
+      status: "timed_out",
+      deliveryStatus: "failed",
+      error: "PROVIDER_FAILURE_SENTINEL",
+    });
+    expect(Value.Check(TaskSummarySchema, payload?.task)).toBe(true);
+    // Older task summaries remain valid; delivery status is an additive field.
+    expect(Value.Check(TaskSummarySchema, { id: "old-task", status: "failed" })).toBe(true);
+    expect(Value.Check(TaskSummarySchema, { ...payload?.task, deliveryStatus: "unknown" })).toBe(
+      false,
+    );
+    const listed = await runTaskHandler("tasks.list", {});
+    expect(listed.payload?.tasks?.find((entry) => entry.id === task.taskId)).toMatchObject({
+      status: "timed_out",
+      deliveryStatus: "failed",
+      error: "PROVIDER_FAILURE_SENTINEL",
+    });
+  });
+
   it("lists task summaries with SDK-facing statuses and filters", async () => {
     const running = createTaskRecord({
       runtime: "subagent",

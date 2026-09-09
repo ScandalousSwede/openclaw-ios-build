@@ -11,6 +11,7 @@ import {
   resetDetachedTaskLifecycleRuntimeForTests,
   setDetachedTaskLifecycleRuntime,
 } from "./detached-task-runtime.js";
+import { mapTaskRunView } from "./task-domain-views.js";
 import {
   cancelFlowById,
   cancelFlowByIdForOwner,
@@ -37,6 +38,7 @@ import {
   getTaskById,
   findLatestTaskForFlowId,
   findTaskByRunId,
+  reloadTaskRegistryFromStore,
   resetTaskRegistryControlRuntimeForTests,
   resetTaskRegistryDeliveryRuntimeForTests,
   resetTaskRegistryForTests,
@@ -261,45 +263,118 @@ describe("task-executor", () => {
     });
   });
 
-  it("records progress, failure, and delivery status through the executor", async () => {
-    await withTaskExecutorStateDir(async () => {
-      const created = createRunningTaskRun({
-        runtime: "subagent",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
-        childSessionKey: "agent:codex:subagent:child",
-        runId: "run-executor-fail",
-        task: "Write summary",
-        startedAt: 10,
-      });
+  it.each(["failed", "timed_out", "cancelled"] as const)(
+    "preserves %s execution errors across delivery retries and persisted readback",
+    async (status) => {
+      await withTaskExecutorStateDir(async () => {
+        const created = createRunningTaskRun({
+          runtime: "subagent",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          childSessionKey: "agent:worker:subagent:child",
+          runId: "run-executor-fail",
+          task: "Write summary",
+          startedAt: 10,
+        });
+        recordTaskRunProgressByRunId({
+          runId: "run-executor-fail",
+          lastEventAt: 20,
+          progressSummary: "Collecting results",
+          eventSummary: "Collecting results",
+        });
+        failTaskRunByRunId({
+          runId: "run-executor-fail",
+          runtime: "subagent",
+          status,
+          endedAt: 40,
+          lastEventAt: 40,
+          error: "PROVIDER_FAILURE_SENTINEL",
+        });
 
-      recordTaskRunProgressByRunId({
-        runId: "run-executor-fail",
-        lastEventAt: 20,
-        progressSummary: "Collecting results",
-        eventSummary: "Collecting results",
+        for (const error of ["DELIVERY_FAILURE_SENTINEL", "DELIVERY_RETRY_SENTINEL"]) {
+          setDetachedTaskDeliveryStatusByRunId({
+            runId: "run-executor-fail",
+            runtime: "subagent",
+            deliveryStatus: "failed",
+            error,
+          });
+          reloadTaskRegistryFromStore();
+          const task = getTaskById(created.taskId);
+          expect(task).toMatchObject({
+            status,
+            progressSummary: "Collecting results",
+            error: "PROVIDER_FAILURE_SENTINEL",
+            deliveryStatus: "failed",
+          });
+          if (!task) {
+            throw new Error("expected persisted task");
+          }
+          expect(mapTaskRunView(task)).toMatchObject({
+            status,
+            error: "PROVIDER_FAILURE_SENTINEL",
+            deliveryStatus: "failed",
+          });
+        }
+        setDetachedTaskDeliveryStatusByRunId({
+          runId: "run-executor-fail",
+          runtime: "subagent",
+          deliveryStatus: "delivered",
+        });
+        reloadTaskRegistryFromStore();
+        expect(getTaskById(created.taskId)).toMatchObject({
+          status,
+          error: "PROVIDER_FAILURE_SENTINEL",
+          deliveryStatus: "delivered",
+        });
       });
+    },
+  );
 
-      failTaskRunByRunId({
-        runId: "run-executor-fail",
-        endedAt: 40,
-        lastEventAt: 40,
-        error: "tool failed",
+  it.each([
+    { status: "succeeded", executionError: undefined, retryError: "DELIVERY_RETRY_SENTINEL" },
+    { status: "failed", executionError: undefined, retryError: "DELIVERY_FAILURE_SENTINEL" },
+    { status: "failed", executionError: "", retryError: "DELIVERY_FAILURE_SENTINEL" },
+  ] as const)(
+    "retains delivery-error fallback for $status with execution error $executionError",
+    async ({ status, executionError, retryError }) => {
+      await withTaskExecutorStateDir(async () => {
+        const task = createRunningTaskRun({
+          runtime: "subagent",
+          ownerKey: "agent:main:main",
+          scopeKind: "session",
+          runId: "run-delivery-fallback",
+          task: "Write summary",
+          startedAt: 10,
+        });
+        if (status === "succeeded") {
+          completeTaskRunByRunId({ runId: "run-delivery-fallback", endedAt: 40 });
+        } else {
+          failTaskRunByRunId({
+            runId: "run-delivery-fallback",
+            endedAt: 40,
+            error: executionError,
+          });
+        }
+        for (const [error, expectedError] of [
+          ["DELIVERY_FAILURE_SENTINEL", "DELIVERY_FAILURE_SENTINEL"],
+          ["DELIVERY_RETRY_SENTINEL", retryError],
+        ]) {
+          setDetachedTaskDeliveryStatusByRunId({
+            runId: "run-delivery-fallback",
+            runtime: "subagent",
+            deliveryStatus: "failed",
+            error,
+          });
+          reloadTaskRegistryFromStore();
+          expect(getTaskById(task.taskId)).toMatchObject({
+            status,
+            error: expectedError,
+            deliveryStatus: "failed",
+          });
+        }
       });
-
-      setDetachedTaskDeliveryStatusByRunId({
-        runId: "run-executor-fail",
-        deliveryStatus: "failed",
-      });
-
-      const task = getTaskById(created.taskId);
-      expect(task?.taskId).toBe(created.taskId);
-      expect(task?.status).toBe("failed");
-      expect(task?.progressSummary).toBe("Collecting results");
-      expect(task?.error).toBe("tool failed");
-      expect(task?.deliveryStatus).toBe("failed");
-    });
-  });
+    },
+  );
 
   it("persists explicit task kind metadata on created runs", async () => {
     await withTaskExecutorStateDir(async () => {

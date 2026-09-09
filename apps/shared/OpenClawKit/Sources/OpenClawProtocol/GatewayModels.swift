@@ -2017,21 +2017,25 @@ public struct SessionsPreviewParams: Codable, Sendable {
 
 public struct SessionsDescribeParams: Codable, Sendable {
     public let key: String
+    public let metadataonly: Bool?
     public let includederivedtitles: Bool?
     public let includelastmessage: Bool?
 
     public init(
         key: String,
+        metadataonly: Bool?,
         includederivedtitles: Bool?,
         includelastmessage: Bool?)
     {
         self.key = key
+        self.metadataonly = metadataonly
         self.includederivedtitles = includederivedtitles
         self.includelastmessage = includelastmessage
     }
 
     private enum CodingKeys: String, CodingKey {
         case key
+        case metadataonly = "metadataOnly"
         case includederivedtitles = "includeDerivedTitles"
         case includelastmessage = "includeLastMessage"
     }
@@ -3236,6 +3240,7 @@ public struct TaskSummary: Codable, Sendable {
     public let kind: String?
     public let runtime: String?
     public let status: AnyCodable
+    public let deliverystatus: AnyCodable?
     public let title: String?
     public let agentid: String?
     public let sessionkey: String?
@@ -3259,6 +3264,7 @@ public struct TaskSummary: Codable, Sendable {
         kind: String?,
         runtime: String?,
         status: AnyCodable,
+        deliverystatus: AnyCodable?,
         title: String?,
         agentid: String? = nil,
         sessionkey: String?,
@@ -3281,6 +3287,7 @@ public struct TaskSummary: Codable, Sendable {
         self.kind = kind
         self.runtime = runtime
         self.status = status
+        self.deliverystatus = deliverystatus
         self.title = title
         self.agentid = agentid
         self.sessionkey = sessionkey
@@ -3305,6 +3312,7 @@ public struct TaskSummary: Codable, Sendable {
         case kind
         case runtime
         case status
+        case deliverystatus = "deliveryStatus"
         case title
         case agentid = "agentId"
         case sessionkey = "sessionKey"
