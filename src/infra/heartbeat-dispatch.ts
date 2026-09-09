@@ -287,22 +287,26 @@ async function prepareHeartbeatDispatchReply(
   const selected = resolveHeartbeatReplyPayload(replyResult);
   const execution = resolveReplyOperationAgentTurn(runState);
   const response = resolveHeartbeatToolResponseFromReplyResult(replyResult);
-  // Admission can lose to foreground work after preflight. An empty rejected
-  // turn must leave its events queued, unlike a completed quiet turn.
-  const admissionBusy =
-    runState.admission?.status === "skipped" &&
-    runState.admission.reason === "active-run" &&
-    !response &&
-    (!selected || !hasOutboundReplyContent(selected));
-  if (execution === "cancelled" || execution === "superseded" || admissionBusy) {
-    const reason =
-      execution === "superseded"
-        ? "preempted"
-        : execution === "cancelled"
-          ? "agent-runner-cancelled"
-          : HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT;
+  if (execution === "cancelled" || execution === "superseded") {
+    const reason = execution === "superseded" ? "preempted" : "agent-runner-cancelled";
     policy.result = { status: "skipped", reason };
     emitHeartbeatEvent({ status: "skipped", reason, durationMs: Date.now() - startedAt });
+    return {};
+  }
+  const admission = runState.admission;
+  if (
+    admission?.status === "skipped" &&
+    !response &&
+    (!selected || !hasOutboundReplyContent(selected))
+  ) {
+    // Rejected admission did not consume the wake. Only foreground contention
+    // retries; terminal cleanup remains with the owner of the queued event.
+    const result: HeartbeatRunResult =
+      admission.reason === "active-run"
+        ? { status: "skipped", reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT }
+        : { status: "failed", reason: admission.reason };
+    policy.result = result;
+    emitHeartbeatEvent({ ...result, durationMs: Date.now() - startedAt });
     return {};
   }
   const failure = resolveHeartbeatTerminalToolFailure(replyResult);

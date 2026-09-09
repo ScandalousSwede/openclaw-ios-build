@@ -36,13 +36,19 @@ import { type HeartbeatDeps, runHeartbeatOnce } from "./heartbeat-runner.js";
 import {
   seedHeartbeatScratchForTest,
   seedMainSessionStore,
+  setupTelegramHeartbeatPluginRuntimeForTests,
   withTempHeartbeatSandbox,
 } from "./heartbeat-runner.test-utils.js";
 import {
   HEARTBEAT_SKIP_CRON_IN_PROGRESS,
   HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
 } from "./heartbeat-wake.js";
-import { resetSystemEventsForTest, enqueueSystemEvent, peekSystemEvents } from "./system-events.js";
+import {
+  resetSystemEventsForTest,
+  enqueueSystemEvent,
+  peekSystemEventEntries,
+  peekSystemEvents,
+} from "./system-events.js";
 
 vi.mock("jiti", () => ({ createJiti: () => () => ({}) }));
 
@@ -679,6 +685,60 @@ describe("heartbeat runner skips when target session lane is busy", () => {
         expect((await runHeartbeat(cfg, replySpy, wake)).status).toBe("ran");
         expect(replySpy).toHaveBeenCalledTimes(2);
         expect(peekSystemEvents(sessionKey)).toEqual([]);
+      });
+    },
+  );
+
+  it.each(["aborted", "lifecycle-invalidated"] as const)(
+    "retains inspected work and fails an empty explicitly %s admission",
+    async (reason) => {
+      await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+        const registry = getActivePluginRegistry();
+        setupTelegramHeartbeatPluginRuntimeForTests();
+        try {
+          const cfg = createHeartbeatTelegramConfig(storePath);
+          cfg.agents!.defaults!.workspace = tmpDir;
+          cfg.channels!.telegram!.heartbeat = { showOk: true };
+          const sessionKey = await seedHeartbeatTelegramSession(storePath, cfg);
+          const wake = {
+            source: "cron" as const,
+            intent: "immediate" as const,
+            reason: "cron:rejected-admission",
+            sessionKey,
+          };
+          enqueueSystemEvent("Check the scheduled report", {
+            sessionKey,
+            contextKey: wake.reason,
+          });
+          const inspectedEvents = peekSystemEventEntries(sessionKey);
+          expect(inspectedEvents).toHaveLength(1);
+          replySpy.mockImplementationOnce(async (_ctx, options) => {
+            const runState = resolveReplyOperationRunState(options);
+            if (!runState) {
+              throw new Error("Expected heartbeat reply operation state");
+            }
+            // The admission receipt is distinct from a cancelled or superseded execution.
+            runState.admission = { status: "skipped", reason };
+            return undefined;
+          });
+          const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1", chatId: "123" });
+
+          const result = await runHeartbeat(cfg, replySpy, wake, { telegram: sendTelegram });
+
+          expect(replySpy).toHaveBeenCalledOnce();
+          expect(result).toEqual({ status: "failed", reason });
+          expect(getLastHeartbeatEvent()).toMatchObject({
+            status: "failed",
+            reason,
+            durationMs: expect.any(Number),
+          });
+          expect(peekSystemEventEntries(sessionKey)).toEqual(inspectedEvents);
+          expect(sendTelegram).not.toHaveBeenCalled();
+        } finally {
+          if (registry) {
+            setActivePluginRegistry(registry);
+          }
+        }
       });
     },
   );
