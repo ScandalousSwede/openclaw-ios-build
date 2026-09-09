@@ -21,9 +21,13 @@ export type MemoryHostRecallRecordedEvent = {
   }>;
 };
 
-/** Event emitted when recall hits are visible but excluded from short-term promotion. */
+/** Diagnostic for memory candidates excluded from short-term tracking, not final search selection. */
 export type MemoryHostRecallSkippedEvent = {
   type: "memory.recall.skipped";
+  /** Absent on older diagnostics; this event only records tracking eligibility. */
+  scope?: "short-term-recall-tracking";
+  /** The tracking diagnostic does not remove or rerank search results. */
+  searchResultEffect?: "none";
   timestamp: string;
   query: string;
   reason: "non-short-term-memory-path";

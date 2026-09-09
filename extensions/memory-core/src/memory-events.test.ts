@@ -149,6 +149,8 @@ describe("memory host event journal integration", () => {
     }
     expect(skippedEvent.query).toBe("alpha durable memory");
     expect(skippedEvent.reason).toBe("non-short-term-memory-path");
+    expect(skippedEvent.scope).toBe("short-term-recall-tracking");
+    expect(skippedEvent.searchResultEffect).toBe("none");
     expect(skippedEvent.eligibleResultCount).toBe(0);
     expect(skippedEvent.skippedResultCount).toBe(3);
     expect(skippedEvent.results.map((result) => result.path)).toEqual([

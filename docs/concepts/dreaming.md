@@ -21,6 +21,16 @@ Dreaming is **opt-in** and disabled by default.
 
 Long-term promotion still writes only to `MEMORY.md`.
 
+The `memory.recall.skipped` diagnostic with reason `non-short-term-memory-path`
+describes eligibility for short-term recall tracking. New records identify this
+with `scope: "short-term-recall-tracking"` and `searchResultEffect: "none"`;
+older records omit those fields. This best-effort tracking does not remove or
+rerank search results. It can run before a combined memory/wiki search performs
+its final merge and result limiting, so the diagnostic alone establishes neither
+final inclusion nor exclusion. Use the actual search-tool response to establish
+which hits reached the caller. Index coverage, ranking, and result-size limits
+remain separate controls.
+
 ## Phase model
 
 Dreaming runs three cooperative phases per sweep, in order: light -> REM -> deep. These are internal implementation phases, not separate user-configured modes.
