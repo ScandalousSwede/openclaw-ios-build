@@ -2,11 +2,35 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { runWithoutOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context.js";
-import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
+import {
+  captureGatewayRootWorkAdmissionContinuationScope,
+  getGatewayRestartDrainSignal,
+  isGatewayRestartDraining,
+  isGatewayWorkAdmissionClosed,
+  onGatewaySuspendAdmissionChange,
+  tryBeginGatewayIndependentRootWorkAdmission,
+  waitForGatewayRestartFenceSettlement,
+} from "../process/gateway-work-admission.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { normalizeHeartbeatWakeReason } from "./heartbeat-reason.js";
 import type { HeartbeatRunResult, HeartbeatWakeRequest } from "./heartbeat-wake-contracts.js";
+import {
+  contributionWake,
+  merge,
+  mergeForDispatch,
+  withoutRetiredContributions,
+  type PendingWake,
+  type SessionEventWakeWaitOptions,
+  type Settlement,
+  type WakePayload,
+} from "./session-event-wake-coalescing.js";
+import {
+  bindSystemEventWakeAdmission,
+  runWithAdmittedSystemEventSelection,
+} from "./system-event-ownership.js";
+
+export type { SessionEventWakeWaitOptions } from "./session-event-wake-coalescing.js";
 
 type SessionEventWakeResult = HeartbeatRunResult;
 type SessionEventWakeRequest = HeartbeatWakeRequest;
@@ -14,37 +38,26 @@ type WakeHandler = (
   request: SessionEventWakeRequest,
   signal: AbortSignal,
 ) => Promise<SessionEventWakeResult>;
-export type SessionEventWakeWaitOptions = {
-  abortSignal?: AbortSignal;
-  /** Detach this waiter while the queue retains the wake at its retry deadline. */
-  stopWaitingOnRetry?: (
-    result: Extract<SessionEventWakeResult, { status: "skipped" }>,
-    retryAtMs: number,
-  ) => boolean;
-};
-type Settlement = {
-  active: boolean;
-  settle: (result: SessionEventWakeResult) => void;
-  stopWaitingOnRetry?: SessionEventWakeWaitOptions["stopWaitingOnRetry"];
-};
-type PendingWake = SessionEventWakeRequest & {
-  sequence: number;
-  barrierSequence?: number;
-  requestedAt: number;
-  readyAt: number;
-  notBefore: number;
-  settlements: Settlement[];
-};
 type WakeGroup = {
   task?: PendingWake;
   scheduled?: PendingWake;
   event?: PendingWake;
+  admittedTask?: PendingWake;
+  admittedScheduled?: PendingWake;
+  admittedEvent?: PendingWake;
   blockedUntil: number;
 };
 type ActiveWake = { generation: number; controller: AbortController };
 type RequestOptions = Omit<SessionEventWakeRequest, "retainedWork"> & { coalesceMs?: number };
 
-const SLOTS = ["task", "scheduled", "event"] as const;
+const SLOTS = [
+  "task",
+  "scheduled",
+  "event",
+  "admittedTask",
+  "admittedScheduled",
+  "admittedEvent",
+] as const;
 const COALESCE_MS = 250;
 const RETRY_MS = 1_000;
 export const SESSION_EVENT_IDLE_RETRY_MS = 60_000;
@@ -63,55 +76,23 @@ export function isRetryableSessionEventWakeReason(reason: string): boolean {
   return RETRY_REASONS.has(reason);
 }
 
-function priority(wake: SessionEventWakeRequest): number {
-  return wake.intent === "manual" || wake.intent === "immediate"
-    ? 3
-    : wake.source === "retry" || wake.reason === "retry"
-      ? 0
-      : wake.intent === "scheduled" || wake.source === "interval" || wake.reason === "interval"
-        ? 1
-        : 2;
+function canAdmit(wake: PendingWake): boolean {
+  if (isGatewayRestartDraining()) {
+    // One-way restart settles admitted waiters without invoking the handler.
+    // A reversible signal fence parks all work until its owner decides.
+    return getGatewayRestartDrainSignal().aborted && wake.admissions.length > 0;
+  }
+  return wake.admissions.length > 0 || !isGatewayWorkAdmissionClosed();
 }
 
-function merge(previous: PendingWake, next: PendingWake): PendingWake {
-  const preferred =
-    (previous.intent === "task") !== (next.intent === "task")
-      ? previous.intent === "task"
-        ? previous
-        : next
-      : priority(next) > priority(previous) ||
-          (priority(next) === priority(previous) && next.requestedAt >= previous.requestedAt)
-        ? next
-        : previous;
-  const other = preferred === previous ? next : previous;
-  const tasks = new Map(
-    [...(previous.tasks ?? []), ...(next.tasks ?? [])].map((task) => [task.jobId, task]),
-  );
-  const bypass =
-    (preferred.intent === "manual" || preferred.intent === "immediate") && !preferred.retainedWork;
-  return {
-    ...preferred,
-    // A scheduled reason must not discard the event's guard-retry semantics.
-    intent: preferred.intent === "scheduled" ? other.intent : preferred.intent,
-    sequence: Math.min(previous.sequence, next.sequence),
-    barrierSequence:
-      previous.barrierSequence === undefined
-        ? next.barrierSequence
-        : Math.min(previous.barrierSequence, next.barrierSequence ?? Infinity),
-    requestedAt:
-      !bypass && (previous.notBefore || next.notBefore)
-        ? Math.min(previous.requestedAt, next.requestedAt)
-        : preferred.requestedAt,
-    readyAt: Math.min(previous.readyAt, next.readyAt),
-    notBefore: bypass ? 0 : Math.max(previous.notBefore, next.notBefore),
-    heartbeat: preferred.heartbeat ?? other.heartbeat,
-    scheduledEveryMs: preferred.scheduledEveryMs ?? other.scheduledEveryMs,
-    tasks: tasks.size
-      ? [...tasks.values()].toSorted((left, right) => left.jobId.localeCompare(right.jobId))
-      : undefined,
-    retainedWork: !bypass && (previous.retainedWork || next.retainedWork),
-    settlements: [...previous.settlements, ...next.settlements].filter((entry) => entry.active),
-  };
+function immediateGlobalEvent(group: WakeGroup | undefined): PendingWake | undefined {
+  return [group?.event, group?.admittedEvent]
+    .filter((wake): wake is PendingWake =>
+      Boolean(wake && wake.intent === "immediate" && canAdmit(wake)),
+    )
+    .toSorted(
+      (left, right) => (left.barrierSequence ?? Infinity) - (right.barrierSequence ?? Infinity),
+    )[0];
 }
 
 function targetKey(request: SessionEventWakeRequest): string {
@@ -150,15 +131,64 @@ function createSessionEventWakeRuntime() {
   let timer: NodeJS.Timeout | undefined;
   let timerDueAt = 0;
   let enabled = true;
+  let waitingForRestartFence = false;
 
   function enqueue(wake: PendingWake, blockedUntil = 0): void {
+    if (wake.parts) {
+      for (const part of wake.parts) {
+        enqueue(
+          {
+            ...part,
+            readyAt: wake.readyAt,
+            notBefore: wake.notBefore,
+            retainedWork: wake.retainedWork,
+          },
+          blockedUntil,
+        );
+      }
+      return;
+    }
+    if (wake.admissions.some((entry) => !entry.active)) {
+      // A detached waiter leaves work queued, but cannot lend its old root to
+      // another live contribution. Rebuild the bounded cohorts from the exact
+      // normalized contributions before their payloads can coalesce again.
+      for (const entry of wake.admissions) {
+        if (!entry.active) {
+          entry.admission?.release();
+        }
+        enqueue(contributionWake(wake, entry), blockedUntil);
+      }
+      return;
+    }
     const key = targetKey(wake);
     const group = pending.get(key) ?? { blockedUntil: 0 };
     const slot =
-      wake.intent === "task" ? "task" : wake.intent === "scheduled" ? "scheduled" : "event";
+      wake.admissions.length > 0
+        ? wake.intent === "task"
+          ? "admittedTask"
+          : wake.intent === "scheduled"
+            ? "admittedScheduled"
+            : "admittedEvent"
+        : wake.intent === "task"
+          ? "task"
+          : wake.intent === "scheduled"
+            ? "scheduled"
+            : "event";
     group[slot] = group[slot] ? merge(group[slot], wake) : wake;
     group.blockedUntil = Math.max(group.blockedUntil, blockedUntil);
     pending.set(key, group);
+  }
+
+  function partitionDetachedContributions(): void {
+    for (const group of pending.values()) {
+      for (const slot of SLOTS) {
+        const wake = group[slot];
+        if (wake?.admissions.some((entry) => !entry.active)) {
+          delete group[slot];
+          enqueue(wake, group.blockedUntil);
+        }
+      }
+    }
   }
 
   function isReady(group: WakeGroup | undefined, now: number): boolean {
@@ -167,18 +197,18 @@ function createSessionEventWakeRuntime() {
       group.blockedUntil <= now &&
       SLOTS.some((slot) => {
         const wake = group[slot];
-        return wake && Math.max(wake.readyAt, wake.notBefore) <= now;
+        return wake && canAdmit(wake) && Math.max(wake.readyAt, wake.notBefore) <= now;
       }),
     );
   }
 
   function afterBarrier(key: string, wake: PendingWake, global: WakeGroup | undefined): boolean {
-    const barrier =
-      global?.event?.intent === "immediate" ? global.event.barrierSequence : undefined;
+    const barrier = immediateGlobalEvent(global)?.barrierSequence;
     return key !== GLOBAL_TARGET && barrier !== undefined && wake.sequence >= barrier;
   }
 
   function takeReady(): Array<{ key: string; wakes: PendingWake[] }> {
+    partitionDetachedContributions();
     if (active.has(GLOBAL_TARGET)) {
       return [];
     }
@@ -188,7 +218,7 @@ function createSessionEventWakeRuntime() {
     if (globalReady && active.size) {
       return [];
     }
-    const event = global?.event;
+    const event = immediateGlobalEvent(global);
     const flush =
       globalReady &&
       event?.intent === "immediate" &&
@@ -216,6 +246,7 @@ function createSessionEventWakeRuntime() {
         const wake = group[slot];
         if (
           wake &&
+          canAdmit(wake) &&
           !afterBarrier(key, wake, global) &&
           wake.notBefore <= now &&
           (flush || wake.readyAt <= now)
@@ -227,21 +258,27 @@ function createSessionEventWakeRuntime() {
       if (!SLOTS.some((slot) => group[slot])) {
         pending.delete(key);
       }
+      // Cohorts remain separate while parked. Once independent admission is
+      // available, the same task/monitor/event coalescing rules apply to both.
+      const combine = (left?: PendingWake, right?: PendingWake) =>
+        left && right ? mergeForDispatch(left, right) : (left ?? right);
+      const taskWake = combine(picked.task, picked.admittedTask);
+      const scheduledWake = combine(picked.scheduled, picked.admittedScheduled);
+      const eventWake = combine(picked.event, picked.admittedEvent);
       let wakes: PendingWake[];
-      if (picked.task) {
-        // A task turn includes monitor scratch, so it consumes a coincident base tick.
-        const task = picked.scheduled ? merge(picked.scheduled, picked.task) : picked.task;
-        wakes = picked.event
-          ? [task, picked.event].toSorted(
+      if (taskWake) {
+        const task = scheduledWake ? mergeForDispatch(scheduledWake, taskWake) : taskWake;
+        wakes = eventWake
+          ? [task, eventWake].toSorted(
               (left, right) =>
                 Number(Boolean(right.retainedWork)) - Number(Boolean(left.retainedWork)) ||
                 left.requestedAt - right.requestedAt,
             )
           : [task];
-      } else if (picked.event) {
-        wakes = [picked.scheduled ? merge(picked.scheduled, picked.event) : picked.event];
+      } else if (eventWake) {
+        wakes = [scheduledWake ? mergeForDispatch(scheduledWake, eventWake) : eventWake];
       } else {
-        wakes = picked.scheduled ? [picked.scheduled] : [];
+        wakes = scheduledWake ? [scheduledWake] : [];
       }
       if (wakes.length) {
         ready.push({ key, wakes });
@@ -253,6 +290,11 @@ function createSessionEventWakeRuntime() {
   function settle(wake: PendingWake, result: SessionEventWakeResult): void {
     for (const entry of wake.settlements) {
       entry.settle(result);
+    }
+    // Detaching/cancelling a waiter does not cancel the queued wake. Borrowed
+    // scopes retire with that wake; they never extend the origin root lifetime.
+    for (const entry of wake.admissions) {
+      entry.admission?.release();
     }
   }
 
@@ -307,18 +349,45 @@ function createSessionEventWakeRuntime() {
   ): Promise<void> {
     const signal = owner.controller.signal;
     try {
-      for (const [index, wake] of wakes.entries()) {
+      for (const [index, selectedWake] of wakes.entries()) {
+        let wake = selectedWake;
         // Busy backoff also owns wakes selected before the current attempt began.
         const blockedUntil = pending.get(key)?.blockedUntil ?? 0;
-        if (owner.generation !== generation || blockedUntil > performance.now()) {
+        if (
+          owner.generation !== generation ||
+          blockedUntil > performance.now() ||
+          wake.admissions.some((entry) => !entry.active)
+        ) {
           handOff(wakes, index);
           return;
         }
-        let result: SessionEventWakeResult;
+        const independent = tryBeginGatewayIndependentRootWorkAdmission("heartbeat:wake");
+        if (
+          !independent &&
+          (!canAdmit(wake) || wake.parts?.some((part) => part.admissions.length === 0))
+        ) {
+          // A fence can close after selection. Return each cohort before waiting
+          // so independent work cannot monopolize this target's active slot.
+          handOff(wakes, index);
+          return;
+        }
+        if (!independent && getGatewayRestartDrainSignal().aborted) {
+          settle(wake, {
+            status: "failed",
+            reason: "heartbeat wake interrupted by gateway restart",
+          });
+          continue;
+        }
+        let result: SessionEventWakeResult | undefined;
         let onAbort: (() => void) | undefined;
         try {
-          result = await runWithGatewayIndependentRootWorkAdmission(() => {
+          const invoke = async (): Promise<SessionEventWakeResult> => {
             signal.throwIfAborted();
+            if (isGatewayRestartDraining()) {
+              return getGatewayRestartDrainSignal().aborted
+                ? { status: "failed", reason: "heartbeat wake interrupted by gateway restart" }
+                : { status: "skipped", reason: "preempted", retryAtMs: Date.now() };
+            }
             // Subscribe before calling the handler: it can synchronously replace its owner.
             const aborted = new Promise<never>((_resolve, reject) => {
               onAbort = () =>
@@ -345,7 +414,47 @@ function createSessionEventWakeRuntime() {
             // A synchronous handler throw must not leave the abort promise unobserved.
             const running = abortSignals.run(signal, async () => run(request, signal));
             return Promise.race([running, aborted]);
-          }, "heartbeat:wake");
+          };
+          const retired = new Set<Settlement>();
+          const runOwned = (
+            admissionIndex: number,
+          ): Promise<SessionEventWakeResult | undefined> => {
+            const entry = wake.admissions[admissionIndex];
+            const scope = entry?.admission;
+            if (entry && scope) {
+              let entered = false;
+              return scope
+                .run(() => {
+                  entered = true;
+                  return runOwned(admissionIndex + 1);
+                })
+                .catch((error: unknown) => {
+                  if (entered) {
+                    throw error;
+                  }
+                  // Only this original contribution lost admission. A same-slot
+                  // sibling still owns its result and must reach the handler.
+                  retired.add(entry);
+                  entry.settle({
+                    status: "failed",
+                    reason: "heartbeat wake admission is no longer active",
+                  });
+                  scope.release();
+                  return runOwned(admissionIndex + 1);
+                });
+            }
+            if (retired.size > 0) {
+              const remaining = withoutRetiredContributions(wake, retired);
+              if (!remaining) {
+                return Promise.resolve(undefined);
+              }
+              wake = remaining;
+            }
+            return independent
+              ? independent.run(() => runWithAdmittedSystemEventSelection(undefined, invoke))
+              : runWithAdmittedSystemEventSelection(wake.admissions, invoke);
+          };
+          result = await runOwned(0);
         } catch {
           if (owner.generation === generation) {
             retry(wake);
@@ -354,9 +463,13 @@ function createSessionEventWakeRuntime() {
           }
           continue;
         } finally {
+          independent?.release();
           if (onAbort) {
             signal.removeEventListener("abort", onAbort);
           }
+        }
+        if (!result) {
+          continue;
         }
         if (result.status === "skipped" && shouldRetain(wake, result)) {
           if (owner.generation === generation) {
@@ -406,6 +519,18 @@ function createSessionEventWakeRuntime() {
   }
 
   function schedulePending(readyDelayMs = 0): void {
+    partitionDetachedContributions();
+    if (
+      isGatewayRestartDraining() &&
+      !getGatewayRestartDrainSignal().aborted &&
+      !waitingForRestartFence
+    ) {
+      waitingForRestartFence = true;
+      void waitForGatewayRestartFenceSettlement().finally(() => {
+        waitingForRestartFence = false;
+        schedulePending(COALESCE_MS);
+      });
+    }
     if (active.size >= MAX_ACTIVE_TARGETS || active.has(GLOBAL_TARGET)) {
       return;
     }
@@ -421,7 +546,7 @@ function createSessionEventWakeRuntime() {
       }
       for (const slot of SLOTS) {
         const wake = group[slot];
-        if (wake && !afterBarrier(key, wake, global)) {
+        if (wake && canAdmit(wake) && !afterBarrier(key, wake, global)) {
           earliest = Math.min(earliest, Math.max(wake.readyAt, wake.notBefore, group.blockedUntil));
         }
       }
@@ -475,7 +600,7 @@ function createSessionEventWakeRuntime() {
     };
     const nextSequence = ++sequence;
     runWithoutOwnedSessionTranscriptWrites(() => {
-      const pendingWake: PendingWake = {
+      const payload: WakePayload = {
         ...normalized,
         sequence: nextSequence,
         barrierSequence:
@@ -485,7 +610,15 @@ function createSessionEventWakeRuntime() {
         requestedAt: now,
         readyAt: now + resolveTimerTimeoutMs(coalesceMs, COALESCE_MS, 0),
         notBefore: 0,
+        taskSequences: new Map((wake.tasks ?? []).map((task) => [task.jobId, nextSequence])),
+      };
+      if (settlement?.admission) {
+        settlement.wake = payload;
+      }
+      const pendingWake: PendingWake = {
+        ...payload,
         settlements: settlement ? [settlement] : [],
+        admissions: settlement?.admission ? [settlement] : [],
       };
       enqueue(pendingWake);
       schedulePending();
@@ -502,6 +635,7 @@ function createSessionEventWakeRuntime() {
     return new Promise((resolve) => {
       const signal = lifecycle?.abortSignal;
       const settlement: Settlement = {
+        admission: captureGatewayRootWorkAdmissionContinuationScope() ?? undefined,
         active: true,
         stopWaitingOnRetry: lifecycle?.stopWaitingOnRetry,
         settle: (result) => {
@@ -512,16 +646,23 @@ function createSessionEventWakeRuntime() {
           }
         },
       };
-      const onAbort = () =>
+      bindSystemEventWakeAdmission(settlement);
+      const onAbort = () => {
         settlement.settle({ status: "failed", reason: "heartbeat wake cancelled" });
+        schedulePending();
+      };
       if (signal?.aborted) {
         onAbort();
+        settlement.admission?.release();
       } else {
         signal?.addEventListener("abort", onAbort, { once: true });
         enqueueRequest(options, settlement);
       }
     });
   }
+
+  // Parked independent work owns no active target and resumes from this same queue.
+  onGatewaySuspendAdmissionChange(() => schedulePending());
 
   return {
     setSessionEventWakeHandler,

@@ -158,8 +158,11 @@ New channel plugins should use `MsgContext.ChannelPromptContext`,
 `SupplementalContextFacts.channelStructuredContext`. The older
 `UntrustedContext`, `UntrustedStructuredContext`,
 `UntrustedStructuredContextEntry`, and supplemental `untrustedContext` names
-remain as deprecated SDK aliases until 2026-09-08 (registry record
-`sdk-untrusted-context-identifier-aliases`). Inbound finalization folds those
+remain as deprecated SDK aliases with the original 2026-09-08 removal review
+date (registry record `sdk-untrusted-context-identifier-aliases`). Removal is
+pending supported external plugin migration verification and explicit
+breaking-release approval; the elapsed date does not establish either.
+Inbound finalization folds those
 deprecated fields into the channel-named fields and removes the old keys from
 runtime context.
 

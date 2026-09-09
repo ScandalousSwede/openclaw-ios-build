@@ -3,6 +3,7 @@ import {
   HEARTBEAT_SKIP_CRON_IN_PROGRESS,
   type HeartbeatRunResult,
 } from "../../infra/heartbeat-wake.js";
+import { runWithSystemEventWakeReceipt } from "../../infra/system-event-ownership.js";
 import type { CommandLaneTaskMarker } from "../../process/command-queue.js";
 import {
   type CronActiveJobMarker,
@@ -224,6 +225,7 @@ export async function executeJobCore(
       options?.onHeartbeatExecutionStarted,
       options?.activeJobMarker,
       options?.owningCronLaneTaskMarker,
+      options?.onHeartbeatExecutionDeferred,
     );
     return triggerEval ? { ...result, triggerEval } : result;
   }
@@ -239,6 +241,7 @@ async function executeMainSessionCronJob(
   onHeartbeatExecutionStarted?: ExecuteJobCoreOptions["onHeartbeatExecutionStarted"],
   activeJobMarker?: CronActiveJobMarker,
   owningCronLaneTaskMarker?: CommandLaneTaskMarker,
+  onHeartbeatExecutionDeferred?: () => void,
 ): Promise<
   CronRunOutcome &
     CronRunTelemetry & {
@@ -280,7 +283,7 @@ async function executeMainSessionCronJob(
   };
   const removeQueuedSystemEvent = () =>
     removeQueuedSystemEventHandle(state, job, queuedSystemEvent);
-  if (job.wakeMode === "now" && state.deps.requestHeartbeatAndWait) {
+  if (state.deps.requestHeartbeatAndWait) {
     onHeartbeatExecutionStarted?.(heartbeatWake);
     const waitStartedAt = state.deps.nowMs();
     const releaseHeartbeatWait = markCronJobWaitingForHeartbeat(
@@ -288,21 +291,37 @@ async function executeMainSessionCronJob(
       owningCronLaneTaskMarker,
     );
     let handedOff = false;
+    const handOffAdmission = () => {
+      if (!handedOff) {
+        handedOff = true;
+        onHeartbeatExecutionDeferred?.();
+      }
+    };
     let heartbeatResult: HeartbeatRunResult;
     try {
-      heartbeatResult = await state.deps.requestHeartbeatAndWait(heartbeatWake, {
-        abortSignal,
-        stopWaitingOnRetry: (result, retryAtMs) => {
-          // Only busy/guard deferrals spend this budget; an executing turn still
-          // owns completion. Detaching leaves the queue's original retry intact.
-          const remainingMs = 2 * 60_000 - (state.deps.nowMs() - waitStartedAt);
-          handedOff =
-            result.reason === HEARTBEAT_SKIP_CRON_IN_PROGRESS ||
-            remainingMs <= 0 ||
-            retryAtMs - Date.now() > remainingMs;
-          return handedOff;
-        },
-      });
+      const requestAndWait = state.deps.requestHeartbeatAndWait;
+      const settlement = runWithSystemEventWakeReceipt(queuedSystemEvent.remove, () =>
+        requestAndWait(heartbeatWake, {
+          abortSignal,
+          stopWaitingOnRetry: (result, retryAtMs) => {
+            // Release scheduling capacity without detaching the terminal waiter.
+            // The queue retains its original retry and the exact run owns completion.
+            const remainingMs = 2 * 60_000 - (state.deps.nowMs() - waitStartedAt);
+            if (
+              result.reason === HEARTBEAT_SKIP_CRON_IN_PROGRESS ||
+              remainingMs <= 0 ||
+              retryAtMs - Date.now() > remainingMs
+            ) {
+              handOffAdmission();
+            }
+            return false;
+          },
+        }),
+      );
+      if (job.wakeMode !== "now") {
+        handOffAdmission();
+      }
+      heartbeatResult = await settlement;
     } catch (error) {
       removeQueuedSystemEvent();
       throw error;
@@ -313,7 +332,7 @@ async function executeMainSessionCronJob(
       removeQueuedSystemEvent();
       return { status: "error", error: timeoutErrorMessage() };
     }
-    if (handedOff || heartbeatResult.status === "ran") {
+    if (heartbeatResult.status === "ran") {
       return { status: "ok", summary: text };
     }
     removeQueuedSystemEvent();
@@ -328,8 +347,8 @@ async function executeMainSessionCronJob(
     removeQueuedSystemEvent();
     return { status: "error", error: timeoutErrorMessage() };
   }
-  state.deps.requestHeartbeat(heartbeatWake);
-  return { status: "ok", summary: text };
+  removeQueuedSystemEvent();
+  return { status: "error", error: "heartbeat wake settlement unavailable", summary: text };
 }
 
 async function executeDetachedCronJob(

@@ -597,6 +597,7 @@ export function tryBeginGatewaySuspendAdmission(
 
 /** Clears restart/suspend admission during SIGUSR1 and isolated tests. */
 export function resetGatewayWorkAdmission(): void {
+  const wasClosed = isGatewayWorkAdmissionClosed();
   // SIGUSR1 can abandon old async chains before their finally blocks run.
   // Retire their ALS records so surviving chains must re-enter admission.
   GATEWAY_WORK_ADMISSION_STATE.restartDrainController.abort(
@@ -617,6 +618,10 @@ export function resetGatewayWorkAdmission(): void {
   } else {
     GATEWAY_WORK_ADMISSION_STATE.suspendGeneration += 1;
     GATEWAY_WORK_ADMISSION_STATE.suspendInvalidated = undefined;
+    if (wasClosed) {
+      // Committed restart can reopen without a suspension phase transition.
+      notifyGatewaySuspendAdmission();
+    }
   }
   resolveSuspendOpenWaiters();
 }

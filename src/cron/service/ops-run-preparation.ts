@@ -79,6 +79,8 @@ export type ActivatedManualRun = Extract<PreparedManualRun, { ran: true }> & {
 };
 
 export type ManualRunOptions = {
+  /** Releases an enqueueRun lane while the exact admitted run retains settlement. */
+  onHeartbeatExecutionDeferred?: () => void;
   runId?: string;
   /** Revalidates the caller before preflight effects and durable reservation. */
   commitGuard?: () => void;

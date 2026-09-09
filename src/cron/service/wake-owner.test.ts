@@ -53,7 +53,11 @@ function createHarness(handler: HeartbeatWakeHandler) {
       requestHeartbeatAndWait({ ...wake, sessionKey, coalesceMs: 0 }, lifecycle),
     runIsolatedAgentJob: async () => ({ status: "ok" }),
   });
-  const run = (id = "reminder", signal?: AbortSignal) => {
+  const run = (
+    id = "reminder",
+    signal?: AbortSignal,
+    onHeartbeatExecutionDeferred?: () => void,
+  ) => {
     const job: CronJob = {
       id,
       name: id,
@@ -66,7 +70,7 @@ function createHarness(handler: HeartbeatWakeHandler) {
       wakeMode: "now",
       state: {},
     };
-    return executeJobCore(state, job, signal);
+    return executeJobCore(state, job, signal, { onHeartbeatExecutionDeferred });
   };
   return { state, run };
 }
@@ -132,7 +136,7 @@ it.each([
   { reason: "requests-in-flight", retryDelay: 180_000 },
   { reason: "cron-in-progress", retryDelay: 1_000 },
 ])(
-  "detaches the cron waiter while preserving $reason work and its deadline",
+  "releases admission while retaining $reason terminal ownership and its deadline",
   async ({ reason, retryDelay }) => {
     const handler = vi
       .fn<HeartbeatWakeHandler>()
@@ -146,9 +150,17 @@ it.each([
         return ran;
       });
     const { state, run } = createHarness(handler);
-    const pending = run();
+    let admissionReleased = false;
+    let finished = false;
+    const pending = run("reminder", undefined, () => {
+      admissionReleased = true;
+    }).then((result) => {
+      finished = true;
+      return result;
+    });
     await vi.advanceTimersByTimeAsync(0);
-    await expect(pending).resolves.toEqual({ status: "ok", summary: "reminder" });
+    expect(admissionReleased).toBe(true);
+    expect(finished).toBe(false);
     expect(state.deps.requestHeartbeat).not.toHaveBeenCalled();
     expect(handler.mock.calls[0]?.[0].heartbeat).toEqual({ target: "last" });
     expect(peekSystemEventEntries(sessionKey).map((event) => event.text)).toEqual(["reminder"]);
@@ -156,6 +168,7 @@ it.each([
     expect(handler).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(handler).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toEqual({ status: "ok", summary: "reminder" });
     expect(peekSystemEventEntries(sessionKey)).toHaveLength(0);
   },
 );
@@ -203,6 +216,18 @@ it.each([false, true])("removes only the cancelled job's event, retrying=%s", as
   expect(observed).toEqual(["unrelated"]);
 });
 
+it("fails an unobservable heartbeat without leaving its event queued", async () => {
+  const { state, run } = createHarness(async () => ran);
+  state.deps.requestHeartbeatAndWait = undefined;
+  enqueueSystemEventWithReceipt("unrelated", { sessionKey, contextKey: "other" });
+  await expect(run()).resolves.toMatchObject({
+    status: "error",
+    error: "heartbeat wake settlement unavailable",
+  });
+  expect(state.deps.requestHeartbeat).not.toHaveBeenCalled();
+  expect(peekSystemEventEntries(sessionKey).map((event) => event.text)).toEqual(["unrelated"]);
+});
+
 it("removes only the failed job's event after terminal wake failure", async () => {
   const { run } = createHarness(async () => ({ status: "failed", reason: "runner refused" }));
   enqueueSystemEventWithReceipt("unrelated", { sessionKey, contextKey: "other" });
@@ -244,15 +269,18 @@ it("applies the canonical immediate flood guard to main cron wakes", async () =>
   }
 });
 
-it("hands off at the original busy budget after repeated retry deadlines", async () => {
+it("releases admission at the original busy budget without finalizing retained work", async () => {
   const handler = vi.fn<HeartbeatWakeHandler>().mockImplementation(async () => ({
     status: "skipped",
     reason: "requests-in-flight",
     retryAtMs: Date.now() + 60_000,
   }));
   const { run } = createHarness(handler);
+  let admissionReleased = false;
   let finished = false;
-  const pending = run().then((result) => {
+  const pending = run("reminder", undefined, () => {
+    admissionReleased = true;
+  }).then((result) => {
     finished = true;
     return result;
   });
@@ -260,7 +288,8 @@ it("hands off at the original busy budget after repeated retry deadlines", async
   expect(handler).toHaveBeenCalledTimes(2);
   expect(finished).toBe(false);
   await vi.advanceTimersByTimeAsync(1);
-  await expect(pending).resolves.toMatchObject({ status: "ok" });
+  expect(admissionReleased).toBe(true);
+  expect(finished).toBe(false);
   expect(handler).toHaveBeenCalledTimes(3);
   handler.mockImplementation(async () => {
     drainSystemEventEntries(sessionKey);
@@ -270,5 +299,6 @@ it("hands off at the original busy budget after repeated retry deadlines", async
   expect(handler).toHaveBeenCalledTimes(3);
   await vi.advanceTimersByTimeAsync(1);
   expect(handler).toHaveBeenCalledTimes(4);
+  await expect(pending).resolves.toMatchObject({ status: "ok" });
   expect(peekSystemEventEntries(sessionKey)).toHaveLength(0);
 });

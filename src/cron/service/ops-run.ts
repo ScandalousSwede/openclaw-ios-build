@@ -1,6 +1,10 @@
 import { enqueueCommandInLane } from "../../process/command-queue.js";
-import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gateway-work-admission.js";
+import {
+  runWithGatewayIndependentRootWorkContinuation,
+  runWithRetainedGatewayRootWork,
+} from "../../process/gateway-work-admission.js";
 import { CommandLane } from "../../process/lanes.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { isCronActiveJobMarkerCurrent } from "../active-jobs.js";
 import {
   CronRunReceiptRevisionError,
@@ -142,6 +146,7 @@ async function finishPreparedManualRun(
   state: CronServiceState,
   prepared: ActivatedManualRun,
   mode?: CronRunMode,
+  onHeartbeatExecutionDeferred?: () => void,
 ): Promise<void> {
   const executionJob = prepared.executionJob;
   const startedAt = prepared.startedAt;
@@ -157,6 +162,7 @@ async function finishPreparedManualRun(
     try {
       coreResult = await executeJobCoreWithTimeout(state, executionJob, {
         runId: taskRunId,
+        onHeartbeatExecutionDeferred,
         activeJobMarker: prepared.activeJobMarker,
         owningCronLaneTaskMarker: prepared.owningCronLaneTaskMarker,
         streamBatch: prepared.streamBatch,
@@ -472,7 +478,7 @@ export async function run(
   if (!prepared.ok || !prepared.ran) {
     return prepared;
   }
-  const admission = await runWithCronAdmission(state, async () => {
+  const admission = await runWithCronAdmission(state, async (releaseAdmission) => {
     let activeRun: Awaited<ReturnType<typeof activatePreparedManualRun>>;
     try {
       activeRun = await activatePreparedManualRun(state, prepared, mode);
@@ -494,7 +500,12 @@ export async function run(
     if (!activeRun.ran) {
       return activeRun;
     }
-    await finishPreparedManualRun(state, activeRun, mode);
+    await runWithRetainedGatewayRootWork(() =>
+      finishPreparedManualRun(state, activeRun, mode, () => {
+        releaseAdmission();
+        opts?.onHeartbeatExecutionDeferred?.();
+      }),
+    );
     return { ok: true, ran: true } as const;
   });
   if (admission.kind === "stopped") {
@@ -519,18 +530,72 @@ export async function enqueueRun(
   const scheduleOwnershipAtMs = state.deps.nowMs();
   const runId = `manual:${id}:${scheduleOwnershipAtMs}:${nextManualRunId++}`;
   const terminalTracker: ManualRunTerminalTracker = { emitted: false };
+  let backgroundErrorHandled = false;
+  const onBackgroundError = (err: unknown) => {
+    if (backgroundErrorHandled) {
+      return;
+    }
+    backgroundErrorHandled = true;
+    if (terminalTracker.emitted) {
+      state.deps.log.error(
+        { jobId: id, runId, err: String(err) },
+        "cron: queued manual run failed after emitting its terminal event",
+      );
+      return;
+    }
+    const finishedAt = state.deps.nowMs();
+    const job = state.store?.jobs.find((entry) => entry.id === id);
+    emitCronRunFinished(
+      state,
+      {
+        jobId: id,
+        action: "finished",
+        job,
+        status: "error",
+        error: normalizeCronRunErrorText(err),
+        runId,
+        runAtMs: finishedAt,
+        durationMs: 0,
+        nextRunAtMs: job?.state.nextRunAtMs,
+      },
+      terminalTracker,
+    );
+    state.deps.log.error(
+      { jobId: id, runId, err: String(err) },
+      "cron: queued manual run background execution failed",
+    );
+  };
   void runWithGatewayIndependentRootWorkContinuation(
     () =>
       enqueueCommandInLane(
         CommandLane.Cron,
         async (owningCronLaneTaskMarker) => {
-          const result = await run(state, id, mode, {
+          const handoff = createDeferredCore<{ kind: "deferred" }>();
+          let deferred = false;
+          const running = run(state, id, mode, {
+            onHeartbeatExecutionDeferred: () => {
+              deferred = true;
+              handoff.resolve({ kind: "deferred" });
+            },
             runId,
             scheduleOwnershipAtMs,
             terminalTracker,
             owningCronLaneTaskMarker,
             ...(opts?.commitGuard ? { commitGuard: opts.commitGuard } : {}),
           });
+          void running.catch((error: unknown) => {
+            if (deferred) {
+              onBackgroundError(error);
+            }
+          });
+          const settlement = await Promise.race([
+            running.then((result) => ({ kind: "completed" as const, result })),
+            handoff.promise,
+          ]);
+          if (settlement.kind === "deferred") {
+            return undefined;
+          }
+          const result = settlement.result;
           if (result.ok && "ran" in result && !result.ran) {
             if (result.reason !== "invalid-spec") {
               const finishedAt = state.deps.nowMs();
@@ -569,36 +634,7 @@ export async function enqueueRun(
         },
       ),
     "cron:manual-run",
-  ).catch((err: unknown) => {
-    if (terminalTracker.emitted) {
-      state.deps.log.error(
-        { jobId: id, runId, err: String(err) },
-        "cron: queued manual run failed after emitting its terminal event",
-      );
-      return;
-    }
-    const finishedAt = state.deps.nowMs();
-    const job = state.store?.jobs.find((entry) => entry.id === id);
-    emitCronRunFinished(
-      state,
-      {
-        jobId: id,
-        action: "finished",
-        job,
-        status: "error",
-        error: normalizeCronRunErrorText(err),
-        runId,
-        runAtMs: finishedAt,
-        durationMs: 0,
-        nextRunAtMs: job?.state.nextRunAtMs,
-      },
-      terminalTracker,
-    );
-    state.deps.log.error(
-      { jobId: id, runId, err: String(err) },
-      "cron: queued manual run background execution failed",
-    );
-  });
+  ).catch(onBackgroundError);
   return { ok: true, enqueued: true, runId } as const;
 }
 

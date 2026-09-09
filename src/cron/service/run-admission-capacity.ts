@@ -89,7 +89,7 @@ export function cancelCronRunAdmissionWaiters(state: CronServiceState): void {
  */
 export async function runWithCronAdmission<T>(
   state: CronServiceState,
-  execute: () => Promise<T>,
+  execute: (releaseAdmission: () => void) => Promise<T>,
   acquiredRelease?: () => void,
 ): Promise<{ kind: "admitted"; value: T } | { kind: "stopped" }> {
   const release = acquiredRelease ?? (await acquireCronRunAdmission(state));
@@ -97,7 +97,7 @@ export async function runWithCronAdmission<T>(
     return { kind: "stopped" };
   }
   try {
-    return { kind: "admitted", value: await execute() };
+    return { kind: "admitted", value: await execute(release) };
   } finally {
     release();
   }

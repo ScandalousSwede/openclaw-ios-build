@@ -48,6 +48,7 @@ type CronCoreRunOutcome = Awaited<ReturnType<typeof executeJobCore>> & {
 type CronRunTimeout = { timeoutMs: number; reason: string };
 type CronCoreRunOptions = {
   runId?: string;
+  onHeartbeatExecutionDeferred?: () => void;
   activeJobMarker?: CronActiveJobMarker;
   owningCronLaneTaskMarker?: CommandLaneTaskMarker;
   streamBatch?: string;
@@ -275,6 +276,7 @@ async function executeJobCoreWithTimeoutUnfinalized(
       // Conditions own their pending tools; main payloads hand work to a shared
       // heartbeat. Release cancellation before that handoff can produce effects.
       onPayloadExecutionStarted: detachedPayload ? undefined : releaseCronTaskRun,
+      onHeartbeatExecutionDeferred: opts?.onHeartbeatExecutionDeferred,
       onExecutionStarted: trackExecution ? noteRunnerStarted : undefined,
       onExecutionPhase: trackExecution ? (watchdog?.notePhase ?? accumulateExecution) : undefined,
       onLaneWait: watchdog && deferTimeoutUntilExecutionStart ? noteLaneState : undefined,

@@ -1,3 +1,5 @@
+import { runWithRetainedGatewayRootWork } from "../../process/gateway-work-admission.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { markCronJobActive } from "../active-jobs.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
@@ -485,15 +487,16 @@ export async function executeQueuedCronRun(params: {
   onNotRunnable: (job: CronJob) => Promise<void>;
   onSetupError?: (job: CronJob, errorText: string) => void;
   /** Runs before admission release; true means terminal handling is complete. */
-  onCompleted?: (outcome: TimedCronRunOutcome) => Promise<boolean>;
+  onCompleted?: (outcome: TimedCronRunOutcome, deferred: boolean) => Promise<boolean>;
 }): Promise<
   | { kind: "stopped" }
   | { kind: "skipped" }
   | { kind: "completed"; outcome: TimedCronRunOutcome; handled: boolean }
+  | { kind: "deferred" }
 > {
   const { state } = params;
   let activated = false;
-  const executeAdmitted = async () => {
+  const executeAdmitted = async (releaseAdmission: () => void) => {
     const started = await locked(state, async () => {
       await ensureLoaded(state, { forceReload: true, skipRecompute: true });
       if (params.isUnavailable?.() || state.stopped) {
@@ -599,48 +602,77 @@ export async function executeQueuedCronRun(params: {
       startedAt: started.startedAt,
       runReceipt: started.runReceipt,
     };
-    let outcome: TimedCronRunOutcome;
-    try {
-      const execute = async () =>
-        await executeJobCoreWithTimeout(state, executionJob, {
-          runId: taskRunId,
-          activeJobMarker,
-          runReceipt: started.runReceipt,
-          executionIdentity: createCronOwnerExecutionIdentityAdmission({
-            state,
+    const handoff = createDeferredCore<{ kind: "deferred" }>();
+    let deferred = false;
+    const onHeartbeatExecutionDeferred = () => {
+      releaseAdmission();
+      // Scheduled batches can finish admission while this exact owner persists.
+      // Catch-up callers without a terminal sink continue awaiting their outcome.
+      if (params.onCompleted && !deferred) {
+        deferred = true;
+        handoff.resolve({ kind: "deferred" });
+      }
+    };
+    const execution = runWithRetainedGatewayRootWork(async () => {
+      let outcome: TimedCronRunOutcome;
+      try {
+        const execute = async () =>
+          await executeJobCoreWithTimeout(state, executionJob, {
+            runId: taskRunId,
+            onHeartbeatExecutionDeferred,
+            activeJobMarker,
             runReceipt: started.runReceipt,
-            taskId: taskRun?.taskId,
-            flowId: taskRun?.flowId,
+            executionIdentity: createCronOwnerExecutionIdentityAdmission({
+              state,
+              runReceipt: started.runReceipt,
+              taskId: taskRun?.taskId,
+              flowId: taskRun?.flowId,
+            }),
+          });
+        const result = state.deps.runSchedulerOwned
+          ? await state.deps.runSchedulerOwned(execute)
+          : await execute();
+        outcome = { ...base, ...result, endedAt: state.deps.nowMs() };
+      } catch (error) {
+        const receiptSettlementDisposition =
+          error instanceof CronRunReceiptRevisionError && error.reason === "owner-unavailable"
+            ? "owner-unavailable"
+            : undefined;
+        const errorText =
+          error instanceof CronRunReceiptRevisionError
+            ? error.message
+            : normalizeCronRunErrorText(error);
+        params.onSetupError?.(executionJob, errorText);
+        outcome = {
+          ...base,
+          ...authorCronRunCompletion(state, executionJob, {
+            status: "error",
+            error: errorText,
+            diagnostics: createCronRunDiagnosticsFromError("cron-setup", errorText, {
+              nowMs: state.deps.nowMs,
+            }),
           }),
-        });
-      const result = state.deps.runSchedulerOwned
-        ? await state.deps.runSchedulerOwned(execute)
-        : await execute();
-      outcome = { ...base, ...result, endedAt: state.deps.nowMs() };
-    } catch (error) {
-      const receiptSettlementDisposition =
-        error instanceof CronRunReceiptRevisionError && error.reason === "owner-unavailable"
-          ? "owner-unavailable"
-          : undefined;
-      const errorText =
-        error instanceof CronRunReceiptRevisionError
-          ? error.message
-          : normalizeCronRunErrorText(error);
-      params.onSetupError?.(executionJob, errorText);
-      outcome = {
-        ...base,
-        ...authorCronRunCompletion(state, executionJob, {
-          status: "error",
-          error: errorText,
-          diagnostics: createCronRunDiagnosticsFromError("cron-setup", errorText, {
-            nowMs: state.deps.nowMs,
-          }),
-        }),
-        ...(receiptSettlementDisposition ? { receiptSettlementDisposition } : {}),
-        endedAt: state.deps.nowMs(),
+          ...(receiptSettlementDisposition ? { receiptSettlementDisposition } : {}),
+          endedAt: state.deps.nowMs(),
+        };
+      }
+      return {
+        kind: "completed" as const,
+        outcome,
+        handled: (await params.onCompleted?.(outcome, deferred)) === true,
       };
-    }
-    return { outcome, handled: (await params.onCompleted?.(outcome)) === true };
+    });
+    // A handoff releases only admission; failures from the retained terminal
+    // continuation remain observed and leave existing receipt recovery in charge.
+    void execution.catch((error: unknown) => {
+      if (deferred) {
+        state.deps.log.error(
+          { jobId: params.jobId, error: normalizeCronRunErrorText(error) },
+          "cron: deferred heartbeat finalization failed",
+        );
+      }
+    });
+    return await Promise.race([execution, handoff.promise]);
   };
   const admission = await runWithCronAdmission(
     state,
@@ -662,5 +694,5 @@ export async function executeQueuedCronRun(params: {
   if (!admission.value) {
     return { kind: "skipped" };
   }
-  return { kind: "completed", ...admission.value };
+  return admission.value;
 }

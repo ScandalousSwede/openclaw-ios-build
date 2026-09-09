@@ -17,6 +17,7 @@ import type { DeliveryContext } from "../utils/delivery-context.types.js";
 import { generateSecureUuid } from "./secure-random.js";
 import {
   cloneSystemEventOwner,
+  recordSystemEventAdmission,
   recordSystemEventOwner,
   resolveSystemEventOwnerAgentId,
 } from "./system-event-ownership.js";
@@ -177,6 +178,7 @@ function enqueueOwnedSystemEventEntry(
     deliveryContext: normalizedDeliveryContext,
   };
   recordSystemEventOwner(event, normalizedOwnerAgentId);
+  recordSystemEventAdmission(event);
   entry.queue.push(event);
   if (entry.queue.length > MAX_EVENTS) {
     entry.queue.shift();
@@ -199,7 +201,10 @@ export function enqueueSystemEventWithReceipt(
     return null;
   }
   const sessionKey = requireSessionKey(options.sessionKey);
-  return () => consumeSelectedSystemEventEntries(sessionKey, [event]).length > 0;
+  const remove = () => consumeSelectedSystemEventEntries(sessionKey, [event]).length > 0;
+  // Preserve opaque occurrence custody on the existing removal receipt.
+  cloneSystemEventOwner(event, remove);
+  return remove;
 }
 
 export function drainSystemEventEntries(sessionKey: string): SystemEvent[] {

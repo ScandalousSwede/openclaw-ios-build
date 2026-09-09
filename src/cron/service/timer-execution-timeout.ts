@@ -131,6 +131,8 @@ export type ExecuteJobCoreOptions = {
   activeJobMarker?: CronActiveJobMarker;
   owningCronLaneTaskMarker?: CommandLaneTaskMarker;
   onPayloadExecutionStarted?: () => void;
+  /** Releases admission waiting only; the original heartbeat still owns the outcome. */
+  onHeartbeatExecutionDeferred?: () => void;
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
   onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   onLaneWait?: (info?: { waiting?: boolean }) => void;

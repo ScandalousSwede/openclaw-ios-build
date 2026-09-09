@@ -390,7 +390,14 @@ async function onAdmittedTimer(state: CronServiceState) {
                   `cron: job failed: ${errorText}`,
                 );
               },
-              onCompleted: async (result) => {
+              onCompleted: async (result, deferred) => {
+                if (deferred) {
+                  // The batch may already have joined its drain. This retained
+                  // owner must join its own finalization, including write failure.
+                  await finalizeCompletedCronRunOutcomes(state, [result]);
+                  armTimer(state);
+                  return true;
+                }
                 if (!result.isolatedAgentSetupTimeout) {
                   // Drain finished state independently: a slow sibling must not
                   // strand outcomes, and store I/O must not own execution slots.
@@ -429,7 +436,7 @@ async function onAdmittedTimer(state: CronServiceState) {
               settleThisInitialActivation(!stopAdmittingDueJobs && !state.stopped);
               return pMapSkip;
             }
-            if (execution.handled) {
+            if (execution.kind === "deferred" || execution.handled) {
               return pMapSkip;
             }
             return execution.outcome;
