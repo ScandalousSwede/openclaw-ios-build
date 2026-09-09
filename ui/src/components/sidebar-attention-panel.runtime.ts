@@ -3,7 +3,7 @@ import type { NavigationRouteId } from "../app-navigation.ts";
 import { pathForRoute } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import { ScopeUpgradeController } from "../app/device-scope-upgrade-controller.runtime.ts";
-import type { ExecApprovalDecision } from "../app/exec-approval.ts";
+import type { ApprovalDecision } from "../app/exec-approval.ts";
 import type { MentionsCapability } from "../app/mentions.ts";
 import { isMobileNavLayout } from "../app/mobile-nav-layout.ts";
 import type { UpdateProgress } from "../app/update-confirmation.ts";
@@ -42,7 +42,7 @@ type SidebarAttentionPanelParams = {
   context: ApplicationContext;
   mentions: MentionsCapability;
   entries: readonly SidebarInboxEntry[];
-  onApprovalDecision: (event: Event, approvalId: string, decision: ExecApprovalDecision) => void;
+  onApprovalDecision: (event: Event, approvalId: string, decision: ApprovalDecision) => void;
   onClose: (restoreFocus: boolean) => void;
   onDismiss: (dismissal: SidebarAttentionDismissal) => void;
   onKeydown: (event: KeyboardEvent) => void;

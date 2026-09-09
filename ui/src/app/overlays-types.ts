@@ -1,7 +1,11 @@
 import type { UpdateRunRecord } from "../../../src/infra/update-run-record.js";
 import type { UpdateAvailable, UpdateScheduleState } from "../api/types.ts";
 import type { DevicePairSetupAccess, DevicePairSetupLifecycle } from "../lib/device-pair-setup.ts";
-import type { ExecApprovalDecision, ExecApprovalRequest } from "./exec-approval.ts";
+import type {
+  ApprovalDecision,
+  ArtifactReviewBinding,
+  ExecApprovalRequest,
+} from "./exec-approval.ts";
 import type { SubmittedUpdateReport } from "./update-failure-report.ts";
 import type { ApplicationStatusBanner, RecordedUpdateAttempt } from "./update-overlay-helpers.ts";
 
@@ -31,6 +35,8 @@ export type ApplicationUpdateOverlaySnapshot = {
 export type ApplicationOverlaySnapshot = ApplicationUpdateOverlaySnapshot & {
   approvalQueue: readonly ExecApprovalRequest[];
   approvalBusy: boolean;
+  artifactReviewAvailable?: boolean;
+  pendingArtifactReviews?: readonly ExecApprovalRequest[];
   approvalCanGrant: boolean;
   approvalErrors: ReadonlyMap<string, string>;
   devicePairSetupOpen: boolean;
@@ -41,13 +47,17 @@ export type ApplicationOverlaySnapshot = ApplicationUpdateOverlaySnapshot & {
 export type ApplicationOverlays = {
   readonly snapshot: ApplicationOverlaySnapshot;
   subscribe: (listener: (snapshot: ApplicationOverlaySnapshot) => void) => () => void;
+  refreshApprovals?: (
+    openBinding?: ArtifactReviewBinding,
+    isCurrent?: () => boolean,
+  ) => Promise<boolean>;
   refreshUpdateStatus: () => Promise<void>;
   acknowledgeUpdateRun: () => void;
   runUpdate: (options?: { sessionKey?: string }) => Promise<void>;
   holdUpdate: () => Promise<boolean>;
   reportUpdateFailure: (attemptId: string) => Promise<void>;
   decideApproval: (
-    decision: ExecApprovalDecision,
+    decision: ApprovalDecision,
     approvalId?: string,
     projectedApproval?: ExecApprovalRequest,
   ) => Promise<void>;

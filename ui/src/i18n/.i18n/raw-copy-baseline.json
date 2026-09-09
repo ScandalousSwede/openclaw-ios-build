@@ -187,6 +187,13 @@
       "count": 1,
       "kind": "html-text",
       "name": "text",
+      "path": "ui/src/components/exec-approval-card.ts",
+      "text": "Review artifact"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
       "path": "ui/src/components/file-preview-modal.ts",
       "text": "esc"
     },
@@ -427,6 +434,748 @@
       "name": "text",
       "path": "ui/src/pages/devices/view-exec-approvals.ts",
       "text": "exec host=gateway/node"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Engineering handoff receipts"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Automatic wake is disabled. Newest submissions first; five receipts per page."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Canonical operation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Content SHA-256"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Disconnected. Previously loaded receipts are not current."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Engineering handoffs"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Handoff"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Last successful read:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Latest receipt event"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Loading handoff receipts…"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "No handoff receipts were returned in this bounded read."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Older handoffs"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Operator read access is required to view handoff receipts."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Queued"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Receipt and binding"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Receiver agent"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Receiver receipts do not establish execution, completion or owner acceptance."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Receiver thread"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Receiver workspace"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Refresh newest handoffs"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Request event"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/handoff-view.ts",
+      "text": "Submission sequence"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Earlier observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Evidence basis and continuation"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Recorded operator reviews"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Requested owner feedback"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Work details"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": ". Evidence outside this scope has not been ruled out."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": ". Request expiry"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": ". Semantic correctness is not established by this check."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": ". Use the verified artifact controls above. Continuing execution requires the owning workflow; this view does not dispatch work or record a state transition."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "· artifact"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "· observed"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "· Observed"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "· producer observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "· Request event"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "A newer observation is available for this task. Showing current evidence; the requested observation remains in provenance."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Artifact relation:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Artifact SHA-256:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Artifact:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Authenticated operator disposition recorded"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Bound event"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Capability:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Detail follows this task and producer, including newer observations outside the list's time window."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Earlier artifacts ("
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Event"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Event:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Evidence basis"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Evidence basis is unavailable from this gateway. Verification and owner disposition are not inferred."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Executor:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Independent verification"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Inspect current evidence"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Link to current observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Link to requested observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Link to this earlier observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Native observation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "No artifact from the current attempt is available. The evidence below belongs to a previous attempt."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "No artifact references were returned for the current observation. Earlier artifacts, when available, are listed below."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "No qualified disposition recorded."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "No qualified review records were returned in this scope."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Open verified"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Operation:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Operator review history was not supplied by this reader."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Owner acceptance"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Owner disposition"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Producer narrative"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Provenance, verification and history"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Read-only continuation"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Read-only evidence. Continuing work requires the owning workflow; opening this view does not dispatch work."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Receipt-qualified operator records in the admitted review corpus at snapshot"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Recorded operator reviews"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Recorded state value:"
+    },
+    {
+      "count": 2,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Recorded state:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Requested"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Requested owner feedback"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Review"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Scope:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Structural verification"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Task:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "These artifacts belong to earlier observations. They do not establish a result for the current work."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "This does not establish that the earlier observation was superseded. Requested:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "This history does not establish a currently actionable review, owner acceptance, scientific correctness or independent verification."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Unknown in this reader. Owner acceptance not recorded."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-detail.ts",
+      "text": "Verifier report"
+    },
+    {
+      "count": 1,
+      "kind": "html-attribute",
+      "name": "aria-label",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Work observations"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "· Technical evidence ·"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Apply evidence filters"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "ARGUS · Technical evidence"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Corpus:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Evidence last checked"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Evidence scope and freshness"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Filter evidence by project, task, source or time"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Find evidence on the server"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Find in loaded work"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Here's what matters now."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Load more evidence"
+    },
+    {
+      "count": 2,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Observed"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Project"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Recorded state:"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Recorded technical work and its artifacts. Coverage is limited to admitted evidence."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Refresh evidence"
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "Snapshot evidence, not a live activity feed. Refreshes on reconnect and when returning after a minute."
+    },
+    {
+      "count": 1,
+      "kind": "html-text",
+      "name": "text",
+      "path": "ui/src/pages/overview/operational-presentation.ts",
+      "text": "This visible view checks every 60 seconds; the evidence projection normally updates every 5 minutes."
+    },
+    {
+      "count": 1,
+      "kind": "object-property",
+      "name": "title",
+      "path": "ui/src/pages/overview/operational-view.test-helpers.ts",
+      "text": "Reader correction"
+    },
+    {
+      "count": 1,
+      "kind": "object-property",
+      "name": "description",
+      "path": "ui/src/pages/overview/operational-view.ts",
+      "text": "Record an authenticated operator disposition for this exact current artifact."
+    },
+    {
+      "count": 1,
+      "kind": "object-property",
+      "name": "title",
+      "path": "ui/src/pages/overview/operational-view.ts",
+      "text": "Review current artifact"
     },
     {
       "count": 4,

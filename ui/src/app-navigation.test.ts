@@ -93,6 +93,7 @@ describe("navigationIconForRoute", () => {
     expect(
       Object.fromEntries(ALL_ROUTES.map((routeId) => [routeId, navigationIconForRoute(routeId)])),
     ).toEqual({
+      overview: "layoutDashboard",
       chat: "messageSquare",
       custodian: "lobster",
       activity: "activity",
@@ -196,6 +197,7 @@ describe("titleForRoute", () => {
     expect(
       Object.fromEntries(ALL_ROUTES.map((routeId) => [routeId, titleForRoute(routeId)])),
     ).toEqual({
+      overview: "Argus",
       chat: "Chat",
       custodian: "OpenClaw",
       activity: "Activity",
@@ -249,6 +251,7 @@ describe("subtitleForRoute", () => {
     expect(
       Object.fromEntries(ALL_ROUTES.map((routeId) => [routeId, subtitleForRoute(routeId)])),
     ).toEqual({
+      overview: "Work, decisions, artifacts and handoffs",
       chat: "Gateway chat for quick interventions.",
       custodian: "System setup and care.",
       activity: "Recent sessions across people using this gateway.",
@@ -336,7 +339,7 @@ describe("routeIdFromPath", () => {
     expect(routeIdFromPath("/chat")).toBe("chat");
     expect(routeIdFromPath("/custodian")).toBe("custodian");
     expect(routeIdFromPath("/new")).toBe("new-session");
-    expect(routeIdFromPath("/overview")).toBeNull();
+    expect(routeIdFromPath("/overview")).toBe("overview");
     expect(routeIdFromPath("/settings/connection")).toBe("connection");
     expect(routeIdFromPath("/connection")).toBeNull();
     expect(routeIdFromPath("/activity")).toBe("activity");
@@ -590,6 +593,7 @@ describe("plugin tabs route", () => {
 describe("SIDEBAR_NAV_ROUTES", () => {
   it("keeps the canonical sidebar route order", () => {
     expect(SIDEBAR_NAV_ROUTES).toEqual([
+      "overview",
       "dashboards",
       "usage",
       "cron",

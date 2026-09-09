@@ -15,6 +15,16 @@ export const en: TranslationMap & {
   updates: TranslationMap;
   login: TranslationMap;
 } = {
+  argusEvidence: {
+    title: "Argus",
+    subtitle: "Work, decisions, artifacts and handoffs",
+    loadedRecord: "{count} record loaded.",
+    loadedRecords: "{count} records loaded.",
+    allRecordsLoaded: "All matching records in this evidence scope are loaded.",
+    partialRecords: "Partial coverage: more matching records may exist.",
+    artifactReference: "{count} artifact reference",
+    artifactReferences: "{count} artifact references",
+  },
   pluginUi: {
     customize: "Customize UI",
     selectionScope: "Choose views for this browser window. Built-in views are always available.",

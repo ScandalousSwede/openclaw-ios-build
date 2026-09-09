@@ -28,6 +28,7 @@ import {
   parseApprovalRequestedEvent,
   parseApprovalResolvedEvent,
   resolveApprovalRequest,
+  sameArtifactReviewBinding,
   type ExecApprovalPromptState,
 } from "./exec-approval.ts";
 import type { ApplicationGateway } from "./gateway.ts";
@@ -99,6 +100,13 @@ export function createApplicationOverlays(
       ...snapshot,
       ...updates.snapshot,
       approvalQueue: promptState.execApprovalQueue,
+      artifactReviewAvailable: promptState.artifactReviewAvailable === true,
+      pendingArtifactReviews:
+        promptState.artifactReviewAvailable === true
+          ? promptState.execApprovalQueue.filter(
+              (entry) => entry.kind === "artifact_review" && entry.expiresAtMs > Date.now(),
+            )
+          : [],
       approvalBusy: promptState.execApprovalBusy,
       approvalCanGrant: readGatewayOperatorAccess(gateway.snapshot).canGrantApprovals,
       approvalErrors: new Map(promptState.execApprovalErrors),
@@ -190,12 +198,14 @@ export function createApplicationOverlays(
     if (connected && !operatorAccess.canReviewApprovals) {
       approvalDecision = null;
       promptState.execApprovalQueue = [];
+      promptState.artifactReviewAvailable = false;
       promptState.execApprovalBusy = false;
       promptState.execApprovalErrors.clear();
       clearExecApprovalTimers(promptState);
     }
     if (!connected || !next.client) {
       promptState.execApprovalQueue = [];
+      promptState.artifactReviewAvailable = false;
       promptState.execApprovalBusy = false;
       promptState.execApprovalErrors.clear();
       if (next.phase !== "reload-required" && !next.client) {
@@ -296,6 +306,42 @@ export function createApplicationOverlays(
     runUpdate: updates.runUpdate,
     holdUpdate: updates.holdUpdate,
     reportUpdateFailure: updates.reportUpdateFailure,
+    async refreshApprovals(openBinding, isCurrent) {
+      const binding = openBinding
+        ? { ...openBinding, artifact_sha256: [...openBinding.artifact_sha256] }
+        : undefined;
+      const client = activeClient;
+      const epoch = connectedEpoch;
+      const generation = approvalAccessGeneration;
+      if (!client || !isCurrentClient(client)) {
+        return false;
+      }
+      await refreshApprovals(client, epoch, generation);
+      if (
+        !isCurrentClient(client) ||
+        connectedEpoch !== epoch ||
+        generation !== approvalAccessGeneration ||
+        !operatorAccess.canReviewApprovals ||
+        promptState.artifactReviewAvailable !== true ||
+        !binding ||
+        isCurrent?.() === false
+      ) {
+        return false;
+      }
+      const pending = promptState.execApprovalQueue.find(
+        (entry) =>
+          entry.kind === "artifact_review" &&
+          entry.expiresAtMs > Date.now() &&
+          entry.artifactReview &&
+          sameArtifactReviewBinding(entry.artifactReview.binding, binding),
+      );
+      if (!pending) {
+        return false;
+      }
+      // Preserve the current queue's oldest-first ordering. The requesting view
+      // opens the exact pending id through the shell's existing explicit action.
+      return true;
+    },
     async decideApproval(decision, approvalId, projectedApproval) {
       const active = approvalId
         ? (promptState.execApprovalQueue.find((entry) => entry.id === approvalId) ??
@@ -335,7 +381,22 @@ export function createApplicationOverlays(
         isCurrentClient(operation.client);
       publish();
       try {
-        await resolveApprovalRequest(client, active, decision);
+        const binding = active.artifactReview?.binding;
+        await resolveApprovalRequest(client, active, decision, {
+          isCurrent: () =>
+            isCurrentOperation() &&
+            (active.kind !== "artifact_review" ||
+              (promptState.artifactReviewAvailable === true &&
+                binding !== undefined &&
+                promptState.execApprovalQueue.some(
+                  (entry) =>
+                    entry.id === active.id &&
+                    entry.kind === "artifact_review" &&
+                    entry.expiresAtMs > Date.now() &&
+                    entry.artifactReview &&
+                    sameArtifactReviewBinding(entry.artifactReview.binding, binding),
+                ))),
+        });
         if (!isCurrentOperation()) {
           return;
         }

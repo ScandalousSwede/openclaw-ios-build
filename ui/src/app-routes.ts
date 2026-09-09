@@ -53,6 +53,7 @@ import { page as memoryImportPage } from "./pages/memory-import/route.ts";
 import { page as modelProvidersPage } from "./pages/model-providers/route.ts";
 import { page as modelSetupPage } from "./pages/model-setup/route.ts";
 import { page as newSessionPage } from "./pages/new-session/route.ts";
+import { page as overviewPage } from "./pages/overview/route.ts";
 import { page as pluginPage } from "./pages/plugin/route.ts";
 import { page as pluginsPage } from "./pages/plugins/route.ts";
 import { page as portalsPage } from "./pages/portals/route.ts";
@@ -85,6 +86,7 @@ export type ApplicationRouter = Router<
 type AppRoute = PageDefinition<RouteId, ApplicationContext<RouteId>, AppRouteModule>;
 
 const APP_ROUTE_TREE = [
+  overviewPage,
   ...chatPages,
   custodianPage,
   newSessionPage,

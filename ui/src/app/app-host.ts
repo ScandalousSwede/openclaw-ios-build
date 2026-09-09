@@ -142,7 +142,9 @@ class OpenClawShell
     this.renderRoot?.querySelector(tagName) ?? null;
   @query("openclaw-command-palette") commandPalette: CommandPaletteElement | undefined;
   @query("openclaw-exec-approval")
-  approvalOverlay: (HTMLElement & { show(): void; dialogOpen?: boolean }) | undefined;
+  approvalOverlay:
+    | (HTMLElement & { show(approvalId?: string): void; dialogOpen?: boolean })
+    | undefined;
   commandPaletteTarget: CommandPaletteTargetDetail | undefined;
   navDrawerTrigger: HTMLElement | null = null;
   // Desktop and modal navigation are two slots for the same live sidebar.

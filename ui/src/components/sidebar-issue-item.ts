@@ -4,7 +4,7 @@ import type { NavigationRouteId } from "../app-navigation.ts";
 import { pathForRoute } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context.ts";
 import type { ScopeUpgradeState } from "../app/device-scope-upgrade-availability.ts";
-import type { ExecApprovalDecision, ExecApprovalRequest } from "../app/exec-approval.ts";
+import type { ApprovalDecision, ExecApprovalRequest } from "../app/exec-approval.ts";
 import type { UpdateProgress } from "../app/update-confirmation.ts";
 import { t } from "../i18n/index.ts";
 import { formatDateTimeMs, formatRelativeTimestamp } from "../lib/format.ts";
@@ -135,7 +135,7 @@ export function renderSidebarApprovalItem(params: {
   approval: ExecApprovalRequest;
   context: ApplicationContext | undefined;
   onClosePanel: () => void;
-  onDecision: (event: Event, approvalId: string, decision: ExecApprovalDecision) => void;
+  onDecision: (event: Event, approvalId: string, decision: ApprovalDecision) => void;
 }) {
   const context = params.context;
   if (!context) {

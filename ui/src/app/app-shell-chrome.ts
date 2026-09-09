@@ -81,7 +81,9 @@ export interface ShellChromeHost extends HTMLElement, ShellPanelHost {
   readonly commandPaletteElement: OptionalCustomElement;
   readonly execApprovalElement: OptionalCustomElement;
   readonly commandPalette: CommandPaletteElement | undefined;
-  readonly approvalOverlay: (HTMLElement & { show(): void; dialogOpen?: boolean }) | undefined;
+  readonly approvalOverlay:
+    | (HTMLElement & { show(approvalId?: string): void; dialogOpen?: boolean })
+    | undefined;
   navDrawerOpen: boolean;
   desktopNavigationExpanded: boolean;
   navDrawerTrigger: HTMLElement | null;
@@ -550,7 +552,16 @@ export class ShellChromeOwner {
     const host = this.host;
     const descriptor = lazyShellEvent(SHELL_APPROVALS_OPEN_EVENT, event);
     if (isOptionalElementDefined(host.execApprovalElement)) {
-      host.approvalOverlay?.show();
+      const detail = descriptor.detail;
+      const approvalId = detail && "approvalId" in detail ? detail.approvalId : undefined;
+      if (
+        approvalId !== undefined &&
+        (typeof approvalId !== "string" || !/^[A-Za-z0-9_.:-]{1,512}$/.test(approvalId))
+      ) {
+        this.clearPendingLazyAction(descriptor);
+        return;
+      }
+      host.approvalOverlay?.show(approvalId);
       this.clearPendingLazyAction(descriptor);
       return;
     }

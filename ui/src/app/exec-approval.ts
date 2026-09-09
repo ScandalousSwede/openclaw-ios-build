@@ -2,6 +2,7 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { ApprovalScope } from "../../../src/infra/approval-scope.ts";
+import { parseArtifactReviewPending } from "./artifact-review-parser.ts";
 
 export type ExecApprovalRequestPayload = {
   command: string;
@@ -21,11 +22,19 @@ export type ExecApprovalRequestPayload = {
   allowedDecisions?: readonly ExecApprovalDecision[];
 };
 
-export type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
+type ExecApprovalDecision = "allow-once" | "allow-always" | "deny";
+
+export type ApprovalDecision = ExecApprovalDecision | "accept_artifact" | "reject_artifact";
+export type ArtifactReviewBinding = {
+  operation_id: string;
+  event_id: string;
+  artifact_sha256: string[];
+};
 
 export type ExecApprovalRequest = {
   id: string;
-  kind: "exec" | "plugin" | "system-agent";
+  kind: "exec" | "plugin" | "system-agent" | "artifact_review";
+  artifactReview?: { binding: ArtifactReviewBinding };
   request: ExecApprovalRequestPayload;
   pluginTitle?: string;
   pluginDescription?: string | null;
@@ -51,6 +60,7 @@ export type ExecApprovalPromptState = {
   } | null;
   execApprovalQueue: ExecApprovalRequest[];
   execApprovalBusy: boolean;
+  artifactReviewAvailable?: boolean;
   execApprovalErrors: Map<string, string>;
   execApprovalRefreshes?: Set<{ removedIds: Set<string> }>;
   execApprovalExpiryTimers?: Map<string, ReturnType<typeof globalThis.setTimeout>>;
@@ -310,8 +320,43 @@ export function parseApprovalRequestedEvent(
 export async function resolveApprovalRequest(
   client: NonNullable<ExecApprovalPromptState["client"]>,
   approval: ExecApprovalRequest,
-  decision: ExecApprovalDecision,
+  decision: ApprovalDecision,
+  options?: { isCurrent: () => boolean },
 ): Promise<void> {
+  if (approval.kind === "artifact_review") {
+    if (
+      !approval.artifactReview ||
+      (decision !== "accept_artifact" && decision !== "reject_artifact") ||
+      approval.expiresAtMs <= Date.now() ||
+      options?.isCurrent() !== true
+    ) {
+      throw new Error("Artifact review requires a current authority owner and valid decision");
+    }
+    const binding = {
+      ...approval.artifactReview.binding,
+      artifact_sha256: [...approval.artifactReview.binding.artifact_sha256],
+    };
+    const digest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(JSON.stringify([approval.id, decision])),
+    );
+    // Key preparation yields. The overlay owns the connection, grant and pending
+    // binding; all must still be current immediately before the write.
+    if (approval.expiresAtMs <= Date.now() || !options.isCurrent()) {
+      throw new Error("Artifact review authority is no longer current");
+    }
+    await client.request("plugin.approval.resolve", {
+      kind: "artifact_review",
+      id: approval.id,
+      decision,
+      binding,
+      idempotency_key: `artifact-review:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
+    });
+    return;
+  }
+  if (decision === "accept_artifact" || decision === "reject_artifact") {
+    throw new Error("Invalid execution approval decision");
+  }
   if (approval.kind === "system-agent") {
     await client.request("approval.resolve", {
       id: approval.id,
@@ -500,10 +545,11 @@ export async function refreshPendingApprovalQueue(
   refreshes.add(refresh);
   const refreshStartedWith = pruneExecApprovalQueue(state.execApprovalQueue);
   try {
-    const [execResult, pluginResult, systemAgentResult] = await Promise.allSettled([
+    const [execResult, pluginResult, systemAgentResult, artifactResult] = await Promise.allSettled([
       client.request("exec.approval.list", {}),
       client.request("plugin.approval.list", {}),
       client.request("openclaw.approval.list", {}),
+      client.request("plugin.approval.list", { kind: "artifact_review" }),
     ]);
     const execApprovals =
       execResult.status === "fulfilled"
@@ -517,8 +563,30 @@ export async function refreshPendingApprovalQueue(
       systemAgentResult.status === "fulfilled"
         ? (parseApprovalList(systemAgentResult.value, parseSystemAgentApprovalRequested) ?? [])
         : currentApprovalsForKind(state.execApprovalQueue, "system-agent");
+    const artifactPayload =
+      artifactResult.status === "fulfilled" && isRecord(artifactResult.value)
+        ? artifactResult.value
+        : null;
+    const artifactItems =
+      artifactPayload && Array.isArray(artifactPayload.items) && artifactPayload.items.length <= 100
+        ? artifactPayload.items
+        : null;
+    const parsedArtifactApprovals = artifactItems
+      ? parseApprovalList(artifactItems, parseArtifactReviewPending)
+      : null;
+    const artifactListValid =
+      parsedArtifactApprovals !== null && parsedArtifactApprovals.length === artifactItems?.length;
+    const artifactApprovals = artifactListValid
+      ? parsedArtifactApprovals
+      : currentApprovalsForKind(state.execApprovalQueue, "artifact_review");
+    const artifactAvailable = artifactPayload?.available === true && artifactListValid;
     const refreshed = mergeRefreshedApprovalQueue(
-      sortApprovalsOldestFirst([...execApprovals, ...pluginApprovals, ...systemAgentApprovals]),
+      sortApprovalsOldestFirst([
+        ...execApprovals,
+        ...pluginApprovals,
+        ...systemAgentApprovals,
+        ...artifactApprovals,
+      ]),
       refreshStartedWith,
       state.execApprovalQueue,
       refresh.removedIds,
@@ -526,6 +594,7 @@ export async function refreshPendingApprovalQueue(
     if (options?.isCurrentClient && !options.isCurrentClient(client)) {
       return false;
     }
+    state.artifactReviewAvailable = artifactAvailable;
     state.execApprovalQueue = refreshed;
     pruneExecApprovalErrors(state);
     const refreshedIds = new Set(refreshed.map((entry) => entry.id));
@@ -551,4 +620,18 @@ export function clearResolvedExecApprovalPrompt(state: ExecApprovalPromptState, 
   for (const refresh of state.execApprovalRefreshes ?? []) {
     refresh.removedIds.add(id);
   }
+}
+
+/** Compare exact current evidence bindings; hash order is not authority. */
+export function sameArtifactReviewBinding(
+  a: ArtifactReviewBinding,
+  b: ArtifactReviewBinding,
+): boolean {
+  const sortedB = b.artifact_sha256.toSorted();
+  return (
+    a.operation_id === b.operation_id &&
+    a.event_id === b.event_id &&
+    a.artifact_sha256.length === b.artifact_sha256.length &&
+    a.artifact_sha256.toSorted().every((hash, index) => hash === sortedB[index])
+  );
 }

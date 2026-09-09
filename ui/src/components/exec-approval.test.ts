@@ -418,4 +418,40 @@ describe("openclaw-exec-approval", () => {
 
     expect(container.querySelector("openclaw-modal-dialog")).toBeNull();
   });
+  it("opens the exact artifact review without changing the ordinary queue order", async () => {
+    const queue = [
+      createExecRequest({ id: "ordinary-first" }),
+      createExecRequest({
+        id: "artifact-second",
+        kind: "artifact_review",
+        pluginTitle: "Review exact artifact",
+        artifactReview: {
+          binding: {
+            operation_id: "operation",
+            event_id: "event",
+            artifact_sha256: ["a".repeat(64)],
+          },
+        },
+      }),
+    ];
+    const { approval, onDecision } = await renderApproval(queue);
+    (approval as LitElement & { show(id?: string): void }).show("artifact-second");
+    await approval.updateComplete;
+    const accept = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Accept artifact",
+    );
+    expect(accept).toBeDefined();
+    expect(container.textContent).not.toContain("Always allow");
+    expect(queue.map((entry) => entry.id)).toEqual(["ordinary-first", "artifact-second"]);
+    accept!.click();
+    expect(onDecision).toHaveBeenCalledWith("artifact-second", "accept_artifact");
+  });
+
+  it("does not replace an unavailable exact review with another pending request", async () => {
+    const { approval, onDecision } = await renderApproval(createExecRequest());
+    (approval as LitElement & { show(id?: string): void }).show("no-longer-pending");
+    await approval.updateComplete;
+    expect(container.querySelector("openclaw-modal-dialog")).toBeNull();
+    expect(onDecision).not.toHaveBeenCalled();
+  });
 });

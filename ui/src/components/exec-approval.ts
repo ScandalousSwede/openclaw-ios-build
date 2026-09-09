@@ -1,7 +1,7 @@
 // Control UI modal presents approvals after an explicit operator action.
 import { html, nothing, type PropertyValues } from "lit";
 import { property, query, state } from "lit/decorators.js";
-import type { ExecApprovalDecision, ExecApprovalRequest } from "../app/exec-approval.ts";
+import type { ApprovalDecision, ExecApprovalRequest } from "../app/exec-approval.ts";
 import { t } from "../i18n/index.ts";
 import {
   KEYBOARD_SHORTCUT_COMBOS,
@@ -23,7 +23,7 @@ type ExecApprovalProps = {
   busy: boolean;
   canGrant: boolean;
   errors: ReadonlyMap<string, string>;
-  onDecision: (approvalId: string, decision: ExecApprovalDecision) => void | Promise<void>;
+  onDecision: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
 };
 
 function renderApprovalQueueList(params: {
@@ -77,7 +77,7 @@ function keyEventComesFromTextEntry(event: KeyboardEvent): boolean {
 // Authorization shortcuts require a Ctrl/Cmd chord: the modal steals focus
 // when it opens, so a bare letter typed mid-sentence into the composer could
 // otherwise approve a command the user never read.
-function shortcutDecision(event: KeyboardEvent): ExecApprovalDecision | null {
+function shortcutDecision(event: KeyboardEvent): ApprovalDecision | null {
   if (keyEventComesFromTextEntry(event)) {
     return null;
   }
@@ -96,9 +96,15 @@ class ExecApproval extends OpenClawLightDomContentsElement {
   @state() private selectedApprovalId: string | null = null;
   @state() private explicitlyOpen = false;
 
-  show(): void {
-    if (!this.props?.queue.length) {
+  show(approvalId?: string): void {
+    if (
+      !this.props?.queue.length ||
+      (approvalId !== undefined && !this.props.queue.some((entry) => entry.id === approvalId))
+    ) {
       return;
+    }
+    if (approvalId !== undefined) {
+      this.selectedApprovalId = approvalId;
     }
     this.explicitlyOpen = true;
     void this.updateComplete.then(() => this.dialog?.show());

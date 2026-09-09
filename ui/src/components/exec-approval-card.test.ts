@@ -4,7 +4,7 @@ import { render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExecApprovalRequest } from "../app/exec-approval.ts";
 import { i18n } from "../i18n/index.ts";
-import { renderExecApprovalCard } from "./exec-approval-card.ts";
+import { renderExecApprovalCard, renderSidebarApprovalRow } from "./exec-approval-card.ts";
 
 let container: HTMLDivElement;
 
@@ -134,4 +134,59 @@ describe("exec approval card", () => {
     expect(card?.querySelector('[data-approval-chip="agent"]')).toBeNull();
     expect(card?.textContent).not.toContain("agent:main:session-1");
   });
+  it.each(["inline", "sidebar"] as const)(
+    "opens the exact artifact modal from %s without disposition buttons",
+    (surface) => {
+      const request = approval({
+        id: "exact-artifact",
+        kind: "artifact_review",
+        expiresAtMs: Date.now() + 60000,
+        artifactReview: {
+          binding: {
+            operation_id: "operation",
+            event_id: "event",
+            artifact_sha256: ["a".repeat(64)],
+          },
+        },
+      });
+      const onDecision = vi.fn();
+      const opened = vi.fn();
+      window.addEventListener("openclaw:approvals-open", opened);
+      try {
+        render(
+          surface === "inline"
+            ? renderExecApprovalCard({
+                approval: request,
+                busy: false,
+                canGrant: true,
+                error: null,
+                variant: "inline",
+                onDecision,
+              })
+            : renderSidebarApprovalRow({
+                approval: request,
+                busy: false,
+                canGrant: true,
+                error: null,
+                onDecision,
+              }),
+          container,
+        );
+        expect(container.textContent).not.toContain("Accept artifact");
+        expect(container.textContent).not.toContain("Reject artifact");
+        const button = [...container.querySelectorAll("button")].find(
+          (candidate) => candidate.textContent?.trim() === "Review artifact",
+        );
+        expect(button).toBeDefined();
+        button!.click();
+        expect(opened).toHaveBeenCalledOnce();
+        expect((opened.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+          approvalId: "exact-artifact",
+        });
+        expect(onDecision).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener("openclaw:approvals-open", opened);
+      }
+    },
+  );
 });

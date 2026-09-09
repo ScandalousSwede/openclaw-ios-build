@@ -5,10 +5,11 @@ import { formatApprovalDisplayPath } from "../../../src/infra/approval-display-p
 import type { ApprovalScope } from "../../../src/infra/approval-scope.ts";
 import type { GatewaySessionRow } from "../api/types.ts";
 import type {
-  ExecApprovalDecision,
+  ApprovalDecision,
   ExecApprovalRequest,
   ExecApprovalRequestPayload,
 } from "../app/exec-approval.ts";
+import { SHELL_APPROVALS_OPEN_EVENT } from "../app/lazy-shell-action.ts";
 import { t } from "../i18n/index.ts";
 import { formatCountdown } from "../lib/format.ts";
 import { resolveSessionDisplayName } from "../lib/session-display.ts";
@@ -20,7 +21,7 @@ const DEFAULT_EXEC_APPROVAL_DECISIONS = [
   "allow-once",
   "allow-always",
   "deny",
-] as const satisfies readonly ExecApprovalDecision[];
+] as const satisfies readonly ApprovalDecision[];
 
 type ExecApprovalCardProps = {
   approval: ExecApprovalRequest;
@@ -30,7 +31,7 @@ type ExecApprovalCardProps = {
   error: string | null;
   variant: "inline" | "modal";
   queueCount?: number;
-  onDecision: (approvalId: string, decision: ExecApprovalDecision) => void | Promise<void>;
+  onDecision: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
 };
 
 type SidebarApprovalRowProps = {
@@ -40,7 +41,7 @@ type SidebarApprovalRowProps = {
   error: string | null;
   openSessionHref?: string;
   sessionTitle?: string | null;
-  onDecision: (event: Event, approvalId: string, decision: ExecApprovalDecision) => void;
+  onDecision: (event: Event, approvalId: string, decision: ApprovalDecision) => void;
   onOpenSession?: (event: MouseEvent) => void;
 };
 
@@ -223,7 +224,13 @@ export function compactApprovalCommand(command: string): string {
   return singleLine.length > 64 ? `${truncateUtf16Safe(singleLine, 61)}…` : singleLine;
 }
 
-function approvalDecisionLabel(decision: ExecApprovalDecision, kind: ExecApprovalRequest["kind"]) {
+function approvalDecisionLabel(decision: ApprovalDecision, kind: ExecApprovalRequest["kind"]) {
+  if (decision === "accept_artifact") {
+    return "Accept artifact";
+  }
+  if (decision === "reject_artifact") {
+    return "Reject artifact";
+  }
   return t(
     decision === "allow-once"
       ? "execApproval.allowOnce"
@@ -235,11 +242,20 @@ function approvalDecisionLabel(decision: ExecApprovalDecision, kind: ExecApprova
   );
 }
 
-function decisionClass(decision: ExecApprovalDecision) {
+function decisionClass(decision: ApprovalDecision) {
+  if (decision === "accept_artifact") {
+    return "btn primary";
+  }
+  if (decision === "reject_artifact") {
+    return "btn danger";
+  }
   return decision === "allow-once" ? "btn primary" : decision === "deny" ? "btn danger" : "btn";
 }
 
-function decisionShortcut(decision: ExecApprovalDecision) {
+function decisionShortcut(decision: ApprovalDecision) {
+  if (decision === "accept_artifact" || decision === "reject_artifact") {
+    return "";
+  }
   return decision === "allow-once"
     ? "Ctrl/Cmd+Enter"
     : decision === "allow-always"
@@ -247,9 +263,10 @@ function decisionShortcut(decision: ExecApprovalDecision) {
       : "Ctrl/Cmd+D";
 }
 
-export function resolveApprovalDecisions(
-  active: ExecApprovalRequest,
-): readonly ExecApprovalDecision[] {
+export function resolveApprovalDecisions(active: ExecApprovalRequest): readonly ApprovalDecision[] {
+  if (active.kind === "artifact_review") {
+    return ["accept_artifact", "reject_artifact"];
+  }
   if (active.request.allowedDecisions?.length) {
     return active.request.allowedDecisions;
   }
@@ -262,6 +279,22 @@ export function approvalTitle(active: ExecApprovalRequest): string {
   return active.kind !== "exec"
     ? (active.pluginTitle ?? t("execApproval.pluginApprovalNeeded"))
     : t("execApproval.execApprovalNeeded");
+}
+
+function renderArtifactReviewOpener(approval: ExecApprovalRequest, busy: boolean) {
+  return html`<button
+    class="btn"
+    type="button"
+    ?disabled=${busy || approval.expiresAtMs <= Date.now()}
+    @click=${() =>
+      window.dispatchEvent(
+        new CustomEvent(SHELL_APPROVALS_OPEN_EVENT, {
+          detail: { approvalId: approval.id },
+        }),
+      )}
+  >
+    Review artifact
+  </button>`;
 }
 
 export function renderSidebarApprovalRow(props: SidebarApprovalRowProps) {
@@ -314,20 +347,24 @@ export function renderSidebarApprovalRow(props: SidebarApprovalRowProps) {
         role="group"
         aria-label=${t("approvalPage.actionsLabel")}
       >
-        ${resolveApprovalDecisions(approval).map((decision) => {
-          const label = approvalDecisionLabel(decision, approval.kind);
-          return html`<button
-            type="button"
-            class="btn btn--xs ${
-              decision === "deny" ? "btn--ghost" : ""
-            } sidebar-approval-row__action sidebar-approval-row__action--${decision}"
-            aria-label=${t("execApproval.decisionRequest", { decision: label, command })}
-            ?disabled=${props.busy || !props.canGrant || expired}
-            @click=${(event: Event) => props.onDecision(event, approval.id, decision)}
-          >
-            ${label}
-          </button>`;
-        })}
+        ${
+          approval.kind === "artifact_review"
+            ? renderArtifactReviewOpener(approval, props.busy)
+            : resolveApprovalDecisions(approval).map((decision) => {
+                const label = approvalDecisionLabel(decision, approval.kind);
+                return html`<button
+                  type="button"
+                  class="btn btn--xs ${
+                    decision === "deny" ? "btn--ghost" : ""
+                  } sidebar-approval-row__action sidebar-approval-row__action--${decision}"
+                  aria-label=${t("execApproval.decisionRequest", { decision: label, command })}
+                  ?disabled=${props.busy || !props.canGrant || expired}
+                  @click=${(event: Event) => props.onDecision(event, approval.id, decision)}
+                >
+                  ${label}
+                </button>`;
+              })
+        }
         ${
           props.openSessionHref && props.onOpenSession
             ? html`<a
@@ -440,23 +477,27 @@ export function renderExecApprovalCard(props: ExecApprovalCardProps) {
         : nothing
     }
     <div class="exec-approval-actions">
-      ${decisions.map((decision) => {
-        const label = approvalDecisionLabel(decision, props.approval.kind);
-        return html`<button
-          class=${decisionClass(decision)}
-          type="button"
-          aria-label=${label}
-          ?disabled=${props.busy || !props.canGrant}
-          title=${
-            props.variant === "modal" && props.canGrant
-              ? `${label} (${decisionShortcut(decision)})`
-              : label
-          }
-          @click=${() => props.onDecision(active.id, decision)}
-        >
-          <span>${label}</span>
-        </button>`;
-      })}
+      ${
+        active.kind === "artifact_review" && props.variant !== "modal"
+          ? renderArtifactReviewOpener(active, props.busy)
+          : decisions.map((decision) => {
+              const label = approvalDecisionLabel(decision, props.approval.kind);
+              return html`<button
+                class=${decisionClass(decision)}
+                type="button"
+                aria-label=${label}
+                ?disabled=${props.busy || !props.canGrant}
+                title=${
+                  props.variant === "modal" && props.canGrant
+                    ? `${label} (${decisionShortcut(decision)})`
+                    : label
+                }
+                @click=${() => props.onDecision(active.id, decision)}
+              >
+                <span>${label}</span>
+              </button>`;
+            })
+      }
     </div>
   </div>`;
 }

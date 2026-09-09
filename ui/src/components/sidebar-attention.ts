@@ -3,7 +3,7 @@ import { html, nothing, type PropertyValues } from "lit";
 import { property, state } from "lit/decorators.js";
 import type { NavigationRouteId } from "../app-navigation.ts";
 import { applicationContext, type ApplicationContext } from "../app/context.ts";
-import type { ExecApprovalDecision } from "../app/exec-approval.ts";
+import type { ApprovalDecision } from "../app/exec-approval.ts";
 import type { MentionsCapability } from "../app/mentions.ts";
 import type { UpdateProgress } from "../app/update-confirmation.ts";
 import { t } from "../i18n/index.ts";
@@ -257,7 +257,7 @@ class SidebarAttention extends OpenClawLightDomElement {
     }
   };
 
-  private async decideApproval(event: Event, approvalId: string, decision: ExecApprovalDecision) {
+  private async decideApproval(event: Event, approvalId: string, decision: ApprovalDecision) {
     const context = this.context;
     if (!context) {
       return;

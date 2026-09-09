@@ -11,7 +11,7 @@ import type {
   ControlUiSessionBranch,
   ControlUiSessionPullRequest,
 } from "../../../../src/gateway/control-ui-contract.js";
-import type { ExecApprovalDecision, ExecApprovalRequest } from "../../app/exec-approval.ts";
+import type { ApprovalDecision, ExecApprovalRequest } from "../../app/exec-approval.ts";
 import { renderExecApprovalCard } from "../../components/exec-approval-card.ts";
 import { icons } from "../../components/icons.ts";
 import type { ImageLightboxItem } from "../../components/image-lightbox.ts";
@@ -83,10 +83,7 @@ export type ChatProps = Omit<
     approvalBusy?: boolean;
     approvalCanGrant: boolean;
     approvalErrors?: ReadonlyMap<string, string>;
-    onApprovalDecision?: (
-      approvalId: string,
-      decision: ExecApprovalDecision,
-    ) => void | Promise<void>;
+    onApprovalDecision?: (approvalId: string, decision: ApprovalDecision) => void | Promise<void>;
     workspaceConflict?: WorkspaceResultConflict;
     onDismissWorkspaceConflict?: () => void;
     swarm?: Parameters<typeof renderChatSwarmProgress>[0];

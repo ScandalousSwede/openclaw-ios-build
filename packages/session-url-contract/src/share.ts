@@ -34,6 +34,7 @@ export const CONTROL_UI_RESERVED_ROUTE_SEGMENTS: readonly string[] = Object.free
   "model-setup",
   "new",
   "nodes",
+  "overview",
   "plugin",
   "portals",
   "profile",
