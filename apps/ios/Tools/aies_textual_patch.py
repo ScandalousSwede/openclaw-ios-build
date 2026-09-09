@@ -5,6 +5,7 @@ import hashlib
 import json
 import pathlib
 import subprocess
+import stat
 
 PROVENANCE = "apps/ios/PackageAuthority/textual-balanced-concatenation-patch.json"
 SOURCE = "Sources/Textual/Internal/TextFragment/TextBuilder.swift"
@@ -96,7 +97,15 @@ def verify(root: pathlib.Path, manifest: dict, workspace_state: pathlib.Path, so
         else:
             with archived.open("xb") as stream:
                 stream.write(original)
-        target.write_bytes(expected)
+        # SwiftPM makes resolved source files read-only. Permit this one
+        # already-verified delta, then restore its exact original mode even
+        # if writing fails; never unlock the package tree recursively.
+        original_mode = stat.S_IMODE(target.stat().st_mode)
+        try:
+            target.chmod(original_mode | stat.S_IWUSR)
+            target.write_bytes(expected)
+        finally:
+            target.chmod(original_mode)
         content = target.read_bytes()
         status = git("status", "--porcelain=v1", "--untracked-files=all").decode()
     if content != expected or status != expected_status:

@@ -7,6 +7,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
+import stat
 
 import aies_textual_patch as patcher
 
@@ -53,6 +55,28 @@ class TextualPatchTests(unittest.TestCase):
         self.assertEqual((self.archive / "TextBuilder-original.swift").read_bytes(), self.original)
         self.assertEqual(self.verify(), first)
         self.assertEqual(self.verify(apply=True), first)
+
+    def test_patches_swiftpm_readonly_source_and_restores_exact_mode(self):
+        self.target.chmod(0o444)
+        self.verify(apply=True)
+        self.assertEqual(self.target.read_bytes(), self.expected)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o444)
+        self.verify()
+
+    def test_restores_readonly_mode_after_write_failure(self):
+        self.target.chmod(0o444)
+        original_write = Path.write_bytes
+        def fail_target(path, data):
+            if path == self.target:
+                self.assertTrue(path.stat().st_mode & stat.S_IWUSR)
+                raise OSError("synthetic disk failure")
+            return original_write(path, data)
+        with mock.patch.object(Path, "write_bytes", fail_target):
+            with self.assertRaisesRegex(OSError, "synthetic disk failure"):
+                self.verify(apply=True)
+        self.assertEqual(stat.S_IMODE(self.target.stat().st_mode), 0o444)
+        self.assertEqual(self.target.read_bytes(), self.original)
+        self.assertEqual((self.archive / "TextBuilder-original.swift").read_bytes(), self.original)
 
     def test_verification_rejects_unpatched_checkout_without_mutating_it(self):
         with self.assertRaisesRegex(patcher.PatchError, "exact governed patch"):
