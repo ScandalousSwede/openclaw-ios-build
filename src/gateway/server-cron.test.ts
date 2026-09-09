@@ -28,6 +28,7 @@ import {
 } from "../process/gateway-work-admission.js";
 import type { RunExit } from "../process/supervisor/types.js";
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
+import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 
 type RunCronIsolatedAgentTurnMock = (params: {
   abortSignal?: AbortSignal;
@@ -561,6 +562,63 @@ describe("buildGatewayCronService", () => {
       expect(state.cron.getJob(existing.id)?.state.lastDeliveryError).toBeUndefined();
     } finally {
       state.cron.stop();
+    }
+  });
+
+  it("records a skipped force-run for a retained collection review when Workshop is now off", async () => {
+    const testState = await createOpenClawTestState({
+      layout: "split",
+      prefix: "openclaw-workshop-retained-review-off-",
+    });
+    const cfg = {
+      agents: {
+        ownership: "explicit",
+        entries: { main: { workspace: testState.workspaceDir } },
+      },
+      skills: { workshop: { autonomous: { mode: "auto" } } },
+    } satisfies OpenClawConfig;
+    const broadcast = vi.fn();
+    const state = loadCronService(cfg, { broadcast });
+    const rootsBefore = getActiveGatewayRootWorkCount();
+    const tasksBefore = getSuspensionVisibleCronTaskRunCount();
+    try {
+      const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, { schedulerSeed: "test-seed" });
+      if (!spec) {
+        throw new Error("Expected a collection review monitor for the test agent");
+      }
+      const job = await state.cron.add(spec.input, { enabledExplicit: true, systemOwned: true });
+      expect(state.cron.getJob(job.id)?.enabled).toBe(true);
+      loadConfigMock.mockReturnValue({
+        ...cfg,
+        skills: { workshop: { autonomous: { mode: "off" } } },
+      } satisfies OpenClawConfig);
+      // Keep the old enabled row: current execution policy must fence it before reconciliation.
+      await expect(state.cron.run(job.id, "force")).resolves.toEqual({ ok: true, ran: true });
+
+      expect(runCronIsolatedAgentTurnMock).not.toHaveBeenCalled();
+      expect(sendCronAnnouncePayloadStrictMock).not.toHaveBeenCalled();
+      expect(state.cron.getJob(job.id)).toMatchObject({
+        id: job.id,
+        enabled: true,
+        state: { lastRunStatus: "skipped", lastDeliveryStatus: "not-requested" },
+      });
+      expect(broadcast).toHaveBeenCalledWith(
+        "cron",
+        expect.objectContaining({
+          jobId: job.id,
+          action: "finished",
+          status: "skipped",
+          summary: "Skill collection review disabled.",
+        }),
+        expect.anything(),
+      );
+      expect(state.cron.getJob(job.id)?.state.runningAtMs).toBeUndefined();
+      expect(state.cron.getJob(job.id)?.state.queuedAtMs).toBeUndefined();
+      expect(getActiveGatewayRootWorkCount()).toBe(rootsBefore);
+      expect(getSuspensionVisibleCronTaskRunCount()).toBe(tasksBefore);
+    } finally {
+      await state.cron.stopAndDrain?.();
+      await testState.cleanup();
     }
   });
 
@@ -1979,6 +2037,9 @@ describe("buildGatewayCronService", () => {
 
       await state.cron.run(job.id, "force");
 
+      expect(requestHeartbeatAndWaitMock).toHaveBeenCalledOnce();
+      expect(requestHeartbeatMock).not.toHaveBeenCalled();
+
       expect(callArg(enqueueSystemEventMock, 0, 0, "system event text")).toBe("hello");
       const eventOptions = requireRecord(
         callArg(enqueueSystemEventMock, 0, 1, "system event options"),
@@ -1987,7 +2048,7 @@ describe("buildGatewayCronService", () => {
       expect(eventOptions.sessionKey).toBe("agent:main:main");
       expect(resolveSystemEventOwnerAgentId(eventOptions)).toBe("main");
       const heartbeatRequest = requireRecord(
-        callArg(requestHeartbeatMock, 0, 0, "heartbeat request"),
+        callArg(requestHeartbeatAndWaitMock, 0, 0, "terminal heartbeat request"),
         "request",
       );
       expect(heartbeatRequest.agentId).toBe("main");
@@ -2995,6 +3056,9 @@ describe("buildGatewayCronService", () => {
 
       await state.cron.run(job.id, "force");
 
+      expect(requestHeartbeatAndWaitMock).toHaveBeenCalledOnce();
+      expect(requestHeartbeatMock).not.toHaveBeenCalled();
+
       expect(callArg(enqueueSystemEventMock, 0, 0, "system event text")).toBe("hello global");
       const eventOptions = requireRecord(
         callArg(enqueueSystemEventMock, 0, 1, "system event options"),
@@ -3003,7 +3067,7 @@ describe("buildGatewayCronService", () => {
       expect(eventOptions.sessionKey).toBe("global");
       expect(resolveSystemEventOwnerAgentId(eventOptions)).toBe("main");
       const heartbeatRequest = requireRecord(
-        callArg(requestHeartbeatMock, 0, 0, "heartbeat request"),
+        callArg(requestHeartbeatAndWaitMock, 0, 0, "terminal heartbeat request"),
         "request",
       );
       expect(heartbeatRequest.agentId).toBe("main");
@@ -3223,8 +3287,11 @@ describe("buildGatewayCronService", () => {
 
       await state.cron.run(job.id, "force");
 
+      expect(requestHeartbeatAndWaitMock).toHaveBeenCalledOnce();
+      expect(requestHeartbeatMock).not.toHaveBeenCalled();
+
       const call = requireRecord(
-        callArg(requestHeartbeatMock, 0, 0, "heartbeat request"),
+        callArg(requestHeartbeatAndWaitMock, 0, 0, "terminal heartbeat request"),
         "heartbeat request",
       );
       expect(call.agentId).toBe("main");

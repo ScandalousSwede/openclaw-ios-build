@@ -5,10 +5,12 @@ import {
   withPreparedModelRuntimePluginGenerationScope,
 } from "../../agents/prepared-model-runtime-generation-scope.js";
 import type { PreparedModelRuntimePluginGeneration } from "../../agents/prepared-model-runtime.types.js";
+import { setRuntimeConfigSnapshot } from "../../config/config.js";
 import {
   createNestedToolActivity,
   projectNestedToolActivityForHooks,
 } from "../../sessions/nested-tool-activity.js";
+import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { buildSkillExperienceReviewPrompt } from "./experience-review-prompt.js";
 import {
   createSkillExperienceReviewScheduler,
@@ -270,6 +272,68 @@ describe("skill experience review scheduler", () => {
     expect(review).toHaveBeenCalledOnce();
     expect(runReview).not.toHaveBeenCalled();
     scheduler.clear();
+  });
+
+  it("drops a queued automatic review when current Workshop mode becomes off", async () => {
+    const testState = await createOpenClawTestState({
+      layout: "split",
+      prefix: "openclaw-workshop-disable-queued-",
+    });
+    const reviewRuntime = await import("./experience-review.js");
+    const activeRuns = await import("../../agents/embedded-agent-runner/active-run-projections.js");
+    const runReview = vi
+      .spyOn(reviewRuntime, "runSkillExperienceReview")
+      .mockResolvedValue(undefined);
+    const systemActivity = vi.spyOn(activeRuns, "getActiveEmbeddedRunCount").mockReturnValue(0);
+    const params = completedRun({ mode: "auto", sessionKey: "agent:main:queued-disable" });
+    params.ctx.workspaceDir = testState.workspaceDir;
+    params.ctx.foregroundPromptContext.workspaceDir = testState.workspaceDir;
+    params.ctx.foregroundPromptContext.cwd = testState.workspaceDir;
+    params.ctx.foregroundPromptContext.agentDir = testState.agentDir();
+    params.source = { ...params.source!, storePath: testState.statePath("sessions.sqlite") };
+    params.config.agents = { defaults: { workspace: testState.workspaceDir } };
+    const disabledConfig = {
+      ...params.config,
+      skills: { workshop: { autonomous: { mode: "off" as const } } },
+    };
+    vi.useFakeTimers();
+    try {
+      const { scheduleSkillExperienceReview } = await import("./experience-review-default.js");
+      setRuntimeConfigSnapshot(params.config);
+      // The same real default scheduler must admit this fixture while automatic review is enabled.
+      scheduleSkillExperienceReview(params);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.dynamicImportSettled();
+      await flushMicrotasks();
+      expect(runReview).toHaveBeenCalledOnce();
+      runReview.mockClear();
+
+      scheduleSkillExperienceReview(params);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(runReview).not.toHaveBeenCalled();
+      setRuntimeConfigSnapshot(disabledConfig);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.dynamicImportSettled();
+      await flushMicrotasks();
+
+      expect(runReview).not.toHaveBeenCalled();
+      // Reenabling without another completion must not revive work retired under off.
+      setRuntimeConfigSnapshot(params.config);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.dynamicImportSettled();
+      await flushMicrotasks();
+      expect(runReview).not.toHaveBeenCalled();
+    } finally {
+      // Drain the singleton's owned timer under off before restoring its mocked dispatch boundary.
+      setRuntimeConfigSnapshot(disabledConfig);
+      await vi.runOnlyPendingTimersAsync();
+      await vi.dynamicImportSettled();
+      await flushMicrotasks();
+      runReview.mockRestore();
+      systemActivity.mockRestore();
+      vi.useRealTimers();
+      await testState.cleanup();
+    }
   });
 
   it("rechecks group policy while preserving main-session sandbox identity", async () => {
