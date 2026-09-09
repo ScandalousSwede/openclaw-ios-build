@@ -9,7 +9,10 @@ vi.mock("../../plugins/manifest-registry.js", () => ({
 }));
 it("admitted provider alias uses the immutable descriptor without registry", () => {
   withExplicitProviderRuntimeScope(
-    { config: {}, provider: { id: "anthropic", aliases: ["claude"] } },
+    {
+      config: {},
+      provider: { id: "anthropic", label: "Anthropic", auth: [], aliases: ["claude"] },
+    },
     (admitted) => {
       for (const provider of ["anthropic", "claude"]) {
         expect(

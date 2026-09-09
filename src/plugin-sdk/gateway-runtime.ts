@@ -1,3 +1,24 @@
+import type {
+  IosEvidenceNotificationInput,
+  IosEvidenceNotificationOptions,
+  IosEvidenceNotificationResult,
+} from "../gateway/ios-evidence-push.js";
+
+export type {
+  IosEvidenceNotificationInput,
+  IosEvidenceNotificationOptions,
+  IosEvidenceNotificationResult,
+} from "../gateway/ios-evidence-push.js";
+
+/** Send one admitted evidence pointer through the existing paired iOS APNs route. */
+export async function sendIosEvidenceNotification(
+  input: IosEvidenceNotificationInput,
+  options: IosEvidenceNotificationOptions,
+): Promise<IosEvidenceNotificationResult> {
+  const runtime = await import("../gateway/ios-evidence-push.js");
+  return await runtime.sendIosEvidenceNotification(input, options);
+}
+
 // Public gateway/client helpers for plugins that talk to the host gateway surface.
 
 export * from "../gateway/channel-status-patches.js";

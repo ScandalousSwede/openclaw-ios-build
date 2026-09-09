@@ -1166,6 +1166,79 @@ export async function sendApnsExecApprovalAlert(
   });
 }
 
+type ApnsEvidenceAlertParams = {
+  gatewayDeviceId: string;
+  operationId: string;
+  eventId: string;
+  artifactSha256?: string;
+} & (
+  | Omit<DirectApnsExecApprovalAlertParams, "nodeId" | "approvalId" | "gatewayDeviceId">
+  | Omit<RelayApnsExecApprovalAlertParams, "nodeId" | "approvalId" | "gatewayDeviceId">
+);
+
+type ApnsEvidencePointer = Pick<
+  ApnsEvidenceAlertParams,
+  "gatewayDeviceId" | "operationId" | "eventId" | "artifactSha256"
+>;
+
+function createEvidenceAlertPayload(params: ApnsEvidencePointer): object {
+  return {
+    aps: {
+      alert: {
+        title: "Argus evidence available",
+        body: "Open OpenClaw to inspect the recorded evidence.",
+      },
+    },
+    openclaw: {
+      kind: "argus.evidence",
+      gatewayDeviceId: params.gatewayDeviceId,
+      operationId: params.operationId,
+      eventId: params.eventId,
+      ...(params.artifactSha256 ? { artifactSha256: params.artifactSha256 } : {}),
+    },
+  };
+}
+
+/** Check the actual UTF-8 APNs envelope limit before attempting transport. */
+export function isApnsEvidenceAlertPayloadWithinLimit(params: ApnsEvidencePointer): boolean {
+  return Buffer.byteLength(JSON.stringify(createEvidenceAlertPayload(params)), "utf8") <= 4096;
+}
+
+/** Sends the fixed evidence pointer contract, without sound or private alert content. */
+export async function sendApnsEvidenceAlert(
+  params: ApnsEvidenceAlertParams,
+): Promise<ApnsPushResult> {
+  if (!isApnsEvidenceAlertPayloadWithinLimit(params)) {
+    throw new Error("APNs evidence payload exceeds 4096 bytes");
+  }
+  const payload = createEvidenceAlertPayload(params);
+  if (params.registration.transport === "relay") {
+    const relayParams = params as Extract<
+      ApnsEvidenceAlertParams,
+      { relayConfig: ApnsRelayConfig }
+    >;
+    return await sendRelayApnsPush({
+      relayConfig: relayParams.relayConfig,
+      registration: relayParams.registration,
+      payload,
+      pushType: "alert",
+      priority: "10",
+      gatewayIdentity: relayParams.relayGatewayIdentity,
+      requestSender: relayParams.relayRequestSender,
+    });
+  }
+  const directParams = params as Extract<ApnsEvidenceAlertParams, { auth: ApnsAuthConfig }>;
+  return await sendDirectApnsPush({
+    auth: directParams.auth,
+    registration: directParams.registration,
+    payload,
+    timeoutMs: directParams.timeoutMs,
+    requestSender: directParams.requestSender,
+    pushType: "alert",
+    priority: "10",
+  });
+}
+
 /** Sends a silent wake telling the app an exec approval changed state. */
 export async function sendApnsExecApprovalResolvedWake(
   params: DirectApnsExecApprovalResolvedParams | RelayApnsExecApprovalResolvedParams,
