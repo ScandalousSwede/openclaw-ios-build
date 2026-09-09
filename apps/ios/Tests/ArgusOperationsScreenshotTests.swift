@@ -1,10 +1,51 @@
 import SwiftUI
 import UIKit
+import UserNotifications
 import Vision
 import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testNotificationReferenceCorrectionUsesProductionEvidenceHierarchy() async throws {
+        let (detail, _) = ArgusEvidenceNotificationTests.fixture()
+        let reference = try XCTUnwrap(ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: ["openclaw": [
+                "kind": "argus.evidence",
+                "gatewayDeviceId": "fixture-gateway",
+                "operationId": detail.requested.id,
+                "eventId": detail.requested.eventId,
+                "artifactSha256": detail.requested.artifacts[0].sha256,
+            ]]))
+        let resolved = try await reference.resolve(
+            identity: { .init(deviceId: "fixture-gateway") },
+            detail: { _ in detail },
+            stillCurrent: { true })
+        let root = VStack(alignment: .leading, spacing: 12) {
+            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+            ArgusOperationEvidenceContent(detail: resolved, artifactsAvailable: true, openArtifact: { _, _ in })
+        }
+        .padding()
+        .background(Color(uiColor: .systemBackground))
+        .environment(\.dynamicTypeSize, .accessibility1)
+        .environment(\.colorScheme, .dark)
+        .frame(width: 390)
+        .fixedSize(horizontal: false, vertical: true)
+        let image = try self.hostedImage(
+            root,
+            artifactNames: ["correction.txt"],
+            requiredText: [
+                "A newer observation",
+                "Recorded artifacts",
+                "Source and provenance",
+            ])
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "argus-notification-reference-correction-synthetic-accessibility"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+    }
+
     @MainActor
     func testProductionEvidenceCardsAtStandardAndAccessibilitySizes() throws {
         let store = ArgusOperationsStore()

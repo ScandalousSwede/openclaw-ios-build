@@ -326,6 +326,11 @@ struct RootTabs: View {
             .onChange(of: self.onboardingRequestID) { _, _ in
                 self.evaluateOnboardingPresentation(force: true)
             }
+            .onChange(of: self.appModel.argusEvidenceNotificationPresentationID, initial: true) { _, _ in
+                if self.appModel.argusEvidenceNotificationRequest != nil {
+                    self.selectedTab = .control
+                }
+            }
             .onChange(of: self.appModel.openChatRequestID) { _, _ in
                 self.selectedTab = .chat
             }
@@ -530,7 +535,9 @@ struct RootTabs: View {
     }
 
     private func gatewayProblemPrimaryActionTitle(_ problem: GatewayConnectionProblem) -> String {
-        if problem.canTrustRotatedCertificate { return "Trust certificate" }
+        if problem.canTrustRotatedCertificate {
+            return "Trust certificate"
+        }
         return problem.retryable ? "Retry" : "Open Settings"
     }
 
@@ -572,11 +579,17 @@ struct RootTabs: View {
     }
 
     private func hasExistingGatewayConfig() -> Bool {
-        if self.appModel.activeGatewayConnectConfig != nil { return true }
-        if GatewaySettingsStore.loadLastGatewayConnection() != nil { return true }
+        if self.appModel.activeGatewayConnectConfig != nil {
+            return true
+        }
+        if GatewaySettingsStore.loadLastGatewayConnection() != nil {
+            return true
+        }
 
         let preferredStableID = self.preferredGatewayStableID.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !preferredStableID.isEmpty { return true }
+        if !preferredStableID.isEmpty {
+            return true
+        }
 
         let manualHost = self.manualGatewayHost.trimmingCharacters(in: .whitespacesAndNewlines)
         return self.manualGatewayEnabled && !manualHost.isEmpty

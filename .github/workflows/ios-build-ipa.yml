@@ -663,6 +663,7 @@ jobs:
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/ChatMarkdownRenderingTests \
             -only-testing:OpenClawTests/ArgusOperationsTests \
+            -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ArgusWorkContractTests \
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
@@ -1317,6 +1318,7 @@ jobs:
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/ChatMarkdownRenderingTests \
             -only-testing:OpenClawTests/ArgusOperationsTests \
+            -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ArgusWorkContractTests \
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \

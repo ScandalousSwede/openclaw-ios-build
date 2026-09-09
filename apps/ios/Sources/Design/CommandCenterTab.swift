@@ -48,6 +48,12 @@ struct CommandCenterTab: View {
                 .safeAreaPadding(.bottom, OpenClawProMetric.bottomScrollInset)
             }
             .navigationBarHidden(true)
+            .navigationDestination(item: Binding(
+                get: { self.appModel.argusEvidenceNotificationRequest },
+                set: { self.appModel.argusEvidenceNotificationRequest = $0 }))
+            { request in
+                ArgusEvidenceNotificationView(request: request).id(request.id)
+            }
         }
         .task(id: self.recentSessionsRefreshID) {
             await self.refreshRecentSessionsIfNeeded()
@@ -64,19 +70,18 @@ struct CommandCenterTab: View {
         .padding(.horizontal, OpenClawProMetric.pagePadding)
     }
 
+    @ViewBuilder
     private var commandAmbientOverlay: some View {
-        Group {
-            if self.colorScheme == .light {
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(0.05),
-                        Color.clear,
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom)
-                    .ignoresSafeArea()
-                    .allowsHitTesting(false)
-            }
+        if self.colorScheme == .light {
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.05),
+                    Color.clear,
+                ],
+                startPoint: .top,
+                endPoint: .bottom)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
         }
     }
 
@@ -252,10 +257,18 @@ struct CommandCenterTab: View {
         guard !self.gatewayConnected else { return "Healthy" }
         let status = self.appModel.gatewayDisplayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = status.lowercased()
-        if lowercased.contains("approval") { return "Approval" }
-        if lowercased.contains("reconnect") { return "Reconnecting" }
-        if lowercased.contains("connect") { return "Connecting" }
-        if lowercased.contains("idle") { return "Idle" }
+        if lowercased.contains("approval") {
+            return "Approval"
+        }
+        if lowercased.contains("reconnect") {
+            return "Reconnecting"
+        }
+        if lowercased.contains("connect") {
+            return "Connecting"
+        }
+        if lowercased.contains("idle") {
+            return "Idle"
+        }
         return "Offline"
     }
 
@@ -319,7 +332,9 @@ struct CommandCenterTab: View {
     }
 
     private var sessionListMode: String {
-        if self.appModel.isAppleReviewDemoModeEnabled { return "demo" }
+        if self.appModel.isAppleReviewDemoModeEnabled {
+            return "demo"
+        }
         return self.appModel.isOperatorGatewayConnected ? "operator" : "offline"
     }
 
@@ -397,7 +412,9 @@ struct CommandCenterTab: View {
             guard Self.isRecentChatSession(session.key, defaultSessionKey: defaultSessionKey) else { continue }
             result.append(session)
             included.insert(session.key)
-            if result.count >= 4 { break }
+            if result.count >= 4 {
+                break
+            }
         }
 
         return result
@@ -499,7 +516,9 @@ struct CommandCenterTab: View {
     nonisolated static func isRecentChatSession(_ key: String, defaultSessionKey: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        if trimmed == defaultSessionKey { return false }
+        if trimmed == defaultSessionKey {
+            return false
+        }
         let normalized = trimmed.lowercased()
         let defaultBase = self.sessionBaseKey(defaultSessionKey)
         if !normalized.contains(":"),
@@ -507,7 +526,9 @@ struct CommandCenterTab: View {
         {
             return false
         }
-        if self.isHiddenInternalSession(trimmed) { return false }
+        if self.isHiddenInternalSession(trimmed) {
+            return false
+        }
         return !self.isAgentDeviceSession(trimmed, defaultSessionKey: defaultSessionKey)
     }
 
@@ -650,7 +671,9 @@ private struct CommandSessionsScreen: View {
     }
 
     private var headerDetail: String {
-        if self.isLoading, self.sessions.isEmpty { return "Loading recent sessions" }
+        if self.isLoading, self.sessions.isEmpty {
+            return "Loading recent sessions"
+        }
         let count = self.sessionRows.count
         if count == 0 {
             return self.appModel.isCommandSessionListAvailable ? "No recent sessions" : "Gateway offline"
@@ -716,7 +739,9 @@ extension NodeAppModel {
     }
 
     fileprivate var commandSessionListMode: String {
-        if self.isAppleReviewDemoModeEnabled { return "demo" }
+        if self.isAppleReviewDemoModeEnabled {
+            return "demo"
+        }
         return self.isOperatorGatewayConnected ? "operator" : "offline"
     }
 }

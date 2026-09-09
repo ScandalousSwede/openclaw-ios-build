@@ -32,6 +32,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
     private static let wakeRefreshTaskIdentifier = "ai.openclaw.ios.bgrefresh"
     private var backgroundWakeTask: Task<Bool, Never>?
     private var pendingAPNsDeviceToken: PendingAPNsDeviceToken?
+    private var pendingArgusEvidenceReference: ArgusEvidenceNotificationReference?
     private var pendingWatchPromptActions: [PendingWatchPromptAction] = []
     private var pendingExecApprovalPrompts: [PendingExecApprovalPrompt] = []
     private var pendingExecApprovalRequestedPushIDs: [String] = []
@@ -40,6 +41,10 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
     weak var appModel: NodeAppModel? {
         didSet {
             guard let model = self.resolvedAppModel() else { return }
+            if let reference = self.pendingArgusEvidenceReference {
+                self.pendingArgusEvidenceReference = nil
+                model.openArgusEvidenceNotification(reference)
+            }
             if let token = self.pendingAPNsDeviceToken {
                 self.pendingAPNsDeviceToken = nil
                 Task { @MainActor in
@@ -366,11 +371,29 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         completionHandler([])
     }
 
+    @discardableResult
+    func routeArgusEvidenceNotification(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> Bool {
+        guard let reference = ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: actionIdentifier, userInfo: userInfo) else { return false }
+        if let model = self.resolvedAppModel() {
+            model.openArgusEvidenceNotification(reference)
+        } else {
+            self.pendingArgusEvidenceReference = reference
+        }
+        return true
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void)
     {
+        if self.routeArgusEvidenceNotification(
+            actionIdentifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
+        {
+            completionHandler()
+            return
+        }
         if let action = Self.parseWatchPromptAction(from: response) {
             Task { @MainActor [weak self] in
                 guard let self else {
@@ -539,7 +562,9 @@ enum WatchPromptNotificationBridge {
             return true
         case .notDetermined:
             let granted = await (try? center.requestAuthorization(options: [.alert, .sound, .badge])) ?? false
-            if !granted { return false }
+            if !granted {
+                return false
+            }
             let updatedStatus = await self.notificationAuthorizationStatus(center: center)
             if self.isAuthorizationStatusAllowed(updatedStatus) {
                 // Refresh APNs registration immediately after the first permission grant so the

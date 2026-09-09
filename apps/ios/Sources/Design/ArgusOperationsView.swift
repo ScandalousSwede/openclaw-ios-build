@@ -145,7 +145,17 @@ struct ArgusArtifactButtonLabel: View {
     }
 }
 
-private struct ArgusOperationDetailView: View {
+/// A newly qualified route must retry pending reads even when connectivity was already restored.
+/// These public generation values trigger view work; full route admission remains in the RPC client.
+struct ArgusOperationDetailTaskID: Equatable {
+    let isVisible: Bool
+    let sameGateway: Bool
+    let isConnected: Bool
+    let routeGeneration: UInt64?
+    let socketGeneration: UInt64?
+}
+
+struct ArgusOperationDetailView: View {
     @Environment(NodeAppModel.self) private var appModel
     let operation: ArgusOperation
     let client: ArgusOperationsClient
@@ -154,6 +164,20 @@ private struct ArgusOperationDetailView: View {
     @State private var artifactOpen = ArgusArtifactOpenStore()
     @State private var isVisible = false
     @State private var detailLoadGeneration = 0
+    @State private var skipInitialLoad = false
+
+    init(
+        operation: ArgusOperation,
+        client: ArgusOperationsClient,
+        initialDetail: ArgusOperationDetail? = nil,
+        initialArtifactSHA: String? = nil)
+    {
+        self.operation = operation
+        self.client = client
+        self._detail = State(initialValue: initialDetail)
+        self._skipInitialLoad = State(initialValue: initialDetail != nil)
+        self._artifactOpen = State(initialValue: ArgusArtifactOpenStore(initialArtifactSHA: initialArtifactSHA))
+    }
 
     private var sameGateway: Bool {
         self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID
@@ -192,41 +216,56 @@ private struct ArgusOperationDetailView: View {
         }
         .navigationTitle("Evidence")
         .navigationBarTitleDisplayMode(.inline)
-        .task(id: "\(self.sameGateway)|\(self.appModel.isOperatorGatewayConnected)") {
+        .task(id: ArgusOperationDetailTaskID(
+            isVisible: self.isVisible,
+            sameGateway: self.sameGateway,
+            isConnected: self.appModel.isOperatorGatewayConnected,
+            routeGeneration: self.client.pinnedRoute?.diagnosticRouteGeneration,
+            socketGeneration: self.client.pinnedRoute?.diagnosticSocketGeneration))
+        {
             self.detailLoadGeneration += 1
-            if self.sameGateway, self.appModel.isOperatorGatewayConnected {
-                await self.load()
+            if self.isVisible, self.sameGateway, self.appModel.isOperatorGatewayConnected {
+                if self.skipInitialLoad {
+                    self.skipInitialLoad = false
+                } else {
+                    await self.load()
+                }
+                guard !Task.isCancelled, self.isVisible, self.sameGateway else { return }
+                if let detail = self.detail {
+                    // A corrected current observation must never substitute its artifact for the tapped event.
+                    await self.artifactOpen.openPendingArtifact(for: detail.requested, fetch: self.fetchArtifact)
+                }
             }
         }
         .refreshable { await self.load() }
-        .sheet(item: Binding(
-            get: { self.artifactOpen.preview },
-            set: { _ in self.artifactOpen.dismissPreview() }))
-        { preview in
-            NavigationStack {
-                ArgusArtifactView(preview: preview)
-                    .navigationTitle("Verified artifact")
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar { Button("Done") { self.artifactOpen.dismissPreview() } }
-            }
-        }
-        .onChange(of: self.sameGateway) { _, same in
-                self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
-                if !same {
-                    self.detail = nil
+            .sheet(item: Binding(
+                get: { self.artifactOpen.preview },
+                set: { _ in self.artifactOpen.dismissPreview() }))
+            { preview in
+                NavigationStack {
+                    ArgusArtifactView(preview: preview)
+                        .navigationTitle("Verified artifact")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar { Button("Done") { self.artifactOpen.dismissPreview() } }
                 }
             }
-            .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
-                self.artifactOpen.setAvailable(self.isVisible && self.sameGateway && connected)
-            }
-            .onAppear {
-                self.isVisible = true
-                self.artifactOpen.setAvailable(self.sameGateway && self.appModel.isOperatorGatewayConnected)
-            }
-            .onDisappear {
-                self.isVisible = false
-                self.artifactOpen.setAvailable(false)
-            }
+            .onChange(of: self.sameGateway) { _, same in
+                    self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
+                    if !same {
+                        self.detail = nil
+                    }
+                }
+                .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
+                    self.artifactOpen.setAvailable(self.isVisible && self.sameGateway && connected)
+                }
+                .onAppear {
+                    self.isVisible = true
+                    self.artifactOpen.setAvailable(self.sameGateway && self.appModel.isOperatorGatewayConnected)
+                }
+                .onDisappear {
+                    self.isVisible = false
+                    self.artifactOpen.setAvailable(false)
+                }
     }
 
     private func load() async {
@@ -249,9 +288,15 @@ private struct ArgusOperationDetailView: View {
 
     private func openArtifact(_ artifact: ArgusOperation.Artifact, item: ArgusOperation) async {
         guard self.sameGateway, self.appModel.isOperatorGatewayConnected else { return }
-        await self.artifactOpen.open(artifact, item: item) { params in
-            try await self.client.request("argus.operations.artifact", params: params, as: ArgusOperationArtifact.self)
-        }
+        await self.artifactOpen.open(artifact, item: item, fetch: self.fetchArtifact)
+    }
+
+    private func fetchArtifact(_ params: [String: String]) async throws -> ArgusOperationArtifact {
+        let response = try await self.client.request(
+            "argus.operations.artifact", params: params, as: ArgusOperationArtifact.self)
+        guard self.sameGateway, self.isVisible, self.appModel.isOperatorGatewayConnected,
+              !Task.isCancelled else { throw ArgusOperationsError.unavailable }
+        return response
     }
 }
 

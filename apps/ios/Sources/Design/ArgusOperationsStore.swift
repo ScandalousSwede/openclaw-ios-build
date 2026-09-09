@@ -227,11 +227,30 @@ struct ArgusArtifactPreview: Identifiable {
 @MainActor
 @Observable
 final class ArgusArtifactOpenStore {
+    private(set) var pendingInitialArtifactSHA: String?
     private(set) var preview: ArgusArtifactPreview?
     private(set) var isLoading = false
     private(set) var error: String?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var isAvailable = false
+    @ObservationIgnored private var verificationFailed = false
+
+    init(initialArtifactSHA: String? = nil) {
+        self.pendingInitialArtifactSHA = initialArtifactSHA
+    }
+
+    func openPendingArtifact(
+        for item: ArgusOperation,
+        fetch: ([String: String]) async throws -> ArgusOperationArtifact) async
+    {
+        guard let digest = self.pendingInitialArtifactSHA,
+              let artifact = item.artifacts.first(where: { $0.sha256 == digest }) else { return }
+        await self.open(artifact, item: item, fetch: fetch)
+        // Retry transient reads on reconnect, but never repeatedly fetch a failed verification.
+        if self.preview?.id == "\(item.eventId):\(digest)" || self.verificationFailed {
+            self.pendingInitialArtifactSHA = nil
+        }
+    }
 
     func setAvailable(_ available: Bool) {
         self.invalidate()
@@ -243,6 +262,7 @@ final class ArgusArtifactOpenStore {
         self.preview = nil
         self.isLoading = false
         self.error = nil
+        self.verificationFailed = false
     }
 
     func dismissPreview() {
@@ -260,6 +280,7 @@ final class ArgusArtifactOpenStore {
         self.isLoading = true
         self.preview = nil
         self.error = nil
+        self.verificationFailed = false
         defer {
             if generation == self.generation {
                 self.isLoading = false
@@ -278,6 +299,10 @@ final class ArgusArtifactOpenStore {
                 mimeType: previewMimeType)
         } catch {
             guard generation == self.generation, !Task.isCancelled else { return }
+            switch error {
+            case ArgusOperationsError.invalidResponse, is DecodingError: self.verificationFailed = true
+            default: break
+            }
             self.error = "Artifact unavailable or integrity verification failed. Nothing was opened."
         }
     }
@@ -291,9 +316,12 @@ enum ArgusOperationsError: Error {
 struct ArgusOperationsClient: Sendable {
     let session: GatewayNodeSession
     let gatewayID: String
+    var pinnedRoute: GatewayNodeSessionRoute?
 
     func request<T: Decodable & Sendable>(_ method: String, params: [String: String], as _: T.Type) async throws -> T {
-        guard let route = await self.session.currentRoute(ifGatewayID: self.gatewayID) else {
+        guard let route = await self.session.currentRoute(ifGatewayID: self.gatewayID),
+              self.pinnedRoute == nil || self.pinnedRoute == route
+        else {
             throw ArgusOperationsError.unavailable
         }
         let encoded = try JSONSerialization.data(withJSONObject: params)
@@ -305,7 +333,9 @@ struct ArgusOperationsClient: Sendable {
         guard data.count <= 2_000_000 else { throw ArgusOperationsError.invalidResponse }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try decoder.decode(T.self, from: data)
+        let response = try decoder.decode(T.self, from: data)
+        guard await self.session.isCurrentRoute(route) else { throw ArgusOperationsError.unavailable }
+        return response
     }
 }
 

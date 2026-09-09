@@ -230,7 +230,9 @@ struct GatewayConnectionOwner: Sendable {
 
     func matches(currentGeneration: UInt64, activeConfig: GatewayConnectConfig?) -> Bool {
         guard currentGeneration == self.generation, let activeConfig else { return false }
-        if activeConfig.hasSameConnectionInputs(as: self.config) { return true }
+        if activeConfig.hasSameConnectionInputs(as: self.config) {
+            return true
+        }
         let consumedBootstrapConfig = GatewayConnectConfig(
             url: self.config.url,
             stableID: self.config.stableID,
@@ -326,7 +328,9 @@ final class NodeAppModel {
     }
 
     var mobileSetupComplete: Bool {
-        if self.isAppleReviewDemoModeEnabled { return true }
+        if self.isAppleReviewDemoModeEnabled {
+            return true
+        }
         return self.nodeRoleState == .online && self.operatorRoleState == .online
     }
 
@@ -355,7 +359,9 @@ final class NodeAppModel {
     private(set) var lastGatewayProblem: GatewayConnectionProblem?
     private var operatorGatewayProblem: GatewayConnectionProblem?
     var gatewayDisplayStatusText: String {
-        if let lastGatewayProblem { return lastGatewayProblem.statusText }
+        if let lastGatewayProblem {
+            return lastGatewayProblem.statusText
+        }
         if self.nodeRoleState == .online, self.operatorRoleState != .online {
             return "Operator/chat \(self.operatorRoleState.statusLabel)"
         }
@@ -371,6 +377,8 @@ final class NodeAppModel {
     var homeCanvasRevision: Int = 0
     var lastShareEventText: String = "No share events yet."
     var openChatRequestID: Int = 0
+    var argusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest?
+    var argusEvidenceNotificationPresentationID: Int = 0
     var gatewaySetupRequestID: Int = 0
     private(set) var pendingAgentDeepLinkPrompt: AgentDeepLinkPrompt?
     private var pendingGatewaySetupLink: GatewayConnectDeepLink?
@@ -694,7 +702,9 @@ final class NodeAppModel {
                     else { return }
                     do {
                         try await owner.wake()
-                        if try await owner.unresolvedCommands().isEmpty { return }
+                        if try await owner.unresolvedCommands().isEmpty {
+                            return
+                        }
                     } catch {
                         return
                     }
@@ -797,9 +807,9 @@ final class NodeAppModel {
     func _test_configureChatOutbox(
         stableGatewayID: String?,
         storeProvider:
-            (@MainActor @Sendable (String) async throws -> OpenClawChatOutboxStore)?,
+        (@MainActor @Sendable (String) async throws -> OpenClawChatOutboxStore)?,
         transportProvider:
-            @escaping @MainActor @Sendable (String) -> any OpenClawChatTransport)
+        @escaping @MainActor @Sendable (String) -> any OpenClawChatTransport)
     {
         self.testChatOutboxGatewayOwnerOverrideEnabled = true
         self.testChatOutboxGatewayOwnerID = stableGatewayID
@@ -817,7 +827,7 @@ final class NodeAppModel {
     func _test_setChatOutboxDatabase(
         _ database: OpenClawChatOutboxDatabase?,
         reopenProvider:
-            (@MainActor @Sendable () throws -> OpenClawChatOutboxDatabase)? = nil)
+        (@MainActor @Sendable () throws -> OpenClawChatOutboxDatabase)? = nil)
     {
         self.chatOutboxDatabase = database
         self.testChatOutboxDatabaseProvider = reopenProvider
@@ -998,7 +1008,9 @@ final class NodeAppModel {
     private func handleCanvasA2UIAction(body: [String: Any]) async {
         let userActionAny = body["userAction"] ?? body
         let userAction: [String: Any] = {
-            if let dict = userActionAny as? [String: Any] { return dict }
+            if let dict = userActionAny as? [String: Any] {
+                return dict
+            }
             if let dict = userActionAny as? [AnyHashable: Any] {
                 return dict.reduce(into: [String: Any]()) { acc, pair in
                     guard let key = pair.key as? String else { return }
@@ -1550,15 +1562,14 @@ final class NodeAppModel {
     {
         guard shouldApply() else { return }
         do {
-            let res: Data
-            if let expectedRoute {
-                res = try await self.operatorGateway.request(
+            let res: Data = if let expectedRoute {
+                try await self.operatorGateway.request(
                     method: "config.get",
                     paramsJSON: "{}",
                     timeoutSeconds: 8,
                     ifCurrentRoute: expectedRoute)
             } else {
-                res = try await self.operatorGateway.request(
+                try await self.operatorGateway.request(
                     method: "config.get",
                     paramsJSON: "{}",
                     timeoutSeconds: 8)
@@ -1599,15 +1610,14 @@ final class NodeAppModel {
             self.gatewayAgentRosterLoadState = .loading
         }
         do {
-            let res: Data
-            if let expectedRoute {
-                res = try await self.operatorGateway.request(
+            let res: Data = if let expectedRoute {
+                try await self.operatorGateway.request(
                     method: "agents.list",
                     paramsJSON: "{}",
                     timeoutSeconds: 8,
                     ifCurrentRoute: expectedRoute)
             } else {
-                res = try await self.operatorGateway.request(
+                try await self.operatorGateway.request(
                     method: "agents.list",
                     paramsJSON: "{}",
                     timeoutSeconds: 8)
@@ -1720,7 +1730,9 @@ final class NodeAppModel {
 
             let stream = await self.operatorGateway.subscribeServerEvents(bufferingNewest: 200)
             for await evt in stream {
-                if Task.isCancelled || !shouldContinue() { return }
+                if Task.isCancelled || !shouldContinue() {
+                    return
+                }
                 if let expectedRoute {
                     guard await self.operatorGateway.isCurrentRoute(expectedRoute) else { return }
                 }
@@ -1790,7 +1802,7 @@ final class NodeAppModel {
                     return decoded.ok ?? false
                 } catch {
                     guard await shouldContinue() else { return true }
-                    if !(await self.operatorGateway.isCurrentRoute(operatorRoute)) {
+                    if await !(self.operatorGateway.isCurrentRoute(operatorRoute)) {
                         return true
                     }
                     if let gatewayError = error as? GatewayResponseError {
@@ -1819,11 +1831,10 @@ final class NodeAppModel {
                 guard let self else { return }
                 guard await shouldContinue() else { return }
                 guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else { return }
-                let nodeDisconnected: Bool
-                if let nodeRoute {
-                    nodeDisconnected = await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)
+                let nodeDisconnected: Bool = if let nodeRoute {
+                    await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)
                 } else {
-                    nodeDisconnected = false
+                    false
                 }
                 guard await shouldContinue() else { return }
                 await MainActor.run {
@@ -2004,7 +2015,9 @@ final class NodeAppModel {
             let params = try? Self.decodeParams(OpenClawCanvasSnapshotParams.self, from: req.paramsJSON)
             let format = params?.format ?? .jpeg
             let maxWidth: CGFloat? = {
-                if let raw = params?.maxWidth, raw > 0 { return CGFloat(raw) }
+                if let raw = params?.maxWidth, raw > 0 {
+                    return CGFloat(raw)
+                }
                 // Keep default snapshots comfortably below the gateway client's maxPayload.
                 // For full-res, clients should explicitly request a larger maxWidth.
                 return switch format {
@@ -2792,7 +2805,9 @@ extension NodeAppModel {
 
     private func isCameraEnabled() -> Bool {
         // Default-on: if the key doesn't exist yet, treat it as enabled.
-        if UserDefaults.standard.object(forKey: "camera.enabled") == nil { return true }
+        if UserDefaults.standard.object(forKey: "camera.enabled") == nil {
+            return true
+        }
         return UserDefaults.standard.bool(forKey: "camera.enabled")
     }
 
@@ -2824,7 +2839,9 @@ extension NodeAppModel {
         let base = SessionKey.normalizeMainKey(self.mainSessionBaseKey)
         let agentId = (self.selectedAgentId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let defaultId = (self.gatewayDefaultAgentId ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if agentId.isEmpty || (!defaultId.isEmpty && agentId == defaultId) { return base }
+        if agentId.isEmpty || (!defaultId.isEmpty && agentId == defaultId) {
+            return base
+        }
         return SessionKey.makeAgentSessionKey(agentId: agentId, baseKey: base)
     }
 
@@ -2877,7 +2894,9 @@ extension NodeAppModel {
 
     private func agentDisplayName(for agentId: String, fallback: String) -> String {
         let resolvedId = agentId.trimmingCharacters(in: .whitespacesAndNewlines)
-        if resolvedId.isEmpty { return fallback }
+        if resolvedId.isEmpty {
+            return fallback
+        }
         if let match = self.gatewayAgents.first(where: { $0.id == resolvedId }) {
             let name = (match.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             return name.isEmpty ? match.id : name
@@ -3049,8 +3068,12 @@ extension NodeAppModel {
                 expectedConfig: expectedConfig,
                 expectedConfigurationGeneration: expectedConfigurationGeneration)
         }
-        if let operatorGatewayTask { await operatorGatewayTask.value }
-        if let nodeGatewayTask { await nodeGatewayTask.value }
+        if let operatorGatewayTask {
+            await operatorGatewayTask.value
+        }
+        if let nodeGatewayTask {
+            await nodeGatewayTask.value
+        }
         guard self.foregroundRecoveryOwns(
             expectedConfig: expectedConfig,
             expectedConfigurationGeneration: expectedConfigurationGeneration)
@@ -3393,11 +3416,11 @@ extension NodeAppModel {
             password: password)
         {
         case .sharedToken, .password:
-            return true
+            true
         case .bootstrapToken:
-            return false
+            false
         case .none, .deviceToken:
-            return hasStoredOperatorToken
+            hasStoredOperatorToken
         }
     }
 
@@ -3522,7 +3545,9 @@ extension NodeAppModel {
         issues: [GatewayBootstrapHandoffIssue],
         persistence: GatewayBootstrapHandoffPersistence) -> GatewayMobileSetupHandoffState
     {
-        if persistence == .failed { return .persistenceFailed }
+        if persistence == .failed {
+            return .persistenceFailed
+        }
         let invalidNodeOrEnvelopeIssues: Set<GatewayBootstrapHandoffIssue> = [
             .missingNodeRole,
             .missingNodeToken,
@@ -3531,16 +3556,32 @@ extension NodeAppModel {
             .malformedResponse,
             .untrustedEndpoint,
         ]
-        if !invalidNodeOrEnvelopeIssues.isDisjoint(with: Set(issues)) { return .invalid }
-        if issues.contains(.missingOperatorRole) { return .nodeOnly }
-        if issues.contains(.missingOperatorToken) { return .missingOperatorCredential }
+        if !invalidNodeOrEnvelopeIssues.isDisjoint(with: Set(issues)) {
+            return .invalid
+        }
+        if issues.contains(.missingOperatorRole) {
+            return .nodeOnly
+        }
+        if issues.contains(.missingOperatorToken) {
+            return .missingOperatorCredential
+        }
 
         var missingScopes: [String] = []
-        if issues.contains(.missingOperatorRead) { missingScopes.append("operator.read") }
-        if issues.contains(.missingOperatorWrite) { missingScopes.append("operator.write") }
-        if issues.contains(.missingOperatorTalkSecrets) { missingScopes.append("operator.talk.secrets") }
-        if !missingScopes.isEmpty { return .scopeBlocked(missing: missingScopes) }
-        if issues.isEmpty, persistence == .succeeded { return .ready }
+        if issues.contains(.missingOperatorRead) {
+            missingScopes.append("operator.read")
+        }
+        if issues.contains(.missingOperatorWrite) {
+            missingScopes.append("operator.write")
+        }
+        if issues.contains(.missingOperatorTalkSecrets) {
+            missingScopes.append("operator.talk.secrets")
+        }
+        if !missingScopes.isEmpty {
+            return .scopeBlocked(missing: missingScopes)
+        }
+        if issues.isEmpty, persistence == .succeeded {
+            return .ready
+        }
         return .invalid
     }
 
@@ -3687,7 +3728,9 @@ extension NodeAppModel {
         missingScopes: [String]?) -> GatewayOperatorLoopPostConnectDecision
     {
         guard ownerIsCurrent else { return .stopStaleOwner }
-        if blockedGeneration == ownerGeneration { return .stopScopeBlocked }
+        if blockedGeneration == ownerGeneration {
+            return .stopScopeBlocked
+        }
         guard let missingScopes else { return .retryRouteAdmission }
         return missingScopes.isEmpty ? .monitor : .stopScopeBlocked
     }
@@ -3741,7 +3784,9 @@ extension NodeAppModel {
             var forcePhysicalReconnectOnNextAttempt = forceSessionReconnect
             operatorReconnectLoop: while !Task.isCancelled {
                 guard self.isCurrentGatewayConnectionOwner(loopOwner) else { break }
-                if self.operatorReconnectBlockedGeneration == loopOwner.generation { break }
+                if self.operatorReconnectBlockedGeneration == loopOwner.generation {
+                    break
+                }
                 if self.gatewayPairingPaused {
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                     continue
@@ -4229,7 +4274,9 @@ extension NodeAppModel {
                     attempt = 0
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
                 } catch {
-                    if Task.isCancelled { break }
+                    if Task.isCancelled {
+                        break
+                    }
                     guard self.isCurrentGatewayConnectionOwner(owner) else { break }
                     if !didFallbackClientId,
                        let fallbackClientId = self.legacyClientIdFallback(
@@ -4553,15 +4600,14 @@ extension NodeAppModel {
             let data = try JSONEncoder().encode(
                 Params(includeGlobal: true, includeUnknown: false, limit: 80))
             guard let json = String(data: data, encoding: .utf8) else { return }
-            let response: Data
-            if let expectedRoute {
-                response = try await self.operatorGateway.request(
+            let response: Data = if let expectedRoute {
+                try await self.operatorGateway.request(
                     method: "sessions.list",
                     paramsJSON: json,
                     timeoutSeconds: 10,
                     ifCurrentRoute: expectedRoute)
             } else {
-                response = try await self.operatorGateway.request(
+                try await self.operatorGateway.request(
                     method: "sessions.list",
                     paramsJSON: json,
                     timeoutSeconds: 10)
@@ -5810,15 +5856,14 @@ extension NodeAppModel {
     private func fetchPushRelayGatewayIdentity(
         ifCurrentRoute expectedRoute: GatewayNodeSessionRoute? = nil) async throws -> PushRelayGatewayIdentity
     {
-        let response: Data
-        if let expectedRoute {
-            response = try await self.operatorGateway.request(
+        let response: Data = if let expectedRoute {
+            try await self.operatorGateway.request(
                 method: "gateway.identity.get",
                 paramsJSON: "{}",
                 timeoutSeconds: 8,
                 ifCurrentRoute: expectedRoute)
         } else {
-            response = try await self.operatorGateway.request(
+            try await self.operatorGateway.request(
                 method: "gateway.identity.get",
                 paramsJSON: "{}",
                 timeoutSeconds: 8)
@@ -5863,13 +5908,17 @@ extension NodeAppModel {
            let kind = payload["kind"] as? String
         {
             let trimmed = kind.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
+            if !trimmed.isEmpty {
+                return trimmed
+            }
         }
         if let payload = userInfo["openclaw"] as? [AnyHashable: Any],
            let kind = payload["kind"] as? String
         {
             let trimmed = kind.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { return trimmed }
+            if !trimmed.isEmpty {
+                return trimmed
+            }
         }
         return "unknown"
     }
@@ -6462,15 +6511,14 @@ extension NodeAppModel {
     {
         guard shouldApply() else { return }
         do {
-            let data: Data
-            if let expectedRoute {
-                data = try await self.operatorGateway.request(
+            let data: Data = if let expectedRoute {
+                try await self.operatorGateway.request(
                     method: "voicewake.get",
                     paramsJSON: "{}",
                     timeoutSeconds: 8,
                     ifCurrentRoute: expectedRoute)
             } else {
-                data = try await self.operatorGateway.request(
+                try await self.operatorGateway.request(
                     method: "voicewake.get",
                     paramsJSON: "{}",
                     timeoutSeconds: 8)
@@ -6614,7 +6662,9 @@ extension NodeAppModel {
         let trimmed = (key ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let current = self.mainSessionBaseKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed == current { return }
+        if trimmed == current {
+            return
+        }
         self.mainSessionBaseKey = trimmed
         self.talkMode.updateMainSessionKey(self.mainSessionKey)
     }
