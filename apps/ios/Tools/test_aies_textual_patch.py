@@ -64,10 +64,14 @@ class TextualPatchTests(unittest.TestCase):
         self.verify()
 
     def test_restores_readonly_mode_after_write_failure(self):
+        # Model macOS temporary roots whose spelling includes an ancestor symlink.
+        alias = Path(self.temp.name) / "packages-alias"
+        alias.symlink_to(self.packages, target_is_directory=True)
+        self.target = alias / "checkouts/textual" / patcher.SOURCE
         self.target.chmod(0o444)
         original_write = Path.write_bytes
         def fail_target(path, data):
-            if path == self.target:
+            if path.resolve() == self.target.resolve():
                 self.assertTrue(path.stat().st_mode & stat.S_IWUSR)
                 raise OSError("synthetic disk failure")
             return original_write(path, data)
