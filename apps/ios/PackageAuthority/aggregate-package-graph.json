@@ -25,6 +25,11 @@
       "packageIdentity": "elevenlabskit",
       "path": "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json",
       "sha256": "2251cb6ed0c542c57c0e3bc00d496fd3e6982365779d31b9169a1d421d3d7914"
+    },
+    {
+      "packageIdentity": "textual",
+      "path": "apps/ios/PackageAuthority/textual-balanced-concatenation-patch.json",
+      "sha256": "3d62145bd94c89923c2ea980248d830506e4699f94f26e14abbacb99751b244a"
     }
   ],
   "standaloneLocks": [

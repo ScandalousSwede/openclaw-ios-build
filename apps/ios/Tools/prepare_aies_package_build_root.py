@@ -14,6 +14,7 @@ import sys
 from typing import Any
 
 import aies_package_authority as authority
+import aies_textual_patch
 
 
 RECEIPT_SCHEMA = "aies.ios.package-preparation.v1"
@@ -276,6 +277,12 @@ def verify_receipt(receipt_path: pathlib.Path, output: pathlib.Path | None = Non
     workspace_state = authority.validate_workspace_state(manifest, workspace_state_path)
     if workspace_state["workspaceStateSHA256"] != receipt["workspaceState"]["workspaceStateSHA256"]:
         raise PreparationError("SwiftPM workspace-state changed after preparation")
+    textual_patch_checkout = aies_textual_patch.verify(
+        build_root, manifest, workspace_state_path,
+        pathlib.Path(receipt["clonedSourcePackages"]).resolve(),
+    )
+    if textual_patch_checkout != receipt["textualPatchCheckout"]:
+        raise PreparationError("Textual patch checkout changed after preparation")
     source_patch_checkout = authority.validate_source_patch_checkout(
         build_root,
         manifest,
@@ -293,6 +300,7 @@ def verify_receipt(receipt_path: pathlib.Path, output: pathlib.Path | None = Non
         "concreteResolved": concrete,
         "workspaceState": workspace_state,
         "sourcePatchCheckout": source_patch_checkout,
+        "textualPatchCheckout": textual_patch_checkout,
         "lockInventory": current_locks,
     }
     if output is not None:
@@ -473,6 +481,11 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         build_manifest, workspace_states[0]
     )
     write_json(evidence / "workspace-state-validation.json", workspace_state)
+    textual_patch_checkout = aies_textual_patch.verify(
+        build_root, build_manifest, workspace_states[0], source_packages,
+        apply=True, archive=patch_evidence,
+    )
+    write_json(evidence / "textual-patch-checkout.json", textual_patch_checkout)
     source_patch_checkout = authority.validate_source_patch_checkout(
         build_root,
         build_manifest,
@@ -515,6 +528,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         },
         "workspaceState": workspace_state,
         "sourcePatchCheckout": source_patch_checkout,
+        "textualPatchCheckout": textual_patch_checkout,
         "strictArguments": strict,
         "strictResolveCommand": strict_command,
         "clonedSourcePackages": str(source_packages),

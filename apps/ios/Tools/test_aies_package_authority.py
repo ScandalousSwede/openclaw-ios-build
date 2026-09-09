@@ -25,6 +25,7 @@ class AIESPackageAuthorityTests(unittest.TestCase):
         paths = [
             authority.DEFAULT_MANIFEST,
             "apps/ios/PackageAuthority/elevenlabskit-observability-patch.json",
+            "apps/ios/PackageAuthority/textual-balanced-concatenation-patch.json",
             "apps/ios/project.yml",
             "apps/shared/OpenClawKit/Package.swift",
             "apps/swabble/Package.swift",

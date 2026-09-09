@@ -15,6 +15,8 @@ import tempfile
 from typing import Any
 from urllib.parse import urlsplit
 
+import aies_textual_patch
+
 
 SCHEMA = "aies.ios.aggregate-package-authority.v2"
 DEFAULT_MANIFEST = "apps/ios/PackageAuthority/aggregate-package-graph.json"
@@ -197,8 +199,8 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         )
 
     source_patches = payload["sourcePatches"]
-    if not isinstance(source_patches, list) or len(source_patches) != 1:
-        raise AuthorityError("aggregate authority requires exactly one governed source patch")
+    if not isinstance(source_patches, list) or len(source_patches) != 2:
+        raise AuthorityError("aggregate authority requires exactly two governed source patches")
     source_patch = source_patches[0]
     if not isinstance(source_patch, dict):
         raise AuthorityError("source patch authority must be an object")
@@ -498,6 +500,11 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         elevenlabs_pin["revision"] != provenance["patch"]["revision"]
     ):
         raise AuthorityError("ElevenLabsKit semantic pin differs from governed patch provenance")
+    try:
+        aies_textual_patch.declaration(root, payload)
+    except (aies_textual_patch.PatchError, OSError, KeyError, TypeError) as error:
+        raise AuthorityError("invalid Textual patch authority: " + str(error)) from error
+
     return payload
 
 

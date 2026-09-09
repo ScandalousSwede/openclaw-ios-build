@@ -268,6 +268,7 @@ jobs:
           set -euo pipefail
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_textual_patch.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
             test_prepare_aies_manual_archive_signing.py \
@@ -404,6 +405,7 @@ jobs:
           cd "${AIES_BUILD_ROOT}/apps/ios/Tools"
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_aies_package_authority.py \
+            test_aies_textual_patch.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
             test_prepare_aies_manual_archive_signing.py \
@@ -1197,6 +1199,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v \
             test_cleanup_aies_export_profiles.py \
             test_aies_package_authority.py \
+            test_aies_textual_patch.py \
             test_aies_qualification_workflow_contract.py \
             test_credential_free_keychain_contract.py \
             test_prepare_aies_manual_archive_signing.py \
