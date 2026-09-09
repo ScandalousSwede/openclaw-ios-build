@@ -12,6 +12,7 @@ import { getActivePluginRegistry, setActivePluginRegistry } from "../plugins/run
 import type { CommandLaneSnapshot } from "../process/command-queue.js";
 import { CommandLane } from "../process/lanes.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
+import { getLastHeartbeatEvent } from "./heartbeat-events.js";
 import { type HeartbeatDeps, runHeartbeatOnce } from "./heartbeat-runner.js";
 import { seedMainSessionStore, withTempHeartbeatSandbox } from "./heartbeat-runner.test-utils.js";
 import {
@@ -19,7 +20,7 @@ import {
   HEARTBEAT_SKIP_LANES_BUSY,
   HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
 } from "./heartbeat-wake.js";
-import { resetSystemEventsForTest, enqueueSystemEvent } from "./system-events.js";
+import { resetSystemEventsForTest, enqueueSystemEvent, peekSystemEvents } from "./system-events.js";
 
 vi.mock("jiti", () => ({ createJiti: () => () => ({}) }));
 
@@ -360,6 +361,50 @@ describe("heartbeat runner skips when target session lane is busy", () => {
       }
     });
   });
+
+  it.each(["aborted", "lifecycle-invalidated"] as const)(
+    "fails explicitly rejected %s admission without consuming queued work",
+    async (reason) => {
+      await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+        const base = createHeartbeatTelegramConfig();
+        const cfg: OpenClawConfig = {
+          ...base,
+          session: { store: storePath },
+          agents: {
+            defaults: { ...base.agents?.defaults, workspace: tmpDir },
+          },
+        };
+        const sessionKey = await seedHeartbeatTelegramSession(storePath, cfg);
+        const text = "Synthetic scheduled work awaiting admission";
+        enqueueSystemEvent(text, { sessionKey, contextKey: "cron:synthetic-admission" });
+        replySpy.mockImplementation(async (_ctx, replyOptions) => {
+          const runState = resolveReplyOperationRunState(replyOptions);
+          if (!runState) {
+            throw new Error("expected heartbeat reply operation state");
+          }
+          runState.admission = { status: "skipped", reason };
+          return undefined;
+        });
+
+        const result = await runHeartbeatOnce({
+          cfg,
+          source: "cron",
+          intent: "immediate",
+          reason: "cron:synthetic-admission",
+          sessionKey,
+          deps: {
+            getQueueSize: () => 0,
+            getReplyFromConfig: replySpy,
+          },
+        });
+
+        expect(replySpy).toHaveBeenCalledOnce();
+        expect(result).toEqual({ status: "failed", reason });
+        expect(getLastHeartbeatEvent()).toMatchObject({ status: "failed", reason });
+        expect(peekSystemEvents(sessionKey)).toEqual([text]);
+      });
+    },
+  );
 
   it("does not infer admission rejection from a replacement run after an empty heartbeat", async () => {
     await withTempHeartbeatSandbox(async ({ storePath }) => {

@@ -2029,15 +2029,19 @@ export async function runHeartbeatOnce(opts: {
     if (
       !heartbeatToolResponse &&
       (!replyPayload || !hasOutboundReplyContent(replyPayload)) &&
-      replyOperationRunState.admission?.status === "skipped" &&
-      replyOperationRunState.admission.reason === "active-run"
+      replyOperationRunState.admission?.status === "skipped"
     ) {
+      // Rejected admission did not consume the wake. Only active-run is retryable;
+      // cancellation cleanup remains with the owner of the queued system event.
+      const result: HeartbeatRunResult =
+        replyOperationRunState.admission.reason === "active-run"
+          ? { status: "skipped", reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT }
+          : { status: "failed", reason: replyOperationRunState.admission.reason };
       emitHeartbeatEvent({
-        status: "skipped",
-        reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT,
+        ...result,
         durationMs: Date.now() - startedAt,
       });
-      return { status: "skipped", reason: HEARTBEAT_SKIP_REQUESTS_IN_FLIGHT };
+      return result;
     }
     const includeReasoning = heartbeat?.includeReasoning === true;
     const reasoningPayloads = includeReasoning
