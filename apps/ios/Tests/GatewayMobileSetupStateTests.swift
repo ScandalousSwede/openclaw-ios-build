@@ -350,8 +350,9 @@ import Testing
         #expect(model.contains("operatorRoute: GatewayNodeSessionRoute,"))
         #expect(model.contains(
             "guard await self.operatorGateway.disconnect(ifCurrentRoute: operatorRoute) else { return }"))
-        #expect(model.contains(
-            "nodeDisconnected = await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)"))
+        // SwiftFormat may express the result as an if-expression. The invariant is
+        // the route-owned disconnect call, independent of its assignment syntax.
+        #expect(model.contains("await self.nodeGateway.disconnect(ifCurrentRoute: nodeRoute)"))
         #expect(model.contains(
             "self.operatorGateway.currentRoute(\n                      ifGatewayID: expectedGatewayID)"))
         #expect(model.contains("self.nodeGateway.currentRoute(ifGatewayID: expectedGatewayID)"))
