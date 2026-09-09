@@ -150,6 +150,7 @@ Every section heading and namespace anchor from the previous single-page version
 - <a id="reusable-runtime-utilities" />[Reusable runtime utilities](/plugins/sdk-runtime/config-and-utilities#reusable-runtime-utilities)
 - <a id="stage-timing-diagnostics" />[Stage timing diagnostics](/plugins/sdk-runtime/config-and-utilities#stage-timing-diagnostics)
 - <a id="plugin-command-runtime-helpers" />[Plugin command runtime helpers](/plugins/sdk-runtime/agent#plugin-command-runtime-helpers)
+- <a id="send-a-canonical-evidence-pointer-to-ios" />[Send a canonical evidence pointer to iOS](/plugins/sdk-runtime/gateway-and-nodes#send-a-canonical-evidence-pointer-to-ios)
 - <a id="gateway-service-events" />[Gateway service events](/plugins/sdk-runtime/gateway-and-nodes#gateway-service-events)
 - <a id="api-runtime-agent" />[`api.runtime.agent`](/plugins/sdk-runtime/agent#api-runtime-agent)
 - <a id="api-runtime-agent-defaults" />[`api.runtime.agent.defaults`](/plugins/sdk-runtime/agent#api-runtime-agent-defaults)

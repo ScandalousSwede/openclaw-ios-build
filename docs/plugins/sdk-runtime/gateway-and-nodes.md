@@ -271,3 +271,61 @@ The reporter is revoked when the service stops or its plugin registry generation
 late callback from an old generation cannot overwrite current health. Prefer returning the startup
 promise when the service is not usable until that promise settles; use the reporter only for
 deliberately nonblocking work that owns its own stop path.
+
+## Send a canonical evidence pointer to iOS
+
+`sendIosEvidenceNotification` from `openclaw/plugin-sdk/gateway-runtime` lazily
+loads the existing APNs sender for one currently paired iOS or iPadOS operator
+device. The caller must first admit the exact canonical operation/event pair,
+verify any supplied artifact digest, and apply its notification policy.
+
+```typescript
+import { sendIosEvidenceNotification } from "openclaw/plugin-sdk/gateway-runtime";
+
+const result = await sendIosEvidenceNotification(
+  { targetDeviceId, operationId, eventId, artifactSha256 },
+  { authorizeSend: async () => notificationPolicyStillAllowsSend() },
+);
+```
+
+`targetDeviceId` must be an exact paired identity (at most 128 Unicode scalars).
+`operationId` and `eventId` must be nonempty exact identifiers of at most 300
+Unicode scalars, without leading/trailing Unicode whitespace, control or format
+characters, or unpaired surrogates. The derived gateway identity has the same
+128-scalar limit as the target identity.
+`artifactSha256` is optional; when present it must be 64 lowercase hexadecimal
+characters. The serialized APNs payload must fit within 4096 UTF-8 bytes.
+
+The helper derives the gateway identity and uses the target's existing direct
+or relay registration and configuration. It requires a current effective
+operator role and an active operator token granting `operator.read`. After
+configuration is prepared, the required `authorizeSend` callback provides an
+additional send-time deny check; it cannot grant pairing or scope access.
+The helper rechecks the registration and current pairing before sending.
+The current APNs transport repeats those checks and `authorizeSend` after
+transport preparation. The callback must therefore be a repeatable deny check;
+it must not consume a one-use approval or dispatch work.
+Do not expose this callback or transport configuration as RPC input.
+
+The fixed alert says “Argus evidence available” and asks the recipient to open
+OpenClaw. Its `openclaw` metadata contains only `kind: "argus.evidence"`,
+`gatewayDeviceId`, `operationId`, `eventId`, and the optional digest. It contains
+no evidence body, custom sound, or caller-supplied alert content.
+
+The result's `status` is one of:
+
+- `provider_accepted`: the configured provider route reports success.
+- `provider_rejected`: the route explicitly rejects the request.
+- `acceptance_unknown`: transport failed ambiguously or its result was inconsistent.
+- `not_sent_unavailable`: input, pairing, registration, configuration, or the
+  final checks prevented a send, including the transport-time checks. A thrown
+  `authorizeSend` callback also returns this.
+- `not_sent_held`: the final callback did not return `true`.
+
+When available, results include `transport` (`direct` or `relay`), a validated
+UUID `providerId`, and an integer `httpStatus` between 100 and 599. Provider
+bodies, errors, credentials, token suffixes, and private routing details are
+omitted. Acceptance does not establish device delivery, an artifact opening,
+or owner acknowledgment. The helper does not retry, queue, fan out, or remove
+registrations. Qualify the configured relay's support for `argus.evidence` and
+the receiving app separately before claiming an end-to-end result.

@@ -111,3 +111,34 @@ export function createApnsApprovalResolvedPayload(params: {
     },
   };
 }
+
+/** Fixed metadata accepted by the iOS canonical evidence notification receiver. */
+export type ApnsEvidencePointer = {
+  gatewayDeviceId: string;
+  operationId: string;
+  eventId: string;
+  artifactSha256?: string;
+};
+
+export function createEvidenceAlertPayload(params: ApnsEvidencePointer): object {
+  return {
+    aps: {
+      alert: {
+        title: "Argus evidence available",
+        body: "Open OpenClaw to inspect the recorded evidence.",
+      },
+    },
+    openclaw: {
+      kind: "argus.evidence",
+      gatewayDeviceId: params.gatewayDeviceId,
+      operationId: params.operationId,
+      eventId: params.eventId,
+      ...(params.artifactSha256 ? { artifactSha256: params.artifactSha256 } : {}),
+    },
+  };
+}
+
+/** Check the actual UTF-8 APNs envelope limit before attempting transport. */
+export function isApnsEvidenceAlertPayloadWithinLimit(params: ApnsEvidencePointer): boolean {
+  return Buffer.byteLength(JSON.stringify(createEvidenceAlertPayload(params)), "utf8") <= 4096;
+}

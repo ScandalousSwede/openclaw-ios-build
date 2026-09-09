@@ -18,6 +18,9 @@ import {
   createApnsApprovalAlertPayload,
   createApnsApprovalResolvedPayload,
   createApnsBackgroundPayload,
+  createEvidenceAlertPayload,
+  isApnsEvidenceAlertPayloadWithinLimit,
+  type ApnsEvidencePointer,
   resolveExecApprovalAlertBody,
   resolvePluginApprovalAlertBody,
 } from "./push-apns-payloads.js";
@@ -54,7 +57,7 @@ export type { ApnsAuthConfig } from "./push-apns-auth.js";
 type ApnsTransport = "direct" | "relay";
 
 /** Normalized APNs push result returned to gateway push/nodes methods. */
-type ApnsPushResult = {
+export type ApnsPushResult = {
   ok: boolean;
   status: number;
   apnsId?: string;
@@ -543,6 +546,28 @@ async function sendApnsPush(
     ...(controls?.signal ? { signal: controls.signal } : {}),
     ...(controls?.isCurrent ? { isCurrent: controls.isCurrent } : {}),
   });
+}
+
+type ApnsEvidenceAlertParams = ApnsTransportParams & ApnsLifecycleControls & ApnsEvidencePointer;
+
+export { isApnsEvidenceAlertPayloadWithinLimit } from "./push-apns-payloads.js";
+
+/** Send the fixed evidence pointer through the current APNs transport owner. */
+export async function sendApnsEvidenceAlert(
+  params: ApnsEvidenceAlertParams,
+): Promise<ApnsPushResult> {
+  if (!isApnsEvidenceAlertPayloadWithinLimit(params)) {
+    throw new Error("APNs evidence payload exceeds 4096 bytes");
+  }
+  return await sendApnsPush(
+    {
+      transport: params,
+      payload: createEvidenceAlertPayload(params),
+      pushType: "alert",
+      priority: "10",
+    },
+    params,
+  );
 }
 
 /** Sends an exec-approval alert notification via direct APNs or relay. */
