@@ -231,6 +231,66 @@ struct VoicePlaybackBoundaryTests {
     }
 
 
+    /// Independently validates the same MP3 with Apple's file decoder and player.
+    /// This does not exercise the production streaming parser or queue lifecycle.
+    func checkMP3FileControl(mode: SessionMode) async throws {
+        try self.prepareAudio(mode)
+        defer { self.cleanupAudio() }
+        let url = try #require(Bundle.module.url(
+            forResource: "synthetic-1s-44100", withExtension: "mp3", subdirectory: "Fixtures"))
+        let encodedBytes = try Data(contentsOf: url).count
+        #expect(encodedBytes == 16718)
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 88200))
+        try file.read(into: buffer)
+        let duration = Double(buffer.frameLength) / format.sampleRate
+        #expect(duration >= 0.9 && duration <= 1.1)
+        #expect(format.channelCount == 1)
+        #expect(format.sampleRate == 44100)
+        let samples = try #require(buffer.floatChannelData?[0])
+        let peak = (0..<Int(buffer.frameLength)).map { abs(samples[$0]) }.max() ?? 0
+        #expect(peak > 0.01 && peak < 0.1)
+        print("VOICE_MP3_DECODE frames=\(buffer.frameLength) rate=\(format.sampleRate) duration=\(duration) peak=\(peak)")
+
+        let player = try AVAudioPlayer(contentsOf: url)
+        let observations = Observations()
+        let delegate = MP3FileDelegate(observations: observations)
+        player.delegate = delegate
+        defer { player.stop(); player.delegate = nil }
+        #expect(player.prepareToPlay())
+        observations.record("play_called")
+        #expect(player.play())
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        while observations.time("file_playback_finished") == nil,
+              observations.time("file_playback_failed") == nil,
+              ProcessInfo.processInfo.systemUptime < deadline
+        {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let completed = observations.time("file_playback_finished")
+        try observations.printReceipt(
+            "mp3-file-control-\(mode.rawValue)", finished: completed != nil, bytes: encodedBytes)
+        let start = try #require(observations.time("play_called"))
+        #expect(try #require(completed) - start >= 0.9)
+        #expect(observations.time("file_playback_failed") == nil)
+        withExtendedLifetime(delegate) {}
+    }
+
+    private final class MP3FileDelegate: NSObject, AVAudioPlayerDelegate {
+        let observations: Observations
+
+        init(observations: Observations) { self.observations = observations }
+
+        nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+            self.observations.record(flag ? "file_playback_finished" : "file_playback_failed")
+        }
+
+        nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: (any Error)?) {
+            self.observations.record("file_playback_failed")
+        }
+    }
+
     func checkStandardFloatOutput(mode: SessionMode) async throws {
         try self.prepareAudio(mode)
         defer { self.cleanupAudio() }
@@ -281,5 +341,15 @@ struct VoicePlaybackControlTests {
     @Test(arguments: VoicePlaybackBoundaryTests.sessionModes)
     func standardFloatOutputCompletes(mode: VoicePlaybackBoundaryTests.SessionMode) async throws {
         try await VoicePlaybackBoundaryTests().checkStandardFloatOutput(mode: mode)
+    }
+}
+
+/// Fresh process control for MP3 fixture validity and native file playback.
+@MainActor
+@Suite(.serialized)
+struct VoiceMP3FileControlTests {
+    @Test(arguments: VoicePlaybackBoundaryTests.sessionModes)
+    func mp3FileDecodesAndPlays(mode: VoicePlaybackBoundaryTests.SessionMode) async throws {
+        try await VoicePlaybackBoundaryTests().checkMP3FileControl(mode: mode)
     }
 }
