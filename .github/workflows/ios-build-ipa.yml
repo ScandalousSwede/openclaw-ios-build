@@ -13,6 +13,14 @@ on:
           - signed-internal-testflight
           - scoped-read-token
           - diagnostic-recorder-probe
+      probe_suite:
+        description: Native boundary to exercise (no provider calls)
+        required: false
+        default: DiagnosticRecorderBoundaryTests
+        type: choice
+        options:
+          - DiagnosticRecorderBoundaryTests
+          - VoicePlaybackBoundaryTests
       probe_target:
         description: Bounded diagnostic comparison target (no app signing or upload)
         required: false
@@ -2415,8 +2423,10 @@ jobs:
       - name: Bind exact source
         env:
           EXPECTED_SHA: ${{ inputs.expected_git_sha }}
+          PROBE_SUITE: ${{ inputs.probe_suite || 'DiagnosticRecorderBoundaryTests' }}
         run: |
           set -euo pipefail
+          case "${PROBE_SUITE}" in DiagnosticRecorderBoundaryTests|VoicePlaybackBoundaryTests) ;; *) exit 1 ;; esac
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
           mkdir -p "${RUNNER_TEMP}/diagnostic-recorder-probe"
@@ -2460,13 +2470,17 @@ jobs:
             --output "${RUNNER_TEMP}/diagnostic-recorder-probe/probe-package-resolution.json"
 
       - name: Isolated optimized macOS comparison
+        env:
+          PROBE_SUITE: ${{ inputs.probe_suite || 'DiagnosticRecorderBoundaryTests' }}
         if: inputs.probe_target == 'macos'
         run: |
           set -euo pipefail
           swift test --package-path apps/ios/Tools/DiagnosticRecorderProbe --force-resolved-versions \
-            -c release -v --filter DiagnosticRecorderBoundaryTests \
+            -c release -v --filter "${PROBE_SUITE}" \
             2>&1 | tee "${RUNNER_TEMP}/diagnostic-recorder-probe/macos-release.log"
       - name: Isolated optimized iOS simulator comparison
+        env:
+          PROBE_SUITE: ${{ inputs.probe_suite || 'DiagnosticRecorderBoundaryTests' }}
         if: inputs.probe_target == 'ios-simulator'
         run: |
           set -euo pipefail
@@ -2490,7 +2504,7 @@ jobs:
           xcodebuild -scheme "${probe_scheme}" -configuration Release \
             -destination "platform=iOS Simulator,id=${simulator_udid}" \
             -parallel-testing-enabled NO \
-            -only-testing:DiagnosticRecorderProbeTests/DiagnosticRecorderBoundaryTests \
+            -only-testing:"DiagnosticRecorderProbeTests/${PROBE_SUITE}" \
             -resultBundlePath "${RUNNER_TEMP}/diagnostic-recorder-probe/ios-release.xcresult" \
             CODE_SIGNING_ALLOWED=NO test \
             2>&1 | tee "${RUNNER_TEMP}/diagnostic-recorder-probe/ios-release.log"
