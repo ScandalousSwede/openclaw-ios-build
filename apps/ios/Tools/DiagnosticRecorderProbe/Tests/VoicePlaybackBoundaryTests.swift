@@ -14,7 +14,7 @@ struct VoicePlaybackBoundaryTests {
         case appStyleSpeaker
     }
 
-    static var sessionModes: [SessionMode] {
+    nonisolated static var sessionModes: [SessionMode] {
         #if os(iOS)
         [.playbackOnly, .appStyleSpeaker]
         #else
@@ -66,12 +66,20 @@ struct VoicePlaybackBoundaryTests {
             try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [
                 .allowBluetoothHFP, .allowBluetoothA2DP, .allowAirPlay, .defaultToSpeaker,
             ])
-            try? session.setPreferredSampleRate(48000)
-            try? session.setPreferredIOBufferDuration(0.02)
         }
+        // Set both modes explicitly so test order cannot inherit another mode's preferences.
+        try session.setPreferredSampleRate(mode == .appStyleSpeaker ? 48000 : 44100)
+        try session.setPreferredIOBufferDuration(0.02)
         try session.setActive(true)
         if mode == .appStyleSpeaker { try session.overrideOutputAudioPort(.speaker) }
-        print("VOICE_PLAYBACK_ROUTE " + session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ","))
+        let receipt: [String: Any] = [
+            "mode": mode.rawValue, "category": session.category.rawValue,
+            "sampleRate": session.sampleRate, "ioBufferDuration": session.ioBufferDuration,
+            "preferredSampleRate": session.preferredSampleRate,
+            "outputPorts": session.currentRoute.outputs.map { $0.portType.rawValue },
+        ]
+        let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
+        print("VOICE_PLAYBACK_SESSION " + String(decoding: data, as: UTF8.self))
         #endif
     }
 
