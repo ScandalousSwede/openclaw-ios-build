@@ -4188,6 +4188,7 @@ private struct IncrementalSpeechBuffer {
     private var spokenOffset: Int = 0
     private var inCodeBlock = false
     private var directiveParsed = false
+    private var directiveHeader: String?
 
     mutating func ingest(text: String, isFinal: Bool) -> [String] {
         let normalized = text.replacingOccurrences(of: "\r\n", with: "\n")
@@ -4203,7 +4204,12 @@ private struct IncrementalSpeechBuffer {
     }
 
     private mutating func stripDirectiveIfReady(from text: String) -> String? {
-        guard !self.directiveParsed else { return text }
+        guard !self.directiveParsed else {
+            // Only remove the original header from cumulative snapshots. A corrected
+            // response may legitimately start with different JSON-shaped content.
+            guard let directiveHeader, text.hasPrefix(directiveHeader) else { return text }
+            return TalkDirectiveParser.parse(text).stripped
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if trimmed.hasPrefix("{") {
@@ -4214,6 +4220,7 @@ private struct IncrementalSpeechBuffer {
             let parsed = TalkDirectiveParser.parse(text)
             if let directive = parsed.directive {
                 self.directive = directive
+                self.directiveHeader = String(text[..<newlineRange.upperBound])
             }
             self.directiveParsed = true
             return parsed.stripped

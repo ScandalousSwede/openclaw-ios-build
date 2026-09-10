@@ -62,4 +62,14 @@ import Testing
         #expect(second == ["More detail."])
     }
 
+
+    @Test func correctedSnapshotDoesNotStripDifferentDirectiveShapedContent() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_incrementalReset()
+        let original = #"{"voice":"fixture-voice"}"# + "\nFirst sentence."
+        #expect(manager._test_incrementalIngest(original, isFinal: false) == ["First sentence."])
+        let corrected = #"{"language":"Swift"}"# + "\nCorrected technical content."
+        #expect(manager._test_incrementalIngest(corrected, isFinal: true) == [corrected])
+    }
+
 }
