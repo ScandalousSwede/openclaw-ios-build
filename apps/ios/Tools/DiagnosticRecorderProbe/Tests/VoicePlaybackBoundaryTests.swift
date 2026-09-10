@@ -108,7 +108,9 @@ struct VoicePlaybackBoundaryTests {
         observations: Observations, mp3: Bool = false) async -> StreamingPlaybackResult
     {
         let watchdog = Task { @MainActor in
-            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            // Cold native audio setup exceeded 11 seconds in the simulator. MP3
+            // initializes off-main, so include that startup in its bounded watchdog.
+            do { try await Task.sleep(for: .seconds(mp3 ? 30 : 8)) } catch { return }
             observations.record("watchdog_stop")
             if mp3 { _ = StreamingAudioPlayer.shared.stop() }
             else { _ = PCMStreamingAudioPlayer.shared.stop() }
