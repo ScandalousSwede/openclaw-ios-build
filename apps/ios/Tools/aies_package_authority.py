@@ -244,7 +244,7 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
     if provenance["schema"] != "aies.ios.package-source-patch.v1":
         raise AuthorityError("unsupported ElevenLabsKit source-patch provenance schema")
     if provenance["packageIdentity"] != "elevenlabskit" or provenance["purpose"] != (
-        "diagnostic_playback_observability_pcm_stream_integrity_and_teardown_ownership"
+        "diagnostic_playback_observability_pcm_float_output_stream_integrity_and_teardown_ownership"
     ):
         raise AuthorityError("ElevenLabsKit source-patch purpose or identity differs")
     expected_original = {
@@ -257,8 +257,8 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         raise AuthorityError("ElevenLabsKit original 0.1.1 provenance differs")
     expected_patch = {
         "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-        "revision": "44a108904cbb652a876bfdb838362746631b8987",
-        "tree": "72003ce50bc475c2defba379f0a62184c3e86161",
+        "revision": "147285120d19fa1c3fdbc29152b9edd273a095f3",
+        "tree": "d88a357c28b5f6d943fdf1629601c2987f07d4f0",
         "changedPaths": [
             "Sources/ElevenLabsKit/PCMPlayerNode.swift",
             "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
@@ -279,7 +279,7 @@ def validate_manifest(root: pathlib.Path, manifest_path: pathlib.Path) -> dict[s
         "applicationBehaviorDependsOnObserver": False,
         "playbackBehaviorChanged": True,
         "networkingBehaviorChanged": False,
-        "decodingBehaviorChanged": False,
+        "decodingBehaviorChanged": True,
         "bufferingBehaviorChanged": True,
         "routingBehaviorChanged": False,
         "cancellationBehaviorChanged": True,
@@ -950,7 +950,7 @@ def validate_source_patch_checkout(
     if manifest_sha256 != "f45bc818aec405d5f4250cff4e95619c951041b12234a984bfb10e2bdf787431":
         raise AuthorityError("ElevenLabsKit dependency Package.swift hash differs from 0.1.1")
     binary_diff_sha256 = sha256_bytes(binary_diff)
-    if binary_diff_sha256 != "070e31aace97e234618c3725e603abc4a206b54eb263b799fd8e24f53ad31811":
+    if binary_diff_sha256 != "a0699ea9c34d1cde5683baba58406072d26f742a75b7c51c17324e168da84f81":
         raise AuthorityError("ElevenLabsKit binary patch digest differs from reviewed delta")
 
     return {

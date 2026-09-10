@@ -1,7 +1,7 @@
 {
   "schema": "aies.ios.package-source-patch.v1",
   "packageIdentity": "elevenlabskit",
-  "purpose": "diagnostic_playback_observability_pcm_stream_integrity_and_teardown_ownership",
+  "purpose": "diagnostic_playback_observability_pcm_float_output_stream_integrity_and_teardown_ownership",
   "original": {
     "repository": "https://github.com/steipete/ElevenLabsKit.git",
     "tag": "0.1.1",
@@ -10,8 +10,8 @@
   },
   "patch": {
     "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-    "revision": "44a108904cbb652a876bfdb838362746631b8987",
-    "tree": "72003ce50bc475c2defba379f0a62184c3e86161",
+    "revision": "147285120d19fa1c3fdbc29152b9edd273a095f3",
+    "tree": "d88a357c28b5f6d943fdf1629601c2987f07d4f0",
     "changedPaths": [
       "Sources/ElevenLabsKit/PCMPlayerNode.swift",
       "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
@@ -30,7 +30,7 @@
     "applicationBehaviorDependsOnObserver": false,
     "playbackBehaviorChanged": true,
     "networkingBehaviorChanged": false,
-    "decodingBehaviorChanged": false,
+    "decodingBehaviorChanged": true,
     "bufferingBehaviorChanged": true,
     "routingBehaviorChanged": false,
     "cancellationBehaviorChanged": true,
