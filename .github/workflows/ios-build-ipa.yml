@@ -12,6 +12,15 @@ on:
           - unsigned-diagnostic
           - signed-internal-testflight
           - scoped-read-token
+          - diagnostic-recorder-probe
+      probe_target:
+        description: Bounded diagnostic comparison target (no app signing or upload)
+        required: false
+        default: macos
+        type: choice
+        options:
+          - macos
+          - ios-simulator
       read_purpose:
         description: Read-only API purpose (no tester or group changes)
         required: false
@@ -54,7 +63,7 @@ jobs:
           AIES_REF_TYPE: ${{ github.ref_type }}
         run: |
           set -euo pipefail
-          if [[ "${AIES_DISTRIBUTION}" == "unsigned-diagnostic" ]]; then
+          if [[ "${AIES_DISTRIBUTION}" == "unsigned-diagnostic" || "${AIES_DISTRIBUTION}" == "diagnostic-recorder-probe" ]]; then
             exit 0
           fi
           if [[ "${AIES_DISTRIBUTION}" != "signed-internal-testflight" && "${AIES_DISTRIBUTION}" != "scoped-read-token" ]]; then
@@ -91,7 +100,7 @@ jobs:
           fi
 
   xcodegen-conformance:
-    if: inputs.distribution != 'scoped-read-token'
+    if: inputs.distribution != 'scoped-read-token' && inputs.distribution != 'diagnostic-recorder-probe'
     needs: dispatch-gate
     runs-on: macos-15
     steps:
@@ -2390,3 +2399,87 @@ jobs:
           path: ${{ runner.temp }}/asc-read-capability.json
           if-no-files-found: error
           retention-days: 1
+
+  recorder-comparison:
+    needs: dispatch-gate
+    if: inputs.distribution == 'diagnostic-recorder-probe'
+    concurrency:
+      group: diagnostic-recorder-experiment
+      cancel-in-progress: false
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Bind exact source
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_git_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
+          mkdir -p "${RUNNER_TEMP}/diagnostic-recorder-probe"
+          git rev-parse HEAD > "${RUNNER_TEMP}/diagnostic-recorder-probe/source-sha.txt"
+      - name: Select retained archive Xcode version
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
+        with:
+          xcode-version: "26.2"
+      - name: Record actual compiler and execution conditions
+        run: |
+          set -euo pipefail
+          {
+            xcodebuild -version
+            xcrun swiftc --version
+            xcrun --sdk iphoneos --show-sdk-version
+            xcrun --sdk iphoneos --show-sdk-build-version
+            xcrun --sdk iphonesimulator --show-sdk-version
+            xcrun --sdk iphonesimulator --show-sdk-build-version
+            uname -m
+            sw_vers
+            xcrun simctl list runtimes
+          } > "${RUNNER_TEMP}/diagnostic-recorder-probe/toolchain.txt"
+          xcrun xctrace list devices > "${RUNNER_TEMP}/diagnostic-recorder-probe/devices.txt" 2>&1
+      - name: Resolve and validate existing shared package pins
+        run: |
+          set -euo pipefail
+          package="${GITHUB_WORKSPACE}/apps/shared/OpenClawKit"
+          swift package --package-path "${package}" resolve
+          python3 apps/ios/Tools/aies_package_authority.py \
+            --repo-root "${GITHUB_WORKSPACE}" validate-scoped-resolved \
+            --scope openclawkit --resolved "${package}/Package.resolved" \
+            --output "${RUNNER_TEMP}/diagnostic-recorder-probe/package-resolution.json"
+      - name: Isolated optimized macOS comparison
+        if: inputs.probe_target == 'macos'
+        run: |
+          set -euo pipefail
+          swift test --package-path apps/shared/OpenClawKit --force-resolved-versions \
+            -c release -v --filter DiagnosticRecorderBoundaryTests \
+            2>&1 | tee "${RUNNER_TEMP}/diagnostic-recorder-probe/macos-release.log"
+      - name: Isolated optimized iOS simulator comparison
+        if: inputs.probe_target == 'ios-simulator'
+        run: |
+          set -euo pipefail
+          simulator_udid="$(xcrun simctl list devices available --json | python3 -c '
+          import json,sys
+          devices=[d for runtime, entries in json.load(sys.stdin)["devices"].items() if ".iOS-" in runtime for d in entries if d.get("isAvailable") and d.get("name", "").startswith("iPhone")]
+          if not devices: raise SystemExit("No available iPhone simulator")
+          print(devices[0]["udid"])
+          ')"
+          cd apps/shared/OpenClawKit
+          xcodebuild -list -json > "${RUNNER_TEMP}/diagnostic-recorder-probe/package-schemes.json"
+          xcodebuild -scheme OpenClawKit -configuration Release \
+            -destination "platform=iOS Simulator,id=${simulator_udid}" \
+            -parallel-testing-enabled NO \
+            -only-testing:OpenClawKitTests/DiagnosticRecorderBoundaryTests \
+            -resultBundlePath "${RUNNER_TEMP}/diagnostic-recorder-probe/ios-release.xcresult" \
+            CODE_SIGNING_ALLOWED=NO test \
+            2>&1 | tee "${RUNNER_TEMP}/diagnostic-recorder-probe/ios-release.log"
+      - name: Retain experiment evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: diagnostic-recorder-${{ inputs.probe_target }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/diagnostic-recorder-probe
+          if-no-files-found: error
+          retention-days: 90
