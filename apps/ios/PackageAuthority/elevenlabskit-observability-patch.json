@@ -10,8 +10,8 @@
   },
   "patch": {
     "repository": "https://github.com/ScandalousSwede/ElevenLabsKit.git",
-    "revision": "fcaf63f3a2c551662b1f1b3170192c0aad3e2a4f",
-    "tree": "eff35fcff10b482b50026a81f8c35de02a2aaa79",
+    "revision": "6d014d93e14eb620bb5da7ede9566b0b90a8219b",
+    "tree": "a54c3c135e8d79b144c264e67cdcaeb69d8a1dcb",
     "changedPaths": [
       "Sources/ElevenLabsKit/PCMPlayerNode.swift",
       "Sources/ElevenLabsKit/PCMStreamingAudioPlayer.swift",
