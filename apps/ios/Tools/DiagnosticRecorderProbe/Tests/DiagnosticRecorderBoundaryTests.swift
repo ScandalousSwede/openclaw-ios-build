@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import os
 import Testing
-@testable import OpenClawKit
+import OpenClawKit
 
 /// Run only this suite in a fresh process. Other suites also own the global sink.
 /// This is a bounded diagnostic experiment, not a portable absolute-depth gate.
