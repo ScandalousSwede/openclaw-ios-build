@@ -1628,7 +1628,17 @@ public struct OpenClawDiagnosticEvent: Codable, Equatable, Sendable {
 public enum OpenClawDiagnosticRecorder {
     public typealias Sink = @Sendable (String) -> Void
 
-    private static let sink = OSAllocatedUnfairLock<Sink?>(initialState: nil)
+    /// Store a stable reference across the generic inout lock boundary.
+    /// The callback stays immutable and is invoked after releasing the lock.
+    private final class SinkHolder: Sendable {
+        let callback: Sink
+
+        init(_ callback: @escaping Sink) {
+            self.callback = callback
+        }
+    }
+
+    private static let sink = OSAllocatedUnfairLock<SinkHolder?>(initialState: nil)
     private static let recordPrefix = "aies_diagnostic="
     private static let maximumEncodedRecordBytes = 8192
     private static let requiredKeys: Set<String> = [
@@ -1759,8 +1769,9 @@ public enum OpenClawDiagnosticRecorder {
     ])
 
     public static func installSink(_ sink: @escaping Sink) {
+        let holder = SinkHolder(sink)
         self.sink.withLock { current in
-            current = sink
+            current = holder
         }
     }
 
@@ -1777,7 +1788,7 @@ public enum OpenClawDiagnosticRecorder {
         guard let encoded = try? encoder.encode(event) else { return }
         let line = self.recordPrefix + encoded.base64EncodedString()
         let currentSink = self.sink.withLock { $0 }
-        currentSink?(line)
+        currentSink?.callback(line)
     }
 
     public static func decodeRecord(_ record: String) -> OpenClawDiagnosticEvent? {

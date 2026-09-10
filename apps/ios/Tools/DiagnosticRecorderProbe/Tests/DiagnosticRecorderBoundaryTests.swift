@@ -212,4 +212,43 @@ struct DiagnosticRecorderBoundaryTests {
             try probe.report(arm: arm, checks: [], completedWorkPerCaller: completedCounts)
         }
     }
+
+    @Test func capturedCallbackCompletesAfterReplacementAndClear() throws {
+        let (event, _) = try Self.fixture()
+        let entered = DispatchSemaphore(value: 0)
+        let releaseCaptured = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        // Old completion, replacement delivery, invalid payload or synchronization failures.
+        let counts = OSAllocatedUnfairLock(initialState: [0, 0, 0])
+        defer {
+            releaseCaptured.signal()
+            OpenClawDiagnosticRecorder.clearSink()
+        }
+        OpenClawDiagnosticRecorder.installSink { line in
+            let valid = OpenClawDiagnosticRecorder.decodeRecord(line) == event
+            entered.signal()
+            let released = releaseCaptured.wait(timeout: .now() + 5) == .success
+            counts.withLock {
+                $0[0] += 1
+                if !valid || !released { $0[2] += 1 }
+            }
+            completed.signal()
+        }
+        DispatchQueue.global().async { OpenClawDiagnosticRecorder.record(event) }
+        try #require(entered.wait(timeout: .now() + 5) == .success)
+        // Replacement and another call must work while the captured callback is in flight.
+        OpenClawDiagnosticRecorder.installSink { line in
+            let valid = OpenClawDiagnosticRecorder.decodeRecord(line) == event
+            counts.withLock {
+                $0[1] += 1
+                if !valid { $0[2] += 1 }
+            }
+        }
+        OpenClawDiagnosticRecorder.record(event)
+        OpenClawDiagnosticRecorder.clearSink()
+        OpenClawDiagnosticRecorder.record(event)
+        releaseCaptured.signal()
+        try #require(completed.wait(timeout: .now() + 5) == .success)
+        #expect(counts.withLock { $0 } == [1, 1, 0])
+    }
 }
