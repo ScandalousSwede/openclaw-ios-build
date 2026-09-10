@@ -25,4 +25,41 @@ import Testing
 
         #expect(segments.isEmpty)
     }
+
+    @Test func cumulativeVoiceDirectiveDoesNotReplaySpokenPrefix() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_incrementalReset()
+        let directive = #"{"voice":"fixture-voice"}"# + "\n"
+        let first = manager._test_incrementalIngest(directive + "First sentence.", isFinal: false)
+        let second = manager._test_incrementalIngest(
+            directive + "First sentence. Second sentence.", isFinal: false)
+        let final = manager._test_incrementalIngest(
+            directive + "First sentence. Second sentence. Final sentence.", isFinal: true)
+        #expect(first == ["First sentence."])
+        #expect(second == ["Second sentence."])
+        #expect(final == ["Final sentence."])
+        #expect(manager._test_incrementalIngest(
+            directive + "First sentence. Second sentence. Final sentence.", isFinal: true).isEmpty)
+    }
+
+    @Test func splitVoiceDirectiveRemainsStrippedInLaterSnapshots() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_incrementalReset()
+        #expect(manager._test_incrementalIngest(#"{"lang":"en"}"#, isFinal: false).isEmpty)
+        let prefix = #"{"lang":"en"}"# + "\n"
+        #expect(manager._test_incrementalIngest(prefix + "Ready.", isFinal: false) == ["Ready."])
+        #expect(manager._test_incrementalIngest(
+            prefix + "Ready. This is the tail.", isFinal: true) == ["This is the tail."])
+    }
+
+    @Test func ordinaryJSONIsPreservedAcrossCumulativeSnapshots() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager._test_incrementalReset()
+        let prefix = #"{"count":12}"# + "\nThe first reading."
+        let first = manager._test_incrementalIngest(prefix, isFinal: false)
+        let second = manager._test_incrementalIngest(prefix + " More detail.", isFinal: true)
+        #expect(first == [prefix])
+        #expect(second == ["More detail."])
+    }
+
 }
