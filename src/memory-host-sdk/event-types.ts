@@ -19,9 +19,11 @@ type MemoryHostRecallRecordedEvent = MemoryHostEventStorageMetadata & {
   }>;
 };
 
-/** Event emitted when recall hits are visible but excluded from short-term promotion. */
+/** Diagnostic for memory candidates excluded from short-term tracking, not search selection. */
 type MemoryHostRecallSkippedEvent = MemoryHostEventStorageMetadata & {
   type: "memory.recall.skipped";
+  scope?: "short-term-recall-tracking";
+  searchResultEffect?: "none";
   timestamp: string;
   query: string;
   reason: "non-short-term-memory-path";

@@ -22,6 +22,16 @@ Dreaming is enabled by default. Set
 - **Human-readable output** in `DREAMS.md` (or an existing `dreams.md`) and optional phase report files under `memory/dreaming/<phase>/YYYY-MM-DD.md`.
 
 Long-term promotion still writes only to `MEMORY.md`.
+
+The diagnostic event `memory.recall.skipped` with reason
+`non-short-term-memory-path` describes short-term recall tracking eligibility.
+New records identify that scope with `scope: "short-term-recall-tracking"` and
+`searchResultEffect: "none"`; older records may omit both fields. Tracking does
+not remove or rerank search results. The current search tool tracks only primary
+results selected after corpus balancing. Historical versions and other callers
+can record candidates at different stages, so inspect the actual tool response
+before using a diagnostic as proof of final search selection.
+
 Each newly promoted entry carries trailing recall metadata derived from the
 candidate: up to three concept tags in `<!-- trigger: phrase one, phrase two -->`
 and a bounded `<!-- importance: N -->` value from 1 to 10. Consolidation keeps

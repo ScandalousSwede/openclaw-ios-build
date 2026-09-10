@@ -94,6 +94,8 @@ const memoryHostEventRecordSchema = z.discriminatedUnion("type", [
   }),
   z.looseObject({
     type: z.literal("memory.recall.skipped"),
+    scope: z.literal("short-term-recall-tracking").optional(),
+    searchResultEffect: z.literal("none").optional(),
     timestamp: z.string(),
     storageTruncated: z.unknown().optional(),
     query: z.string(),
@@ -220,6 +222,10 @@ export function normalizeMemoryHostEventRecordForStorage(
           }
         : {
             type: "memory.recall.skipped" as const,
+            ...(event.scope !== undefined ? { scope: event.scope } : {}),
+            ...(event.searchResultEffect !== undefined
+              ? { searchResultEffect: event.searchResultEffect }
+              : {}),
             timestamp: timestamp.value,
             query: query.value,
             reason: "non-short-term-memory-path" as const,

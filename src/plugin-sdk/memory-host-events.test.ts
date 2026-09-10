@@ -199,6 +199,105 @@ describe("memory host event journal helpers", () => {
     ]);
   });
 
+  it.each([
+    {},
+    { scope: "short-term-recall-tracking" as const },
+    { searchResultEffect: "none" as const },
+    { scope: "short-term-recall-tracking" as const, searchResultEffect: "none" as const },
+  ])(
+    "preserves supplied recall diagnostic metadata without inventing legacy fields: %j",
+    async (metadata) => {
+      const workspaceDir = await createTempDir("recall-diagnostic-metadata-");
+      const env = { ...process.env, OPENCLAW_STATE_DIR: workspaceDir };
+      await appendMemoryHostEvent(
+        workspaceDir,
+        {
+          type: "memory.recall.skipped",
+          timestamp: "2026-04-05T12:00:00.000Z",
+          query: "synthetic durable result",
+          reason: "non-short-term-memory-path",
+          eligibleResultCount: 0,
+          skippedResultCount: 1,
+          results: [
+            {
+              path: "docs/widget.md",
+              startLine: 1,
+              endLine: 2,
+              score: 0.9,
+              reason: "non-short-term-memory-path",
+            },
+          ],
+          ...metadata,
+        },
+        { env },
+      );
+      resetPluginStateStoreForTests();
+      const [record] = await readMemoryHostEventRecords({ workspaceDir, env });
+      expect(record).toMatchObject({ type: "memory.recall.skipped", ...metadata });
+      if (record?.type !== "memory.recall.skipped") {
+        throw new Error("expected diagnostic");
+      }
+      expect(record.scope).toBe("scope" in metadata ? metadata.scope : undefined);
+      expect(record.searchResultEffect).toBe(
+        "searchResultEffect" in metadata ? metadata.searchResultEffect : undefined,
+      );
+      await expect(readMemoryHostEvents({ workspaceDir, env })).resolves.toEqual([]);
+    },
+  );
+
+  it.each([
+    { scope: null },
+    { scope: "search-selection" },
+    { scope: 7 },
+    { searchResultEffect: null },
+    { searchResultEffect: "dropped" },
+    { searchResultEffect: false },
+  ])("rejects malformed diagnostic scope metadata: %j", (metadata) => {
+    expect(
+      normalizeMemoryHostEventRecordForStorage({
+        type: "memory.recall.skipped",
+        timestamp: "2026-04-05T12:00:00.000Z",
+        query: "synthetic",
+        reason: "non-short-term-memory-path",
+        eligibleResultCount: 0,
+        skippedResultCount: 0,
+        results: [],
+        ...metadata,
+      }),
+    ).toBeNull();
+  });
+
+  it("retains diagnostic scope when oversized result details are bounded", () => {
+    const record = normalizeMemoryHostEventRecordForStorage({
+      type: "memory.recall.skipped",
+      timestamp: "2026-04-05T12:00:00.000Z",
+      query: "synthetic",
+      reason: "non-short-term-memory-path",
+      scope: "short-term-recall-tracking",
+      searchResultEffect: "none",
+      eligibleResultCount: 0,
+      skippedResultCount: 100,
+      results: Array.from({ length: 100 }, () => ({
+        path: "docs/widget.md",
+        startLine: 1,
+        endLine: 2,
+        score: 0.9,
+        reason: "non-short-term-memory-path",
+      })),
+    });
+    expect(record).toMatchObject({
+      type: "memory.recall.skipped",
+      scope: "short-term-recall-tracking",
+      searchResultEffect: "none",
+      skippedResultCount: 100,
+      storageTruncated: true,
+    });
+    if (record?.type !== "memory.recall.skipped") {
+      throw new Error("expected diagnostic");
+    }
+    expect(record.results).toHaveLength(10);
+  });
+
   it("bounds oversized diagnostic detail without failing the parent operation", async () => {
     const workspaceDir = await createTempDir("memory-host-events-bounded-");
     const env = { ...process.env, OPENCLAW_STATE_DIR: workspaceDir };

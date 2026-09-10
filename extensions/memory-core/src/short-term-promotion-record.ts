@@ -115,6 +115,8 @@ function buildMemoryRecallSkippedEvent(params: {
 }) {
   return {
     type: "memory.recall.skipped" as const,
+    scope: "short-term-recall-tracking" as const,
+    searchResultEffect: "none" as const,
     timestamp: params.timestamp,
     query: params.query,
     reason: "non-short-term-memory-path" as const,
