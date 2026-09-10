@@ -23,6 +23,7 @@ on:
           - VoicePlaybackBoundaryTests
           - VoicePlaybackControlTests
           - VoiceMP3FileControlTests
+          - VoiceMP3CancellationBoundaryTests
       probe_target:
         description: Bounded diagnostic comparison target (no app signing or upload)
         required: false
@@ -2428,7 +2429,10 @@ jobs:
           PROBE_SUITE: ${{ inputs.probe_suite || 'DiagnosticRecorderBoundaryTests' }}
         run: |
           set -euo pipefail
-          case "${PROBE_SUITE}" in DiagnosticRecorderBoundaryTests|VoicePlaybackBoundaryTests|VoicePlaybackControlTests|VoiceMP3FileControlTests) ;; *) exit 1 ;; esac
+          case "${PROBE_SUITE}" in DiagnosticRecorderBoundaryTests|VoicePlaybackBoundaryTests|VoicePlaybackControlTests|VoiceMP3FileControlTests|VoiceMP3CancellationBoundaryTests) ;; *) exit 1 ;; esac
+          if [[ "${PROBE_SUITE}" == "VoiceMP3CancellationBoundaryTests" ]]; then
+            [[ "${{ inputs.probe_target }}" == "macos" ]]
+          fi
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
           mkdir -p "${RUNNER_TEMP}/diagnostic-recorder-probe"
