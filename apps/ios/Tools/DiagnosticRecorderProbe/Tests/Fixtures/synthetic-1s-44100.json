@@ -1,0 +1,15 @@
+{
+  "fixture": "synthetic-1s-44100.mp3",
+  "description": "Generated 440Hz tone; no user/provider/microphone audio",
+  "pcm_frames": 44100,
+  "pcm_rate": 44100,
+  "channels": 1,
+  "pcm_format": "s16le",
+  "peak_amplitude": 1000,
+  "encoder": "lameenc1.8.4",
+  "mp3_bitrate_kbps": 128,
+  "encoder_quality": 2,
+  "bytes": 16718,
+  "sha256": "aabeca9305462ff080b20121d7e0336ae3cdad2a787352d9caeabb88ac4cfe85",
+  "encoder_source": "https://pypi.org/project/lameenc/1.8.4/"
+}

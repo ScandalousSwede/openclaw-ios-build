@@ -3,7 +3,7 @@ import Foundation
 import OpenClawKit
 import Testing
 
-/// Native player experiment: synthetic PCM, no microphone, gateway or provider calls.
+/// Native player experiment: synthetic PCM/MP3, no microphone, gateway or provider calls.
 /// Run this suite alone. Simulator completion is not physical audibility evidence.
 /// Compares playback-only and app-style playAndRecord categories; no capture or barge-in.
 @MainActor
@@ -46,7 +46,7 @@ struct VoicePlaybackBoundaryTests {
             let receipt: [String: Any] = [
                 "scenario": scenario, "finished": finished,
                 "inputBytes": bytes, "sampleRate": 44100,
-                "evidence": "native synthetic PCM; no physical audibility claim",
+                "evidence": "native synthetic audio; no physical audibility claim",
                 "events": snapshot.map { ["stage": $0.0, "seconds": $0.1 - origin] },
             ]
             let data = try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys])
@@ -85,6 +85,7 @@ struct VoicePlaybackBoundaryTests {
 
     private func cleanupAudio() {
         _ = PCMStreamingAudioPlayer.shared.stop()
+        _ = StreamingAudioPlayer.shared.stop()
         #if os(iOS)
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         #endif
@@ -104,18 +105,24 @@ struct VoicePlaybackBoundaryTests {
 
     private func play(
         _ stream: AsyncThrowingStream<Data, Error>,
-        observations: Observations) async -> StreamingPlaybackResult
+        observations: Observations, mp3: Bool = false) async -> StreamingPlaybackResult
     {
         let watchdog = Task { @MainActor in
             do { try await Task.sleep(for: .seconds(8)) } catch { return }
             observations.record("watchdog_stop")
-            _ = PCMStreamingAudioPlayer.shared.stop()
+            if mp3 { _ = StreamingAudioPlayer.shared.stop() }
+            else { _ = PCMStreamingAudioPlayer.shared.stop() }
         }
         defer { watchdog.cancel() }
         observations.record("play_called")
-        let result = await PCMStreamingAudioPlayer.shared.play(
-            stream: stream, sampleRate: 44100,
-            observer: StreamingPlaybackObserver { observations.record($0.stage.rawValue) })
+        let observer = StreamingPlaybackObserver { observations.record($0.stage.rawValue) }
+        let result: StreamingPlaybackResult
+        if mp3 {
+            result = await StreamingAudioPlayer.shared.play(stream: stream, observer: observer)
+        } else {
+            result = await PCMStreamingAudioPlayer.shared.play(
+                stream: stream, sampleRate: 44100, observer: observer)
+        }
         observations.record("play_returned")
         return result
     }
@@ -193,4 +200,35 @@ struct VoicePlaybackBoundaryTests {
             #expect(observations.time("playback_cancelled") == nil)
         }
     }
+
+    @Test(arguments: Self.sessionModes)
+    func mp3EOFWaitsForDecodedAudioDuration(mode: SessionMode) async throws {
+        try self.prepareAudio(mode)
+        defer { self.cleanupAudio() }
+        let url = try #require(Bundle.module.url(
+            forResource: "synthetic-1s-44100", withExtension: "mp3", subdirectory: "Fixtures"))
+        let data = try Data(contentsOf: url)
+        #expect(data.count == 16718)
+        // Whole prefetched payload versus network chunks that split MPEG frame boundaries.
+        for chunkSize in [data.count, 137] {
+            let observations = Observations()
+            let stream = AsyncThrowingStream<Data, Error> { continuation in
+                for offset in stride(from: 0, to: data.count, by: chunkSize) {
+                    continuation.yield(data.subdata(in: offset..<min(offset + chunkSize, data.count)))
+                }
+                continuation.finish()
+            }
+            let result = await self.play(stream, observations: observations, mp3: true)
+            try observations.printReceipt(
+                "mp3-eof-\(chunkSize)-\(mode.rawValue)", finished: result.finished, bytes: data.count)
+            #expect(result.finished)
+            #expect(observations.time("watchdog_stop") == nil)
+            let accepted = try #require(observations.time("playback_submission_accepted"))
+            let returned = try #require(observations.time("play_returned"))
+            #expect(returned - accepted >= 0.9)
+            #expect(observations.time("playback_completed") != nil)
+            #expect(observations.time("playback_failed") == nil)
+        }
+    }
+
 }

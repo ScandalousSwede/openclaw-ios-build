@@ -12,6 +12,7 @@ let package = Package(
             name: "DiagnosticRecorderProbeTests",
             dependencies: [.product(name: "OpenClawKit", package: "OpenClawKit")],
             path: "Tests",
+            resources: [.copy("Fixtures")],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
                 .enableExperimentalFeature("SwiftTesting"),
