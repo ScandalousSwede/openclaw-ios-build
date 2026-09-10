@@ -201,8 +201,7 @@ struct VoicePlaybackBoundaryTests {
         }
     }
 
-    @Test(arguments: Self.sessionModes)
-    func mp3EOFWaitsForDecodedAudioDuration(mode: SessionMode) async throws {
+    func checkMP3EOF(mode: SessionMode) async throws {
         try self.prepareAudio(mode)
         defer { self.cleanupAudio() }
         let url = try #require(Bundle.module.url(
@@ -231,4 +230,56 @@ struct VoicePlaybackBoundaryTests {
         }
     }
 
+
+    func checkStandardFloatOutput(mode: SessionMode) async throws {
+        try self.prepareAudio(mode)
+        defer { self.cleanupAudio() }
+        let engine = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100))
+        buffer.frameLength = 44100
+        let samples = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<44100 {
+            samples[frame] = Float(sin(Double(frame) * 2 * .pi * 440 / 44100) * 1000 / 32768)
+        }
+        engine.attach(node)
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+        defer { node.stop(); engine.stop() }
+        let observations = Observations()
+        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            observations.record("data_played_back")
+        }
+        try engine.start()
+        observations.record("play_called")
+        node.play()
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        while observations.time("data_played_back") == nil,
+              ProcessInfo.processInfo.systemUptime < deadline
+        {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let completed = observations.time("data_played_back")
+        try observations.printReceipt(
+            "direct-float-control-\(mode.rawValue)", finished: completed != nil, bytes: 44100 * 4)
+        let start = try #require(observations.time("play_called"))
+        #expect(try #require(completed) - start >= 0.9)
+    }
+
+}
+
+
+/// Run independently from PCM failures: native format control and production MP3 path.
+@MainActor
+@Suite(.serialized)
+struct VoicePlaybackControlTests {
+    @Test(arguments: VoicePlaybackBoundaryTests.sessionModes)
+    func mp3EOFWaitsForDecodedAudioDuration(mode: VoicePlaybackBoundaryTests.SessionMode) async throws {
+        try await VoicePlaybackBoundaryTests().checkMP3EOF(mode: mode)
+    }
+
+    @Test(arguments: VoicePlaybackBoundaryTests.sessionModes)
+    func standardFloatOutputCompletes(mode: VoicePlaybackBoundaryTests.SessionMode) async throws {
+        try await VoicePlaybackBoundaryTests().checkStandardFloatOutput(mode: mode)
+    }
 }

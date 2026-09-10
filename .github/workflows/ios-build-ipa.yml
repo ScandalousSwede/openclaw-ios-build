@@ -21,6 +21,7 @@ on:
         options:
           - DiagnosticRecorderBoundaryTests
           - VoicePlaybackBoundaryTests
+          - VoicePlaybackControlTests
       probe_target:
         description: Bounded diagnostic comparison target (no app signing or upload)
         required: false
@@ -2426,7 +2427,7 @@ jobs:
           PROBE_SUITE: ${{ inputs.probe_suite || 'DiagnosticRecorderBoundaryTests' }}
         run: |
           set -euo pipefail
-          case "${PROBE_SUITE}" in DiagnosticRecorderBoundaryTests|VoicePlaybackBoundaryTests) ;; *) exit 1 ;; esac
+          case "${PROBE_SUITE}" in DiagnosticRecorderBoundaryTests|VoicePlaybackBoundaryTests|VoicePlaybackControlTests) ;; *) exit 1 ;; esac
           [[ "${EXPECTED_SHA}" =~ ^[0-9a-f]{40}$ ]]
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_SHA}" ]]
           mkdir -p "${RUNNER_TEMP}/diagnostic-recorder-probe"
