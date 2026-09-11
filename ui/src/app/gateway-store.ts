@@ -3,6 +3,7 @@
 import type { EventLogEntry } from "../api/event-log.ts";
 import {
   GatewayBrowserClient,
+  resolveGatewayErrorDetailCode,
   type GatewayBrowserClientOptions,
   type GatewayEventListener,
   type GatewayHelloOk,
@@ -158,7 +159,8 @@ export function createApplicationGateway(
           reconnecting: everConnected && willRetry,
           hello: null,
           lastError: error?.message ?? `disconnected (${code}): ${reason || "no reason"}`,
-          lastErrorCode: error?.code ?? null,
+          // Server detail codes select recovery guidance; the envelope code is generic.
+          lastErrorCode: resolveGatewayErrorDetailCode(error) ?? error?.code ?? null,
         });
       },
       onGap: ({ expected, received }) => {

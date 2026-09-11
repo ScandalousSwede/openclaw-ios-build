@@ -5,6 +5,7 @@ import type {
   GatewayBrowserClientOptions,
   GatewayHelloOk,
 } from "../api/gateway.ts";
+import { resolveAuthHintKind, shouldShowInsecureContextHint } from "../lib/overview-hints.ts";
 import { createStorageMock } from "../test-helpers/storage.ts";
 import { createApplicationGateway } from "./gateway-store.ts";
 import { loadSettings } from "./settings.ts";
@@ -67,6 +68,52 @@ describe("createApplicationGateway reconnecting snapshot", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each([
+    ["AUTH_TOKEN_MISSING", "required"],
+    ["AUTH_PASSWORD_MISSING", "required"],
+    ["AUTH_TOKEN_MISMATCH", "failed"],
+  ])("preserves %s through the store into auth recovery", (detailCode, hint) => {
+    const { gateway, current } = createStore();
+    gateway.start();
+    current().opts.onClose?.({
+      code: 1008,
+      reason: "connect failed",
+      willRetry: false,
+      error: {
+        code: "INVALID_REQUEST",
+        message: "unauthorized: gateway credentials rejected",
+        details: { code: detailCode },
+      },
+    });
+    expect(gateway.snapshot.lastErrorCode).toBe(detailCode);
+    expect(
+      resolveAuthHintKind({
+        ...gateway.snapshot,
+        hasToken: false,
+        hasPassword: false,
+      }),
+    ).toBe(hint);
+  });
+
+  it("preserves browser security errors without structured server details", () => {
+    const { gateway, current } = createStore();
+    gateway.start();
+    current().opts.onClose?.({
+      code: 1006,
+      reason: "security error",
+      willRetry: false,
+      error: { code: "BROWSER_WEBSOCKET_SECURITY_ERROR", message: "Browser refused WebSocket" },
+    });
+    expect(gateway.snapshot.lastErrorCode).toBe("BROWSER_WEBSOCKET_SECURITY_ERROR");
+    expect(
+      shouldShowInsecureContextHint(
+        false,
+        gateway.snapshot.lastError,
+        gateway.snapshot.lastErrorCode,
+      ),
+    ).toBe(true);
   });
 
   it("keeps the first connect attempt on the login gate (not reconnecting)", () => {
