@@ -3078,9 +3078,9 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: breadcrumb.stage.rawValue,
-            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
+            runIdentifier: runID,
             operationIdentifier: "tts-generation-\(generation)",
             operationGeneration: generation,
             diagnosticAttemptID: "tts-generation-\(generation)",
@@ -3119,9 +3119,9 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: "tts_\(observation.stage.rawValue)",
-            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
+            runIdentifier: runID,
             operationIdentifier: attempt,
             operationGeneration: generation,
             diagnosticAttemptID: attempt,
@@ -3143,9 +3143,9 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: observation.stage.rawValue,
-            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
+            runIdentifier: runID,
             operationIdentifier: attempt,
             operationGeneration: generation,
             diagnosticAttemptID: attempt,
