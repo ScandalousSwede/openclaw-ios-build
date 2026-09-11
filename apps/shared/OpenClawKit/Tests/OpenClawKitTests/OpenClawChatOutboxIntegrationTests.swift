@@ -1259,19 +1259,31 @@ struct OpenClawChatOutboxIntegrationTests {
             outboxStore: fixture.store,
             outboxStableGatewayID: "gateway-test")
 
-        vm.selectModel("openai/gpt-5.4")
-        try await waitUntil("model patch remains in flight") {
-            await modelGate.waiterCount() == 1
-        }
-        vm.input = "persist without the network patch"
-        vm.send()
-        try await waitUntil("offline command persisted independently") {
-            (try? await fixture.store.loadUnresolved().first?.text) ==
-                "persist without the network patch"
-        }
+        do {
+            vm.selectModel("openai/gpt-5.4")
+            try await waitUntil("model patch remains in flight") {
+                await modelGate.waiterCount() == 1
+            }
+            vm.input = "persist without the network patch"
+            vm.send()
+            try await waitUntil("offline command persisted and draft cleared independently") {
+                guard (try? await fixture.store.loadUnresolved().first?.text) ==
+                    "persist without the network patch"
+                else { return false }
+                // SQLite visibility can precede the main actor resuming enqueue.
+                // Keep the model patch blocked until both persistence effects are visible.
+                return await MainActor.run { vm.input.isEmpty }
+            }
 
-        #expect(vm.input.isEmpty)
-        #expect(await state.healthCallCount() == 0)
+            #expect(vm.input.isEmpty)
+            #expect(await modelGate.waiterCount() == 1)
+            #expect(await state.healthCallCount() == 0)
+        } catch {
+            await modelGate.open()
+            vm.shutdown()
+            try? await fixture.close()
+            throw error
+        }
         await modelGate.open()
         vm.shutdown()
         try await fixture.close()
