@@ -1272,8 +1272,8 @@ export class OperationalView extends LitElement {
                   ${operationTime(this.detail.observed_at)}
                 </p>
                 <p>
-                  Detail follows this task and producer, including newer observations outside the
-                  list's time window.
+                  Details and history are limited to the returned scope. Other operations may
+                  contain later evidence; use the work list to inspect them.
                 </p>
                 <p>
                   Read-only evidence. Continuing work requires the owning workflow; opening this
@@ -1307,7 +1307,7 @@ export class OperationalView extends LitElement {
                 ${this.renderWorkContract(this.detail)}
                 <p>
                   ${this.detail.historyComplete
-                    ? "Complete returned history within this task and producer."
+                    ? "Complete returned history within the reported scope."
                     : "Partial history; additional evidence exists."}
                 </p>
                 <p>Operation: ${this.detail.operation_id}</p>
