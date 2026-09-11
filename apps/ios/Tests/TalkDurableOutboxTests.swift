@@ -4,6 +4,7 @@ import OpenClawChatUI
 import OpenClawKit
 import OpenClawProtocol
 import Testing
+import XCTest
 @testable import OpenClaw
 
 private enum DurableTalkTestError: Error {
@@ -477,6 +478,7 @@ private final class DurableTalkBlockingSystemSpeech: TalkSystemSpeechProviding {
 }
 
 private final class DurableTalkMultiCallSystemSpeech: TalkSystemSpeechProviding {
+    private var starts: [Int: () -> Void] = [:]
     private var nextCallID = 0
     private var pendingCalls: [Int: CheckedContinuation<Void, Error>] = [:]
     private var callWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
@@ -487,6 +489,7 @@ private final class DurableTalkMultiCallSystemSpeech: TalkSystemSpeechProviding 
     func speak(text _: String, language _: String?, onStart: (() -> Void)?) async throws {
         self.nextCallID += 1
         let callID = self.nextCallID
+        self.starts[callID] = onStart
         onStart?()
         for target in Array(self.callWaiters.keys).filter({ $0 <= callID }) {
             self.callWaiters.removeValue(forKey: target)?.resume()
@@ -509,7 +512,10 @@ private final class DurableTalkMultiCallSystemSpeech: TalkSystemSpeechProviding 
         }
     }
 
+    func replayStart(callID: Int) { self.starts[callID]?() }
+
     func complete(callID: Int) {
+        self.starts.removeValue(forKey: callID)
         self.pendingCalls.removeValue(forKey: callID)?.resume()
     }
 }
@@ -2938,5 +2944,142 @@ extension TalkDurableOutboxTests {
         let result = await manager._test_waitForChatCompletion(runID: "exact-run", stream: events.stream)
         #expect(result.state == "error")
         #expect(result.text == nil)
+    }
+}
+
+// XCTest runs separately from the Swift Testing suites which also own the
+// process-global diagnostic sink. This test uses the existing serial CI lane.
+@MainActor
+final class TalkSpeechTraceTests: XCTestCase {
+    func testDurableRepliesAndManualReplacementKeepExactTraceIdentity() async throws {
+        let transport = DurableTalkAcceptedTransport(stableGatewayID: "gateway-talk", autoConfirmHistory: true)
+        let fixture = try await DurableTalkOutboxFixture.make(
+            transport: transport, confirmationDelaysNanoseconds: [0, 0])
+        addTeardownBlock { try await fixture.close() }
+        let events = DurableTalkEventSource()
+        let speech = DurableTalkMultiCallSystemSpeech()
+        let lines = DurableTalkTraceLines()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager.systemSpeech = speech
+        manager._test_setTTSAudioHooks(prepare: { durableTalkSpeakerRoute }, restore: {})
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: {
+                durableTalkCaptureAdmission(token: try await fixture.owner.destructiveSessionAdmissionToken())
+            },
+            persist: { request in
+                try await persistDurableTalk(request, owner: fixture.owner, gatewayEvents: events.stream)
+            })
+        manager.updateGatewayConnected(true)
+        OpenClawDiagnosticRecorder.installSink { lines.append($0) }
+        defer {
+            manager.setForegroundAudioCaptureAllowed(false)
+            for call in 1...max(speech.callCount, 1) { speech.complete(callID: call) }
+            events.finish()
+            OpenClawDiagnosticRecorder.clearSink()
+        }
+
+        _ = try await manager._test_prepareActivePTT(transcript: "synthetic request")
+        await manager._test_handleTranscript("synthetic request", isFinal: true)
+        let firstID = try XCTUnwrap(manager._test_durableCaptureIdentity()?.rawCommandID)
+        let firstResult = await manager.endPushToTalk()
+        XCTAssertEqual(firstResult.status, "queued")
+        try await waitForDurableTalk("first response observer") {
+            await MainActor.run { manager._test_hasDurableResponseTask() }
+        }
+        events.sendChatFinal(runID: firstID, text: "same response")
+        try await waitForDurableTalk("first speech starts") {
+            await MainActor.run { speech.callCount == 1 }
+        }
+        let firstGeneration = manager._test_ttsGeneration()
+        let firstHash = try XCTUnwrap(OpenClawDiagnosticEvent(
+            kind: .tts, state: "test_identity", runIdentifier: firstID).runID)
+        let capture = lines.events().first { $0.state == "speech_capture_persisted" }
+        XCTAssertNotNil(capture, "capture/request binding must be recorded")
+        let recognition = try XCTUnwrap(lines.events().first { $0.state == "speech_transcript_final_received" })
+        XCTAssertEqual(capture?.runID, firstHash)
+        XCTAssertEqual(capture?.sessionGeneration, recognition.sessionGeneration)
+        XCTAssertNotNil(capture?.sessionGeneration)
+
+        let manual = Task { @MainActor in await manager.testSystemVoice() }
+        defer { manual.cancel() }
+        try await waitForDurableTalk("manual replacement starts") {
+            await MainActor.run { speech.callCount == 2 }
+        }
+        let manualGeneration = manager._test_ttsGeneration()
+        XCTAssertNotEqual(manualGeneration, firstGeneration)
+        speech.replayStart(callID: 1)
+        let lateStart = try XCTUnwrap(lines.events().last { $0.state == "tts_playback_started" })
+        XCTAssertEqual(lateStart.playbackGeneration, firstGeneration)
+        XCTAssertEqual(lateStart.runID, firstHash)
+        XCTAssertEqual(manager._test_ttsGeneration(), manualGeneration)
+        speech.complete(callID: 1)
+        try await waitForDurableTalk("retired response exits") {
+            await MainActor.run { !manager._test_hasDurableResponseTask() }
+        }
+        speech.complete(callID: 2)
+        await manual.value
+
+        _ = try await manager._test_prepareActivePTT(transcript: "another request")
+        let secondID = try XCTUnwrap(manager._test_durableCaptureIdentity()?.rawCommandID)
+        XCTAssertNotEqual(firstID, secondID)
+        let secondResult = await manager.endPushToTalk()
+        XCTAssertEqual(secondResult.status, "queued")
+        try await waitForDurableTalk("second response observer") {
+            await MainActor.run { manager._test_hasDurableResponseTask() }
+        }
+        events.sendChatFinal(runID: secondID, text: "same response")
+        try await waitForDurableTalk("second speech starts") {
+            await MainActor.run { speech.callCount == 3 }
+        }
+        let secondGeneration = manager._test_ttsGeneration()
+        let secondHash = try XCTUnwrap(OpenClawDiagnosticEvent(
+            kind: .tts, state: "test_identity", runIdentifier: secondID).runID)
+        speech.complete(callID: 3)
+        try await waitForDurableTalk("second response completes") {
+            await MainActor.run { !manager._test_hasDurableResponseTask() }
+        }
+
+        let records = lines.events()
+        for (generation, expectedRun) in [
+            (firstGeneration, Optional(firstHash)), (manualGeneration, nil), (secondGeneration, Optional(secondHash)),
+        ] {
+            for state in ["tts_request_admitted", "tts_playback_pipeline_entered", "tts_playback_started"] {
+                let matches = records.filter { $0.playbackGeneration == generation && $0.state == state }
+                XCTAssertFalse(matches.isEmpty, "missing \(state) for generation \(generation)")
+                XCTAssertTrue(matches.allSatisfy { $0.runID == expectedRun }, "incorrect run binding for \(state)")
+            }
+        }
+        let completed = try XCTUnwrap(records.last { $0.state == "tts_playback_completed" })
+        XCTAssertEqual(completed.playbackGeneration, secondGeneration)
+        XCTAssertEqual(completed.runID, secondHash)
+        for line in lines.snapshot() {
+            let prefix = "aies_diagnostic="
+            XCTAssertTrue(line.hasPrefix(prefix))
+            let data = try XCTUnwrap(Data(base64Encoded: String(line.dropFirst(prefix.count))))
+            let json = try XCTUnwrap(String(data: data, encoding: .utf8))
+            XCTAssertFalse(json.contains(firstID) || json.contains(secondID))
+        }
+    }
+}
+
+private final class DurableTalkTraceLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+
+    func append(_ line: String) {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        self.lines.append(line)
+    }
+
+    func snapshot() -> [String] {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.lines
+    }
+
+    func events() -> [OpenClawDiagnosticEvent] {
+        self.snapshot().compactMap(OpenClawDiagnosticRecorder.decodeRecord)
     }
 }

@@ -690,6 +690,7 @@ jobs:
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
+            -only-testing:OpenClawTests/TalkSpeechTraceTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkProStateTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
@@ -1346,6 +1347,7 @@ jobs:
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
             -only-testing:OpenClawTests/TalkModeManagerTests \
             -only-testing:OpenClawTests/TalkDurableOutboxTests \
+            -only-testing:OpenClawTests/TalkSpeechTraceTests \
             -only-testing:OpenClawTests/TalkModeIncrementalSpeechBufferTests \
             -only-testing:OpenClawTests/TalkProStateTests \
             -only-testing:OpenClawTests/TalkTTSDiagnosticsTests \
