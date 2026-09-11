@@ -2998,6 +2998,7 @@ final class TalkSpeechTraceTests: XCTestCase {
         XCTAssertNotNil(capture, "capture/request binding must be recorded")
         let recognition = try XCTUnwrap(lines.events().first { $0.state == "speech_transcript_final_received" })
         XCTAssertEqual(capture?.runID, firstHash)
+        XCTAssertEqual(capture?.resultClass, "success")
         XCTAssertEqual(capture?.sessionGeneration, recognition.sessionGeneration)
         XCTAssertNotNil(capture?.sessionGeneration)
 
@@ -3060,6 +3061,49 @@ final class TalkSpeechTraceTests: XCTestCase {
             let json = try XCTUnwrap(String(data: data, encoding: .utf8))
             XCTAssertFalse(json.contains(firstID) || json.contains(secondID))
         }
+    }
+
+    func testRetiredPersistenceKeepsCapturedIdentityAndDecodedClassification() async throws {
+        let fixture = try await DurableTalkOutboxFixture.make()
+        addTeardownBlock { try await fixture.close() }
+        let gate = DurableTalkGate()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let lines = DurableTalkTraceLines()
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: {
+                durableTalkCaptureAdmission(token: try await fixture.owner.destructiveSessionAdmissionToken())
+            },
+            persist: { request in
+                await gate.wait()
+                return try await persistDurableTalk(request, owner: fixture.owner)
+            })
+        manager.updateGatewayConnected(true)
+        OpenClawDiagnosticRecorder.installSink { lines.append($0) }
+        defer {
+            manager.setForegroundAudioCaptureAllowed(false)
+            OpenClawDiagnosticRecorder.clearSink()
+        }
+        _ = try await manager._test_prepareActivePTT(transcript: "retired synthetic request")
+        let requestID = try XCTUnwrap(manager._test_durableCaptureIdentity()?.rawCommandID)
+        let stop = Task { @MainActor in await manager.endPushToTalk() }
+        addTeardownBlock {
+            await gate.open()
+            _ = await stop.value
+        }
+        try await waitForDurableTalk("persistence pauses before reset") {
+            await gate.waiterCount() == 1
+        }
+        manager.beginCredentialReset()
+        await gate.open()
+        let result = await stop.value
+        XCTAssertEqual(result.status, "cancelled")
+        let capture = try XCTUnwrap(lines.events().first { $0.state == "speech_capture_persisted" })
+        let expectedHash = OpenClawDiagnosticEvent(kind: .tts, state: "test_identity", runIdentifier: requestID).runID
+        XCTAssertEqual(capture.runID, expectedHash)
+        XCTAssertNotNil(capture.sessionGeneration)
+        XCTAssertEqual(capture.resultClass, "stale_callback")
+        XCTAssertFalse(manager._test_hasDurableResponseTask())
     }
 }
 

@@ -1809,6 +1809,13 @@ final class TalkModeManager: NSObject {
             throw error
         }
         let deliveryIsCurrent = pending.deliveryGeneration == self.durableDeliveryGeneration
+        OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
+            kind: .tts,
+            state: "speech_capture_persisted",
+            runIdentifier: pending.request.rawCommandID,
+            sessionGeneration: pending.captureGeneration,
+            resultClass: deliveryIsCurrent ? "success" : "stale_callback",
+            byteCount: pending.transcript.utf8.count))
 
         // The enqueue return is proof that SQLite committed. A concurrent new
         // capture owns a newer generation and must never be erased here.
@@ -2033,11 +2040,13 @@ final class TalkModeManager: NSObject {
         if shouldIncremental {
             await self.handleIncrementalAssistantFinal(
                 text: assistantText,
+                runID: rawCommandID,
                 presentationValidator: presentationValidator,
                 durableResponseGeneration: responseGeneration)
         } else {
             await self.playAssistant(
                 text: assistantText,
+                runID: rawCommandID,
                 presentationValidator: presentationValidator,
                 durableResponseGeneration: responseGeneration)
         }
@@ -2643,6 +2652,7 @@ final class TalkModeManager: NSObject {
 
     private func playAssistant(
         text: String,
+        runID: String,
         presentationValidator: @escaping SpeechPresentationValidator,
         durableResponseGeneration: UInt64? = nil) async
     {
@@ -2705,7 +2715,7 @@ final class TalkModeManager: NSObject {
                 isRealtime: false))
         }
         self.startSpeechInterruptionRecognitionIfNeeded()
-        let generation = self.beginTTSGeneration()
+        let generation = self.beginTTSGeneration(runID: runID)
         if durableResponseGeneration != nil {
             self.durableResponseSpeechGeneration = generation
         }
@@ -2718,7 +2728,7 @@ final class TalkModeManager: NSObject {
         self.lastPlaybackWasPCM = attempts.initial.flatMap {
             TalkTTSValidation.pcmSampleRate(from: $0.outputFormat)
         } != nil
-        let result = await self.makeTTSPlaybackPipeline(generation: generation).speak(
+        let result = await self.makeTTSPlaybackPipeline(generation: generation, runID: runID).speak(
             text: cleaned,
             language: language,
             providerAttempt: attempts.initial,
@@ -2909,7 +2919,10 @@ final class TalkModeManager: NSObject {
             voiceIDPresent: voiceIDPresent)
     }
 
-    private func makeTTSPlaybackPipeline(generation: UInt64) -> TalkTTSPlaybackPipeline {
+    private func makeTTSPlaybackPipeline(
+        generation: UInt64,
+        runID: String? = nil) -> TalkTTSPlaybackPipeline
+    {
         TalkTTSPlaybackPipeline(
             pcmPlayer: self.pcmPlayer,
             mp3Player: self.mp3Player,
@@ -2925,17 +2938,17 @@ final class TalkModeManager: NSObject {
                 self?.updateTTSDiagnostics(progress, generation: generation)
             },
             breadcrumb: { [weak self] breadcrumb in
-                self?.recordTTSBreadcrumb(breadcrumb, generation: generation)
+                self?.recordTTSBreadcrumb(breadcrumb, generation: generation, runID: runID)
             },
             playbackObserver: StreamingPlaybackObserver { observation in
-                Self.recordTTSPlaybackObservation(observation, generation: generation)
+                Self.recordTTSPlaybackObservation(observation, generation: generation, runID: runID)
             },
             lifecycleObserver: { observation in
-                Self.recordTTSLifecycleObservation(observation, generation: generation)
+                Self.recordTTSLifecycleObservation(observation, generation: generation, runID: runID)
             })
     }
 
-    private func beginTTSGeneration() -> UInt64 {
+    private func beginTTSGeneration(runID: String? = nil) -> UInt64 {
         if let activeTTSGeneration {
             TalkAudioSessionDiagnostics.recordStopRequested(
                 origin: .providerReplacement,
@@ -2962,7 +2975,8 @@ final class TalkModeManager: NSObject {
         self.ttsDiagnostics.durationMilliseconds = nil
         self.recordTTSBreadcrumb(
             TalkTTSBreadcrumb(stage: .requestAdmitted),
-            generation: self.ttsGeneration)
+            generation: self.ttsGeneration,
+            runID: runID)
         return self.ttsGeneration
     }
 
@@ -3056,10 +3070,15 @@ final class TalkModeManager: NSObject {
             durationMilliseconds: progress.durationMilliseconds))
     }
 
-    private func recordTTSBreadcrumb(_ breadcrumb: TalkTTSBreadcrumb, generation: UInt64) {
+    private func recordTTSBreadcrumb(
+        _ breadcrumb: TalkTTSBreadcrumb,
+        generation: UInt64,
+        runID: String? = nil)
+    {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: breadcrumb.stage.rawValue,
+            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
             operationIdentifier: "tts-generation-\(generation)",
@@ -3081,6 +3100,7 @@ final class TalkModeManager: NSObject {
     nonisolated static func recordTTSPlaybackObservation(
         _ observation: StreamingPlaybackObservation,
         generation: UInt64,
+        runID: String? = nil,
         flush: @Sendable () -> Void = { GatewayDiagnostics.requestFlush() })
     {
         let resultClass: String? = switch observation.stage {
@@ -3099,6 +3119,7 @@ final class TalkModeManager: NSObject {
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: "tts_\(observation.stage.rawValue)",
+            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
             operationIdentifier: attempt,
@@ -3115,12 +3136,14 @@ final class TalkModeManager: NSObject {
     nonisolated static func recordTTSLifecycleObservation(
         _ observation: TalkTTSLifecycleObservation,
         generation: UInt64,
+        runID: String? = nil,
         flush: @Sendable () -> Void = { GatewayDiagnostics.requestFlush() })
     {
         let attempt = "tts-generation-\(generation)"
         OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
             kind: .tts,
             state: observation.stage.rawValue,
+            runIdentifier: runID,
             playbackGeneration: generation,
             cancellationGeneration: generation,
             operationIdentifier: attempt,
@@ -3690,6 +3713,7 @@ final class TalkModeManager: NSObject {
                     "speech_segment_started", runID: segmentRunID, text: segment, result: "started")
                 await self.speakIncrementalSegment(
                     segment,
+                    runID: segmentRunID,
                     context: context,
                     prefetchedAudio: prefetchedAudio,
                     taskGeneration: taskGeneration)
@@ -3906,6 +3930,7 @@ final class TalkModeManager: NSObject {
 
     private func handleIncrementalAssistantFinal(
         text: String,
+        runID: String,
         presentationValidator: @escaping SpeechPresentationValidator,
         durableResponseGeneration: UInt64) async
     {
@@ -3938,6 +3963,7 @@ final class TalkModeManager: NSObject {
         if !self.incrementalSpeechUsed {
             await self.playAssistant(
                 text: text,
+                runID: runID,
                 presentationValidator: presentationValidator,
                 durableResponseGeneration: durableResponseGeneration)
         }
@@ -4097,6 +4123,7 @@ final class TalkModeManager: NSObject {
 
     private func speakIncrementalSegment(
         _ text: String,
+        runID: String?,
         context preferredContext: IncrementalSpeechContext? = nil,
         prefetchedAudio: IncrementalPrefetchedAudio? = nil,
         taskGeneration: UInt64) async
@@ -4156,13 +4183,13 @@ final class TalkModeManager: NSObject {
         }
 
         guard self.isCurrentIncrementalSpeechTask(taskGeneration), !Task.isCancelled else { return }
-        let generation = self.beginTTSGeneration()
+        let generation = self.beginTTSGeneration(runID: runID)
         self.currentPlaybackProvider = initialAttempt == nil ? .system : .elevenLabs
         self.incrementalSpeechPlaybackGeneration = generation
         self.lastPlaybackWasPCM = initialAttempt.flatMap {
             TalkTTSValidation.pcmSampleRate(from: $0.outputFormat)
         } != nil
-        let result = await self.makeTTSPlaybackPipeline(generation: generation).speak(
+        let result = await self.makeTTSPlaybackPipeline(generation: generation, runID: runID).speak(
             text: text,
             language: self.incrementalSpeechLanguage,
             providerAttempt: initialAttempt,
