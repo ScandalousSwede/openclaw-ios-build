@@ -12,6 +12,10 @@ import {
   type BundledProviderPolicySurface,
   type ProviderPolicySurface,
 } from "./provider-policy-surface.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "./provider-runtime-scope.js";
 
 type ProviderPolicyMetadata = {
   manifestRegistry?: Pick<PluginManifestRegistry, "plugins">;
@@ -78,6 +82,15 @@ export function resolveBundledProviderPolicySurface(
   providerId: string,
   options: ProviderPolicyMetadata = {},
 ): BundledProviderPolicySurface | null {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    const provider = resolveExplicitScopedProvider({ config: scope.config, provider: providerId })!;
+    return {
+      normalizeConfig: provider.normalizeConfig,
+      applyConfigDefaults: provider.applyConfigDefaults,
+      resolveThinkingProfile: provider.resolveThinkingProfile,
+    };
+  }
   const normalizedProviderId = normalizeProviderId(providerId);
   if (!normalizedProviderId) {
     return null;

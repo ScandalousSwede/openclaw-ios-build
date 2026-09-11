@@ -14,6 +14,7 @@ import {
   loadPluginManifestRegistryCore,
   type PluginManifestRecord,
 } from "../../plugins/manifest-registry.js";
+import { resolveExplicitScopedProvider } from "../../plugins/provider-runtime-scope.js";
 import { staticModelIdMatches } from "./model.static-id.js";
 
 function hasModelCatalogAliasTransportOverride(alias: ModelCatalogAlias): boolean {
@@ -292,6 +293,10 @@ export function resolveManifestModelCatalogProviderAliasMetadata(params: {
   workspaceDir?: string;
   env?: NodeJS.ProcessEnv;
 }): ManifestModelCatalogProviderAliasMetadata {
+  const scoped = resolveExplicitScopedProvider({ config: params.cfg, provider: params.provider });
+  if (scoped) {
+    return { provider: scoped.id };
+  }
   const provider = normalizeProviderId(params.provider);
   if (!provider) {
     return { provider: params.provider };

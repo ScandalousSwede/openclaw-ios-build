@@ -15,6 +15,10 @@ import {
   resolveProviderConfigApiOwnerHint,
 } from "./provider-config-owner.js";
 import { matchesProviderPluginRef } from "./provider-registry-shared.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "./provider-runtime-scope.js";
 import type { createProviderRegistryResolver } from "./providers.runtime-core.js";
 import type { PluginRegistry } from "./registry-types.js";
 import { getActivePluginRegistryWorkspaceDirFromState } from "./runtime-state.js";
@@ -68,6 +72,19 @@ export function createProviderHookRuntime(
   providers: ReturnType<typeof createProviderRegistryResolver>,
 ) {
   const { isPluginProvidersLoadInFlight, resolvePluginProvidersCore } = providers;
+
+  function resolveExplicitRuntimePlugin(
+    params: ProviderRuntimePluginLookupParams,
+  ): ProviderPlugin | undefined {
+    const scope = getExplicitProviderRuntimeScope();
+    if (!scope) {
+      return undefined;
+    }
+    if (params.providerOwner !== undefined && params.providerOwner !== scope.provider.id) {
+      throw new Error("Provider owner differs from explicit runtime scope");
+    }
+    return resolveExplicitScopedProvider(params);
+  }
 
   /** Carries one attempt's prepared provider plugin through the model transport boundary. */
   function attachModelProviderRuntimePluginHandle<TModel extends object>(
@@ -154,6 +171,19 @@ export function createProviderHookRuntime(
     applyAutoEnable?: boolean;
     pluginMetadataSnapshot?: PluginMetadataRegistryView;
   }): ProviderPlugin[] | undefined {
+    const scope = getExplicitProviderRuntimeScope();
+    if (scope) {
+      if (params.config !== scope.config) {
+        throw new Error("Provider config differs from explicit runtime scope");
+      }
+      for (const provider of params.providerRefs ?? []) {
+        resolveExplicitScopedProvider({ config: params.config, provider });
+      }
+      if (params.onlyPluginIds?.some((id) => id !== scope.provider.id)) {
+        throw new Error("Plugin differs from explicit runtime scope");
+      }
+      return params.onlyPluginIds?.length === 0 ? [] : [scope.provider];
+    }
     const onlyPluginIds = params.onlyPluginIds ? new Set(params.onlyPluginIds) : undefined;
     const filterRegistryPlugins = (registry: PluginRegistry) =>
       registry.providers
@@ -211,6 +241,10 @@ export function createProviderHookRuntime(
   function resolveProviderRuntimePlugin(
     params: ProviderRuntimePluginLookupParams,
   ): ProviderPlugin | undefined {
+    const scoped = resolveExplicitRuntimePlugin(params);
+    if (scoped) {
+      return scoped;
+    }
     const workspaceDir = params.workspaceDir ?? getActivePluginRegistryWorkspaceDirFromState();
     const env = params.env ?? process.env;
     const lookup = { ...params, workspaceDir, env };
@@ -275,6 +309,10 @@ export function createProviderHookRuntime(
   function resolveLoadedProviderRuntimePlugin(
     params: ProviderRuntimePluginLookupParams,
   ): ProviderPlugin | undefined {
+    const scoped = resolveExplicitRuntimePlugin(params);
+    if (scoped) {
+      return scoped;
+    }
     const apiOwnerHint = resolveProviderConfigApiOwnerHint({
       provider: params.provider,
       config: params.config,
@@ -314,6 +352,10 @@ export function createProviderHookRuntime(
   function resolveProviderRuntimePluginHandle(
     params: ProviderRuntimePluginLookupParams,
   ): ProviderRuntimePluginHandle {
+    const scoped = resolveExplicitRuntimePlugin(params);
+    if (scoped) {
+      return { ...params, plugin: scoped };
+    }
     const lookup = {
       ...params,
       workspaceDir: params.workspaceDir ?? getActivePluginRegistryWorkspaceDirFromState(),
@@ -325,6 +367,16 @@ export function createProviderHookRuntime(
   function ensureProviderRuntimePluginHandle(
     params: ProviderRuntimePluginHandleParams,
   ): ProviderRuntimePluginHandle {
+    const scoped = resolveExplicitRuntimePlugin(params);
+    if (scoped) {
+      if (params.runtimeHandle) {
+        resolveExplicitRuntimePlugin(params.runtimeHandle);
+        if (params.runtimeHandle.plugin !== scoped) {
+          throw new Error("Provider handle differs from explicit runtime scope");
+        }
+      }
+      return { ...params, plugin: scoped };
+    }
     const modelId = resolveProviderRuntimeLookupModelId(params);
     if (
       !params.runtimeHandle ||

@@ -1,3 +1,4 @@
+import { loadGlobalRuntimeDotEnvFiles } from "../infra/dotenv.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { findStartupMaintenanceRequiredError } from "../infra/startup-maintenance-required.js";
 import { withPluginMetadataSnapshotScope } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -494,10 +495,20 @@ export async function readBestEffortConfigSnapshotFromContext(
 
 export async function readSourceConfigBestEffortFromContext(
   context: ConfigIoContext,
+  options: { strict?: boolean } = {},
 ): Promise<OpenClawConfig> {
   const { deps, configPath } = context;
-  maybeLoadDotEnvForConfig(deps.env);
+  if (options.strict) {
+    if (deps.env === process.env) {
+      loadGlobalRuntimeDotEnvFiles({ quiet: true });
+    }
+  } else {
+    maybeLoadDotEnvForConfig(deps.env);
+  }
   if (!deps.fs.existsSync(configPath)) {
+    if (options.strict) {
+      throw new Error("Source configuration is unavailable");
+    }
     return {};
   }
   // Best-effort legitimizes the fallback value, not the silence: consumers
@@ -507,6 +518,9 @@ export async function readSourceConfigBestEffortFromContext(
     const raw = deps.fs.readFileSync(configPath, "utf-8");
     const parsed = parseConfigJson5(raw, deps.json5);
     if (!parsed.ok) {
+      if (options.strict) {
+        throw new Error("Source configuration is invalid");
+      }
       deps.logger.warn(
         `Config (${configPath}): best-effort read ignored unparseable config: ${parsed.error}`,
       );
@@ -516,15 +530,28 @@ export async function readSourceConfigBestEffortFromContext(
     try {
       resolved = resolveConfigIncludesForRead(parsed.parsed, configPath, deps);
     } catch (err) {
+      if (options.strict) {
+        throw err;
+      }
       deps.logger.warn(
         `Config (${configPath}): best-effort read skipped $include resolution: ${formatErrorMessage(err)}`,
       );
       return coerceConfig(parsed.parsed);
     }
     const resolution = resolveConfigForRead(resolved, deps.env, deps.lowerPrecedenceEnv);
-    return coerceConfig(resolution.resolvedConfigRaw);
+    const config = coerceConfig(resolution.resolvedConfigRaw);
+    if (options.strict && (resolution.envWarnings.length > 0 || Object.keys(config).length === 0)) {
+      throw new Error("Source configuration is empty or has unresolved environment references");
+    }
+    return config;
   } catch (err) {
-    deps.logger.warn(`Config (${configPath}): best-effort read failed: ${formatErrorMessage(err)}`);
-    return {};
+    if (!options.strict) {
+      deps.logger.warn(
+        `Config (${configPath}): best-effort read failed: ${formatErrorMessage(err)}`,
+      );
+      return {};
+    }
   }
+  // Strict callers get a sanitized failure without include paths or parser data in a cause.
+  throw new Error("Strict source configuration read failed");
 }

@@ -7,12 +7,16 @@ import type {
   PluginManifestProviderEndpoint,
   PluginManifestProviderRequestProvider,
 } from "../plugins/manifest.js";
-import { normalizePluginProviderBaseUrl } from "../plugins/plugin-metadata-provider-facts.js";
+import {
+  buildProviderRequestMetadataFacts,
+  normalizePluginProviderBaseUrl,
+} from "../plugins/plugin-metadata-provider-facts.js";
 import {
   getCurrentPluginMetadataSnapshotRequiredRuntime as getCurrentPluginMetadataSnapshot,
   loadPluginMetadataSnapshotRuntime as loadPluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot-required.js";
 import type { PluginMetadataSnapshotOwnerMaps } from "../plugins/plugin-metadata-snapshot.types.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import { asBoolean } from "../utils/boolean.js";
 import type { RuntimeVersionEnv } from "../version.js";
 import { resolveRuntimeServiceVersion } from "../version.js";
@@ -185,6 +189,18 @@ type ProviderMetadataOwners = {
 function resolveProviderMetadataOwners(
   prepared?: PluginMetadataSnapshotOwnerMaps,
 ): ProviderMetadataOwners {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (!scope.providerManifest) {
+      throw new Error("Scoped provider manifest is required");
+    }
+    return buildProviderRequestMetadataFacts([
+      {
+        providerEndpoints: scope.providerManifest.providerEndpoints,
+        providerRequest: scope.providerManifest.providerRequest,
+      },
+    ]);
+  }
   const owners =
     prepared ??
     getCurrentPluginMetadataSnapshot({

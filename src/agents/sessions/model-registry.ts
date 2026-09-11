@@ -359,14 +359,17 @@ export class ModelRegistry {
     this.modelsJsonPath = modelsJsonPath;
     this.modelsJsonContents = options.modelsJsonContents;
     this.pluginCatalogs = options.pluginCatalogs;
-    this.pluginMetadataSnapshot = resolveModelPluginMetadataSnapshot({
-      ...(options.pluginMetadataSnapshot
-        ? { pluginMetadataSnapshot: options.pluginMetadataSnapshot }
-        : {}),
-      ...(options.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
-      allowWorkspaceScopedCurrent: true,
-      useRuntimeConfig: true,
-    });
+    this.pluginMetadataSnapshot =
+      modelsJsonPath === undefined
+        ? options.pluginMetadataSnapshot
+        : resolveModelPluginMetadataSnapshot({
+            ...(options.pluginMetadataSnapshot
+              ? { pluginMetadataSnapshot: options.pluginMetadataSnapshot }
+              : {}),
+            ...(options.workspaceDir ? { workspaceDir: options.workspaceDir } : {}),
+            allowWorkspaceScopedCurrent: true,
+            useRuntimeConfig: true,
+          });
     this.loadModels();
     this.baseCatalogSnapshot = this.captureCatalogSnapshot();
   }

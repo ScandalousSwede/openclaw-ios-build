@@ -4,7 +4,14 @@
  * once and caches the result.
  */
 import { createRequire } from "node:module";
-import type { ManifestModelIdNormalizationSource } from "../plugins/manifest-model-id-normalization.js";
+import {
+  normalizeProviderModelIdWithManifest,
+  type ManifestModelIdNormalizationSource,
+} from "../plugins/manifest-model-id-normalization.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "../plugins/provider-runtime-scope.js";
 
 type ProviderRuntimeModule = Pick<
   typeof import("../plugins/provider-runtime.js"),
@@ -50,5 +57,17 @@ export function normalizeProviderModelIdWithRuntime(params: {
     modelId: string;
   };
 }): string | undefined {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    const provider = resolveExplicitScopedProvider({
+      config: scope.config,
+      provider: params.provider,
+    })!;
+    const normalized = provider.normalizeModelId?.(params.context);
+    return (
+      (typeof normalized === "string" && normalized.trim() ? normalized.trim() : undefined) ??
+      normalizeProviderModelIdWithManifest(params)
+    );
+  }
   return loadProviderRuntime()?.normalizeProviderModelIdWithPlugin(params);
 }

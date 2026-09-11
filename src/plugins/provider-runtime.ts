@@ -49,6 +49,10 @@ import {
 import { matchesProviderPluginRef } from "./provider-registry-shared.js";
 import type { ProviderRuntimeModel } from "./provider-runtime-model.types.js";
 import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "./provider-runtime-scope.js";
+import {
   prepareSyntheticAuthWithProvider,
   readPreparedSyntheticAuthFact,
   resolveSyntheticAuthWithProvider,
@@ -909,9 +913,41 @@ type ProviderSyntheticAuthParams = {
   modelApi?: string;
 };
 
+function scopedSyntheticAuthParams<T extends ProviderSyntheticAuthParams>(params: T): T {
+  const scope = getExplicitProviderRuntimeScope();
+  if (!scope) {
+    return params;
+  }
+  resolveScopedSyntheticAuthProvider(params);
+  return { ...params, config: scope.config, context: { ...params.context, config: scope.config } };
+}
+
+function resolveScopedSyntheticAuthProvider(params: ProviderSyntheticAuthParams) {
+  const scope = getExplicitProviderRuntimeScope();
+  if (!scope) {
+    return undefined;
+  }
+  if (params.context.config && params.context.config !== scope.config) {
+    throw new Error("Synthetic auth context is outside the explicit provider scope");
+  }
+  resolveExplicitScopedProvider({ config: scope.config, provider: params.context.provider });
+  return resolveExplicitScopedProvider({
+    config: params.config ?? scope.config,
+    provider: params.provider,
+  });
+}
+
 function* resolveSyntheticAuthProviders(
   params: ProviderSyntheticAuthParams,
 ): Generator<ProviderPlugin> {
+  const scoped = resolveScopedSyntheticAuthProvider(params);
+  if (scoped) {
+    if (scoped.resolveSyntheticAuth || scoped.prepareSyntheticAuth) {
+      yield scoped;
+    }
+    return;
+  }
+
   const providerRefs = resolveProviderHookRefs(
     params.provider,
     params.context.providerConfig,
@@ -972,7 +1008,9 @@ function* resolveSyntheticAuthProviders(
   }
 }
 
-export function resolveProviderSyntheticAuthWithPlugin(params: ProviderSyntheticAuthParams) {
+export function resolveProviderSyntheticAuthWithPlugin(inputParams: ProviderSyntheticAuthParams) {
+  const params = scopedSyntheticAuthParams(inputParams);
+  resolveScopedSyntheticAuthProvider(params);
   const captured = readPreparedSyntheticAuthFact(params.context, params);
   if (captured) {
     return captured.result ?? undefined;
@@ -1005,9 +1043,11 @@ async function prepareSyntheticAuthProviders(
 }
 
 export async function prepareProviderSyntheticAuthWithPlugin(
-  params: ProviderSyntheticAuthPreparationParams,
+  inputParams: ProviderSyntheticAuthPreparationParams,
 ) {
+  const params = scopedSyntheticAuthParams(inputParams);
   params.signal?.throwIfAborted();
+  resolveScopedSyntheticAuthProvider(params);
   const captured = readPreparedSyntheticAuthFact(params.context, params);
   if (captured) {
     return captured.result ?? undefined;
@@ -1022,9 +1062,11 @@ function resolveExternalSyntheticAuthProviders(params: ProviderSyntheticAuthPara
 
 /** Prepare external checks without evaluating pure-only hooks before their synchronous read. */
 export async function prepareProviderExternalAuthWithPlugin(
-  params: ProviderSyntheticAuthPreparationParams,
+  inputParams: ProviderSyntheticAuthPreparationParams,
 ) {
+  const params = scopedSyntheticAuthParams(inputParams);
   params.signal?.throwIfAborted();
+  resolveScopedSyntheticAuthProvider(params);
   const captured = readPreparedSyntheticAuthFact(params.context, params);
   return captured
     ? (captured.result ?? undefined)

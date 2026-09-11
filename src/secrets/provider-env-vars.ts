@@ -1,7 +1,10 @@
 /** Resolves provider environment variable candidates and auth evidence from core/plugin metadata. */
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import { resolveProviderAuthAliasMap } from "../agents/provider-auth-aliases.js";
+import {
+  buildProviderAuthAliasMapFromManifests,
+  resolveProviderAuthAliasMap,
+} from "../agents/provider-auth-aliases.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
 import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
@@ -15,6 +18,7 @@ import {
   loadPluginMetadataSnapshot,
   type PluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import { listSetupProviderIds } from "../plugins/setup-descriptors.js";
 import { hasKind } from "../plugins/slots.js";
 import { appendUniqueEnvVarCandidates } from "../shared/env-var-candidates.js";
@@ -59,6 +63,61 @@ export type ProviderAuthLookupMaps = {
   authEvidenceMap: Readonly<Record<string, readonly ProviderAuthEvidence[]>>;
   setupProviderFallbackRefs: readonly string[];
 };
+
+type AdmittedProviderAuthManifest = Pick<
+  PluginManifestRecord,
+  "providers" | "setup" | "cliBackends" | "providerAuthAliases" | "providerAuthChoices"
+> & { origin: "bundled" };
+
+/** Reduce only shipped manifests already admitted by the explicit caller. */
+export function buildAdmittedProviderAuthLookupMaps(params: {
+  providerId: string;
+  manifests: readonly AdmittedProviderAuthManifest[];
+}): ProviderAuthLookupMaps {
+  const providerId = normalizeProviderId(params.providerId);
+  if (
+    !providerId ||
+    providerId !== params.providerId ||
+    params.manifests.some((manifest) => manifest.origin !== "bundled") ||
+    !params.manifests.some((manifest) => manifest.providers.includes(providerId))
+  ) {
+    throw new Error("Auth manifests do not own the selected provider");
+  }
+  const aliasMap = Object.fromEntries(
+    Object.entries(buildProviderAuthAliasMapFromManifests(params.manifests)).filter(
+      ([, target]) => target === providerId,
+    ),
+  );
+  const names = new Set([providerId, ...Object.keys(aliasMap)]);
+  const select = <T>(map: Readonly<Record<string, T>>): Record<string, T> =>
+    Object.fromEntries(Object.entries(map).filter(([name]) => names.has(name)));
+  const entries = Object.entries(aliasMap);
+  const sorted = entries.toSorted(([left], [right]) => left.localeCompare(right));
+  const facts = reduceManifestRuntimeAuthFacts(params.manifests, entries, sorted);
+  return {
+    aliasMap,
+    envCandidateMap: select({
+      ...reduceManifestProviderAuthEnvVarCandidates(params.manifests, sorted),
+      ...CORE_PROVIDER_AUTH_ENV_VAR_CANDIDATES,
+    }),
+    authEvidenceMap: select(facts.authEvidenceMap),
+    setupProviderFallbackRefs: facts.setupProviderFallbackRefs.filter((name) => names.has(name)),
+  };
+}
+function scopedAuthLookup(params?: ProviderEnvVarLookupParams) {
+  const scope = getExplicitProviderRuntimeScope();
+  if (!scope) {
+    return undefined;
+  }
+  if (
+    (params?.config && params.config !== scope.config) ||
+    params?.metadataSnapshot ||
+    !scope.authLookupMaps
+  ) {
+    throw new Error("Auth metadata is outside the explicit provider runtime scope");
+  }
+  return scope.authLookupMaps;
+}
 
 function isWorkspacePluginTrustedForProviderEnvVars(
   plugin: PluginManifestRecord,
@@ -128,6 +187,9 @@ function appendUniqueProviderRef(target: Set<string>, providerId: string): void 
 function resolveProviderMetadataSnapshot(
   params?: ProviderEnvVarLookupParams,
 ): PluginMetadataSnapshot {
+  if (getExplicitProviderRuntimeScope()) {
+    throw new Error("Auth metadata discovery is unavailable inside explicit runtime scope");
+  }
   if (params?.metadataSnapshot) {
     return params.metadataSnapshot;
   }
@@ -189,11 +251,18 @@ function resolveManifestProviderAuthEnvVarCandidates(
   snapshot: PluginMetadataSnapshot,
   sortedAliases: readonly (readonly [string, string])[],
 ): Record<string, string[]> {
+  return reduceManifestProviderAuthEnvVarCandidates(
+    snapshot.plugins.filter((plugin) => shouldUsePluginProviderEnvVars(plugin, params)),
+    sortedAliases,
+  );
+}
+
+function reduceManifestProviderAuthEnvVarCandidates(
+  plugins: readonly Pick<PluginManifestRecord, "setup">[],
+  sortedAliases: readonly (readonly [string, string])[],
+): Record<string, string[]> {
   const candidates: Record<string, string[]> = {};
-  for (const plugin of snapshot.plugins) {
-    if (!shouldUsePluginProviderEnvVars(plugin, params)) {
-      continue;
-    }
+  for (const plugin of plugins) {
     for (const provider of plugin.setup?.providers ?? []) {
       appendUniqueEnvVarCandidates(candidates, provider.id, provider.envVars ?? []);
     }
@@ -213,10 +282,26 @@ function resolveManifestRuntimeAuthFacts(
   aliasEntries: readonly (readonly [string, string])[],
   sortedAliases: readonly (readonly [string, string])[],
 ) {
+  const isEnabled = createInstalledPluginEnabledPredicate(snapshot.index.plugins, params?.config);
+  const eligible = snapshot.plugins.filter(
+    (plugin) => snapshot.index.plugins.length === 0 || isEnabled(plugin.id),
+  );
+  return reduceManifestRuntimeAuthFacts(eligible, aliasEntries, sortedAliases, (plugin) =>
+    shouldUsePluginProviderAuthEvidence(plugin, params),
+  );
+}
+
+function reduceManifestRuntimeAuthFacts<
+  T extends Pick<PluginManifestRecord, "setup" | "providers" | "cliBackends">,
+>(
+  plugins: readonly T[],
+  aliasEntries: readonly (readonly [string, string])[],
+  sortedAliases: readonly (readonly [string, string])[],
+  allowEvidence: (plugin: T) => boolean = () => true,
+) {
   const evidenceByProvider: Record<string, ProviderAuthEvidence[]> = {};
   const refs = new Set<string>();
-  const isEnabled = createInstalledPluginEnabledPredicate(snapshot.index.plugins, params?.config);
-  for (const plugin of snapshot.plugins) {
+  for (const plugin of plugins) {
     const evidenceProviders = (plugin.setup?.providers ?? []).filter(
       (provider) => provider.authEvidence?.length,
     );
@@ -229,10 +314,7 @@ function resolveManifestRuntimeAuthFacts(
     }
     // Package contributions are fixed, but their eligibility follows current config.
     // Evaluate each contributing owner once without narrowing credential-scrubbing hints.
-    if (snapshot.index.plugins.length > 0 && !isEnabled(plugin.id)) {
-      continue;
-    }
-    if (shouldUsePluginProviderAuthEvidence(plugin, params)) {
+    if (allowEvidence(plugin)) {
       for (const provider of evidenceProviders) {
         appendUniqueAuthEvidence(evidenceByProvider, provider.id, provider.authEvidence ?? []);
       }
@@ -263,6 +345,10 @@ function resolveManifestRuntimeAuthFacts(
 export function resolveProviderAuthEnvVarCandidates(
   params?: ProviderEnvVarLookupParams,
 ): Record<string, readonly string[]> {
+  const scoped = scopedAuthLookup(params);
+  if (scoped) {
+    return { ...scoped.envCandidateMap };
+  }
   const snapshot = resolveProviderMetadataSnapshot(params);
   const aliases = resolveProviderAuthAliasMap({ ...params, metadataSnapshot: snapshot });
   const sortedAliases = Object.entries(aliases).toSorted(([left], [right]) =>
@@ -278,6 +364,10 @@ export function resolveProviderAuthEnvVarCandidates(
 export function resolveProviderAuthLookupMaps(
   params?: ProviderEnvVarLookupParams,
 ): ProviderAuthLookupMaps {
+  const scoped = scopedAuthLookup(params);
+  if (scoped) {
+    return scoped;
+  }
   const snapshot = resolveProviderMetadataSnapshot(params);
   const lookupParams = {
     ...params,

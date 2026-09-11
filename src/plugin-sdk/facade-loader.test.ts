@@ -14,6 +14,7 @@ import {
   listImportedBundledPluginFacadeIds,
   loadFacadeModuleAtLocationSync,
   loadBundledPluginPublicSurfaceModule,
+  loadBundledPluginPublicSurfaceManifest,
   loadBundledPluginPublicSurfaceModuleSyncCore,
   MissingPublicSurfaceError,
   resetFacadeLoaderStateForTest,
@@ -596,5 +597,68 @@ describe("plugin-sdk facade loader", () => {
         artifactBasename: "api.js",
       }),
     ).toThrow("plugin load failure");
+  });
+});
+
+describe("bundled facade manifest custody", () => {
+  it("reads the normalized manifest for the selected public artifact owner", async () => {
+    const fixture = createBundledPluginFixture({ prefix: "manifest-owner-", marker: "selected" });
+    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = fixture.bundledPluginsDir;
+    writeJsonFile(path.join(fixture.pluginRoot, "openclaw.plugin.json"), {
+      id: fixture.pluginId,
+      configSchema: {},
+      providers: ["fixture-provider"],
+      modelCatalog: {
+        providers: {
+          "fixture-provider": {
+            defaultUtilityModel: "small-model",
+            models: [{ id: "small-model", name: "Small model" }],
+          },
+        },
+      },
+    });
+    const manifest = await loadBundledPluginPublicSurfaceManifest({
+      dirName: fixture.pluginId,
+      artifactBasename: "api",
+    });
+    expect(manifest.id).toBe(fixture.pluginId);
+    expect(manifest.providers).toEqual(["fixture-provider"]);
+    expect(manifest.modelCatalog?.providers?.["fixture-provider"]?.defaultUtilityModel).toBe(
+      "small-model",
+    );
+    expect(listImportedBundledPluginFacadeIds()).toEqual([]);
+  });
+
+  it.each([{ id: "different-owner", configSchema: {} }, { configSchema: {} }])(
+    "refuses a missing or mismatched manifest owner: %j",
+    async (manifest) => {
+      const fixture = createBundledPluginFixture({
+        prefix: "manifest-invalid-owner-",
+        marker: "unused",
+      });
+      process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = fixture.bundledPluginsDir;
+      writeJsonFile(path.join(fixture.pluginRoot, "openclaw.plugin.json"), manifest);
+      await expect(
+        loadBundledPluginPublicSurfaceManifest({
+          dirName: fixture.pluginId,
+          artifactBasename: "api",
+        }),
+      ).rejects.toThrow(/owner is unavailable/);
+    },
+  );
+
+  it("rejects a manifest that fails canonical validation", async () => {
+    const fixture = createBundledPluginFixture({
+      prefix: "manifest-invalid-schema-",
+      marker: "unused",
+    });
+    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = fixture.bundledPluginsDir;
+    writeJsonFile(path.join(fixture.pluginRoot, "openclaw.plugin.json"), { id: fixture.pluginId });
+    await expect(
+      loadBundledPluginPublicSurfaceManifest({
+        dirName: fixture.pluginId,
+        artifactBasename: "api",
+      }),
+    ).rejects.toThrow(/manifest is invalid/);
   });
 });

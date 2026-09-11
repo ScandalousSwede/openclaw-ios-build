@@ -12,7 +12,6 @@ import type {
   PluginManifestProviderRequestProvider,
 } from "./manifest.js";
 import { listOfficialExternalProviderEndpointManifests } from "./official-external-provider-endpoints.js";
-import type { PluginProviderAuthAliasCandidate } from "./plugin-metadata-snapshot.types.js";
 import type { PluginOrigin } from "./plugin-origin.types.js";
 
 const PROVIDER_ENDPOINT_CLASSES = new Set(
@@ -81,8 +80,10 @@ const PROVIDER_AUTH_ALIAS_ORIGIN_PRIORITY: Readonly<Record<PluginOrigin, number>
 };
 
 /** Prepares package alias candidates without capturing current workspace trust. */
-export function buildPluginMetadataProviderAuthAliases(plugins: readonly PluginManifestRecord[]) {
-  const aliases = new Map<string, PluginProviderAuthAliasCandidate[]>();
+export function buildPluginMetadataProviderAuthAliases<
+  T extends Pick<PluginManifestRecord, "origin" | "providerAuthAliases" | "providerAuthChoices">,
+>(plugins: readonly T[]) {
+  const aliases = new Map<string, Array<{ plugin: T; target: string; order: number }>>();
   let order = 0;
   for (const plugin of plugins) {
     const entries = [
@@ -114,15 +115,19 @@ export function buildPluginMetadataProviderAuthAliases(plugins: readonly PluginM
   return aliases;
 }
 
-export function buildPluginMetadataProviderFacts(plugins: readonly PluginManifestRecord[]) {
+/** Normalizes only caller-selected endpoint and request metadata; never adds other owners. */
+export function buildProviderRequestMetadataFacts(
+  plugins: readonly { providerEndpoints?: unknown; providerRequest?: unknown }[],
+) {
   const providerEndpoints = plugins.flatMap((plugin) =>
     prepareProviderEndpoints(plugin.providerEndpoints),
   );
   const providerRequests = new Map<string, PluginManifestProviderRequestProvider>();
   for (const plugin of plugins) {
-    const requests = isRecord(plugin.providerRequest?.providers)
-      ? plugin.providerRequest.providers
-      : {};
+    const requests =
+      isRecord(plugin.providerRequest) && isRecord(plugin.providerRequest.providers)
+        ? plugin.providerRequest.providers
+        : {};
     for (const [rawProvider, request] of Object.entries(requests)) {
       if (!isRecord(request)) {
         continue;
@@ -147,6 +152,11 @@ export function buildPluginMetadataProviderFacts(plugins: readonly PluginManifes
       });
     }
   }
+  return { providerEndpoints, providerRequests };
+}
+
+export function buildPluginMetadataProviderFacts(plugins: readonly PluginManifestRecord[]) {
+  const { providerEndpoints, providerRequests } = buildProviderRequestMetadataFacts(plugins);
   for (const manifest of listOfficialExternalProviderEndpointManifests()) {
     providerEndpoints.push(...prepareProviderEndpoints(manifest.providerEndpoints));
   }

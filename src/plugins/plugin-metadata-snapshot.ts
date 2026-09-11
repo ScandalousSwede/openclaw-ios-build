@@ -48,6 +48,7 @@ import type {
 import { createPluginRegistryIdNormalizer } from "./plugin-registry-id-normalizer.js";
 import { loadPluginRegistrySnapshotWithMetadata } from "./plugin-registry-snapshot.js";
 import { normalizePluginIdScope, serializePluginIdScope } from "./plugin-scope.js";
+import { assertProviderDiscoveryOutsideExplicitScope } from "./provider-runtime-scope.js";
 
 const MAX_PLUGIN_METADATA_PROJECTIONS = 64;
 export type {
@@ -322,6 +323,7 @@ export function resolvePluginMetadataSnapshotCacheKey(
 export function loadPluginMetadataSnapshot(
   params: LoadPluginMetadataSnapshotParams,
 ): PluginMetadataSnapshot {
+  assertProviderDiscoveryOutsideExplicitScope();
   if (params.allowCurrent === false && getPluginCache().kind !== "operation") {
     return withPluginCache(createPluginCache(), () => loadPluginMetadataSnapshot(params));
   }
@@ -469,6 +471,7 @@ export function completePluginMetadataSnapshot(params: {
 export function resolvePluginMetadataSnapshot(
   params: ResolvePluginMetadataSnapshotParams,
 ): PluginMetadataSnapshot {
+  assertProviderDiscoveryOutsideExplicitScope();
   const canUseCurrentSnapshot =
     params.allowCurrent !== false &&
     params.stateDir === undefined &&

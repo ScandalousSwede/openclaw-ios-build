@@ -18,6 +18,7 @@ export {
   readConfigFileSnapshotForWrite,
   readConfigFileSnapshotWithPluginMetadata,
   readSourceConfigBestEffort,
+  readSourceConfigStrict,
   readSourceConfigSnapshot,
   readSourceConfigSnapshotForWrite,
   recoverConfigFromJsonRootSuffix,

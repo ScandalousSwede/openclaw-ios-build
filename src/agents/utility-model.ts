@@ -4,6 +4,10 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { getCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-snapshot.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
+import {
+  getExplicitProviderRuntimeScope,
+  resolveExplicitScopedProvider,
+} from "../plugins/provider-runtime-scope.js";
 import { resolveAgentConfig, resolveAgentEffectiveModelPrimary } from "./agent-scope.js";
 import { splitTrailingAuthProfile } from "./model-ref-profile.js";
 import { resolveDefaultModelForAgent } from "./model-selection.js";
@@ -43,6 +47,21 @@ function resolveProviderDefaultUtilityModelRef(params: {
   const provider = params.provider.trim().toLowerCase();
   if (!provider) {
     return undefined;
+  }
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    const admittedProvider = resolveExplicitScopedProvider({ config: params.cfg, provider });
+    if (!admittedProvider) {
+      throw new Error("Explicit utility provider is unavailable");
+    }
+    if (params.metadataSnapshot) {
+      throw new Error("Utility model metadata is outside the explicit provider scope");
+    }
+    const modelId =
+      scope.providerManifest?.modelCatalog?.providers?.[
+        admittedProvider.id
+      ]?.defaultUtilityModel?.trim();
+    return modelId ? admittedProvider.id + "/" + modelId : undefined;
   }
   const snapshot =
     params.metadataSnapshot ??

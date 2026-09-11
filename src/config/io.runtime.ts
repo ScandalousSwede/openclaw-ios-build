@@ -527,3 +527,12 @@ async function finalizeCommittedConfigWrite(params: {
   }
   return writeResult;
 }
+
+/** Strict authored includes/env view, without runtime defaults, recovery or plugin loading. */
+export async function readSourceConfigStrict(): Promise<OpenClawConfig> {
+  return await createConfigIO({
+    observe: false,
+    shellEnvFallback: "defer",
+    pluginValidation: "skip",
+  }).readSourceConfigBestEffort({ strict: true });
+}

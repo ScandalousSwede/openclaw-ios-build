@@ -14,6 +14,7 @@ import {
   resolvePluginMetadataSnapshotRuntime,
 } from "./plugin-metadata-snapshot.runtime.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 import { getActivePluginRegistryWorkspaceDirFromStateCore } from "./runtime-workspace-state.js";
 
 /** Caller-owned declarations or facts from an already selected metadata snapshot. */
@@ -31,6 +32,13 @@ type ManifestModelIdNormalizationLookupParams = {
 export function resolveManifestModelIdNormalizationPolicies(
   params: ManifestModelIdNormalizationLookupParams = {},
 ): ReadonlyMap<string, ManifestModelIdNormalizationProvider> {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if ((params.config && params.config !== scope.config) || !scope.manifestPlugins) {
+      throw new Error("Model metadata is outside explicit provider scope");
+    }
+    return collectManifestModelIdNormalizationPolicies(scope.manifestPlugins);
+  }
   if (params.plugins) {
     // Prepared views keep their selected generation; caller-owned arrays remain live inputs.
     return "owners" in params.plugins

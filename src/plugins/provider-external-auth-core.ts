@@ -6,6 +6,7 @@ import type {
   ProviderExternalAuthProfileResolver,
 } from "./provider-external-auth.types.js";
 import type { createProviderHookRuntime } from "./provider-hook-runtime-core.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 import { resolveExternalAuthProfileProviderPluginIds } from "./providers.js";
 import { getActivePluginRegistryWorkspaceDirFromState } from "./runtime-state.js";
 
@@ -17,6 +18,20 @@ export function createProviderExternalAuthResolver(
   function resolveExternalAuthProfilesWithPlugins(
     params: Parameters<ProviderExternalAuthProfileResolver>[0],
   ): ReturnType<ProviderExternalAuthProfileResolver> {
+    const scope = getExplicitProviderRuntimeScope();
+    if (scope) {
+      if (
+        (params.config && params.config !== scope.config) ||
+        (params.context.config && params.context.config !== scope.config)
+      ) {
+        throw new Error("External auth lookup is outside the explicit provider scope");
+      }
+      const profiles = scope.provider.resolveExternalAuthProfiles?.({
+        ...params.context,
+        config: scope.config,
+      });
+      return profiles?.length ? [...profiles] : [];
+    }
     const workspaceDir = params.workspaceDir ?? getActivePluginRegistryWorkspaceDirFromState();
     const env = params.env ?? process.env;
     const config = params.config ?? {};

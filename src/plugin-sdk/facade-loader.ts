@@ -18,6 +18,7 @@ import { resolveLoaderPackageRoot } from "../plugins/sdk-alias.js";
 import {
   createFacadeResolutionKey,
   resolveBundledFacadeModuleLocation,
+  resolveBundledMetadataManifestRecord,
 } from "./facade-resolution-shared.js";
 
 /** Error thrown when a bundled plugin public surface artifact cannot be resolved. */
@@ -280,6 +281,28 @@ export async function loadBundledPluginPublicSurfaceModule<T extends object>(par
   });
   trackFacadeModule(location.modulePath, params.trackedPluginId ?? params.dirName);
   return loaded as T;
+}
+
+/** Read one facade owner's normalized manifest without walking a plugin registry. */
+export async function loadBundledPluginPublicSurfaceManifest(params: {
+  dirName: string;
+  artifactBasename: string;
+}) {
+  const location = resolveFacadeModuleLocation(params);
+  const owner = resolveBundledMetadataManifestRecord({
+    ...params,
+    location,
+    sourceExtensionsRoot: path.join(getOpenClawPackageRoot(), "extensions"),
+  });
+  if (!owner || owner.id !== params.dirName) {
+    throw new Error("Bundled public surface manifest owner is unavailable");
+  }
+  const { loadPluginManifest } = await import("../plugins/manifest.js");
+  const loaded = loadPluginManifest(owner.rootDir, false);
+  if (!loaded.ok || loaded.manifest.id !== owner.id) {
+    throw new Error("Bundled public surface manifest is invalid");
+  }
+  return loaded.manifest;
 }
 
 /** List plugin ids whose public facades have been loaded in this process. */

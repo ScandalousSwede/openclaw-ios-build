@@ -23,6 +23,7 @@ import {
   type PreparedProviderStaticCatalog,
 } from "../../plugins/provider-discovery.js";
 import type { ProviderRuntimeModel } from "../../plugins/provider-runtime-model.types.js";
+import { getExplicitProviderRuntimeScope } from "../../plugins/provider-runtime-scope.js";
 import {
   resolveActivatableProviderOwnerPluginIds,
   resolveBundledProviderCompatPluginIds,
@@ -126,6 +127,13 @@ const defaultBundledStaticCatalogConfig: OpenClawConfig = {};
 function resolveBundledStaticCatalogMetadataSnapshot(
   params: BundledStaticCatalogParams,
 ): PluginMetadataSnapshot | undefined {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (scope.config !== params.cfg || !scope.providerManifest) {
+      throw new Error("Static catalog lookup is outside the explicit manifest scope");
+    }
+    return undefined;
+  }
   // Lifecycle callers pin the catalog to the plugin generation they are publishing.
   // Rediscovery here can mix generations and repeat manifest work for every model lookup.
   if (params.metadataSnapshot) {
@@ -181,6 +189,13 @@ function resolveBundledStaticCatalogState(
   params: BundledStaticCatalogParams,
   metadataSnapshot?: PluginMetadataSnapshot,
 ): BundledStaticCatalogState {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (scope.config !== params.cfg || !scope.providerManifest) {
+      throw new Error("Static catalog lookup is outside the explicit manifest scope");
+    }
+    return { plugins: [scope.providerManifest], plans: new Map() };
+  }
   const cache = metadataSnapshot
     ? getPluginMetadataSnapshotCache(metadataSnapshot)
     : getPluginCache();
@@ -239,6 +254,10 @@ export function createBundledStaticCatalogModelResolver(params?: {
   metadataSnapshot?: PluginMetadataSnapshot;
   workspaceDir?: string;
 }): (lookup: BundledStaticCatalogLookup) => ProviderRuntimeModel | undefined {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope && (scope.config !== params?.cfg || !scope.providerManifest)) {
+    throw new Error("Static catalog lookup is outside the explicit manifest scope");
+  }
   const catalogParams = {
     cfg: params?.cfg,
     env: params?.env ?? process.env,

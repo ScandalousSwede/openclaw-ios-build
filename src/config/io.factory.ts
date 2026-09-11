@@ -29,7 +29,8 @@ export function createConfigIO(options: ConfigIoFactoryOptions = {}) {
     readBestEffortConfig: async () =>
       (await readBestEffortConfigSnapshotFromContext(context)).config,
     readBestEffortConfigSnapshot: () => readBestEffortConfigSnapshotFromContext(context),
-    readSourceConfigBestEffort: () => readSourceConfigBestEffortFromContext(context),
+    readSourceConfigBestEffort: (readOptions?: { strict?: boolean }) =>
+      readSourceConfigBestEffortFromContext(context, readOptions),
     readConfigFileSnapshot: (readOptions: ConfigSnapshotReadOptions = {}) =>
       readConfigFileSnapshotFromContext(context, readOptions),
     readConfigFileSnapshotWithPluginMetadata: (readOptions: ConfigSnapshotReadOptions = {}) =>

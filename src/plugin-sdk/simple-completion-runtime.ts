@@ -11,3 +11,6 @@ export const prepareSimpleCompletionModelForAgent: typeof import("../agents/simp
     () => import("../agents/simple-completion-runtime.js"),
     (runtime) => runtime.prepareSimpleCompletionModelForAgent,
   );
+
+// Retained for the installed scoped-provider preparation contract.
+export { resolveSimpleCompletionSelectionForAgent } from "../agents/simple-completion-selection.js";

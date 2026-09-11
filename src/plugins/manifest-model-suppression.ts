@@ -13,6 +13,7 @@ import {
 import type { ManifestModelSuppressionResolver } from "./manifest-model-suppression.types.js";
 import { getPluginMetadataSnapshotCache } from "./plugin-cache.js";
 import type { PluginMetadataSnapshot } from "./plugin-metadata-snapshot.types.js";
+import { getExplicitProviderRuntimeScope } from "./provider-runtime-scope.js";
 
 type PreparedManifestSuppression = {
   entry: ManifestModelCatalogSuppressionEntry;
@@ -133,6 +134,17 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
   env?: NodeJS.ProcessEnv;
   metadataSnapshot?: PluginMetadataSnapshot;
 }): ManifestModelSuppressionResolver {
+  const scope = getExplicitProviderRuntimeScope();
+  if (scope) {
+    if (scope.config !== params.config || !scope.providerManifest) {
+      throw new Error("Suppression lookup is outside the explicit manifest scope");
+    }
+    return compileManifestModelSuppressionResolver(
+      planManifestModelCatalogSuppressions({ registry: { plugins: [scope.providerManifest] } })
+        .suppressions,
+      params.config,
+    );
+  }
   const snapshot = params.metadataSnapshot ?? loadManifestMetadataSnapshot(params);
   const cache = getPluginMetadataSnapshotCache(snapshot).metadata.modelSuppressionResolvers;
   let compiled = cache.get(snapshot);
@@ -144,11 +156,24 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
   if (cached) {
     return cached;
   }
+  const resolver = compileManifestModelSuppressionResolver(
+    listManifestModelCatalogSuppressions({ snapshot, config: params.config }),
+    params.config,
+  );
+  if (params.config) {
+    compiled.byConfig.set(params.config, resolver);
+  } else {
+    compiled.unconfigured = resolver;
+  }
+  return resolver;
+}
+
+function compileManifestModelSuppressionResolver(
+  entries: readonly ManifestModelCatalogSuppressionEntry[],
+  config?: OpenClawConfig,
+): ManifestModelSuppressionResolver {
   const suppressions = new Map<string, PreparedManifestSuppression[]>();
-  for (const entry of listManifestModelCatalogSuppressions({
-    snapshot,
-    config: params.config,
-  })) {
+  for (const entry of entries) {
     const prepared: PreparedManifestSuppression = {
       entry,
       allowedApis: entry.when?.providerConfigApiIn?.length
@@ -181,7 +206,7 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
           suppression: prepared,
           provider,
           baseUrl: input.baseUrl,
-          config: params.config,
+          config,
         }),
     )?.entry;
     if (!suppression) {
@@ -199,10 +224,5 @@ export function buildManifestBuiltInModelSuppressionResolver(params: {
       ...(suppression.retirement ? { retirement: suppression.retirement } : {}),
     };
   };
-  if (params.config) {
-    compiled.byConfig.set(params.config, resolver);
-  } else {
-    compiled.unconfigured = resolver;
-  }
   return resolver;
 }

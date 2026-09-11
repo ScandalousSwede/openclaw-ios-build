@@ -4,6 +4,7 @@ import { createApiRegistry } from "@openclaw/ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
+import { withExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 import {
   looksLikeSecretSentinel,
   mintSecretSentinel,
@@ -57,6 +58,10 @@ vi.mock("./sessions/model-registry-runtime.js", () => ({
 }));
 
 vi.mock("./embedded-agent-runner/model.js", () => ({
+  createEmptyAgentDiscoveryStores: () => ({
+    authStorage: { setRuntimeApiKey: hoisted.setRuntimeApiKeyMock },
+    modelRegistry: {},
+  }),
   resolveModel: hoisted.resolveModelMock,
   resolveModelAsync: hoisted.resolveModelAsyncMock,
 }));
@@ -982,5 +987,49 @@ describe("prepareSimpleCompletionModelForAgent", () => {
     expectPreparedModelResult(result);
     expect(result.selection).toMatchObject({ provider: "openai", modelId: "gpt-5.5" });
     expect(result.model).toMatchObject({ id: "gpt-5.5", api: "openai-responses" });
+  });
+});
+
+describe("explicit provider preparation boundary", () => {
+  it("prepares the selected provider without metadata discovery or a broad runtime lease", async () => {
+    const config: OpenClawConfig = {
+      agents: {
+        entries: { main: {} },
+        defaults: { model: { primary: "anthropic/claude-opus-4-6" } },
+      },
+    };
+    const provider = { id: "anthropic", label: "Synthetic provider", auth: [] };
+    const providerManifest = { id: "anthropic", providers: ["anthropic"] };
+    const authLookupMaps = {
+      aliasMap: {},
+      envCandidateMap: { anthropic: ["TEST_API_KEY"] },
+      authEvidenceMap: {},
+      setupProviderFallbackRefs: [],
+    };
+    await withExplicitProviderRuntimeScope(
+      { config, provider, providerManifest, manifestPlugins: [], authLookupMaps },
+      async (scope) => {
+        const result = await prepareSimpleCompletionModelForAgent({
+          cfg: scope.config,
+          agentId: "main",
+          skipAgentDiscovery: true,
+        });
+        if ("error" in result) {
+          throw new Error(result.error);
+        }
+        expect(result.model?.provider).toBe("anthropic");
+        expect(result.selection.provider).toBe("anthropic");
+        expect(hoisted.acquireRuntimeLeaseMock).not.toHaveBeenCalled();
+        expect(hoisted.getCurrentPluginMetadataSnapshotMock).not.toHaveBeenCalled();
+        expect(hoisted.resolveModelAsyncMock).toHaveBeenCalledWith(
+          "anthropic",
+          "claude-opus-4-6",
+          expect.any(String),
+          scope.config,
+          expect.objectContaining({ skipAgentDiscovery: true, agentId: "main" }),
+        );
+        expect(hoisted.setRuntimeApiKeyMock).toHaveBeenCalled();
+      },
+    );
   });
 });

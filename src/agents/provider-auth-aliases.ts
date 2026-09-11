@@ -18,6 +18,7 @@ import type {
   PluginMetadataSnapshot,
   PluginProviderAuthAliasCandidate,
 } from "../plugins/plugin-metadata-snapshot.types.js";
+import { getExplicitProviderRuntimeScope } from "../plugins/provider-runtime-scope.js";
 
 /** Inputs that control plugin metadata and trust scope for auth alias lookup. */
 export type ProviderAuthAliasLookupParams = {
@@ -67,10 +68,57 @@ function resolveProviderAuthAliasCandidates(
   );
 }
 
+function scopedAuthAliasMap(params?: ProviderAuthAliasLookupParams) {
+  const scope = getExplicitProviderRuntimeScope();
+  if (!scope) {
+    return undefined;
+  }
+  if (
+    (params?.config && params.config !== scope.config) ||
+    !scope.authLookupMaps ||
+    params?.metadataSnapshot
+  ) {
+    throw new Error("Auth aliases are outside the explicit provider scope");
+  }
+  return scope.authLookupMaps.aliasMap;
+}
+
+/** Pure reduction of metadata already admitted by its owning caller. */
+export function buildProviderAuthAliasMapFromManifests(
+  plugins: readonly Pick<
+    PluginManifestRecord,
+    "origin" | "providerAuthAliases" | "providerAuthChoices"
+  >[],
+): Record<string, string> {
+  const selected = [...buildPluginMetadataProviderAuthAliases(plugins)].flatMap(
+    ([alias, candidates]) => {
+      const owner = candidates[0];
+      return owner
+        ? [
+            {
+              alias,
+              target: owner.target,
+              order: Math.min(...candidates.map((candidate) => candidate.order)),
+            },
+          ]
+        : [];
+    },
+  );
+  const aliases: Record<string, string> = Object.create(null);
+  for (const { alias, target } of selected.toSorted((left, right) => left.order - right.order)) {
+    aliases[alias] = target;
+  }
+  return aliases;
+}
+
 /** Resolve canonical auth provider aliases from plugin metadata. */
 export function resolveProviderAuthAliasMap(
   params?: ProviderAuthAliasLookupParams,
 ): Record<string, string> {
+  const scoped = scopedAuthAliasMap(params);
+  if (scoped) {
+    return Object.assign(Object.create(null), scoped);
+  }
   const allowedPlugins = new Map<PluginManifestRecord, boolean>();
   const selected: Array<{ alias: string; target: string; order: number }> = [];
   for (const [alias, candidates] of resolveProviderAuthAliasCandidates(params)) {
@@ -105,6 +153,10 @@ export function resolveProviderIdForAuth(
   const normalized = normalizeProviderId(provider);
   if (!normalized) {
     return normalized;
+  }
+  const scoped = scopedAuthAliasMap(params);
+  if (scoped) {
+    return scoped[normalized] ?? normalized;
   }
   const candidates = resolveProviderAuthAliasCandidates(params).get(normalized);
   // Package facts are stable; workspace trust follows the current call's config.
