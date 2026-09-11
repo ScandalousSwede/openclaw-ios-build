@@ -3075,8 +3075,10 @@ final class TalkSpeechTraceTests: XCTestCase {
                 durableTalkCaptureAdmission(token: try await fixture.owner.destructiveSessionAdmissionToken())
             },
             persist: { request in
+                let committed = try await persistDurableTalk(request, owner: fixture.owner)
+                // Hold the successful return, not admission in a task reset will cancel.
                 await gate.wait()
-                return try await persistDurableTalk(request, owner: fixture.owner)
+                return committed
             })
         manager.updateGatewayConnected(true)
         OpenClawDiagnosticRecorder.installSink { lines.append($0) }
@@ -3094,6 +3096,9 @@ final class TalkSpeechTraceTests: XCTestCase {
         try await waitForDurableTalk("persistence pauses before reset") {
             await gate.waiterCount() == 1
         }
+        let committedRows = try await fixture.store.loadUnresolved()
+        XCTAssertEqual(committedRows.count, 1)
+        XCTAssertEqual(committedRows.first?.rawCommandID, requestID)
         manager.beginCredentialReset()
         await gate.open()
         let result = await stop.value
