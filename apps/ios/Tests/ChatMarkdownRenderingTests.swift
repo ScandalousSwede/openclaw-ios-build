@@ -8,8 +8,8 @@ import XCTest
 final class ChatMarkdownRenderingTests: XCTestCase {
     @MainActor
     func testManyAttributedRunsInBothChatStyles() async throws {
-        // One paragraph forces thousands of inline runs through Textual's TextBuilder.
-        // Separate paragraphs would hide the recursive interpolation failure.
+        // Many rich runs exercise the chat parser and Textual composition together.
+        // The separate reduction test retains direct 32,000-fragment coverage.
         let markdown = String(repeating: "**bold** plain ", count: 1250)
         for variant in ChatMarkdownVariant.allCases {
             for context in [ChatMarkdownRenderer.Context.user, .assistant] {
@@ -36,14 +36,39 @@ final class ChatMarkdownRenderingTests: XCTestCase {
         let parsed = try AttributedStringMarkdownParser.markdown().attributedString(for: processed.cleaned)
         XCTAssertGreaterThanOrEqual(parsed.runs.count, 32000)
         XCTAssertTrue(String(parsed.characters).hasSuffix("ENDOFPARAGRAPH"))
-        let image = try await render(
-            markdown, context: .assistant, variant: .standard,
-            expectedWords: ["bold", "plain"], scrolling: true, tailMarker: "endofparagraph"
-        )
-        let attachment = XCTAttachment(image: image)
-        attachment.name = "chat-long-rich-paragraph-scrolling-synthetic"
-        attachment.lifetime = .keepAlways
-        add(attachment)
+        for size in [DynamicTypeSize.large, .accessibility1] {
+            let image = try await render(
+                markdown, context: .assistant, variant: .standard,
+                expectedWords: ["bold", "plain"], scrolling: true, tailMarker: "endofparagraph",
+                dynamicTypeSize: size
+            )
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "chat-long-rich-paragraph-scrolling-\(size)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    @MainActor
+    func testParagraphPartitionPreservesContentAttributesAndContainers() throws {
+        let rich = String(repeating: "**bold** [link](https://example.com) \u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} e\u{301} ", count: 400)
+        for markdown in [rich, "> " + rich, "1. " + rich, String(repeating: "x", count: 9000)] {
+            let original = try AttributedStringMarkdownParser.markdown().attributedString(for: markdown)
+            let chunks = paragraphRenderingChunks(original)
+            XCTAssertGreaterThan(chunks.count, 1)
+            var rejoined = AttributedString()
+            for chunk in chunks {
+                XCTAssertLessThanOrEqual(chunk.characters.count, 2048)
+                rejoined.append(chunk)
+            }
+            // Includes the exact paragraph identity and its enclosing containers:
+            // segmentation is rendering-only, not a new semantic paragraph.
+            XCTAssertEqual(rejoined, original)
+        }
+        let ordinary = try AttributedStringMarkdownParser.markdown()
+            .attributedString(for: "**short** paragraph")
+        XCTAssertEqual(paragraphRenderingChunks(ordinary), [ordinary])
+        XCTAssertEqual(paragraphRenderingChunks(AttributedString()), [AttributedString()])
     }
 
     @MainActor

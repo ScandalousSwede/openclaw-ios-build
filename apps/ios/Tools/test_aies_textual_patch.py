@@ -26,11 +26,16 @@ class TextualPatchTests(unittest.TestCase):
         self.original = b"first\nold expression\nlast\n"
         self.expected = b"first\nnew expression\nlast\n"
         self.target.write_bytes(self.original)
+        self.paragraph = self.checkout / patcher.PARAGRAPH
+        self.paragraph.parent.mkdir(parents=True)
+        self.paragraph.write_bytes(self.original)
         self.git("init", "--quiet")
         self.git("add", ".")
         self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture")
         revision = self.git("rev-parse", "HEAD").strip()
-        self.patch = {"schema": "aies.ios.checkout-source-patch.v1", "packageIdentity": "textual", "repository": "https://github.com/gonzalezreal/textual", "revision": revision, "path": patcher.SOURCE, "beforeSHA256": patcher.digest(self.original), "afterSHA256": patcher.digest(self.expected), "replacement": {"before": "old expression", "after": "new expression"}, "purpose": "fixture"}
+        self.patch = {"schema": "aies.ios.checkout-source-patch.v2", "packageIdentity": "textual", "repository": "https://github.com/gonzalezreal/textual", "revision": revision, "files": [
+            {"path": source, "beforeSHA256": patcher.digest(self.original), "afterSHA256": patcher.digest(self.expected),
+             "replacement": {"before": "old expression", "after": "new expression"}} for source in patcher.SOURCES], "purpose": "fixture"}
         self.manifest = {"sourcePatches": [{"packageIdentity": "textual", "path": patcher.PROVENANCE, "sha256": ""}], "pins": [{"identity": "textual", "location": self.patch["repository"], "revision": revision}]}
         self.persist_patch()
         self.state = Path(self.temp.name) / "workspace-state.json"
@@ -82,6 +87,42 @@ class TextualPatchTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), self.original)
         self.assertEqual((self.archive / "TextBuilder-original.swift").read_bytes(), self.original)
 
+    def test_both_files_and_archives_are_verified(self):
+        self.verify(apply=True)
+        self.assertEqual(self.paragraph.read_bytes(), self.expected)
+        self.assertEqual((self.archive / "Paragraph-original.swift").read_bytes(), self.original)
+        self.paragraph.write_bytes(b"unreviewed")
+        with self.assertRaisesRegex(patcher.PatchError, "exact governed patch"):
+            self.verify()
+
+    def test_second_file_precondition_failure_does_not_modify_first(self):
+        self.patch["files"][1]["afterSHA256"] = "0" * 64
+        self.persist_patch()
+        with self.assertRaisesRegex(patcher.PatchError, "replacement digest"):
+            self.verify(apply=True)
+        self.assertEqual(self.target.read_bytes(), self.original)
+        self.assertFalse(self.archive.exists())
+
+    def test_second_archive_conflict_does_not_modify_sources(self):
+        self.archive.mkdir()
+        (self.archive / "Paragraph-original.swift").write_bytes(b"conflict")
+        with self.assertRaisesRegex(patcher.PatchError, "archive conflicts"):
+            self.verify(apply=True)
+        self.assertEqual(self.target.read_bytes(), self.original)
+        self.assertEqual(self.paragraph.read_bytes(), self.original)
+
+    def test_partial_patch_fails_closed_without_repair(self):
+        self.target.write_bytes(self.expected)
+        with self.assertRaisesRegex(patcher.PatchError, "exact governed patch"):
+            self.verify(apply=True)
+        self.assertEqual(self.paragraph.read_bytes(), self.original)
+
+    def test_exact_source_set_required(self):
+        self.patch["files"][1]["path"] = "../outside.swift"
+        self.persist_patch()
+        with self.assertRaisesRegex(patcher.PatchError, "source file set"):
+            self.verify(apply=True)
+
     def test_verification_rejects_unpatched_checkout_without_mutating_it(self):
         with self.assertRaisesRegex(patcher.PatchError, "exact governed patch"):
             self.verify()
@@ -123,7 +164,7 @@ class TextualPatchTests(unittest.TestCase):
             patcher.declaration(self.root, altered)
 
     def test_rejects_wrong_result_digest_before_mutation(self):
-        self.patch["afterSHA256"] = "0" * 64
+        self.patch["files"][0]["afterSHA256"] = "0" * 64
         self.persist_patch()
         with self.assertRaisesRegex(patcher.PatchError, "replacement digest"):
             self.verify(apply=True)

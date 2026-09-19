@@ -29,7 +29,7 @@
     {
       "packageIdentity": "textual",
       "path": "apps/ios/PackageAuthority/textual-balanced-concatenation-patch.json",
-      "sha256": "3d62145bd94c89923c2ea980248d830506e4699f94f26e14abbacb99751b244a"
+      "sha256": "5d1946613ae4ade5a1ba2575dcc7d34b9d7265609d6f100722d7251e230ecf7e"
     }
   ],
   "standaloneLocks": [

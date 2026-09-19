@@ -56,3 +56,12 @@ protected-release preparation contract:
 The project lock and caches are derived runner artifacts. They must not be
 committed, copied between roots, or substituted for the semantic authority.
 Package declaration changes require a separately reviewed authority update.
+
+The Textual provenance record uses checkout-source-patch v2 for two exact files:
+`TextBuilder.swift` retains the balanced attributed-text reduction; `Paragraph.swift`
+partitions very long rich paragraphs into bounded drawing fragments inside one
+paragraph style. All attributed characters and logical container identities remain
+unchanged. Synthetic fragments add no paragraph block spacing. Both original
+files are hash-verified and archived before either write, and both patched files,
+checkout status and original file modes are verified. A partial patch fails closed;
+the disposable build root must be recreated rather than repaired in place.
