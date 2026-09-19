@@ -2908,7 +2908,7 @@ struct ChatViewModelTests {
             messages: [
                 chatTextMessage(role: "assistant", text: "after compact", timestamp: 2),
             ])
-        let gate = SessionSubscribeGate()
+        let gate = AsyncGate()
         let (transport, vm) = await makeViewModel(
             historyResponses: [before, after],
             compactSessionHook: { _ in
@@ -3179,7 +3179,7 @@ struct ChatViewModelTests {
         let models = [
             modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai"),
         ]
-        let gate = SessionSubscribeGate()
+        let gate = AsyncGate()
 
         let (transport, vm) = await makeViewModel(
             historyResponses: [history],
@@ -3359,7 +3359,7 @@ struct ChatViewModelTests {
     }
 
     @Test @MainActor func `failed reconnect preserves retained conversation while loading and after error`() async throws {
-        let gate = SessionSubscribeGate()
+        let gate = AsyncGate()
         let requests = AsyncCounter()
         let (_, vm) = await makeViewModel(
             historyResponses: [historyPayload(messages: [
@@ -3379,7 +3379,7 @@ struct ChatViewModelTests {
         try await waitUntil("refresh history in flight") { await requests.current() == 2 }
         #expect(vm.isLoading)
         #expect(vm.messages.map(\.id) == retainedIDs)
-        await gate.release()
+        await gate.open()
         try await waitUntil("history failure surfaced") {
             await MainActor.run { !vm.isLoading && vm.errorText != nil }
         }
