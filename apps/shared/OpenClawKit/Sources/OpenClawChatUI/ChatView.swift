@@ -502,7 +502,7 @@ public struct OpenClawChatView: View {
         } else {
             base = self.viewModel.messages
         }
-        let projected = self.mergeToolResults(in: base).filter(self.shouldDisplayMessage(_:))
+        let projected = ChatMessageProjection.project(base, showsAssistantTrace: self.showsAssistantTrace)
         self.viewModel.completeMessageListProjection(
             diagnosticContext,
             outputMessageCount: projected.count)
@@ -584,6 +584,10 @@ public struct OpenClawChatView: View {
 
     @ViewBuilder
     private var messageListNoticeBanner: some View {
+        if self.viewModel.isLoading, self.hasVisibleMessageListContent {
+            ChatLoadingBubble()
+                .padding(.vertical, 8)
+        }
         if let error = self.activeErrorText,
            self.hasVisibleMessageListContent,
            !self.viewModel.isLoading,
@@ -623,12 +627,8 @@ public struct OpenClawChatView: View {
     }
 
     private var showsEmptyState: Bool {
-        self.viewModel.messages.isEmpty &&
-            !(self.viewModel.streamingAssistantText.map {
-                AssistantTextParser.hasVisibleContent(in: $0, includeThinking: self.showsAssistantTrace)
-            } ?? false) &&
-            self.viewModel.pendingRunCount == 0 &&
-            self.viewModel.pendingToolCalls.isEmpty
+        // Raw history may contain only hidden thinking/control rows.
+        !self.hasVisibleMessageListContent
     }
 
     private var emptyStateTitle: String {
@@ -656,150 +656,6 @@ public struct OpenClawChatView: View {
             return ("Timed out", "clock.badge.exclamationmark", .orange)
         }
         return ("Error", "exclamationmark.triangle.fill", .orange)
-    }
-
-    private func mergeToolResults(in messages: [OpenClawChatMessage]) -> [OpenClawChatMessage] {
-        var result: [OpenClawChatMessage] = []
-        result.reserveCapacity(messages.count)
-
-        for message in messages {
-            guard self.isToolResultMessage(message) else {
-                result.append(message)
-                continue
-            }
-
-            guard let toolCallId = message.toolCallId,
-                  let last = result.last,
-                  self.toolCallIds(in: last).contains(toolCallId)
-            else {
-                result.append(message)
-                continue
-            }
-
-            let toolText = self.toolResultText(from: message)
-            if toolText.isEmpty {
-                continue
-            }
-
-            var content = last.content
-            content.append(
-                OpenClawChatMessageContent(
-                    type: "tool_result",
-                    text: toolText,
-                    thinking: nil,
-                    thinkingSignature: nil,
-                    mimeType: nil,
-                    fileName: nil,
-                    content: nil,
-                    id: toolCallId,
-                    name: message.toolName,
-                    arguments: nil))
-
-            let merged = OpenClawChatMessage(
-                id: last.id,
-                role: last.role,
-                content: content,
-                timestamp: last.timestamp,
-                transcriptMessageID: last.transcriptMessageID,
-                idempotencyKey: last.idempotencyKey,
-                toolCallId: last.toolCallId,
-                toolName: last.toolName,
-                usage: last.usage,
-                stopReason: last.stopReason,
-                errorMessage: last.errorMessage)
-            result[result.count - 1] = merged
-        }
-
-        return result
-    }
-
-    private func isToolResultMessage(_ message: OpenClawChatMessage) -> Bool {
-        let role = message.role.lowercased()
-        return role == "toolresult" || role == "tool_result"
-    }
-
-    private func shouldDisplayMessage(_ message: OpenClawChatMessage) -> Bool {
-        if self.hasInlineAttachments(in: message) {
-            return true
-        }
-
-        let primaryText = self.primaryText(in: message)
-        if !primaryText.isEmpty {
-            if message.role.lowercased() == "user" {
-                return true
-            }
-            if AssistantTextParser.hasVisibleContent(in: primaryText, includeThinking: self.showsAssistantTrace) {
-                return true
-            }
-        }
-
-        guard self.showsAssistantTrace else {
-            return false
-        }
-
-        if self.isToolResultMessage(message) {
-            return !primaryText.isEmpty
-        }
-
-        return !self.toolCalls(in: message).isEmpty || !self.inlineToolResults(in: message).isEmpty
-    }
-
-    private func primaryText(in message: OpenClawChatMessage) -> String {
-        let parts = message.content.compactMap { content -> String? in
-            let kind = (content.type ?? "text").lowercased()
-            guard kind == "text" || kind.isEmpty else { return nil }
-            return content.text
-        }
-        return OpenClawChatMessage.displayText(
-            contentText: parts.joined(separator: "\n"),
-            role: message.role,
-            stopReason: message.stopReason,
-            errorMessage: message.errorMessage)
-    }
-
-    private func hasInlineAttachments(in message: OpenClawChatMessage) -> Bool {
-        message.content.contains { content in
-            switch content.type ?? "text" {
-            case "file", "attachment":
-                true
-            default:
-                false
-            }
-        }
-    }
-
-    private func toolCalls(in message: OpenClawChatMessage) -> [OpenClawChatMessageContent] {
-        message.content.filter { content in
-            let kind = (content.type ?? "").lowercased()
-            if ["toolcall", "tool_call", "tooluse", "tool_use"].contains(kind) {
-                return true
-            }
-            return content.name != nil && content.arguments != nil
-        }
-    }
-
-    private func inlineToolResults(in message: OpenClawChatMessage) -> [OpenClawChatMessageContent] {
-        message.content.filter { content in
-            let kind = (content.type ?? "").lowercased()
-            return kind == "toolresult" || kind == "tool_result"
-        }
-    }
-
-    private func toolCallIds(in message: OpenClawChatMessage) -> Set<String> {
-        var ids = Set<String>()
-        for content in self.toolCalls(in: message) {
-            if let id = content.id {
-                ids.insert(id)
-            }
-        }
-        if let toolCallId = message.toolCallId {
-            ids.insert(toolCallId)
-        }
-        return ids
-    }
-
-    private func toolResultText(from message: OpenClawChatMessage) -> String {
-        self.primaryText(in: message)
     }
 
     private func dismissKeyboardIfNeeded() {
@@ -950,4 +806,159 @@ private struct ChatNoticeBanner: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)))
     }
+}
+
+// One projection for rendering and empty-state decisions. Preserve transcript rows;
+// only the view folds matching tool evidence into its originating assistant row.
+enum ChatMessageProjection {
+    static func project(
+        _ messages: [OpenClawChatMessage], showsAssistantTrace: Bool) -> [OpenClawChatMessage]
+    {
+        self.mergeToolResults(in: messages).filter {
+            self.shouldDisplayMessage($0, showsAssistantTrace: showsAssistantTrace)
+        }
+    }
+
+    private static func mergeToolResults(in messages: [OpenClawChatMessage]) -> [OpenClawChatMessage] {
+        var result: [OpenClawChatMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for message in messages {
+            guard self.isToolResultMessage(message) else {
+                result.append(message)
+                continue
+            }
+
+            guard let toolCallId = message.toolCallId,
+                  let last = result.last,
+                  self.toolCallIds(in: last).contains(toolCallId)
+            else {
+                result.append(message)
+                continue
+            }
+
+            let toolText = self.toolResultText(from: message)
+            if toolText.isEmpty {
+                continue
+            }
+
+            var content = last.content
+            content.append(
+                OpenClawChatMessageContent(
+                    type: "tool_result",
+                    text: toolText,
+                    thinking: nil,
+                    thinkingSignature: nil,
+                    mimeType: nil,
+                    fileName: nil,
+                    content: nil,
+                    id: toolCallId,
+                    name: message.toolName,
+                    arguments: nil))
+
+            let merged = OpenClawChatMessage(
+                id: last.id,
+                role: last.role,
+                content: content,
+                timestamp: last.timestamp,
+                transcriptMessageID: last.transcriptMessageID,
+                idempotencyKey: last.idempotencyKey,
+                toolCallId: last.toolCallId,
+                toolName: last.toolName,
+                usage: last.usage,
+                stopReason: last.stopReason,
+                errorMessage: last.errorMessage)
+            result[result.count - 1] = merged
+        }
+
+        return result
+    }
+
+    private static func isToolResultMessage(_ message: OpenClawChatMessage) -> Bool {
+        let role = message.role.lowercased()
+        return role == "toolresult" || role == "tool_result"
+    }
+
+    private static func shouldDisplayMessage(
+        _ message: OpenClawChatMessage, showsAssistantTrace: Bool) -> Bool
+    {
+        if self.hasInlineAttachments(in: message) {
+            return true
+        }
+
+        let primaryText = self.primaryText(in: message)
+        if self.isToolResultMessage(message) { return !primaryText.isEmpty }
+        if !primaryText.isEmpty {
+            if message.role.lowercased() == "user" {
+                return true
+            }
+            if AssistantTextParser.hasVisibleContent(in: primaryText, includeThinking: showsAssistantTrace) {
+                return true
+            }
+        }
+
+        if self.inlineToolResults(in: message).contains(where: { !($0.text ?? "").isEmpty }) { return true }
+        guard showsAssistantTrace else { return false }
+
+        return !self.toolCalls(in: message).isEmpty || !self.inlineToolResults(in: message).isEmpty
+    }
+
+    private static func primaryText(in message: OpenClawChatMessage) -> String {
+        let parts = message.content.compactMap { content -> String? in
+            let kind = (content.type ?? "text").lowercased()
+            guard kind == "text" || kind.isEmpty else { return nil }
+            return content.text
+        }
+        return OpenClawChatMessage.displayText(
+            contentText: parts.joined(separator: "\n"),
+            role: message.role,
+            stopReason: message.stopReason,
+            errorMessage: message.errorMessage)
+    }
+
+    private static func hasInlineAttachments(in message: OpenClawChatMessage) -> Bool {
+        message.content.contains { content in
+            switch content.type ?? "text" {
+            case "file", "attachment":
+                true
+            default:
+                false
+            }
+        }
+    }
+
+    private static func toolCalls(in message: OpenClawChatMessage) -> [OpenClawChatMessageContent] {
+        message.content.filter { content in
+            let kind = (content.type ?? "").lowercased()
+            if ["toolcall", "tool_call", "tooluse", "tool_use"].contains(kind) {
+                return true
+            }
+            return content.name != nil && content.arguments != nil
+        }
+    }
+
+    private static func inlineToolResults(in message: OpenClawChatMessage) -> [OpenClawChatMessageContent] {
+        message.content.filter { content in
+            let kind = (content.type ?? "").lowercased()
+            return kind == "toolresult" || kind == "tool_result"
+        }
+    }
+
+    private static func toolCallIds(in message: OpenClawChatMessage) -> Set<String> {
+        var ids = Set<String>()
+        for content in self.toolCalls(in: message) {
+            if let id = content.id {
+                ids.insert(id)
+            }
+        }
+        if let toolCallId = message.toolCallId {
+            ids.insert(toolCallId)
+        }
+        return ids
+    }
+
+    private static func toolResultText(from message: OpenClawChatMessage) -> String {
+        self.primaryText(in: message)
+    }
+
 }

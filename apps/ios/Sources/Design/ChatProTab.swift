@@ -20,6 +20,18 @@ struct ChatPreparationRetryState: Equatable {
 }
 
 enum ChatConnectionPresentation {
+    static func readinessText(
+        blockingText: String?, gatewayConnected: Bool, hasViewModel: Bool,
+        isLoading: Bool, hasError: Bool) -> String?
+    {
+        if let blockingText { return blockingText }
+        if !gatewayConnected { return "Connecting" }
+        if hasError { return "Chat needs attention" }
+        if !hasViewModel { return "Preparing chat" }
+        if isLoading { return "Loading chat" }
+        return nil
+    }
+
     static func blockingText(
         deliveryGate: OpenClawChatOutboxStatus.DeliveryGate?,
         nodeState: GatewayNodeRoleState,
@@ -281,21 +293,21 @@ struct ChatProTab: View {
 
     private var connectionPill: some View {
         HStack(spacing: 6) {
-            ProStatusDot(color: self.chatDeliveryReady ? OpenClawBrand.ok : .orange)
-            Text(self.chatDeliveryReady ? "Connected" : (self.chatBlockingConditionText ?? "Connecting"))
+            ProStatusDot(color: self.chatReadinessText == nil ? OpenClawBrand.ok : .orange)
+            Text(self.chatReadinessText ?? "Connected")
                 .font(.caption.weight(.semibold))
                 .lineLimit(1)
         }
-        .foregroundStyle(self.chatDeliveryReady ? OpenClawBrand.ok : .orange)
+        .foregroundStyle(self.chatReadinessText == nil ? OpenClawBrand.ok : .orange)
         .padding(.horizontal, 10)
         .frame(height: 30)
         .background {
             Capsule()
-                .fill((self.chatDeliveryReady ? OpenClawBrand.ok : Color.orange).opacity(0.11))
+                .fill((self.chatReadinessText == nil ? OpenClawBrand.ok : Color.orange).opacity(0.11))
         }
         .overlay {
             Capsule()
-                .strokeBorder((self.chatDeliveryReady ? OpenClawBrand.ok : Color.orange).opacity(0.16), lineWidth: 1)
+                .strokeBorder((self.chatReadinessText == nil ? OpenClawBrand.ok : Color.orange).opacity(0.16), lineWidth: 1)
         }
     }
 
@@ -304,8 +316,13 @@ struct ChatProTab: View {
             (self.appModel.operatorRoleState == .online && self.appModel.isOperatorGatewayConnected)
     }
 
-    private var chatDeliveryReady: Bool {
-        self.gatewayConnected && self.chatBlockingConditionText == nil
+    private var chatReadinessText: String? {
+        ChatConnectionPresentation.readinessText(
+            blockingText: self.chatBlockingConditionText,
+            gatewayConnected: self.gatewayConnected,
+            hasViewModel: self.viewModel != nil,
+            isLoading: self.viewModel?.isLoading == true,
+            hasError: self.chatPreparationError != nil || self.viewModel?.errorText != nil)
     }
 
     private var messagePlaceholder: String {

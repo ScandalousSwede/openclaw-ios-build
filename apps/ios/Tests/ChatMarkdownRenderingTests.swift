@@ -112,13 +112,94 @@ final class ChatMarkdownRenderingTests: XCTestCase {
     }
 
     @MainActor
+    func testToolOutputCannotReplaceAssistantReplyWithTraceHidden() async throws {
+        // Sanitized shape of retained native exec output: multiline paths plus
+        // a very long unbroken identifier. No private transcript text is copied.
+        let output = String(repeating: "/workspace/results/0123456789abcdef.jsonl\n", count: 1000)
+            + String(repeating: "abcdef0123456789", count: 1000) + " END_OF_TOOL_OUTPUT"
+        for role in ["toolResult", "tool_result", "assistant"] {
+            let tool = OpenClawChatMessage(
+                role: role,
+                content: [OpenClawChatMessageContent(
+                    type: role == "assistant" ? "tool_result" : "text", text: output,
+                    mimeType: nil, fileName: nil, content: nil)],
+                timestamp: nil, toolCallId: "retained-call", toolName: "exec")
+            let reply = OpenClawChatMessage(
+                role: "assistant",
+                content: [OpenClawChatMessageContent(
+                    type: "text", text: "Useful reply remains readable", mimeType: nil, fileName: nil, content: nil)],
+                timestamp: nil)
+            let projected = ChatMessageProjection.project([tool, reply], showsAssistantTrace: false)
+            XCTAssertEqual(projected.count, 2)
+            XCTAssertEqual(projected[0].content[0].text, output)
+            for size in [DynamicTypeSize.large, .accessibility1] {
+                let image = try await render(
+                    "", context: .assistant, variant: .standard,
+                    expectedWords: ["tool output", "view output", "useful reply"], scrolling: true,
+                    messages: projected, dynamicTypeSize: size)
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "bounded-tool-output-\(role)-\(size)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
+    }
+
+    @MainActor
+    func testToolPreviewBoundsBothLinesAndUnbrokenIdentifiers() {
+        let longLine = String(repeating: "abcdef", count: 10000)
+        let preview = ToolResultCard.preview(longLine)
+        XCTAssertLessThanOrEqual(preview.count, ToolResultCard.previewCharacterLimit + 2)
+        XCTAssertTrue(preview.hasSuffix("…"))
+        XCTAssertEqual(ToolResultCard.preview("short output"), "short output")
+        XCTAssertEqual(ToolResultCard.preview("one\ntwo\nthree\nfour"), "one\ntwo\nthree\n…")
+    }
+
+    @MainActor
+    func testProjectionPreservesMatchedOutputAndRecognizesHiddenOnlyHistory() throws {
+        let json = #"""
+        [
+          {"role":"assistant","content":[{"type":"toolCall","id":"call-1","name":"exec","arguments":{}}]},
+          {"role":"toolResult","toolCallId":"call-1","toolName":"exec","content":[{"type":"text","text":"retained evidence"}]}
+        ]
+        """#
+        let messages = try JSONDecoder().decode([OpenClawChatMessage].self, from: Data(json.utf8))
+        XCTAssertTrue(ChatMessageProjection.project([messages[0]], showsAssistantTrace: false).isEmpty)
+        let projected = ChatMessageProjection.project(messages, showsAssistantTrace: false)
+        XCTAssertEqual(projected.count, 1)
+        XCTAssertEqual(projected.first?.content.last?.type, "tool_result")
+        XCTAssertEqual(projected.first?.content.last?.text, "retained evidence")
+        let emptyInline = OpenClawChatMessage(
+            role: "assistant",
+            content: [OpenClawChatMessageContent(
+                type: "tool_result", text: "", mimeType: nil, fileName: nil, content: nil)],
+            timestamp: nil)
+        XCTAssertTrue(ChatMessageProjection.project([emptyInline], showsAssistantTrace: false).isEmpty)
+        for role in ["toolResult", "tool_result"] {
+            let markup = "<thinking>literal tool evidence</thinking>"
+            let tool = OpenClawChatMessage(
+                role: role,
+                content: [OpenClawChatMessageContent(
+                    type: "text", text: markup, mimeType: nil, fileName: nil, content: nil)],
+                timestamp: nil)
+            let visible = ChatMessageProjection.project([tool], showsAssistantTrace: false)
+            XCTAssertEqual(visible.first?.content.first?.text, markup)
+        }
+        // Projection does not mutate canonical history or its role/call identity.
+        XCTAssertEqual(messages[1].role, "toolResult")
+        XCTAssertEqual(messages[1].toolCallId, "call-1")
+    }
+
+    @MainActor
     private func render(
         _ markdown: String,
         context: ChatMarkdownRenderer.Context,
         variant: ChatMarkdownVariant,
         expectedWords: [String],
         scrolling: Bool = false,
-        tailMarker: String? = nil
+        tailMarker: String? = nil,
+        messages: [OpenClawChatMessage]? = nil,
+        dynamicTypeSize: DynamicTypeSize = .large
     ) async throws -> UIImage {
         // Textual uses UIKit-backed layout. ImageRenderer can return a nonnil
         // unsupported-view placeholder, so force real presentation and verify text.
@@ -135,21 +216,21 @@ final class ChatMarkdownRenderingTests: XCTestCase {
                         // Match the real message-list row, including its width,
                         // avatar and assistant segment owner, rather than placing
                         // an initially empty parser view directly in a lazy stack.
-                        ChatMessageBubble(
-                            message: OpenClawChatMessage(
-                                role: context == .assistant ? "assistant" : "user",
-                                content: [OpenClawChatMessageContent(
-                                    type: "text", text: markdown,
-                                    mimeType: nil, fileName: nil, content: nil
-                                )],
-                                timestamp: nil
-                            ),
-                            style: .standard, markdownVariant: variant,
-                            userAccent: nil, showsAssistantTrace: false,
-                            assistantName: "Synthetic assistant", assistantAvatarText: "S",
-                            assistantAvatarTint: nil, showsAssistantAvatar: true
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        ForEach(messages ?? [OpenClawChatMessage(
+                            role: context == .assistant ? "assistant" : "user",
+                            content: [OpenClawChatMessageContent(
+                                type: "text", text: markdown,
+                                mimeType: nil, fileName: nil, content: nil)],
+                            timestamp: nil)]) { message in
+                            ChatMessageBubble(
+                                message: message,
+                                style: .standard, markdownVariant: variant,
+                                userAccent: nil, showsAssistantTrace: false,
+                                assistantName: "Synthetic assistant", assistantAvatarText: "S",
+                                assistantAvatarTint: nil, showsAssistantAvatar: true
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                     .scrollTargetLayout()
                 }
@@ -162,6 +243,7 @@ final class ChatMarkdownRenderingTests: XCTestCase {
         .clipped()
         .background(Color.black)
         .environment(\.colorScheme, .dark)
+        .environment(\.dynamicTypeSize, dynamicTypeSize)
         let host = UIHostingController(rootView: content)
         host.safeAreaRegions = []
         host.overrideUserInterfaceStyle = .dark

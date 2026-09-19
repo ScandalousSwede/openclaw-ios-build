@@ -198,6 +198,25 @@ import Testing
             "This device was approved for node only. Remove only this new device from the gateway and pair again using a setup code.")
     }
 
+    @Test func chatReadinessDistinguishesTransportFromConversationAvailability() {
+        func status(
+            blocked: String? = nil, connected: Bool = true, model: Bool = true,
+            loading: Bool = false, error: Bool = false) -> String?
+        {
+            ChatConnectionPresentation.readinessText(
+                blockingText: blocked, gatewayConnected: connected, hasViewModel: model,
+                isLoading: loading, hasError: error)
+        }
+        #expect(status() == nil)
+        #expect(status(model: false) == "Preparing chat")
+        #expect(status(loading: true) == "Loading chat")
+        #expect(status(error: true) == "Chat needs attention")
+        #expect(status(model: false, error: true) == "Chat needs attention")
+        #expect(status(connected: false, loading: true) == "Connecting")
+        #expect(status(blocked: "Operator connecting", loading: true) == "Operator connecting")
+        #expect(status(blocked: "Operator scopes unavailable", error: true) == "Operator scopes unavailable")
+    }
+
     @Test func chatPresentationNeverHidesRoleRouteOrIdentityBlockers() {
         #expect(ChatConnectionPresentation.blockingText(
             deliveryGate: .routingContractUnavailable,

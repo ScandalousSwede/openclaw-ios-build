@@ -2908,7 +2908,7 @@ struct ChatViewModelTests {
             messages: [
                 chatTextMessage(role: "assistant", text: "after compact", timestamp: 2),
             ])
-        let gate = AsyncGate()
+        let gate = SessionSubscribeGate()
         let (transport, vm) = await makeViewModel(
             historyResponses: [before, after],
             compactSessionHook: { _ in
@@ -3179,7 +3179,7 @@ struct ChatViewModelTests {
         let models = [
             modelChoice(id: "gpt-5.4", name: "GPT-5.4", provider: "openai"),
         ]
-        let gate = AsyncGate()
+        let gate = SessionSubscribeGate()
 
         let (transport, vm) = await makeViewModel(
             historyResponses: [history],
@@ -3356,6 +3356,36 @@ struct ChatViewModelTests {
             await MainActor.run { vm.sessionKey == "other" && vm.sessionId == "sess-other" }
         }
         #expect(changedSessionKeys.isEmpty)
+    }
+
+    @Test @MainActor func `failed reconnect preserves retained conversation while loading and after error`() async throws {
+        let gate = SessionSubscribeGate()
+        let requests = AsyncCounter()
+        let (_, vm) = await makeViewModel(
+            historyResponses: [historyPayload(messages: [
+                chatTextMessage(role: "assistant", text: "Retained useful reply", timestamp: 1),
+            ])],
+            requestHistoryHook: { _ in
+                if await requests.increment() > 1 {
+                    await gate.wait()
+                    throw NSError(domain: "history", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "History temporarily unavailable",
+                    ])
+                }
+            })
+        try await loadAndWaitBootstrap(vm: vm, sessionId: "sess-main")
+        let retainedIDs = vm.messages.map(\.id)
+        vm.refresh()
+        try await waitUntil("refresh history in flight") { await requests.current() == 2 }
+        #expect(vm.isLoading)
+        #expect(vm.messages.map(\.id) == retainedIDs)
+        await gate.release()
+        try await waitUntil("history failure surfaced") {
+            await MainActor.run { !vm.isLoading && vm.errorText != nil }
+        }
+        #expect(vm.messages.map(\.id) == retainedIDs)
+        #expect(vm.messages.first?.content.first?.text == "Retained useful reply")
+        vm.shutdown()
     }
 
     @Test @MainActor func `refresh ignores late history from canceled bootstrap for same session`() async throws {

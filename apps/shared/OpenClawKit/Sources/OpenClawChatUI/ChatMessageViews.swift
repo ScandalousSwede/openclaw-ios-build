@@ -261,7 +261,7 @@ private struct ChatMessageBody: View {
         let textColor = self.isUser ? OpenClawChatTheme.userText : OpenClawChatTheme.assistantText
 
         VStack(alignment: .leading, spacing: 10) {
-            if self.isToolResultMessage, self.showsAssistantTrace {
+            if self.isToolResultMessage {
                 if !text.isEmpty {
                     ToolResultCard(
                         title: self.toolResultTitle,
@@ -274,7 +274,7 @@ private struct ChatMessageBody: View {
                     text: text,
                     context: .user,
                     variant: self.markdownVariant,
-                    font: .system(size: 14),
+                    font: .body,
                     textColor: textColor)
             } else {
                 ChatAssistantTextBody(
@@ -297,7 +297,7 @@ private struct ChatMessageBody: View {
                 }
             }
 
-            if self.showsAssistantTrace, !self.inlineToolResults.isEmpty {
+            if !self.inlineToolResults.isEmpty {
                 ForEach(self.inlineToolResults.indices, id: \.self) { idx in
                     let toolResult = self.inlineToolResults[idx]
                     let display = ToolDisplayRegistry.resolve(name: toolResult.name ?? "tool", args: nil)
@@ -500,35 +500,39 @@ private struct ToolCallCard: View {
     }
 }
 
-private struct ToolResultCard: View {
+// Tool results are evidence, never assistant prose, including when trace is hidden.
+// Keep the conversation bounded; opening details must not expand its scroll extent.
+struct ToolResultCard: View {
     let title: String
     let text: String
     let isUser: Bool
     let toolName: String?
-    @State private var expanded = false
+    @State private var showsDetails = false
+
+    static let previewLineLimit = 3
+    static let previewCharacterLimit = 512
+
+    static func preview(_ text: String) -> String {
+        let prefix = String(text.prefix(Self.previewCharacterLimit))
+        let lines = prefix.components(separatedBy: .newlines)
+        let preview = lines.prefix(Self.previewLineLimit).joined(separator: "\n")
+        return preview.count < text.count ? preview + "\n…" : preview
+    }
 
     var body: some View {
-        if !self.displayContent.isEmpty {
+        if !self.text.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 6) {
-                    Text(self.title)
-                        .font(.footnote.weight(.semibold))
-                    Spacer(minLength: 0)
-                }
+                Label("Tool output · \(self.title)", systemImage: "terminal")
+                    .font(.footnote.weight(.semibold))
 
-                Text(self.displayText)
+                Text(Self.preview(self.text))
                     .font(.footnote.monospaced())
                     .foregroundStyle(self.isUser ? OpenClawChatTheme.userText : OpenClawChatTheme.assistantText)
-                    .lineLimit(self.expanded ? nil : Self.previewLineLimit)
+                    .lineLimit(Self.previewLineLimit)
 
-                if self.shouldShowToggle {
-                    Button(self.expanded ? "Show less" : "Show full output") {
-                        self.expanded.toggle()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
+                Button("View output") { self.showsDetails = true }
+                    .font(.footnote)
+                    .accessibilityHint("Opens the complete tool output in a separate view")
             }
             .padding(10)
             .background(
@@ -537,26 +541,26 @@ private struct ToolResultCard: View {
                     .overlay(
                         RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)))
+            .sheet(isPresented: self.$showsDetails) {
+                NavigationStack {
+                    ScrollView {
+                        // Use original text, not a lossy formatter or Markdown parser.
+                        Text(self.text)
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                    .navigationTitle("Tool output")
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { self.showsDetails = false }
+                        }
+                    }
+                }
+                .frame(minWidth: 280, minHeight: 300)
+            }
         }
-    }
-
-    private static let previewLineLimit = 8
-
-    private var displayContent: String {
-        ToolResultTextFormatter.format(text: self.text, toolName: self.toolName)
-    }
-
-    private var lines: [Substring] {
-        self.displayContent.components(separatedBy: .newlines).map { Substring($0) }
-    }
-
-    private var displayText: String {
-        guard !self.expanded, self.lines.count > Self.previewLineLimit else { return self.displayContent }
-        return self.lines.prefix(Self.previewLineLimit).joined(separator: "\n") + "\n…"
-    }
-
-    private var shouldShowToggle: Bool {
-        self.lines.count > Self.previewLineLimit
     }
 }
 
@@ -747,7 +751,7 @@ private struct ChatAssistantTextBody: View {
         let segments = AssistantTextParser.segments(from: self.text, includeThinking: self.includesThinking)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(segments) { segment in
-                let font = segment.kind == .thinking ? Font.system(size: 14).italic() : Font.system(size: 14)
+                let font = segment.kind == .thinking ? Font.body.italic() : Font.body
                 ChatMarkdownRenderer(
                     text: segment.text,
                     context: .assistant,
