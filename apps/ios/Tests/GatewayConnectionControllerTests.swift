@@ -5,6 +5,85 @@ import UIKit
 @testable import OpenClaw
 
 @Suite(.serialized) struct GatewayConnectionControllerTests {
+    @MainActor private final class BackgroundTaskFixture {
+        var grantsExecution = true
+        var acquired: [UIBackgroundTaskIdentifier] = []
+        var ended: [UIBackgroundTaskIdentifier] = []
+
+        func begin(_ expiration: @escaping @MainActor @Sendable () -> Void) -> UIBackgroundTaskIdentifier {
+            guard self.grantsExecution else { return .invalid }
+            let taskID = UIBackgroundTaskIdentifier(rawValue: self.acquired.count + 1)
+            self.acquired.append(taskID)
+            return taskID
+        }
+
+        func end(_ taskID: UIBackgroundTaskIdentifier) {
+            self.ended.append(taskID)
+        }
+
+        func makeModel() -> NodeAppModel {
+            NodeAppModel(beginBackgroundTask: self.begin, endBackgroundTask: self.end)
+        }
+    }
+
+    @Test @MainActor func unavailableBackgroundTaskDoesNotRetainAReconnectLease() {
+        let backgroundTasks = BackgroundTaskFixture()
+        backgroundTasks.grantsExecution = false
+        let appModel = backgroundTasks.makeModel()
+        defer { appModel.setScenePhase(.active) }
+        appModel.setScenePhase(.background)
+        let current = appModel._test_backgroundGraceState()
+        #expect(current.generation == nil)
+        #expect(current.timer == nil)
+        #expect(current.suppressed)
+        #expect(backgroundTasks.acquired.isEmpty)
+        #expect(backgroundTasks.ended.isEmpty)
+    }
+
+    @Test @MainActor func cancelledBackgroundGraceCannotRetireTheNextBackgroundPeriod() async throws {
+        let backgroundTasks = BackgroundTaskFixture()
+        let appModel = backgroundTasks.makeModel()
+        defer { appModel.setScenePhase(.active) }
+        appModel.setScenePhase(.background)
+        let previous = appModel._test_backgroundGraceState()
+        let previousTimer = try #require(previous.timer)
+        appModel.setScenePhase(.active)
+        appModel.setScenePhase(.background)
+        let replacement = appModel._test_backgroundGraceState()
+        #expect(replacement.generation != previous.generation)
+        _ = try #require(replacement.timer)
+
+        // Await the actual cancelled task, including its queued actor work.
+        // Swallowing sleep cancellation used to suppress/end the replacement.
+        await previousTimer.value
+        let current = appModel._test_backgroundGraceState()
+        #expect(current.generation == replacement.generation)
+        #expect(current.timer != nil)
+        #expect(!current.suppressed)
+        #expect(backgroundTasks.acquired.count == 2)
+        #expect(backgroundTasks.ended == Array(backgroundTasks.acquired.prefix(1)))
+    }
+
+    @Test @MainActor func staleBackgroundExpirationCannotRetireCurrentGrace() throws {
+        let backgroundTasks = BackgroundTaskFixture()
+        let appModel = backgroundTasks.makeModel()
+        defer { appModel.setScenePhase(.active) }
+        appModel.setScenePhase(.background)
+        let previous = try #require(appModel._test_backgroundGraceState().generation)
+        appModel.setScenePhase(.active)
+        appModel.setScenePhase(.background)
+        let replacement = try #require(appModel._test_backgroundGraceState().generation)
+
+        appModel._test_expireBackgroundGrace(generation: previous)
+        #expect(appModel._test_backgroundGraceState().generation == replacement)
+        #expect(!appModel._test_backgroundGraceState().suppressed)
+        appModel._test_expireBackgroundGrace(generation: replacement)
+        #expect(appModel._test_backgroundGraceState().generation == nil)
+        #expect(appModel._test_backgroundGraceState().timer == nil)
+        #expect(appModel._test_backgroundGraceState().suppressed)
+        #expect(backgroundTasks.ended == backgroundTasks.acquired)
+    }
+
     @Test @MainActor func resolvedDisplayNameSetsDefaultWhenMissing() {
         let defaults = UserDefaults.standard
         let displayKey = "node.displayName"

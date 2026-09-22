@@ -361,14 +361,23 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void)
     {
-        let userInfo = notification.request.content.userInfo
+        completionHandler(Self.foregroundNotificationPresentationOptions(
+            userInfo: notification.request.content.userInfo))
+    }
+
+    static func foregroundNotificationPresentationOptions(
+        userInfo: [AnyHashable: Any]) -> UNNotificationPresentationOptions
+    {
+        // Ordinary evidence alerts must remain visible while the app is open.
+        // Use the same validated reference as tap routing; arrival does not open it.
         if Self.isWatchPromptNotification(userInfo)
             || ExecApprovalNotificationBridge.shouldPresentNotification(userInfo: userInfo)
+            || ArgusEvidenceNotificationReference.parse(
+                actionIdentifier: UNNotificationDefaultActionIdentifier, userInfo: userInfo) != nil
         {
-            completionHandler([.banner, .list, .sound])
-            return
+            return [.banner, .list, .sound]
         }
-        completionHandler([])
+        return []
     }
 
     @discardableResult

@@ -451,6 +451,10 @@ final class NodeAppModel {
     private var backgroundedAt: Date?
     private var reconnectAfterBackgroundArmed = false
     private var backgroundGraceTaskID: UIBackgroundTaskIdentifier = .invalid
+    private var backgroundGraceGeneration: UUID?
+    private let beginBackgroundTask: @MainActor (@escaping @MainActor @Sendable () -> Void)
+        -> UIBackgroundTaskIdentifier
+    private let endBackgroundTask: @MainActor (UIBackgroundTaskIdentifier) -> Void
     @ObservationIgnored private var backgroundGraceTaskTimer: Task<Void, Never>?
     private var backgroundReconnectSuppressed = false
     private var backgroundReconnectLeaseUntil: Date?
@@ -894,7 +898,14 @@ final class NodeAppModel {
         remindersService: any RemindersServicing = RemindersService(),
         motionService: any MotionServicing = MotionService(),
         watchMessagingService: any WatchMessagingServicing = WatchMessagingService(),
-        talkMode: TalkModeManager = TalkModeManager())
+        talkMode: TalkModeManager = TalkModeManager(),
+        beginBackgroundTask: @escaping @MainActor (@escaping @MainActor @Sendable () -> Void)
+            -> UIBackgroundTaskIdentifier = {
+                UIApplication.shared.beginBackgroundTask(withName: "gateway-background-grace", expirationHandler: $0)
+            },
+        endBackgroundTask: @escaping @MainActor (UIBackgroundTaskIdentifier) -> Void = {
+            UIApplication.shared.endBackgroundTask($0)
+        })
     {
         self.screen = screen
         self.camera = camera
@@ -909,6 +920,8 @@ final class NodeAppModel {
         self.motionService = motionService
         self.watchMessagingService = watchMessagingService
         self.talkMode = talkMode
+        self.beginBackgroundTask = beginBackgroundTask
+        self.endBackgroundTask = endBackgroundTask
         // APNs tokens are launch-scoped addresses, not durable app state. Drop
         // the fork's legacy cache and wait for the current system callback.
         UserDefaults.standard.removeObject(forKey: Self.legacyAPNsDeviceTokenUserDefaultsKey)
@@ -1312,35 +1325,46 @@ final class NodeAppModel {
     private func beginBackgroundConnectionGracePeriod(seconds: TimeInterval = 25) {
         self.grantBackgroundReconnectLease(seconds: seconds, reason: "scene_background_grace")
         self.endBackgroundConnectionGracePeriod(reason: "restart")
-        let taskID = UIApplication.shared.beginBackgroundTask(withName: "gateway-background-grace") { [weak self] in
+        let generation = UUID()
+        self.backgroundGraceGeneration = generation
+        let taskID = self.beginBackgroundTask { [weak self] in
             Task { @MainActor in
-                self?.suppressBackgroundReconnect(
-                    reason: "background_grace_expired",
-                    disconnectIfNeeded: true)
-                self?.endBackgroundConnectionGracePeriod(reason: "expired")
+                self?.expireBackgroundConnectionGracePeriod(generation: generation, reason: "expired")
             }
         }
         guard taskID != .invalid else {
             self.pushWakeLogger.info("Background grace unavailable: beginBackgroundTask returned invalid")
+            self.expireBackgroundConnectionGracePeriod(generation: generation, reason: "unavailable")
             return
         }
         self.backgroundGraceTaskID = taskID
         self.pushWakeLogger.info("Background grace started seconds=\(seconds, privacy: .public)")
         self.backgroundGraceTaskTimer = Task { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: UInt64(max(1, seconds) * 1_000_000_000))
-            await MainActor.run {
-                self.suppressBackgroundReconnect(reason: "background_grace_timer", disconnectIfNeeded: true)
-                self.endBackgroundConnectionGracePeriod(reason: "timer")
+            do {
+                try await Task.sleep(nanoseconds: UInt64(max(1, seconds) * 1_000_000_000))
+            } catch {
+                return
             }
+            guard !Task.isCancelled else { return }
+            self.expireBackgroundConnectionGracePeriod(generation: generation, reason: "timer")
         }
     }
 
+    private func expireBackgroundConnectionGracePeriod(generation: UUID, reason: String) {
+        // A cancelled timer or queued OS expiration belongs to its original grace
+        // period. It must not retire a newer background connection lease.
+        guard self.backgroundGraceGeneration == generation else { return }
+        self.suppressBackgroundReconnect(reason: "background_grace_\(reason)", disconnectIfNeeded: true)
+        self.endBackgroundConnectionGracePeriod(reason: reason)
+    }
+
     private func endBackgroundConnectionGracePeriod(reason: String) {
+        self.backgroundGraceGeneration = nil
         self.backgroundGraceTaskTimer?.cancel()
         self.backgroundGraceTaskTimer = nil
         guard self.backgroundGraceTaskID != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(self.backgroundGraceTaskID)
+        self.endBackgroundTask(self.backgroundGraceTaskID)
         self.backgroundGraceTaskID = .invalid
         self.pushWakeLogger.info("Background grace ended reason=\(reason, privacy: .public)")
     }
@@ -6825,6 +6849,14 @@ extension NodeAppModel {
 
 #if DEBUG
 extension NodeAppModel {
+    func _test_backgroundGraceState() -> (generation: UUID?, timer: Task<Void, Never>?, suppressed: Bool) {
+        (self.backgroundGraceGeneration, self.backgroundGraceTaskTimer, self.backgroundReconnectSuppressed)
+    }
+
+    func _test_expireBackgroundGrace(generation: UUID) {
+        self.expireBackgroundConnectionGracePeriod(generation: generation, reason: "test_expiration")
+    }
+
     func _test_acquirePTTVoiceWakeLease(captureID: String? = nil) {
         self.acquirePTTVoiceWakeLease()
         if let captureID {

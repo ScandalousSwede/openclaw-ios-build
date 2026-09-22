@@ -11,6 +11,35 @@ struct ArgusEvidenceNotificationTests {
     private static let gateway = "fixture-gateway-device"
     private static let owner = "fixture-paired-route"
 
+    @Test func `valid evidence alerts have foreground presentation`() {
+        let (detail, _) = Self.fixture()
+        let options = OpenClawAppDelegate.foregroundNotificationPresentationOptions(
+            userInfo: self.payload(for: detail))
+        #expect(options == [.banner, .list, .sound])
+    }
+
+    @Test func `invalid evidence and silent payloads do not gain foreground presentation`() {
+        let payloads: [[AnyHashable: Any]] = [
+            ["openclaw": ["kind": "argus.evidence"]],
+            ["aps": ["content-available": 1]],
+            ["openclaw": ["kind": "exec.approval.resolved", "approvalId": "fixture-approval"]],
+        ]
+        for payload in payloads {
+            #expect(OpenClawAppDelegate.foregroundNotificationPresentationOptions(userInfo: payload).isEmpty)
+        }
+    }
+
+    @Test func `existing watch and approval alerts retain foreground presentation`() {
+        let payloads: [[AnyHashable: Any]] = [
+            [WatchPromptNotificationBridge.typeKey: WatchPromptNotificationBridge.typeValue],
+            ["openclaw": ["kind": "exec.approval.requested", "approvalId": "fixture-approval"]],
+        ]
+        for payload in payloads {
+            #expect(OpenClawAppDelegate.foregroundNotificationPresentationOptions(
+                userInfo: payload) == [.banner, .list, .sound])
+        }
+    }
+
     static func fixture() -> (ArgusOperationDetail, Data) {
         let bytes = Data("Synthetic artifact from the exact notification event.".utf8)
         let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
