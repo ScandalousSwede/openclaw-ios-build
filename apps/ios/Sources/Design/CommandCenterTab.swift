@@ -106,60 +106,18 @@ struct CommandCenterTab: View {
                     color: self.gatewayStatusColor,
                     icon: self.gatewayConnected ? "hourglass" : "wifi.slash")
 
-                HStack(spacing: 0) {
-                    self.gatewayFact(
-                        icon: "network",
-                        title: "Gateway/node",
-                        value: self.appModel.nodeRoleState.statusLabel,
-                        color: self.gatewayStatusColor)
-                    Divider().frame(height: 38)
-                    self.gatewayFact(
-                        icon: "bubble.left.and.bubble.right",
-                        title: "Operator/chat",
-                        value: self.appModel.operatorRoleState.statusLabel,
-                        color: OpenClawBrand.accent)
-                    Divider().frame(height: 38)
-                    self.gatewayFact(
-                        icon: "person.2.fill",
-                        title: "Agents",
-                        value: self.gatewayAgentCountText,
-                        color: OpenClawBrand.accentHot)
+                DisclosureGroup("Connection details") {
+                    CommandGatewayFacts(
+                        nodeStatus: self.appModel.nodeRoleState.statusLabel,
+                        operatorStatus: self.appModel.operatorRoleState.statusLabel,
+                        agentCount: self.gatewayAgentCountText)
+                        .padding(.top, 8)
                 }
-                .padding(.vertical, 9)
-                .background {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(self.colorScheme == .dark ? Color.black.opacity(0.16) : Color.black.opacity(0.026))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .strokeBorder(
-                                    Color.primary.opacity(self.colorScheme == .dark ? 0.08 : 0.045),
-                                    lineWidth: 1)
-                        }
-                }
+                .font(.subheadline)
+                .tint(OpenClawBrand.accent)
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
-    }
-
-    private func gatewayFact(icon: String, title: String, value: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                Image(systemName: icon)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(color)
-                Text(title)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Text(value)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(title == "Connection" ? color : .primary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10)
     }
 
     private var defaultChatSessionSection: some View {

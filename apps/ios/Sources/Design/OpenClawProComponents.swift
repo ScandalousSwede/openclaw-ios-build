@@ -115,10 +115,17 @@ private struct ProPanelBackground: View {
 
     private var fill: AnyShapeStyle {
         if self.colorScheme == .dark {
-            let base = self.isProminent
-                ? Color(red: 15 / 255, green: 17 / 255, blue: 19 / 255)
-                : Color(red: 10 / 255, green: 12 / 255, blue: 14 / 255)
-            return AnyShapeStyle(base)
+            return AnyShapeStyle(LinearGradient(
+                stops: self.isProminent ? [
+                    .init(color: OpenClawBrand.graphiteElevated, location: 0),
+                    .init(color: Color(red: 10 / 255, green: 25 / 255, blue: 41 / 255), location: 0.35),
+                    .init(color: Color(red: 7 / 255, green: 20 / 255, blue: 33 / 255), location: 1),
+                ] : [
+                    .init(color: Color(red: 7 / 255, green: 20 / 255, blue: 33 / 255), location: 0),
+                    .init(color: OpenClawBrand.darkCanvasTop, location: 1),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing))
         }
 
         let gradient = LinearGradient(

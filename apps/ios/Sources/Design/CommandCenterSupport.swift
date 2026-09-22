@@ -54,11 +54,7 @@ struct CommandControlBackground: View {
     }
 
     private var darkColors: [Color] {
-        [
-            Color(red: 12 / 255, green: 13 / 255, blue: 15 / 255),
-            Color(red: 7 / 255, green: 8 / 255, blue: 10 / 255),
-            Color(red: 4 / 255, green: 5 / 255, blue: 6 / 255),
-        ]
+        OpenClawBrand.canvasColors(for: .dark)
     }
 
     private var lightColors: [Color] {
@@ -72,10 +68,11 @@ struct CommandControlBackground: View {
 
 struct CommandSessionRow: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let item: CommandCenterTab.WorkItem
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .top, spacing: 12) {
             Image(systemName: self.item.icon)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(self.item.color)
@@ -85,22 +82,17 @@ struct CommandSessionRow: View {
                         .fill(self.item.color.opacity(0.12))
                 }
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(self.item.title)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.82)
-                    Spacer(minLength: 6)
+                Text(self.item.title)
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(self.item.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                self.metadataLayout {
                     Text(self.item.trailing)
                         .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    Text(self.item.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 6)
                     if let progress = self.item.progress {
                         ProProgressBar(progress: progress, color: self.item.color)
                             .frame(width: 68)
@@ -108,10 +100,10 @@ struct CommandSessionRow: View {
                     Text(self.progressLabel)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(self.item.color)
-                        .lineLimit(1)
-                        .frame(width: 48, alignment: .trailing)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 9)
@@ -123,6 +115,12 @@ struct CommandSessionRow: View {
                         .strokeBorder(self.rowBorder, lineWidth: 1)
                 }
         }
+    }
+
+    private var metadataLayout: AnyLayout {
+        self.dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 4))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))
     }
 
     private var progressLabel: String {
@@ -141,6 +139,38 @@ struct CommandSessionRow: View {
 
     private var rowBorder: Color {
         self.colorScheme == .dark ? Color.white.opacity(0.065) : Color.black.opacity(0.045)
+    }
+}
+
+struct CommandGatewayFacts: View {
+    let nodeStatus: String
+    let operatorStatus: String
+    let agentCount: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            self.fact("Gateway/node", value: self.nodeStatus, icon: "network")
+            Divider()
+            self.fact("Operator/chat", value: self.operatorStatus, icon: "bubble.left.and.bubble.right")
+            Divider()
+            self.fact("Agents", value: self.agentCount, icon: "person.2.fill")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func fact(_ title: String, value: String, icon: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(OpenClawBrand.accent)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(value).font(.subheadline.weight(.semibold))
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

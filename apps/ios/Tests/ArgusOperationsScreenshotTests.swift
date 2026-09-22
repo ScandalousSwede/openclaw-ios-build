@@ -28,10 +28,42 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 .environment(\.colorScheme, .dark)
                 .frame(width: 390, height: 844)
             let image = try self.hostedImage(root, requiredText: [
-                "ARGUS", "Recent work", "Synthetic morning briefing", "All work and results",
+                "ARGUS", "Recent work", "Synthetic morning briefing", "All work and results", "Connection details",
             ])
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-home-ordinary-result-synthetic-offline-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
+    func testConnectionDetailsAndSessionTextReflowWithoutTruncation() throws {
+        let item = CommandCenterTab.WorkItem(
+            id: "fixture-session", icon: "bubble.left", title: "Synthetic administrative follow-up",
+            detail: "No recent activity", state: "open", trailing: "chat", color: OpenClawBrand.accent,
+            progress: nil, route: .chat(nil))
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                CommandPanel {
+                    CommandGatewayFacts(
+                        nodeStatus: "Waiting for approval", operatorStatus: "Offline", agentCount: "Unavailable")
+                }
+                CommandSessionRow(item: item)
+            }
+            .padding(20)
+            .background { CommandControlBackground() }
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Gateway/node", "Operator/chat", "Agents", "Waiting for approval", "Offline", "Unavailable",
+                "Synthetic administrative follow-up", "No recent activity", "chat", "open",
+            ])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-home-details-session-reflow-synthetic-\(name)"
             attachment.lifetime = .keepAlways
             self.add(attachment)
         }
