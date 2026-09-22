@@ -98,7 +98,7 @@ struct CommandCenterTab: View {
     }
 
     private var gatewayCard: some View {
-        CommandPanel(isProminent: true, padding: 12) {
+        CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 10) {
                 self.cardHeader(
                     title: "Gateway",
@@ -224,7 +224,7 @@ struct CommandCenterTab: View {
     }
 
     private var gatewayStateText: String {
-        guard !self.gatewayConnected else { return "Healthy" }
+        guard !self.gatewayConnected else { return "Connected" }
         let status = self.appModel.gatewayDisplayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
         let lowercased = status.lowercased()
         if lowercased.contains("approval") {
@@ -608,7 +608,8 @@ private struct CommandSessionsScreen: View {
                     CommandEmptyStateRow(
                         icon: "exclamationmark.triangle.fill",
                         title: "Sessions unavailable",
-                        detail: loadErrorText)
+                        detail: loadErrorText,
+                        iconColor: OpenClawBrand.warn)
                         .padding(.horizontal, 10)
                         .padding(.bottom, 10)
                 } else if self.sessionRows.isEmpty {

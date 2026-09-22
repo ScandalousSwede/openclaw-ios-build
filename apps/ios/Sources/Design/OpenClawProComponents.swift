@@ -141,7 +141,10 @@ private struct ProPanelBackground: View {
 
     private var borderStyle: AnyShapeStyle {
         if self.colorScheme == .dark {
-            return AnyShapeStyle(Color.white.opacity(self.isProminent ? 0.15 : 0.11))
+            let edge = self.isProminent
+                ? Color(red: 46 / 255, green: 152 / 255, blue: 184 / 255)
+                : Color(red: 41 / 255, green: 72 / 255, blue: 94 / 255)
+            return AnyShapeStyle(self.tint ?? edge)
         }
 
         let gradient = LinearGradient(

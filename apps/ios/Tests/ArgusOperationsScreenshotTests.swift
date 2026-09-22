@@ -47,6 +47,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
             let root = CommandCenterTab(
                 workStore: store, workClient: nil, openWork: {}, openChat: {}, openSettings: {})
+                .tint(OpenClawBrand.accent)
                 .environment(model)
                 .environment(\.dynamicTypeSize, size)
                 .environment(\.colorScheme, .dark)

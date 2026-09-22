@@ -206,16 +206,17 @@ struct CommandEmptyStateRow: View {
     let icon: String
     let title: String
     let detail: String
+    var iconColor: Color = .secondary
 
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: self.icon)
                 .font(.caption.weight(.bold))
-                .foregroundStyle(OpenClawBrand.ok)
+                .foregroundStyle(self.iconColor)
                 .frame(width: 30, height: 30)
                 .background {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(OpenClawBrand.ok.opacity(0.10))
+                        .fill(self.iconColor.opacity(0.10))
                 }
             VStack(alignment: .leading, spacing: 2) {
                 Text(self.title)
