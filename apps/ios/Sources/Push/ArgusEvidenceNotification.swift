@@ -83,11 +83,47 @@ struct ArgusEvidenceNotificationRequest: Hashable, Identifiable {
 }
 
 extension NodeAppModel {
+    func reopenLastArgusEvidenceNotification() {
+        guard let request = self.lastArgusEvidenceNotificationRequest else { return }
+        // Keep the original route binding; reopening must not rebind old evidence to a new gateway.
+        self.argusEvidenceNotificationRequest = request
+        self.argusEvidenceNotificationPresentationID &+= 1
+    }
+
     func openArgusEvidenceNotification(_ reference: ArgusEvidenceNotificationReference) {
         // One pending destination; duplicate taps never enqueue work or acknowledge delivery.
         self.argusEvidenceNotificationRequest = .init(
             reference: reference, gatewayOwnerID: self.chatOutboxGatewayOwnerID)
         self.argusEvidenceNotificationPresentationID &+= 1
+    }
+}
+
+struct ArgusEvidenceResumeButton: View {
+    var reopen: () -> Void
+
+    var body: some View {
+        Button(action: self.reopen) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .foregroundStyle(OpenClawBrand.accent)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Reopen last notification")
+                        .font(.headline)
+                    Text("Return to its exact work evidence. Available during this app session.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "chevron.right")
+                    .accessibilityHidden(true)
+            }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("argus.reopenLastNotification")
     }
 }
 
@@ -123,7 +159,7 @@ struct ArgusEvidenceNotificationView: View {
                         Text(
                             """
                             Connect to the paired gateway to open this evidence. \
-                            The reference is retained while this view is open.
+                            You can return from Home using Reopen last notification during this app session.
                             """)
                     } else {
                         ProgressView("Checking evidence reference")

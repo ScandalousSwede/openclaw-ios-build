@@ -377,7 +377,15 @@ final class NodeAppModel {
     var homeCanvasRevision: Int = 0
     var lastShareEventText: String = "No share events yet."
     var openChatRequestID: Int = 0
-    var argusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest?
+    var argusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest? {
+        didSet {
+            // Navigation clears the presented destination on Back, not the last exact reference.
+            if let request = self.argusEvidenceNotificationRequest {
+                self.lastArgusEvidenceNotificationRequest = request
+            }
+        }
+    }
+    private(set) var lastArgusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest?
     var argusEvidenceNotificationPresentationID: Int = 0
     var gatewaySetupRequestID: Int = 0
     private(set) var pendingAgentDeepLinkPrompt: AgentDeepLinkPrompt?

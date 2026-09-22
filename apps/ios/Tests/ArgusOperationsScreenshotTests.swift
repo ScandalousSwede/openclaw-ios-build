@@ -7,6 +7,29 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testNotificationResumeControlAtStandardAndAccessibilitySizes() throws {
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 12) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusEvidenceResumeButton(reopen: {})
+            }
+            .padding()
+            .background(Color(uiColor: .systemBackground))
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(
+                root,
+                requiredText: ["Reopen last notification", "exact work evidence", "app session"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-notification-resume-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testNotificationReferenceCorrectionUsesProductionEvidenceHierarchy() async throws {
         let (detail, _) = ArgusEvidenceNotificationTests.fixture()
         let reference = try XCTUnwrap(ArgusEvidenceNotificationReference.parse(

@@ -110,6 +110,82 @@ struct ArgusEvidenceNotificationTests {
         #expect(model.argusEvidenceNotificationRequest == request)
     }
 
+    @Test func `back and reopen retain the exact notification event artifact and route`() async throws {
+        let (detail, _) = Self.fixture()
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID(Self.owner)
+        let delegate = OpenClawAppDelegate()
+        delegate.appModel = model
+        #expect(delegate.routeArgusEvidenceNotification(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: self.payload(for: detail)))
+        let original = try #require(model.argusEvidenceNotificationRequest)
+        model.argusEvidenceNotificationRequest = nil // The production navigation binding on Back.
+        #expect(model.lastArgusEvidenceNotificationRequest == original)
+        let presentationID = model.argusEvidenceNotificationPresentationID
+        model.reopenLastArgusEvidenceNotification()
+        let reopened = try #require(model.argusEvidenceNotificationRequest)
+        #expect(reopened == original)
+        #expect(model.argusEvidenceNotificationPresentationID == presentationID + 1)
+        let resolved = try await reopened.reference.resolve(
+            identity: { .init(deviceId: Self.gateway) },
+            detail: { params in
+                #expect(params == ["operation_id": detail.requested.id, "event_id": detail.requested.eventId])
+                return detail
+            },
+            stillCurrent: { model.argusEvidenceNotificationRequest == reopened })
+        #expect(resolved.requested.eventId == original.reference.eventId)
+        #expect(resolved.requested.artifacts[0].sha256 == original.reference.artifactSha256)
+        #expect(!resolved.ownerAccepted)
+    }
+
+    @Test func `reopen does not rebind a previous notification after switching gateways`() async throws {
+        let (detail, _) = Self.fixture()
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID(Self.owner)
+        let reference = try #require(ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: self.payload(for: detail)))
+        model.openArgusEvidenceNotification(reference)
+        model.argusEvidenceNotificationRequest = nil
+        model._test_setChatOutboxGatewayOwnerID("fixture-other-route")
+        model.reopenLastArgusEvidenceNotification()
+        let reopened = try #require(model.argusEvidenceNotificationRequest)
+        #expect(reopened.gatewayOwnerID == Self.owner)
+        #expect(reopened.gatewayOwnerID != model.chatOutboxGatewayOwnerID)
+        var detailCalls = 0
+        do {
+            _ = try await reopened.reference.resolve(
+                identity: { .init(deviceId: "fixture-other-gateway") },
+                detail: { _ in detailCalls += 1; return detail },
+                stillCurrent: { true })
+            Issue.record("Reopened evidence unexpectedly resolved against another gateway")
+        } catch {}
+        #expect(detailCalls == 0)
+    }
+
+    @Test func `latest notification replaces the retained destination without creating a queue`() throws {
+        let (detail, _) = Self.fixture()
+        let model = NodeAppModel()
+        model.reopenLastArgusEvidenceNotification()
+        #expect(model.argusEvidenceNotificationRequest == nil)
+        #expect(model.argusEvidenceNotificationPresentationID == 0)
+        let first = try #require(ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: self.payload(for: detail)))
+        model.openArgusEvidenceNotification(first)
+        let next = ArgusEvidenceNotificationReference(
+            gatewayDeviceId: first.gatewayDeviceId,
+            operationId: "fixture-next-operation",
+            eventId: "fixture-next-event",
+            artifactSha256: nil)
+        model.openArgusEvidenceNotification(next)
+        model.argusEvidenceNotificationRequest = nil
+        model.reopenLastArgusEvidenceNotification()
+        #expect(model.argusEvidenceNotificationRequest?.reference == next)
+        #expect(model.lastArgusEvidenceNotificationRequest?.reference == next)
+    }
+
     @MainActor private final class PresentationObservation {
         var requests = 0
     }

@@ -38,6 +38,14 @@ struct CommandCenterTab: View {
                     VStack(alignment: .leading, spacing: 10) {
                         self.header
                         self.gatewayCard
+                        if self.appModel.lastArgusEvidenceNotificationRequest != nil {
+                            CommandPanel(padding: 12) {
+                                ArgusEvidenceResumeButton {
+                                    self.appModel.reopenLastArgusEvidenceNotification()
+                                }
+                            }
+                            .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        }
                         ArgusOperationsSection()
                         self.defaultChatSessionSection
                         self.recentSessions
