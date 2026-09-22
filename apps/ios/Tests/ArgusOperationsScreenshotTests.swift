@@ -399,7 +399,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         host.safeAreaRegions = []
         host.overrideUserInterfaceStyle = .dark
         let window = UIWindow(windowScene: scene)
-        window.rootViewController = host
+        let container = ScreenshotContainerController()
+        window.rootViewController = container
         let size = host.sizeThatFits(in: CGSize(width: 390, height: 4000))
         XCTAssertTrue(size.height.isFinite && size.height > 0 && size.height < 4000)
         guard size.height.isFinite, size.height > 0, size.height < 4000 else {
@@ -407,12 +408,26 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         }
         window.frame = CGRect(origin: .zero, size: CGSize(width: 390, height: ceil(size.height)))
         window.makeKeyAndVisible()
+        // Own child appearance synchronously. A temporary window can otherwise
+        // defer its root's appearance until after this capture has torn it down,
+        // leaving NavigationStack with overlapping appearance transitions.
+        container.addChild(host)
+        host.beginAppearanceTransition(true, animated: false)
+        host.view.frame = window.bounds
+        container.view.addSubview(host.view)
+        host.didMove(toParent: container)
+        host.endAppearanceTransition()
         defer {
+            host.willMove(toParent: nil)
+            host.beginAppearanceTransition(false, animated: false)
+            host.view.removeFromSuperview()
+            host.endAppearanceTransition()
+            host.removeFromParent()
             window.isHidden = true
             window.rootViewController = nil
             previousKeyWindow?.makeKey()
         }
-        host.view.frame = window.bounds
+        XCTAssertTrue(host.view.window === window)
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
@@ -474,4 +489,11 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         XCTAssertFalse(Self.containsProjectLabel("EPC", project: "Argus"))
         XCTAssertFalse(Self.containsProjectLabel("🚫", project: "Argus"))
     }
+}
+
+/// The screenshot helper forwards each child appearance transition explicitly;
+/// the window's deferred root lifecycle must not forward it a second time.
+@MainActor
+private final class ScreenshotContainerController: UIViewController {
+    override var shouldAutomaticallyForwardAppearanceMethods: Bool { false }
 }
