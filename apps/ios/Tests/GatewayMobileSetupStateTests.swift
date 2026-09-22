@@ -303,6 +303,9 @@ import Testing
         let command = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Design/CommandCenterTab.swift"),
             encoding: .utf8)
+        let commandSupport = try String(
+            contentsOf: iosRoot.appendingPathComponent("Sources/Design/CommandCenterSupport.swift"),
+            encoding: .utf8)
         let agents = try String(
             contentsOf: iosRoot.appendingPathComponent("Sources/Design/AgentProTab+Overview.swift"),
             encoding: .utf8)
@@ -327,8 +330,9 @@ import Testing
         #expect(settings.contains("Gateway/node"))
         #expect(settings.contains("Operator/chat"))
         #expect(settings.contains("gatewayAgentCountText"))
-        #expect(command.contains("Gateway/node"))
-        #expect(command.contains("Operator/chat"))
+        #expect(command.contains("CommandGatewayFacts("))
+        #expect(commandSupport.contains("Gateway/node"))
+        #expect(commandSupport.contains("Operator/chat"))
         #expect(agents.contains("gatewayAgentRosterSummaryText"))
         #expect(agents.contains("no agent count is authoritative"))
         #expect(chat.contains("Operator session unavailable"))
