@@ -1,3 +1,4 @@
+import OpenClawKit
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -6,6 +7,44 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testHomeGatewayStatusIgnoresMisleadingTextAtBothSizes() throws {
+        let cases: [(String, GatewayNodeRoleState, GatewayOperatorRoleState, String, String)] = [
+            ("disconnected", .offline, .offline, "Disconnected: network closed", "Offline"),
+            ("timeout", .offline, .offline, "Connection timed out", "Offline"),
+            ("scope-blocked", .online, .scopeBlocked(missing: ["operator.read"]),
+             "Operator/chat reconnect required", "Needs attention"),
+            ("connecting", .connecting, .offline, "Disconnected: previous attempt", "Connecting"),
+            ("connected", .online, .online, "Connection timed out", "Connected"),
+            ("partial", .online, .offline, "Connected", "Offline"),
+        ]
+        for (name, node, operatorState, staleText, expected) in cases {
+            let model = NodeAppModel()
+            model._test_setGatewayRoleStates(node: node, operator: operatorState)
+            model.gatewayStatusText = staleText
+            for (sizeName, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+                let root = VStack(alignment: .leading, spacing: 16) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    CommandGatewayStatus()
+                }
+                .padding(20)
+                .background { CommandControlBackground() }
+                .environment(model)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, .dark)
+                .frame(width: 390)
+                .fixedSize(horizontal: false, vertical: true)
+                let image = try self.hostedImage(
+                    root, requiredText: [expected],
+                    forbiddenText: ["Connected", "Connecting", "Needs attention", "Offline"].filter { $0 != expected })
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-home-gateway-status-synthetic-\(name)-\(sizeName)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
     @MainActor
     func testEvidenceRecoveryNoticesAtStandardAndAccessibilitySizes() throws {
         for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
@@ -448,7 +487,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
     private func hostedImage(
         _ content: some View, selectedProject: String? = nil, artifactNames: [String] = [],
-        requiredText: [String] = []) throws -> UIImage
+        requiredText: [String] = [], forbiddenText: [String] = []) throws -> UIImage
     {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
@@ -526,6 +565,11 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             XCTAssertTrue(
                 renderedText.localizedCaseInsensitiveContains(phrase),
                 "The production detail must visibly render: \(phrase)")
+        }
+        for phrase in forbiddenText {
+            XCTAssertFalse(
+                renderedText.localizedCaseInsensitiveContains(phrase),
+                "The production view must not display a contradictory state: \(phrase)")
         }
         return image
     }

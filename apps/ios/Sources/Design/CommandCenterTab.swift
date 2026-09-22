@@ -100,11 +100,12 @@ struct CommandCenterTab: View {
     private var gatewayCard: some View {
         CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 10) {
-                self.cardHeader(
-                    title: "Gateway",
-                    value: self.gatewayStateText,
-                    color: self.gatewayStatusColor,
-                    icon: self.gatewayConnected ? "hourglass" : "wifi.slash")
+                HStack(spacing: 8) {
+                    Text("Gateway")
+                        .font(.subheadline.weight(.bold))
+                    Spacer(minLength: 8)
+                    CommandGatewayStatus()
+                }
 
                 DisclosureGroup("Connection details") {
                     CommandGatewayFacts(
@@ -221,29 +222,6 @@ struct CommandCenterTab: View {
 
     private var gatewayConnected: Bool {
         GatewayStatusBuilder.build(appModel: self.appModel) == .connected
-    }
-
-    private var gatewayStateText: String {
-        guard !self.gatewayConnected else { return "Connected" }
-        let status = self.appModel.gatewayDisplayStatusText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lowercased = status.lowercased()
-        if lowercased.contains("approval") {
-            return "Approval"
-        }
-        if lowercased.contains("reconnect") {
-            return "Reconnecting"
-        }
-        if lowercased.contains("connect") {
-            return "Connecting"
-        }
-        if lowercased.contains("idle") {
-            return "Idle"
-        }
-        return "Offline"
-    }
-
-    private var gatewayStatusColor: Color {
-        self.gatewayConnected ? OpenClawBrand.ok : .secondary
     }
 
     private var gatewayAddressText: String {

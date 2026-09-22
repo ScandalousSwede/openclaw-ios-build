@@ -30,6 +30,31 @@ struct CommandPanel<Content: View>: View {
     }
 }
 
+struct CommandGatewayStatus: View {
+    @Environment(NodeAppModel.self) private var appModel
+
+    var body: some View {
+        let state = GatewayStatusBuilder.build(appModel: self.appModel)
+        let presentation: (title: String, icon: String, color: Color) = switch state {
+        case .connected:
+            ("Connected", "checkmark.circle", OpenClawBrand.ok)
+        case .connecting:
+            ("Connecting", "arrow.triangle.2.circlepath", .secondary)
+        case .error:
+            ("Needs attention", "exclamationmark.triangle", OpenClawBrand.warn)
+        case .disconnected:
+            ("Offline", "wifi.slash", .secondary)
+        }
+        HStack(spacing: 4) {
+            Image(systemName: presentation.icon)
+                .font(.caption2.weight(.bold))
+            Text(presentation.title)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(presentation.color)
+    }
+}
+
 struct CommandControlBackground: View {
     @Environment(\.colorScheme) private var colorScheme
 
