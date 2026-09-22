@@ -458,9 +458,13 @@ final class NodeAppModel {
     @ObservationIgnored private var backgroundGraceTaskTimer: Task<Void, Never>?
     private var backgroundReconnectSuppressed = false
     private var backgroundReconnectLeaseUntil: Date?
+    private var backgroundReconnectSuppressionID: UUID?
+    @ObservationIgnored private var backgroundReconnectRetirementTask: Task<Void, Never>?
     @ObservationIgnored private var foregroundGatewayResumeCheckInFlight = false
     @ObservationIgnored private var foregroundGatewayResumeCheckID: UUID?
-    @ObservationIgnored private var gatewayConfigurationGeneration: UInt64 = 0
+    @ObservationIgnored private var gatewayConfigurationGeneration: UInt64 = 0 {
+        didSet { self.backgroundReconnectRetirementTask?.cancel() }
+    }
     @ObservationIgnored private var bootstrapHandoffOwner: GatewayConnectionOwner?
     @ObservationIgnored private var operatorReconnectBlockedGeneration: UInt64?
     private var lastSignificantLocationWakeAt: Date?
@@ -1379,6 +1383,8 @@ final class NodeAppModel {
             self.backgroundReconnectLeaseUntil = leaseUntil
         }
         let wasSuppressed = self.backgroundReconnectSuppressed
+        self.backgroundReconnectRetirementTask?.cancel()
+        self.backgroundReconnectSuppressionID = nil
         self.backgroundReconnectSuppressed = false
         let leaseLogMessage =
             "Background reconnect lease reason=\(reason) "
@@ -1398,28 +1404,40 @@ final class NodeAppModel {
                 + "disconnect=\(disconnectIfNeeded)"
         self.pushWakeLogger.info("\(suppressLogMessage, privacy: .public)")
         guard disconnectIfNeeded else { return }
-        Task { [weak self] in
+        let suppressionID = UUID()
+        let configurationGeneration = self.gatewayConfigurationGeneration
+        self.backgroundReconnectSuppressionID = suppressionID
+        self.backgroundReconnectRetirementTask = Task { [weak self] in
             guard let self else { return }
-            await self.operatorGateway.disconnect()
-            await self.nodeGateway.disconnect()
-            await MainActor.run {
-                guard !self.isAppleReviewDemoModeEnabled else { return }
-                self.setOperatorConnected(false)
-                self.gatewayConnected = false
-                self.talkMode.updateGatewayConnected(false)
-                if self.isBackgrounded {
-                    self.gatewayStatusText = "Background idle"
-                    LiveActivityManager.shared.endActivity(reason: "background_idle")
-                    self.gatewayServerName = nil
-                    self.gatewayRemoteAddress = nil
-                    self.showLocalCanvasOnDisconnect()
-                }
+            func ownsSuppression() -> Bool {
+                self.isBackgrounded && self.backgroundReconnectSuppressed &&
+                    self.backgroundReconnectSuppressionID == suppressionID &&
+                    self.gatewayConfigurationGeneration == configurationGeneration &&
+                    !self.isAppleReviewDemoModeEnabled
             }
+            // A queued cleanup must not retire foreground work, a new background
+            // lease, or a replacement configuration. Keep session disconnect so
+            // the current pending handshake is retired as well as admitted routes.
+            guard ownsSuppression() else { return }
+            guard await self.operatorGateway.disconnectUnlessCancelled() else { return }
+            guard ownsSuppression() else { return }
+            guard await self.nodeGateway.disconnectUnlessCancelled() else { return }
+            guard ownsSuppression() else { return }
+            self.setOperatorConnected(false)
+            self.gatewayConnected = false
+            self.talkMode.updateGatewayConnected(false)
+            self.gatewayStatusText = "Background idle"
+            LiveActivityManager.shared.endActivity(reason: "background_idle")
+            self.gatewayServerName = nil
+            self.gatewayRemoteAddress = nil
+            self.showLocalCanvasOnDisconnect()
         }
     }
 
     private func clearBackgroundReconnectSuppression(reason: String) {
         let changed = self.backgroundReconnectSuppressed || self.backgroundReconnectLeaseUntil != nil
+        self.backgroundReconnectRetirementTask?.cancel()
+        self.backgroundReconnectSuppressionID = nil
         self.backgroundReconnectSuppressed = false
         self.backgroundReconnectLeaseUntil = nil
         guard changed else { return }
@@ -6855,6 +6873,10 @@ extension NodeAppModel {
 
     func _test_expireBackgroundGrace(generation: UUID) {
         self.expireBackgroundConnectionGracePeriod(generation: generation, reason: "test_expiration")
+    }
+
+    func _test_backgroundRetirementTask() -> Task<Void, Never>? {
+        self.backgroundReconnectRetirementTask
     }
 
     func _test_acquirePTTVoiceWakeLease(captureID: String? = nil) {

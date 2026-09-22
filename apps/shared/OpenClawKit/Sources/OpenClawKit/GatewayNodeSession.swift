@@ -461,6 +461,19 @@ public actor GatewayNodeSession {
     }
 
     public func disconnect() async {
+        _ = await self.disconnect(unlessCancelled: false)
+    }
+
+    /// Background cleanup can be cancelled synchronously by its lifecycle owner
+    /// while this actor is busy. Check cancellation here, before detaching either
+    /// a pending handshake or an admitted channel, not only before the actor hop.
+    @discardableResult
+    public func disconnectUnlessCancelled() async -> Bool {
+        await self.disconnect(unlessCancelled: true)
+    }
+
+    private func disconnect(unlessCancelled: Bool) async -> Bool {
+        guard !unlessCancelled || !Task.isCancelled else { return false }
         let isLifecycleReentry = self.isExecutingLifecycleCallback()
         if let activeSocketGeneration = self.activeSocketGeneration {
             OpenClawDiagnosticRecorder.record(OpenClawDiagnosticEvent(
@@ -495,6 +508,7 @@ public actor GatewayNodeSession {
         if !isLifecycleReentry {
             await self.waitForLifecycleCallbacksIfNeeded()
         }
+        return true
     }
 
     /// Retires only the exact admitted route. A stale health or lifecycle task

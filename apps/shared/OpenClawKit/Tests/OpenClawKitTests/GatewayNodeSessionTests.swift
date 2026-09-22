@@ -1280,6 +1280,57 @@ struct GatewayNodeSessionTests {
     }
 
     @Test
+    func cancelledRetirementAfterCallerCheckKeepsReplacementRoute() async throws {
+        let gateway = GatewayNodeSession()
+        try await connectForGenerationTest(
+            gateway, session: FakeGatewayWebSocketSession(), endpoint: "ws://first.example.invalid")
+        let hopGate = GatewayAsyncGate()
+        let retirement = Task {
+            guard !Task.isCancelled else { return false }
+            // Cancellation arrives after the caller's check, before the session
+            // actor processes retirement. A caller-only guard misses this case.
+            await hopGate.wait()
+            return await gateway.disconnectUnlessCancelled()
+        }
+        try await waitUntil("retirement passed caller check") { await hopGate.hasStarted() }
+        retirement.cancel()
+        try await connectForGenerationTest(
+            gateway, session: FakeGatewayWebSocketSession(), endpoint: "ws://replacement.example.invalid")
+        let replacement = try #require(await gateway.currentRoute())
+        await hopGate.release()
+
+        #expect(await retirement.value == false)
+        #expect(await gateway.currentRoute() == replacement)
+        await gateway.disconnect()
+    }
+
+    #if DEBUG
+    @Test
+    func uncancelledRetirementClosesPendingHandshake() async throws {
+        let gateway = GatewayNodeSession()
+        let snapshotGate = GatewayAsyncGate()
+        let lifecycle = StringProbe()
+        await gateway._test_setBeforePushAdmission { await snapshotGate.wait() }
+        let connect = Task {
+            try? await connectForGenerationTest(
+                gateway, session: FakeGatewayWebSocketSession(), endpoint: "ws://pending.example.invalid",
+                onConnected: { await lifecycle.append("connected") })
+        }
+        try await waitUntil("snapshot waiting for admission") { await snapshotGate.hasStarted() }
+        #expect(await gateway.currentRoute() == nil)
+        let retirement = Task { await gateway.disconnectUnlessCancelled() }
+        try await waitUntil("pending channel detached") { await gateway.currentRemoteAddress() == nil }
+        await gateway._test_setBeforePushAdmission(nil)
+        await snapshotGate.release()
+
+        #expect(await retirement.value)
+        await connect.value
+        #expect(await gateway.currentRoute() == nil)
+        #expect(await lifecycle.snapshot().isEmpty)
+    }
+    #endif
+
+    @Test
     func lateFailureFromReplacedChannelCannotDisconnectCurrentRoute() async throws {
         let firstSession = FakeGatewayWebSocketSession(deliversReceiveFailureOnCancel: false)
         let secondSession = FakeGatewayWebSocketSession()

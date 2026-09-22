@@ -84,6 +84,67 @@ import UIKit
         #expect(backgroundTasks.ended == backgroundTasks.acquired)
     }
 
+    @Test @MainActor func queuedBackgroundRetirementCannotOverwriteForegroundState() async throws {
+        let backgroundTasks = BackgroundTaskFixture()
+        let appModel = backgroundTasks.makeModel()
+        appModel.setScenePhase(.background)
+        let generation = try #require(appModel._test_backgroundGraceState().generation)
+        appModel._test_expireBackgroundGrace(generation: generation)
+        let retirement = try #require(appModel._test_backgroundRetirementTask())
+
+        // The actor has not yielded since expiry. Foreground return invalidates
+        // the queued cleanup before its first disconnect or visible-state write.
+        appModel.setScenePhase(.active)
+        appModel._test_setGatewayConnected(true)
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
+        await retirement.value
+
+        #expect(appModel._test_isGatewayConnected())
+        #expect(appModel.operatorRoleState == .online)
+        #expect(!appModel._test_backgroundGraceState().suppressed)
+    }
+
+    @Test @MainActor func queuedBackgroundRetirementCannotOverwriteReplacementLease() async throws {
+        let backgroundTasks = BackgroundTaskFixture()
+        let appModel = backgroundTasks.makeModel()
+        defer { appModel.setScenePhase(.active) }
+        appModel.setScenePhase(.background)
+        let generation = try #require(appModel._test_backgroundGraceState().generation)
+        appModel._test_expireBackgroundGrace(generation: generation)
+        let retirement = try #require(appModel._test_backgroundRetirementTask())
+        appModel.setScenePhase(.active)
+        appModel.setScenePhase(.background)
+        let replacement = try #require(appModel._test_backgroundGraceState().generation)
+        appModel._test_setGatewayConnected(true)
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
+
+        await retirement.value
+
+        #expect(appModel._test_isGatewayConnected())
+        #expect(appModel.operatorRoleState == .online)
+        #expect(appModel._test_backgroundGraceState().generation == replacement)
+        #expect(!appModel._test_backgroundGraceState().suppressed)
+    }
+
+    @Test @MainActor func currentBackgroundRetirementStillReachesIdle() async throws {
+        let backgroundTasks = BackgroundTaskFixture()
+        let appModel = backgroundTasks.makeModel()
+        defer { appModel.setScenePhase(.active) }
+        appModel._test_setGatewayConnected(true)
+        appModel._test_setGatewayRoleStates(node: .online, operator: .online)
+        appModel.setScenePhase(.background)
+        let generation = try #require(appModel._test_backgroundGraceState().generation)
+        appModel._test_expireBackgroundGrace(generation: generation)
+        let retirement = try #require(appModel._test_backgroundRetirementTask())
+
+        await retirement.value
+
+        #expect(!appModel._test_isGatewayConnected())
+        #expect(appModel.operatorRoleState == .offline)
+        #expect(appModel.gatewayStatusText == "Background idle")
+        #expect(appModel._test_backgroundGraceState().suppressed)
+    }
+
     @Test @MainActor func resolvedDisplayNameSetsDefaultWhenMissing() {
         let defaults = UserDefaults.standard
         let displayKey = "node.displayName"
