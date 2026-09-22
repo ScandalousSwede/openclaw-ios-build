@@ -150,11 +150,26 @@ struct ArgusEvidenceNotificationView: View {
                     client: client,
                     initialDetail: resolved,
                     initialArtifactSHA: self.request.reference.artifactSha256)
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        if self.isAutomaticallyRecovering {
+                            ArgusEvidenceRecoveryNotice(retainsDetail: true)
+                                .padding()
+                        }
+                    }
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Work evidence").font(.headline)
                     if let error {
                         Text(error)
+                    } else if self.isAutomaticallyRecovering {
+                        ArgusEvidenceRecoveryNotice(retainsDetail: false)
+                        Text("You can reopen this notification from Home during this app session.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else if self.appModel.gatewayPairingPaused || self.appModel.operatorReconnectNeedsUserAction {
+                        Text(self.appModel.gatewayDisplayStatusText)
+                        Text("Review the connection in Settings before opening this evidence.")
+                            .font(.subheadline)
                     } else if !self.appModel.isOperatorGatewayConnected {
                         Text(
                             """
@@ -164,8 +179,10 @@ struct ArgusEvidenceNotificationView: View {
                     } else {
                         ProgressView("Checking evidence reference")
                     }
-                    Button("Retry") { self.retry += 1 }
-                        .disabled(!self.appModel.isOperatorGatewayConnected)
+                    if !self.isAutomaticallyRecovering {
+                        Button("Retry") { self.retry += 1 }
+                            .disabled(!self.appModel.isOperatorGatewayConnected)
+                    }
                 }
                 .padding()
             }
@@ -178,6 +195,19 @@ struct ArgusEvidenceNotificationView: View {
             """) {
                 await self.load()
         }
+    }
+
+    private var isAutomaticallyRecovering: Bool {
+        ArgusEvidenceRecoveryNotice.isEligible(
+            connected: self.appModel.isOperatorGatewayConnected,
+            automaticReconnect: self.appModel.gatewayAutoReconnectEnabled,
+            pairingPaused: self.appModel.gatewayPairingPaused,
+            requiresUserAction: self.appModel.operatorReconnectNeedsUserAction,
+            demoMode: self.appModel.isAppleReviewDemoModeEnabled,
+            configuredOwner: self.appModel.activeGatewayConnectConfig?.effectiveStableID,
+            currentOwner: self.appModel.chatOutboxGatewayOwnerID,
+            boundOwner: self.boundGatewayID,
+            hasError: self.error != nil)
     }
 
     private func load() async {
@@ -234,5 +264,38 @@ struct ArgusEvidenceNotificationView: View {
             Retry after reconnecting.
             """
         }
+    }
+}
+
+struct ArgusEvidenceRecoveryNotice: View {
+    let retainsDetail: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(self.retainsDetail ? "Reconnecting…" : "Waiting for connection")
+                .font(.subheadline.weight(.semibold))
+            Text(self.retainsDetail ? "Your last view is still here." : "We’ll try again automatically.")
+                .font(.subheadline)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(OpenClawBrand.graphite, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(OpenClawBrand.accent.opacity(0.25), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    static func isEligible(
+        connected: Bool, automaticReconnect: Bool, pairingPaused: Bool, requiresUserAction: Bool, demoMode: Bool,
+        configuredOwner: String?, currentOwner: String?, boundOwner: String?, hasError: Bool) -> Bool
+    {
+        guard !connected, automaticReconnect, !pairingPaused, !requiresUserAction, !demoMode, !hasError,
+              let configuredOwner, !configuredOwner.isEmpty,
+              configuredOwner == currentOwner, configuredOwner == boundOwner else { return false }
+        return true
     }
 }

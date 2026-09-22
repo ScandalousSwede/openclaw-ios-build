@@ -358,6 +358,10 @@ final class NodeAppModel {
     var gatewayPairingRequestId: String?
     private(set) var lastGatewayProblem: GatewayConnectionProblem?
     private var operatorGatewayProblem: GatewayConnectionProblem?
+    var operatorReconnectNeedsUserAction: Bool {
+        self.lastGatewayProblem?.pauseReconnect == true ||
+            self.operatorReconnectBlockedGeneration == self.gatewayConfigurationGeneration
+    }
     var gatewayDisplayStatusText: String {
         if let lastGatewayProblem {
             return lastGatewayProblem.statusText

@@ -311,6 +311,7 @@ import UIKit
 
     @Test @MainActor func operatorPairingProblemPreservesPrimaryGatewayConnectionState() {
         let appModel = NodeAppModel()
+        #expect(!appModel.operatorReconnectNeedsUserAction)
         appModel._test_setGatewayConnected(true)
         appModel.gatewayServerName = "gateway.example.com"
         appModel.gatewayRemoteAddress = "127.0.0.1:53380"
@@ -332,6 +333,7 @@ import UIKit
         #expect(!appModel.gatewayPairingPaused)
         #expect(appModel.gatewayPairingRequestId == nil)
         #expect(appModel.operatorRoleState == .scopeBlocked(missing: []))
+        #expect(appModel.operatorReconnectNeedsUserAction)
 
         appModel._test_clearGatewayConnectionProblem()
 
@@ -340,6 +342,7 @@ import UIKit
         #expect(appModel.gatewayPairingRequestId == nil)
 
         appModel._test_clearOperatorGatewayConnectionProblemIfCurrent()
+        #expect(!appModel.operatorReconnectNeedsUserAction)
 
         #expect(appModel._test_isGatewayConnected())
         #expect(appModel.gatewayServerName == "gateway.example.com")

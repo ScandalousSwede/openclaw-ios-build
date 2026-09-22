@@ -7,6 +7,30 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testEvidenceRecoveryNoticesAtStandardAndAccessibilitySizes() throws {
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusEvidenceRecoveryNotice(retainsDetail: true)
+                ArgusEvidenceRecoveryNotice(retainsDetail: false)
+            }
+            .padding(20)
+            .background { CommandControlBackground() }
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Reconnecting", "Your last view is still here", "Waiting for connection", "try again automatically",
+            ])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-evidence-recovery-notices-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testHomeShowsOrdinaryResultAtStandardAndAccessibilitySizes() throws {
         let model = NodeAppModel()
         let store = ArgusOperationsStore()

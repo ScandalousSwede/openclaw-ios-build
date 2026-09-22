@@ -11,6 +11,25 @@ struct ArgusEvidenceNotificationTests {
     private static let gateway = "fixture-gateway-device"
     private static let owner = "fixture-paired-route"
 
+    @Test func `automatic recovery notice requires an eligible same owner reconnect`() {
+        #expect(ArgusEvidenceRecoveryNotice.isEligible(
+            connected: false, automaticReconnect: true, pairingPaused: false, requiresUserAction: false, demoMode: false,
+            configuredOwner: Self.owner, currentOwner: Self.owner, boundOwner: Self.owner, hasError: false))
+        for excluded in [
+            "connected", "manual-off", "pairing", "requires-action", "demo", "unconfigured", "changed-current",
+            "changed-bound", "error",
+        ] {
+            #expect(!ArgusEvidenceRecoveryNotice.isEligible(
+                connected: excluded == "connected", automaticReconnect: excluded != "manual-off",
+                pairingPaused: excluded == "pairing", requiresUserAction: excluded == "requires-action",
+                demoMode: excluded == "demo",
+                configuredOwner: excluded == "unconfigured" ? nil : Self.owner,
+                currentOwner: excluded == "changed-current" ? "other-owner" : Self.owner,
+                boundOwner: excluded == "changed-bound" ? "other-owner" : Self.owner,
+                hasError: excluded == "error"))
+        }
+    }
+
     @Test func `ordinary summary notification retains full exact artifact across a newer run`() async throws {
         let bytes = Data((String(repeating: "Synthetic briefing content. ", count: 150)
             + "Final action: inspect the result tomorrow. 📌").utf8)
