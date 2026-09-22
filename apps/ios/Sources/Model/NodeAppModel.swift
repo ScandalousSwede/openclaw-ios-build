@@ -1409,7 +1409,7 @@ final class NodeAppModel {
         self.backgroundReconnectSuppressionID = suppressionID
         self.backgroundReconnectRetirementTask = Task { [weak self] in
             guard let self else { return }
-            func ownsSuppression() -> Bool {
+            @MainActor func ownsSuppression() -> Bool {
                 self.isBackgrounded && self.backgroundReconnectSuppressed &&
                     self.backgroundReconnectSuppressionID == suppressionID &&
                     self.gatewayConfigurationGeneration == configurationGeneration &&
