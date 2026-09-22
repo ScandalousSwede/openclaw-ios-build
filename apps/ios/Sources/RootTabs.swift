@@ -21,6 +21,8 @@ struct RootTabs: View {
     @AppStorage(AppAppearancePreference.storageKey) private var appearancePreferenceRaw: String =
         AppAppearancePreference.system.rawValue
     @State private var selectedTab: AppTab = Self.initialTab
+    @State private var argusWorkStore = ArgusOperationsStore()
+    @State private var showAgentTools = ["agent", "agents"].contains(Self.initialTabName ?? "")
     @State private var voiceWakeToastText: String?
     @State private var toastDismissTask: Task<Void, Never>?
     @State private var presentedSheet: PresentedSheet?
@@ -38,27 +40,33 @@ struct RootTabs: View {
         case control
         case chat
         case talk
-        case agent
+        case work
         case settings
     }
 
-    private static var initialTab: AppTab {
+    private static var initialTabName: String? {
         let arguments = ProcessInfo.processInfo.arguments
         guard let flagIndex = arguments.firstIndex(of: "--openclaw-initial-tab") else {
-            return .control
+            return nil
         }
         let valueIndex = arguments.index(after: flagIndex)
         guard arguments.indices.contains(valueIndex) else {
-            return .control
+            return nil
         }
 
-        switch arguments[valueIndex].lowercased() {
-        case "chat":
+        return arguments[valueIndex].lowercased()
+    }
+
+    private static var initialTab: AppTab {
+        switch Self.initialTabName {
+        case "chat", "ask":
             return .chat
         case "talk", "voice":
             return .talk
         case "agent", "agents":
-            return .agent
+            return .settings
+        case "work", "results":
+            return .work
         case "settings":
             return .settings
         default:
@@ -139,14 +147,17 @@ struct RootTabs: View {
     private var tabContent: some View {
         TabView(selection: self.$selectedTab) {
             CommandCenterTab(
+                workStore: self.argusWorkStore,
+                workClient: self.argusWorkClient,
+                openWork: { self.selectedTab = .work },
                 openChat: { self.selectedTab = .chat },
                 openSettings: { self.selectedTab = .settings })
-                .tabItem { Label("Command", systemImage: "target") }
+                .tabItem { Label("Home", systemImage: "square.grid.2x2") }
                 .badge(self.appModel.pendingExecApprovalPrompt == nil ? 0 : 1)
                 .tag(AppTab.control)
 
             ChatProTab()
-                .tabItem { Label("Chat", systemImage: "bubble.left.fill") }
+                .tabItem { Label("Ask", systemImage: "bubble.left.fill") }
                 .tag(AppTab.chat)
 
             TalkProTab(openSettings: { self.selectedTab = .settings })
@@ -157,16 +168,45 @@ struct RootTabs: View {
                 }
                 .tag(AppTab.talk)
 
-            AgentProTab()
-                .tabItem { Label("Agent", systemImage: "person.2.fill") }
-                .tag(AppTab.agent)
+            NavigationStack {
+                ZStack {
+                    OpenClawProBackground()
+                    ScrollView {
+                        ArgusOperationsContent(store: self.argusWorkStore, client: self.argusWorkClient)
+                            .padding(.vertical)
+                    }
+                }
+                .navigationTitle("Work & results")
+            }
+            .tabItem { Label("Work", systemImage: "doc.text") }
+            .tag(AppTab.work)
 
             SettingsProTab(
                 gatewaySetupRequest: self.gatewaySetupRequest,
-                onGatewaySetupRequestHandled: self.handleGatewaySetupRequest)
+                onGatewaySetupRequestHandled: self.handleGatewaySetupRequest,
+                openAgentTools: { self.showAgentTools = true })
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(AppTab.settings)
         }
+        // One observation owner serves Home and Work, so tab changes preserve
+        // the selected project/page and cannot start competing refresh loops.
+        .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.argusWorkClient != nil)|\(self.scenePhase)|\(self.argusWorkStore.project.rawValue)") {
+            self.argusWorkStore.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
+            self.argusWorkStore.markUnavailable()
+            guard self.scenePhase == .active, let client = self.argusWorkClient else { return }
+            while !Task.isCancelled {
+                await self.argusWorkStore.refresh(using: client)
+                do { try await Task.sleep(for: .seconds(60)) }
+                catch { return }
+            }
+        }
+    }
+
+    private var argusWorkClient: ArgusOperationsClient? {
+        guard !self.appModel.isAppleReviewDemoModeEnabled,
+              self.appModel.isOperatorGatewayConnected,
+              let id = self.appModel.chatOutboxGatewayOwnerID else { return nil }
+        return ArgusOperationsClient(session: self.appModel.operatorSession, gatewayID: id)
     }
 
     private func rootOverlays(_ content: some View) -> some View {
@@ -341,6 +381,16 @@ struct RootTabs: View {
 
     private func rootPresentation(_ content: some View) -> some View {
         content
+            .sheet(isPresented: self.$showAgentTools) {
+                AgentProTab()
+                    .safeAreaInset(edge: .top) {
+                        HStack {
+                            Spacer()
+                            Button("Close agent tools") { self.showAgentTools = false }
+                        }
+                        .padding()
+                    }
+            }
             .gatewayActionsDialog(
                 isPresented: self.$showGatewayActions,
                 onDisconnect: { self.appModel.disconnectGateway() },

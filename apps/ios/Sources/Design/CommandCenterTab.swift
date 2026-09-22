@@ -9,6 +9,9 @@ struct CommandCenterTab: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var defaultChatSessionEntry: OpenClawChatSessionEntry?
     @State private var recentChatSessions: [OpenClawChatSessionEntry] = []
+    let workStore: ArgusOperationsStore
+    let workClient: ArgusOperationsClient?
+    var openWork: () -> Void
     var openChat: () -> Void
     var openSettings: () -> Void
 
@@ -37,7 +40,7 @@ struct CommandCenterTab: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         self.header
-                        self.gatewayCard
+                        ArgusHomeResultContent(store: self.workStore, client: self.workClient, openWork: self.openWork)
                         if self.appModel.lastArgusEvidenceNotificationRequest != nil {
                             CommandPanel(padding: 12) {
                                 ArgusEvidenceResumeButton {
@@ -46,7 +49,7 @@ struct CommandCenterTab: View {
                             }
                             .padding(.horizontal, OpenClawProMetric.pagePadding)
                         }
-                        ArgusOperationsSection()
+                        self.gatewayCard
                         self.defaultChatSessionSection
                         self.recentSessions
                     }
@@ -70,9 +73,10 @@ struct CommandCenterTab: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 11) {
-            OpenClawProMark(size: 31, shadowRadius: 9)
-            Text("OpenClaw")
-                .font(.system(size: 27, weight: .bold, design: .rounded))
+            OpenClawProMark(size: 42, shadowRadius: 4)
+            Text("ARGUS")
+                .font(.title2.weight(.medium))
+                .tracking(4.5)
             Spacer()
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
@@ -231,7 +235,7 @@ struct CommandCenterTab: View {
             if let badgeValue {
                 Text(badgeValue)
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OpenClawBrand.accentInk)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
                     .background(OpenClawBrand.accentHot, in: Capsule())

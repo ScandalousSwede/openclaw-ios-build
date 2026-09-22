@@ -11,6 +11,50 @@ struct ArgusEvidenceNotificationTests {
     private static let gateway = "fixture-gateway-device"
     private static let owner = "fixture-paired-route"
 
+    @Test func `ordinary summary notification retains full exact artifact across a newer run`() async throws {
+        let bytes = Data((String(repeating: "Synthetic briefing content. ", count: 150)
+            + "Final action: inspect the result tomorrow. 📌").utf8)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let old = ArgusOperation(
+            operationId: "fixture-summary-old", taskId: "ordinary-summary-fixture-job", eventId: "fixture-event-old",
+            title: "Synthetic morning briefing", source: "federation:fixture-ordinary-producer",
+            project: "Argus", kind: "summary", state: "observed", occurredAt: "2026-09-22T08:00:00Z",
+            observedAt: "2026-09-22T08:00:01Z", artifacts: [.init(sha256: digest, bytes: bytes.count)],
+            supersedesEventId: nil, ownerAccepted: false)
+        let newer = ArgusOperation(
+            operationId: "fixture-summary-new", taskId: old.taskId, eventId: "fixture-event-new",
+            title: "Synthetic evening briefing", source: old.source, project: old.project, kind: old.kind,
+            state: "observed", occurredAt: "2026-09-22T18:00:00Z", observedAt: "2026-09-22T18:00:01Z",
+            artifacts: [], supersedesEventId: old.eventId, ownerAccepted: false)
+        let detail = ArgusOperationDetail(
+            item: newer, requested: old, timeline: [old],
+            coverage: .init(complete: true, hasMore: false, observedAt: newer.observedAt), ownerAccepted: false)
+        let list = ArgusOperationsStore()
+        try list.accept(.init(
+            items: [newer], coverage: detail.coverage, nextCursor: nil, automaticDispatchEnabled: false), more: false)
+        #expect(list.items.first?.source == old.source)
+        let reference = try #require(ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: ["openclaw": ["kind": "argus.evidence", "gatewayDeviceId": Self.gateway,
+                                    "operationId": old.id, "eventId": old.eventId, "artifactSha256": digest]]))
+        let resolved = try await reference.resolve(
+            identity: { .init(deviceId: Self.gateway) },
+            detail: { parameters in
+                #expect(parameters == ["operation_id": old.id, "event_id": old.eventId])
+                return detail
+            }, stillCurrent: { true })
+        let opener = ArgusArtifactOpenStore()
+        opener.setAvailable(true)
+        await opener.open(old.artifacts[0], item: resolved.requested) { parameters in
+            #expect(parameters == ["operation_id": old.id, "event_id": old.eventId, "sha256": digest])
+            return .init(sha256: digest, bytes: bytes.count, mimeType: "text/plain; charset=utf-8",
+                         contentBase64: bytes.base64EncodedString(), operationId: old.id, eventId: old.eventId)
+        }
+        #expect(opener.preview?.data == bytes)
+        #expect(bytes.count > 2000)
+        #expect(!resolved.ownerAccepted)
+    }
+
     @Test func `valid evidence alerts have foreground presentation`() {
         let (detail, _) = Self.fixture()
         let options = OpenClawAppDelegate.foregroundNotificationPresentationOptions(

@@ -308,12 +308,12 @@ struct OpenClawProMark: View {
     var shadowRadius: CGFloat = 10
 
     var body: some View {
-        Image("OpenClawIcon")
+        Image("ArgusMark")
             .resizable()
             .scaledToFit()
             .frame(width: self.size, height: self.size)
             .shadow(color: OpenClawBrand.accent.opacity(0.28), radius: self.shadowRadius, y: self.shadowRadius / 2)
-            .accessibilityLabel("OpenClaw")
+            .accessibilityLabel("Argus")
     }
 }
 
@@ -461,7 +461,7 @@ struct ProHeroActionButton: View {
             HStack(spacing: 12) {
                 Image(systemName: self.systemImage)
                     .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(OpenClawBrand.accentInk)
                     .frame(width: 42, height: 42)
                     .background(OpenClawBrand.accentHot, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 

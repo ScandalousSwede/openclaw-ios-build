@@ -321,20 +321,14 @@ extension AgentProTab {
         ZStack(alignment: .bottomTrailing) {
             Text(self.agentBadge(for: agent))
                 .font(.system(size: self.agentBadge(for: agent).count > 2 ? 14 : 18, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
                 .minimumScaleFactor(0.62)
                 .lineLimit(1)
                 .frame(width: 48, height: 48)
                 .background(
                     Circle()
                         .fill(
-                            LinearGradient(
-                                colors: [
-                                    self.agentTint(for: agent, state: state),
-                                    Color.primary.opacity(0.38),
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing)))
+                            OpenClawBrand.graphiteElevated))
                 .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
 
             Circle()

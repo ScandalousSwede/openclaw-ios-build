@@ -7,6 +7,37 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testHomeShowsOrdinaryResultAtStandardAndAccessibilitySizes() throws {
+        let model = NodeAppModel()
+        let store = ArgusOperationsStore()
+        let item = ArgusOperation(
+            operationId: "fixture-summary-operation", taskId: "ordinary-summary-fixture-job",
+            eventId: "fixture-summary-event", title: "Synthetic morning briefing",
+            source: "federation:fixture-ordinary-producer", project: "Argus", kind: "summary",
+            state: "observed", occurredAt: "2026-09-22T08:00:00Z", observedAt: "2026-09-22T08:00:01Z",
+            artifacts: [], supersedesEventId: nil, ownerAccepted: false)
+        try store.accept(.init(
+            items: [item], coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
+            nextCursor: nil, automaticDispatchEnabled: false), more: false)
+        store.markUnavailable()
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = CommandCenterTab(
+                workStore: store, workClient: nil, openWork: {}, openChat: {}, openSettings: {})
+                .environment(model)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, .dark)
+                .frame(width: 390, height: 844)
+            let image = try self.hostedImage(root, requiredText: [
+                "ARGUS", "Recent work", "Synthetic morning briefing", "All work and results",
+            ])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-home-ordinary-result-synthetic-offline-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testNotificationResumeControlAtStandardAndAccessibilitySizes() throws {
         for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
             let root = VStack(alignment: .leading, spacing: 12) {

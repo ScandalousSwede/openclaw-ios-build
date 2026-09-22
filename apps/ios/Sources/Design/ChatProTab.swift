@@ -177,7 +177,7 @@ struct ChatProTab: View {
         HStack(spacing: 11) {
             Text(self.agentBadge)
                 .font(.system(size: self.agentBadge.count > 2 ? 13 : 16, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
+                .foregroundStyle(OpenClawBrand.accentInk)
                 .minimumScaleFactor(0.6)
                 .lineLimit(1)
                 .frame(width: 38, height: 38)

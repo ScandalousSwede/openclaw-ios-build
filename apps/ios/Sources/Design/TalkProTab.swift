@@ -126,7 +126,7 @@ struct TalkProTab: View {
                 Button(action: self.handlePrimaryAction) {
                     Label(self.state.primaryButtonTitle, systemImage: self.state.primaryButtonIcon)
                         .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(self.state.primaryAction == .waiting ? Color.black : OpenClawBrand.accentInk)
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
                         .background {
@@ -556,10 +556,7 @@ struct TalkProState: Equatable {
         case .waiting:
             AnyShapeStyle(OpenClawBrand.warn.opacity(0.72))
         default:
-            AnyShapeStyle(LinearGradient(
-                colors: [self.color.opacity(0.95), OpenClawBrand.accent],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing))
+            AnyShapeStyle(OpenClawBrand.accent)
         }
     }
 

@@ -74,13 +74,16 @@ struct SettingsProTab: View {
     @State var isTestingElevenLabsVoice = false
     let gatewaySetupRequest: GatewaySetupRequest?
     let onGatewaySetupRequestHandled: ((Int) -> Void)?
+    let openAgentTools: (() -> Void)?
 
     init(
         gatewaySetupRequest: GatewaySetupRequest? = nil,
-        onGatewaySetupRequestHandled: ((Int) -> Void)? = nil)
+        onGatewaySetupRequestHandled: ((Int) -> Void)? = nil,
+        openAgentTools: (() -> Void)? = nil)
     {
         self.gatewaySetupRequest = gatewaySetupRequest
         self.onGatewaySetupRequestHandled = onGatewaySetupRequestHandled
+        self.openAgentTools = openAgentTools
     }
 
     var body: some View {
@@ -90,6 +93,12 @@ struct SettingsProTab: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
                         self.settingsHeader
+                        if let openAgentTools {
+                            Button("Agent tools", systemImage: "person.2", action: openAgentTools)
+                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        }
                         self.appearanceSection
                         self.gatewaySection
                         self.settingsListSection

@@ -2,33 +2,44 @@ import ImageIO
 import PDFKit
 import SwiftUI
 
-struct ArgusOperationsSection: View {
-    @Environment(NodeAppModel.self) private var appModel
-    @State private var store = ArgusOperationsStore()
-    @Environment(\.scenePhase) private var scenePhase
-
-    private var client: ArgusOperationsClient? {
-        guard !self.appModel.isAppleReviewDemoModeEnabled,
-              self.appModel.isOperatorGatewayConnected,
-              let id = self.appModel.chatOutboxGatewayOwnerID else { return nil }
-        return ArgusOperationsClient(session: self.appModel.operatorSession, gatewayID: id)
-    }
+struct ArgusHomeResultContent: View {
+    let store: ArgusOperationsStore
+    let client: ArgusOperationsClient?
+    var openWork: () -> Void
 
     var body: some View {
-        ArgusOperationsContent(store: self.store, client: self.client)
-            .task(
-                id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.client != nil)|\(self.scenePhase)|\(self.store.project.rawValue)")
-            {
-                self.store.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
-                // Invalidate suspended work from the previous visibility/route scope.
-                self.store.markUnavailable()
-                guard self.scenePhase == .active, let client else { return }
-                while !Task.isCancelled {
-                    await self.store.refresh(using: client)
-                    do { try await Task.sleep(for: .seconds(60)) }
-                    catch { return }
+        CommandPanel(isProminent: true, padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Recent work · \(self.store.project.rawValue)")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                if let item = self.store.items.first {
+                    ArgusOperationRow(item: item)
+                    if self.store.unavailable {
+                        Label("Showing the last observation", systemImage: "wifi.slash")
+                            .font(.subheadline)
+                    }
+                    if let client {
+                        NavigationLink {
+                            ArgusOperationDetailView(operation: item, client: client)
+                        } label: {
+                            Label(item.artifacts.isEmpty ? "Open details" : "Open result", systemImage: "arrow.right")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } else if self.store.isLoading {
+                    ProgressView("Loading your work")
+                } else {
+                    Text(self.store.unavailable ? "Connect to see your work and results." : "No results in this view yet.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
+                Button("All work and results", action: self.openWork)
+                    .buttonStyle(.bordered)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, OpenClawProMetric.pagePadding)
     }
 }
 
@@ -39,10 +50,10 @@ struct ArgusOperationsContent: View {
     var body: some View {
         CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Work and technical evidence")
+                Text("Work and results")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
-                Text("Canonical work and external observations. Recorded status does not establish owner acceptance.")
+                Text("Recorded work, briefings and results. Open an item for its exact source and document.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Picker("Evidence project", selection: Binding(
@@ -72,7 +83,7 @@ struct ArgusOperationsContent: View {
                         .foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
-                    Text("No evidence found in this returned \(self.store.project.rawValue) scope.")
+                    Text("No results found in this returned \(self.store.project.rawValue) view.")
                         .font(.subheadline)
                 }
                 ForEach(self.store.items) { item in
