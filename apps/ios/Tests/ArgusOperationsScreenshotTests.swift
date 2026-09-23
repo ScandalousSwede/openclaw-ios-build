@@ -9,6 +9,39 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testCurrentWorkAtBothTextSizesAndRetainedState() async throws {
+        let store = ArgusCurrentWorkStore()
+        let page = try ArgusOperationsTests.currentWorkFixture()
+        store.selectGateway("synthetic-current-work")
+        await store.refresh(gatewayID: "synthetic-current-work") { page }
+        for (name, size) in [("standard", DynamicTypeSize.large), ("retained-accessibility", .accessibility1)] {
+            if name == "retained-accessibility" { store.markUnavailable() }
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusCurrentWorkContent(store: store, client: nil)
+            }
+            .padding(.vertical)
+            .background { CommandControlBackground() }
+            .tint(OpenClawBrand.accent)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Current decisions", "Recorded choices for you", "Engineering follow-through",
+                "Synthetic research grant", "Synthetic package recovery", "Next: Engineering",
+                "Document acceptance recorded", "Recorded report", "activation remains unapproved",
+                "Other work may not be included", "Source coverage",
+            ] + (name == "retained-accessibility" ? ["Showing the last check", "may have changed"] : []),
+            forbiddenText: ["Nothing needs you", "All work complete", "synthetic-operation"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-current-work-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testExactDecisionReceiptAtBothTextSizes() throws {
         for status in ["accepted_exact_artifact", "unavailable"] {
             let (item, work) = try ArgusWorkContractTests.fixture(

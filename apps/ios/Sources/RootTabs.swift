@@ -22,6 +22,7 @@ struct RootTabs: View {
         AppAppearancePreference.system.rawValue
     @State private var selectedTab: AppTab = Self.initialTab
     @State private var argusWorkStore = ArgusOperationsStore()
+    @State private var argusCurrentWorkStore = ArgusCurrentWorkStore()
     @State private var showAgentTools = ["agent", "agents"].contains(Self.initialTabName ?? "")
     @State private var voiceWakeToastText: String?
     @State private var toastDismissTask: Task<Void, Never>?
@@ -172,8 +173,13 @@ struct RootTabs: View {
                 ZStack {
                     OpenClawProBackground()
                     ScrollView {
-                        ArgusOperationsContent(store: self.argusWorkStore, client: self.argusWorkClient)
-                            .padding(.vertical)
+                        VStack(spacing: 16) {
+                            if self.argusWorkStore.project == .argus {
+                                ArgusCurrentWorkContent(store: self.argusCurrentWorkStore, client: self.argusWorkClient)
+                            }
+                            ArgusOperationsContent(store: self.argusWorkStore, client: self.argusWorkClient)
+                        }
+                        .padding(.vertical)
                     }
                 }
                 .navigationTitle("Work & results")
@@ -193,9 +199,14 @@ struct RootTabs: View {
         .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.argusWorkClient != nil)|\(self.scenePhase)|\(self.argusWorkStore.project.rawValue)") {
             self.argusWorkStore.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
             self.argusWorkStore.markUnavailable()
+            self.argusCurrentWorkStore.selectGateway(self.appModel.chatOutboxGatewayOwnerID)
+            self.argusCurrentWorkStore.markUnavailable()
             guard self.scenePhase == .active, let client = self.argusWorkClient else { return }
             while !Task.isCancelled {
                 await self.argusWorkStore.refresh(using: client)
+                if self.argusWorkStore.project == .argus {
+                    await self.argusCurrentWorkStore.refresh(using: client)
+                }
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { return }
             }

@@ -19,6 +19,8 @@ Sources/Design/AgentProTab.swift
 Sources/Design/ChatProTab.swift
 Sources/Design/CommandCenterTab.swift
 Sources/Design/ArgusOperationsStore.swift
+Sources/Design/ArgusCurrentWork.swift
+Sources/Design/ArgusDecisionReceipt.swift
 Sources/Design/ArgusOperationsView.swift
 Sources/Design/TalkProTab.swift
 Sources/Design/OpenClawProComponents.swift

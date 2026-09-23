@@ -5,6 +5,183 @@ import Testing
 
 @MainActor
 struct ArgusOperationsTests {
+    static func currentWorkFixture(
+        mutate: (inout [String: Any]) -> Void = { _ in }) throws -> ArgusCurrentWorkPage
+    {
+        let provenance: [String: Any] = [
+            "title_basis": "synthetic_source_display", "summary_basis": "unavailable", "fallback": false,
+        ]
+        var payload: [String: Any] = [
+            "schema": "argus.current-work.v1",
+            "items": [
+                [
+                    "kind": "owner_decision", "responsibility": "owner_choice", "next_actor": "Synthetic owner",
+                    "question": "Which project scope should this draft use?", "outcome": "decision_not_recorded",
+                    "next_action": "Choose the scope in the existing review.",
+                    "review_url": "https://linear.app/argus-egillese/issue/SYNTHETIC-1",
+                    "review_id": "synthetic-review", "application_id": "synthetic-application",
+                    "revision_id": "synthetic-revision", "map_sha": String(repeating: "a", count: 64),
+                    "payload_sha": String(repeating: "b", count: 64),
+                    "presentation": ["title": "Synthetic research grant", "provenance": provenance],
+                ],
+                [
+                    "kind": "accepted_work", "responsibility": "agent_action",
+                    "next_actor": "existing_engineering_owner", "outcome": "exact_artifact_accepted",
+                    "next_action": "Engineering will finish the remaining operational work.",
+                    "review_url": "https://linear.app/argus-egillese/issue/SYNTHETIC-2",
+                    "operation_id": "synthetic-operation", "event_id": "synthetic-event",
+                    "artifact_sha256": String(repeating: "c", count: 64),
+                    "decision_id": "synthetic-decision", "receipt_id": "synthetic-receipt",
+                    "activation_authorized": false, "programme_complete": false,
+                    "presentation": ["title": "Synthetic package recovery; activation remains unapproved", "provenance": provenance],
+                ],
+            ],
+            "coverage": [
+                "status": "bounded", "scope": "current_grant_review_and_recorded_exact_artifact_acceptances",
+                "observed_at": "2026-09-22T18:16:00Z", "programme_count": NSNull(),
+                "programme_complete": false, "returned": 2, "has_more": false,
+                "sources": ["grant_review": ["status": "bounded", "scope": "current_grant_review"]],
+            ],
+            "effects": ["read_only": true, "can_submit": false, "can_approve": false, "can_dispatch": false],
+        ]
+        mutate(&payload)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(ArgusCurrentWorkPage.self, from: JSONSerialization.data(withJSONObject: payload))
+    }
+
+    @Test func currentWorkPreservesRealDecisionKindsAndIdentities() throws {
+        let page = try Self.currentWorkFixture()
+        try page.validate()
+        #expect(page.items[0].operationId == nil)
+        #expect(page.items[0].revisionId == "synthetic-revision")
+        #expect(page.items[0].responsibility == "owner_choice")
+        #expect(page.items[1].responsibility == "agent_action")
+        #expect(page.items[1].receiptId == "synthetic-receipt")
+        #expect(page.items[1].actorLabel == "Engineering")
+        #expect(page.items[1].outcomeLabel == "Document acceptance recorded")
+        #expect(!page.coverage.programmeComplete && page.coverage.programmeCount == nil)
+    }
+
+    @Test func currentWorkRejectsInventedOwnerNeedsAndBroaderEffects() throws {
+        for (field, value) in [
+            ("responsibility", "owner_choice"), ("outcome", "decision_not_recorded"),
+            ("review_url", "https://example.com/foreign"), ("artifact_sha256", "not-a-digest"),
+        ] {
+            let page = try Self.currentWorkFixture { payload in
+                var items = payload["items"] as! [[String: Any]]
+                items[1][field] = value
+                payload["items"] = items
+            }
+            #expect(throws: ArgusOperationsError.self) { try page.validate() }
+        }
+        for effect in ["can_submit", "can_approve", "can_dispatch"] {
+            let page = try Self.currentWorkFixture { payload in
+                var effects = payload["effects"] as! [String: Any]
+                effects[effect] = true
+                payload["effects"] = effects
+            }
+            #expect(throws: ArgusOperationsError.self) { try page.validate() }
+        }
+        for field in ["activation_authorized", "programme_complete"] {
+            for value in [nil, true] as [Bool?] {
+                let page = try Self.currentWorkFixture { payload in
+                    var items = payload["items"] as! [[String: Any]]
+                    if let value {
+                        items[1][field] = value
+                    } else {
+                        items[1].removeValue(forKey: field)
+                    }
+                    payload["items"] = items
+                }
+                #expect(throws: ArgusOperationsError.self) { try page.validate() }
+            }
+        }
+        for (index, fields) in [
+            (0, ["decision_id", "receipt_id", "operation_id", "event_id", "artifact_sha256", "source"]),
+            (1, ["review_id", "application_id", "revision_id", "map_sha", "payload_sha", "source"]),
+        ] {
+            for field in fields {
+                let page = try Self.currentWorkFixture { payload in
+                    var items = payload["items"] as! [[String: Any]]
+                    items[index][field] = "synthetic-foreign-identity"
+                    payload["items"] = items
+                }
+                #expect(throws: ArgusOperationsError.self) { try page.validate() }
+            }
+        }
+    }
+
+    @Test func grantFollowThroughAndReconciliationNeverBecomeOwnerChoices() throws {
+        let page = try Self.currentWorkFixture { payload in
+            var items = payload["items"] as! [[String: Any]]
+            items[0]["kind"] = "grant_follow_through"
+            items[0]["responsibility"] = "agent_action"
+            items[0]["question"] = nil
+            items[0]["outcome"] = "revision_requested_follow_through"
+            items[1] = [
+                "kind": "reconciliation_gap", "responsibility": "engineering_reconciliation",
+                "next_actor": "existing_engineering_owner", "outcome": "unknown_or_changed",
+                "next_action": "Engineering will reconcile the source.", "source": "synthetic-source",
+                "presentation": items[1]["presentation"]!,
+            ]
+            payload["items"] = items
+        }
+        try page.validate()
+        #expect(page.items.allSatisfy { $0.responsibility != "owner_choice" && $0.question == nil })
+        #expect(page.items[0].outcomeLabel == "Revision requested")
+        #expect(page.items[1].reviewURL == nil)
+        let malformed = try Self.currentWorkFixture { payload in
+            payload["items"] = [[
+                "kind": "reconciliation_gap", "responsibility": "engineering_reconciliation",
+                "next_actor": "existing_engineering_owner", "outcome": "unknown_or_changed",
+                "next_action": "Reconcile the source.", "event_id": "foreign-event",
+                "presentation": ["title": "Synthetic gap", "provenance": [
+                    "title_basis": "synthetic", "summary_basis": "unavailable", "fallback": true,
+                ]],
+            ]]
+            var coverage = payload["coverage"] as! [String: Any]
+            coverage["returned"] = 1
+            payload["coverage"] = coverage
+        }
+        #expect(throws: ArgusOperationsError.self) { try malformed.validate() }
+    }
+
+    @Test func currentWorkUnavailableRetainsOnlySameOwnerAndRejectsLateReturn() async throws {
+        let page = try Self.currentWorkFixture()
+        let store = ArgusCurrentWorkStore()
+        store.selectGateway("owner-a")
+        await store.refresh(gatewayID: "owner-a") { page }
+        #expect(store.page?.items.count == 2 && !store.unavailable)
+        await store.refresh(gatewayID: "owner-a") { throw ArgusOperationsError.unavailable }
+        #expect(store.page?.items.count == 2 && store.unavailable)
+        await store.refresh(gatewayID: "owner-a") {
+            store.selectGateway("owner-b")
+            return page
+        }
+        #expect(store.page == nil && store.unavailable && !store.isLoading)
+        await store.refresh(gatewayID: "owner-b") {
+            store.markUnavailable()
+            return page
+        }
+        #expect(store.page == nil && store.unavailable)
+    }
+
+    @Test func emptyCurrentWorkKeepsBoundedCoverageAndUnknownProgrammeCount() async throws {
+        let page = try Self.currentWorkFixture { payload in
+            payload["items"] = [[String: Any]]()
+            var coverage = payload["coverage"] as! [String: Any]
+            coverage["returned"] = 0
+            payload["coverage"] = coverage
+        }
+        let store = ArgusCurrentWorkStore()
+        store.selectGateway("owner")
+        await store.refresh(gatewayID: "owner") { page }
+        #expect(store.page?.items.isEmpty == true && !store.unavailable)
+        #expect(store.page?.coverage.programmeCount == nil)
+        #expect(store.page?.coverage.programmeComplete == false)
+    }
+
     private func page(
         id: String = "external-unfamiliar-47",
         cursor: String? = nil,
