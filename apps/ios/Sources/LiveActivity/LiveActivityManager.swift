@@ -42,9 +42,13 @@ protocol LiveActivityHandle: AnyObject {
     var state: OpenClawActivityAttributes.ContentState { get }
     var staleDate: Date? { get }
     var isActive: Bool { get }
+    var pushGeneration: UInt64? { get }
+    var pushToken: Data? { get }
 
     func update(state: OpenClawActivityAttributes.ContentState, staleDate: Date?) async
     func end(state: OpenClawActivityAttributes.ContentState) async
+    func observePushTokens(_ receive: @escaping @MainActor (Data) -> Void) async
+    func observePushEnd(_ ended: @escaping @MainActor () -> Void) async
 }
 
 @MainActor
@@ -72,6 +76,22 @@ private final class ActivityKitLiveActivityHandle: LiveActivityHandle {
     var state: OpenClawActivityAttributes.ContentState { self.activity.content.state }
     var staleDate: Date? { self.activity.content.staleDate }
     var isActive: Bool { self.activity.activityState == .active }
+    var pushGeneration: UInt64? { self.activity.attributes.pushGeneration }
+    var pushToken: Data? { self.activity.pushToken }
+
+    func observePushTokens(_ receive: @escaping @MainActor (Data) -> Void) async {
+        for await token in self.activity.pushTokenUpdates {
+            guard !Task.isCancelled else { return }
+            receive(token)
+        }
+    }
+
+    func observePushEnd(_ ended: @escaping @MainActor () -> Void) async {
+        for await state in self.activity.activityStateUpdates {
+            guard !Task.isCancelled else { return }
+            if state == .ended || state == .dismissed { ended(); return }
+        }
+    }
 
     func update(state: OpenClawActivityAttributes.ContentState, staleDate: Date?) async {
         await self.activity.update(ActivityContent(state: state, staleDate: staleDate))
@@ -85,7 +105,27 @@ private final class ActivityKitLiveActivityHandle: LiveActivityHandle {
 }
 
 @MainActor
-private final class ActivityKitLiveActivityDriver: LiveActivityDriving {
+final class ActivityKitLiveActivityDriver: LiveActivityDriving {
+    typealias ActivityRequester = @MainActor (
+        OpenClawActivityAttributes, OpenClawActivityAttributes.ContentState, Date?, PushType?) throws -> any LiveActivityHandle
+
+    private let reservePushGeneration: @MainActor () throws -> UInt64
+    private let requestActivity: ActivityRequester
+
+    init(
+        reservePushGeneration: @escaping @MainActor () throws -> UInt64 = LiveActivityPushSequence.next,
+        requestActivity: ActivityRequester? = nil)
+    {
+        self.reservePushGeneration = reservePushGeneration
+        self.requestActivity = requestActivity ?? { attributes, state, staleDate, pushType in
+            let activity = try Activity.request(
+                attributes: attributes,
+                content: ActivityContent(state: state, staleDate: staleDate),
+                pushType: pushType)
+            return ActivityKitLiveActivityHandle(activity)
+        }
+    }
+
     var areActivitiesEnabled: Bool { ActivityAuthorizationInfo().areActivitiesEnabled }
 
     func activities() -> [any LiveActivityHandle] {
@@ -97,11 +137,14 @@ private final class ActivityKitLiveActivityDriver: LiveActivityDriving {
         state: OpenClawActivityAttributes.ContentState,
         staleDate: Date?) throws -> any LiveActivityHandle
     {
-        let activity = try Activity.request(
-            attributes: attributes,
-            content: ActivityContent(state: state, staleDate: staleDate),
-            pushType: nil)
-        return ActivityKitLiveActivityHandle(activity)
+        var attributes = attributes
+        // Remote registration is optional. Preserve the shipped local task
+        // activity if secure metadata is unavailable, without resetting it.
+        attributes.pushGeneration = nil
+        if attributes.taskReference != nil {
+            attributes.pushGeneration = try? self.reservePushGeneration()
+        }
+        return try self.requestActivity(attributes, state, staleDate, attributes.pushGeneration == nil ? nil : .token)
     }
 }
 
@@ -131,6 +174,7 @@ final class LiveActivityManager {
     private let hydrationStaleSeconds: TimeInterval = 300
     private let driver: any LiveActivityDriving
     private let featureEnabled: @MainActor () -> Bool
+    private let pushRegistration: LiveActivityPushRegistration
 
     private var current: CurrentActivity?
     private var pendingPresentation: Presentation?
@@ -149,10 +193,18 @@ final class LiveActivityManager {
             featureEnabled: { LiveActivityFeatureFlag.isEnabled() })
     }
 
-    init(driver: any LiveActivityDriving, featureEnabled: @escaping @MainActor () -> Bool) {
+    init(
+        driver: any LiveActivityDriving, featureEnabled: @escaping @MainActor () -> Bool,
+        pushRegistration: LiveActivityPushRegistration? = nil)
+    {
         self.driver = driver
         self.featureEnabled = featureEnabled
+        self.pushRegistration = pushRegistration ?? LiveActivityPushRegistration()
         self.hydrateCurrentAndQueueDuplicateCleanup()
+    }
+
+    func configurePushPublisher(_ publisher: @escaping LiveActivityPushRegistration.Publisher) {
+        self.pushRegistration.configure(publisher: publisher)
     }
 
     var isActive: Bool {
@@ -339,6 +391,7 @@ final class LiveActivityManager {
     }
 
     private func enqueueEnd(reason: String) {
+        if let handle = self.current?.handle { self.pushRegistration.retire(handle) }
         if self.pendingEndReason == nil {
             // Invalidate an in-flight update immediately. The single worker will
             // still await it before ending, but its completion cannot become current.
@@ -365,6 +418,7 @@ final class LiveActivityManager {
         while !Task.isCancelled {
             if !self.orphanedActivities.isEmpty {
                 let orphan = self.orphanedActivities.removeFirst()
+                self.pushRegistration.retire(orphan)
                 await orphan.end(state: self.endedState(orphan.state))
                 continue
             }
@@ -450,6 +504,7 @@ final class LiveActivityManager {
                 staleDate: presentation.staleDate)
             self.activityGeneration &+= 1
             self.current = CurrentActivity(handle: handle, generation: self.activityGeneration)
+            self.pushRegistration.activate(handle)
             self.scheduleTaskExpiry(for: handle)
             self.logger.info(
                 "started live activity id=\(handle.id, privacy: .public) generation=\(self.activityGeneration)")
@@ -470,6 +525,7 @@ final class LiveActivityManager {
         finalState: OpenClawActivityAttributes.ContentState? = nil) async
     {
         guard let current = self.current else { return }
+        self.pushRegistration.retire(current.handle)
         self.current = nil
         self.expiryTask?.cancel()
         self.expiryTask = nil
@@ -547,6 +603,7 @@ final class LiveActivityManager {
         if let keeper {
             self.activityGeneration &+= 1
             self.current = CurrentActivity(handle: keeper, generation: self.activityGeneration)
+            self.pushRegistration.activate(keeper)
             self.scheduleTaskExpiry(for: keeper)
             self.orphanedActivities = activities.filter { $0.id != keeper.id }
         } else {

@@ -119,6 +119,9 @@ struct OpenClawActivityAttributes: ActivityAttributes {
     var agentName: String
     var sessionKey: String
     var taskReference: ArgusTaskActivityReference? = nil
+    // Fixed for this ActivityKit identity; separate from task lifecycle revisions
+    // and the process-local rendering worker's generation. Older local activities omit it.
+    var pushGeneration: UInt64? = nil
 
     struct ContentState: Codable, Hashable {
         var statusText: String

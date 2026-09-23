@@ -639,6 +639,342 @@ import Testing
         #expect(!manager.isActive)
     }
 
+    @Test @MainActor func taskCreationRemainsLocalWhenPushSequenceIsUnavailable() throws {
+        let mock = MockLiveActivityDriver()
+        let reference = try #require(ArgusTaskActivityReference(
+            gatewayDeviceID: "synthetic-gateway", taskID: Self.taskID, requestID: "synthetic-invocation"))
+        var storageAvailable = false
+        var reservations = 0
+        var requests: [(attributes: OpenClawActivityAttributes, pushRequested: Bool)] = []
+        let driver = ActivityKitLiveActivityDriver(
+            reservePushGeneration: {
+                reservations += 1
+                guard storageAvailable else { throw ArgusOperationsError.unavailable }
+                return 123
+            },
+            requestActivity: { attributes, state, staleDate, pushType in
+                requests.append((attributes, pushType != nil))
+                return try mock.request(attributes: attributes, state: state, staleDate: staleDate)
+            })
+        let attributes = OpenClawActivityAttributes(
+            agentName: "Argus", sessionKey: "task", taskReference: reference)
+        let local = try driver.request(attributes: attributes, state: Self.connectingState("Task running"), staleDate: nil)
+        #expect(local.isActive)
+        #expect(local.taskReference == reference)
+        #expect(requests.count == 1)
+        #expect(requests.first?.attributes.pushGeneration == nil)
+        #expect(requests.first?.pushRequested == false)
+        storageAvailable = true
+        _ = try driver.request(attributes: attributes, state: Self.connectingState("Task running"), staleDate: nil)
+        #expect(requests.last?.attributes.pushGeneration == 123)
+        #expect(requests.last?.pushRequested == true)
+        _ = try driver.request(
+            attributes: .init(agentName: "Argus", sessionKey: "session"),
+            state: Self.connectingState("Session running"), staleDate: nil)
+        #expect(reservations == 2)
+        #expect(requests.last?.attributes.pushGeneration == nil)
+        #expect(requests.last?.pushRequested == false)
+    }
+
+    @Test @MainActor func activityTokenRotationKeepsIdentityLeaseAndDurableRevisionSeparate() async throws {
+        let driver = MockLiveActivityDriver()
+        let handle = try Self.pushActivity(driver: driver)
+        var nextRevision: UInt64 = 80
+        let registration = LiveActivityPushRegistration {
+            nextRevision += 1
+            return nextRevision
+        }
+        var written: [LiveActivityPushEvent] = []
+        registration.configure { event, current in
+            #expect(current())
+            written.append(event)
+            return true
+        }
+        registration.activate(handle)
+        handle.emitPushToken(Data(repeating: 0xAA, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        #expect(written.count == 1)
+        let first = try #require(written.first)
+        let payload = try #require(JSONSerialization.jsonObject(with: Data(first.payloadJSON().utf8)) as? [String: Any])
+        #expect(Set(payload.keys) == Set([
+            "kind", "activityId", "taskId", "requestId", "generation", "registrationRevision", "expiresAtMs", "token",
+        ]))
+        #expect(payload["kind"] as? String == "liveActivityUpdate")
+        #expect(payload["registrationRevision"] as? UInt64 == 81)
+        #expect(payload["generation"] as? UInt64 == 7)
+        #expect(payload["token"] as? String == String(repeating: "aa", count: 32))
+        #expect(payload["requestId"] as? String == "synthetic-invocation")
+        handle.emitPushToken(Data(repeating: 0xAA, count: 32))
+        for _ in 0..<10 { await Task.yield() }
+        #expect(nextRevision == 81)
+        handle.emitPushToken(Data(repeating: 0xBB, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        #expect(written.count == 2)
+        let second = try #require(written.last)
+        #expect(second.identity == first.identity)
+        if case let .register(_, token, revision) = second {
+            #expect(token == Data(repeating: 0xBB, count: 32))
+            #expect(revision == 82)
+        } else { Issue.record("Expected rotated registration") }
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(written.last == second)
+        #expect(nextRevision == 82)
+        registration.retire(handle)
+        await registration.waitUntilIdleForTesting()
+        let retirement = try #require(written.last)
+        #expect(retirement.name == "push.apns.activity.retire")
+        let retiredPayload = try #require(
+            JSONSerialization.jsonObject(with: Data(retirement.payloadJSON().utf8)) as? [String: Any])
+        #expect(Set(retiredPayload.keys) == Set(["kind", "activityId", "taskId", "generation"]))
+        let beforeReconnect = written.count
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(written.count == beforeReconnect + 1)
+        #expect(written.last == retirement)
+    }
+
+    @Test @MainActor func stopDuringPublicationInvalidatesTokenBeforeRetirementBarrier() async throws {
+        let driver = MockLiveActivityDriver()
+        let handle = try Self.pushActivity(driver: driver)
+        let registration = LiveActivityPushRegistration { 12 }
+        var resume: CheckedContinuation<Void, Never>?
+        var writes: [String] = []
+        var admitted = false
+        registration.configure { event, current in
+            if case .register = event {
+                admitted = true
+                await withCheckedContinuation { resume = $0 }
+                #expect(!current())
+                return false
+            }
+            #expect(current())
+            writes.append(event.name)
+            return true
+        }
+        registration.activate(handle)
+        handle.emitPushToken(Data(repeating: 0xCC, count: 32))
+        for _ in 0..<100 where !admitted { await Task.yield() }
+        #expect(admitted)
+        registration.retire(handle)
+        handle.emitPushToken(Data(repeating: 0xDD, count: 32))
+        resume?.resume()
+        await registration.waitUntilIdleForTesting()
+        #expect(writes == ["push.apns.activity.retire"])
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(writes == ["push.apns.activity.retire", "push.apns.activity.retire"])
+    }
+
+    @Test @MainActor func offlineRetirementDoesNotStarveReplacementAndReconnectReusesExactRevision() async throws {
+        let driver = MockLiveActivityDriver()
+        let old = try Self.pushActivity(driver: driver)
+        let next = try Self.pushActivity(driver: driver)
+        var revision: UInt64 = 100
+        let registration = LiveActivityPushRegistration { revision += 1; return revision }
+        var retired: [String] = []
+        var published: [LiveActivityPushEvent] = []
+        var allowRetirement = false
+        registration.configure { event, current in
+            #expect(current())
+            if case .retire = event {
+                retired.append(event.identity.activityID)
+                return allowRetirement
+            }
+            published.append(event)
+            return true
+        }
+        registration.activate(old)
+        old.emitPushToken(Data(repeating: 1, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        registration.activate(next)
+        next.emitPushToken(Data(repeating: 2, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        #expect(published.count == 2)
+        #expect(published.last?.identity.activityID == next.id)
+        #expect(retired.contains(old.id))
+        let last = published.last
+        allowRetirement = true
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(published.last == last)
+        #expect(revision == 102)
+        registration.retire(next)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @Test @MainActor func newRegistrationOvertakesRetirementBacklogAfterAnInFlightAttempt() async throws {
+        let driver = MockLiveActivityDriver()
+        let first = try Self.pushActivity(driver: driver)
+        let second = try Self.pushActivity(driver: driver)
+        let current = try Self.pushActivity(driver: driver)
+        let registration = LiveActivityPushRegistration { 101 }
+        registration.retire(first)
+        registration.retire(second)
+        var release: CheckedContinuation<Void, Never>?
+        var suspended = false
+        var writes: [String] = []
+        registration.configure { event, isCurrent in
+            #expect(isCurrent())
+            writes.append("\(event.name):\(event.identity.activityID)")
+            if !suspended {
+                suspended = true
+                await withCheckedContinuation { release = $0 }
+            }
+            return true
+        }
+        for _ in 0..<100 where release == nil { await Task.yield() }
+        let continuation = try #require(release)
+        current.pushToken = Data(repeating: 3, count: 32)
+        registration.activate(current)
+        registration.republish()
+        continuation.resume()
+        await registration.waitUntilIdleForTesting()
+        #expect(Array(writes.prefix(2)) == [
+            "push.apns.activity.retire:\(first.id)",
+            "push.apns.activity.register:\(current.id)",
+        ])
+        let laterRetirement = try #require(writes.firstIndex(of: "push.apns.activity.retire:\(second.id)"))
+        #expect(laterRetirement > 1)
+        registration.retire(current)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @Test @MainActor func reconnectPrioritizesUnchangedFailedRegistrationDuringRetirement() async throws {
+        let driver = MockLiveActivityDriver()
+        let first = try Self.pushActivity(driver: driver)
+        let second = try Self.pushActivity(driver: driver)
+        let current = try Self.pushActivity(driver: driver)
+        current.pushToken = Data(repeating: 4, count: 32)
+        var reserved = 0
+        let registration = LiveActivityPushRegistration { reserved += 1; return 101 }
+        registration.retire(first)
+        registration.retire(second)
+        registration.activate(current)
+        registration.republish()
+        var release: CheckedContinuation<Void, Never>?
+        var suspended = false
+        var writes: [String] = []
+        var registrations: [LiveActivityPushEvent] = []
+        registration.configure { event, isCurrent in
+            #expect(isCurrent())
+            writes.append(event.name)
+            if case .register = event {
+                registrations.append(event)
+                return registrations.count > 1
+            }
+            if !suspended {
+                suspended = true
+                await withCheckedContinuation { release = $0 }
+            }
+            return true
+        }
+        for _ in 0..<100 where release == nil { await Task.yield() }
+        let continuation = try #require(release)
+        registration.republish()
+        continuation.resume()
+        await registration.waitUntilIdleForTesting()
+        #expect(Array(writes.prefix(3)) == [
+            "push.apns.activity.register", "push.apns.activity.retire", "push.apns.activity.register",
+        ])
+        #expect(registrations.count == 2)
+        #expect(registrations.first == registrations.last)
+        #expect(reserved == 1)
+        registration.retire(current)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @Test @MainActor func hydratedActivityKeepsWireGenerationButReservesFreshRegistrationRevision() async throws {
+        let driver = MockLiveActivityDriver()
+        let handle = try Self.pushActivity(driver: driver)
+        handle.pushToken = Data(repeating: 0xAB, count: 32)
+        let registration = LiveActivityPushRegistration { 909 }
+        var event: LiveActivityPushEvent?
+        registration.configure { value, current in event = value; return current() }
+        registration.activate(handle)
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        if case let .register(identity, _, revision) = try #require(event) {
+            #expect(identity.generation == 7)
+            #expect(revision == 909)
+            #expect(identity.expiresAtMs == handle.state.task?.expiresAtMs)
+        } else { Issue.record("Expected hydrated registration") }
+        registration.retire(handle)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @Test @MainActor func oldLocalActivityAndFailedRevisionReservationNeverPublishAToken() async throws {
+        let driver = MockLiveActivityDriver()
+        let old = try Self.pushActivity(driver: driver)
+        old.pushGeneration = nil
+        let handle = try Self.pushActivity(driver: driver)
+        let registration = LiveActivityPushRegistration { throw ArgusOperationsError.unavailable }
+        var events: [LiveActivityPushEvent] = []
+        registration.configure { event, _ in events.append(event); return true }
+        registration.activate(old)
+        old.emitPushToken(Data(repeating: 1, count: 32))
+        registration.activate(handle)
+        handle.emitPushToken(Data(repeating: 2, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        #expect(events.isEmpty)
+        registration.retire(handle)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @Test @MainActor func failedRevisionReservationRetriesCurrentOSTokenOnConnectionWake() async throws {
+        let driver = MockLiveActivityDriver()
+        let handle = try Self.pushActivity(driver: driver)
+        var storageAvailable = true
+        var revision: UInt64 = 30
+        let registration = LiveActivityPushRegistration {
+            guard storageAvailable else { throw ArgusOperationsError.unavailable }
+            revision += 1
+            return revision
+        }
+        var events: [LiveActivityPushEvent] = []
+        registration.configure { event, current in events.append(event); return current() }
+        registration.activate(handle)
+        handle.emitPushToken(Data(repeating: 1, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        await registration.waitUntilIdleForTesting()
+        #expect(events.count == 1)
+        storageAvailable = false
+        handle.emitPushToken(Data(repeating: 2, count: 32))
+        for _ in 0..<20 { await Task.yield() }
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(events.count == 1)
+        storageAvailable = true
+        registration.republish()
+        await registration.waitUntilIdleForTesting()
+        #expect(events.count == 2)
+        if case let .register(_, token, revision)? = events.last {
+            #expect(token == Data(repeating: 2, count: 32))
+            #expect(revision == 32)
+        } else { Issue.record("Expected current OS token after storage recovery") }
+        registration.retire(handle)
+        await registration.waitUntilIdleForTesting()
+    }
+
+    @MainActor private static func pushActivity(driver: MockLiveActivityDriver) throws -> MockLiveActivityHandle {
+        let reference = try #require(ArgusTaskActivityReference(
+            gatewayDeviceID: "synthetic-gateway", taskID: Self.taskID, requestID: "synthetic-invocation"))
+        let handle = driver.makeActivity(
+            agentName: "Argus", sessionKey: "task", taskReference: reference,
+            state: .init(
+                statusText: "Task running", isIdle: false, isDisconnected: false, isConnecting: false,
+                startedAt: .now, task: .init(phase: .running, lifecycleRevision: 3,
+                    expiresAtMs: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000))),
+            recordAsCreated: true)
+        handle.pushGeneration = 7
+        return handle
+    }
+
     private static func connectingState(_ text: String) -> OpenClawActivityAttributes.ContentState {
         OpenClawActivityAttributes.ContentState(
             statusText: text,
@@ -715,6 +1051,9 @@ private final class MockLiveActivityHandle: LiveActivityHandle {
     let agentName: String
     let sessionKey: String
     let taskReference: ArgusTaskActivityReference?
+    var pushGeneration: UInt64?
+    var pushToken: Data?
+    private let tokens = AsyncStream<Data>.makeStream()
     private(set) var state: OpenClawActivityAttributes.ContentState
     private(set) var staleDate: Date?
     private(set) var isActive = true
@@ -759,6 +1098,20 @@ private final class MockLiveActivityHandle: LiveActivityHandle {
         }
         self.state = state
         self.staleDate = staleDate
+    }
+
+    func observePushTokens(_ receive: @escaping @MainActor (Data) -> Void) async {
+        for await token in self.tokens.stream {
+            guard !Task.isCancelled else { return }
+            receive(token)
+        }
+    }
+
+    func observePushEnd(_ ended: @escaping @MainActor () -> Void) async {}
+
+    func emitPushToken(_ token: Data) {
+        self.pushToken = token
+        self.tokens.continuation.yield(token)
     }
 
     func end(state: OpenClawActivityAttributes.ContentState) async {

@@ -5527,6 +5527,9 @@ extension NodeAppModel {
         trigger: String = "registration_state_changed",
         shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
     {
+        // Route admission and OS token callbacks are the existing publication wakes.
+        // Activity tokens use a separate owner and never replace ordinary APNs state.
+        defer { self.configureActivityPushPublisher() }
         let usesRelayTransport = await self.pushRegistrationManager.usesRelayTransport
         let diagnosticTransport: OpenClawDiagnosticAPNsTransport = usesRelayTransport ? .relay : .direct
         let apnsEnvironment = await self.pushRegistrationManager.diagnosticAPNsEnvironment
@@ -5913,6 +5916,46 @@ extension NodeAppModel {
                 context: nodeDiagnosticContext)
             self.pushWakeLogger.error(
                 "APNs registration publish failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func configureActivityPushPublisher() {
+        LiveActivityManager.shared.configurePushPublisher { [weak self] event, stillCurrent in
+            guard let self else { return false }
+            return await self.publishActivityPush(event, stillCurrent: stillCurrent)
+        }
+    }
+
+    private func publishActivityPush(
+        _ event: LiveActivityPushEvent, stillCurrent: @escaping @MainActor () -> Bool) async -> Bool
+    {
+        guard !self.isAppleReviewDemoModeEnabled, !Task.isCancelled, stillCurrent(),
+              let owner = self.activeGatewayConnectConfig?.effectiveStableID else { return false }
+        let configuration = self.gatewayConfigurationGeneration
+        if case .register = event {
+            let usesRelay = await self.pushRegistrationManager.usesRelayTransport
+            guard !usesRelay,
+                  let token = self.apnsDeviceTokenHex, let topic = Bundle.main.bundleIdentifier,
+                  self.apnsLastRegisteredKey == [token, topic, owner, "direct"].joined(separator: "|")
+            else { return false }
+        }
+        guard let nodeRoute = await self.nodeGateway.currentRoute(ifGatewayID: owner),
+              let operatorRoute = await self.operatorGateway.currentRoute(ifGatewayID: owner) else { return false }
+        do {
+            let identity = try await self.fetchPushRelayGatewayIdentity(ifCurrentRoute: operatorRoute)
+            guard identity.deviceId == event.identity.reference.gatewayDeviceID,
+                  await self.nodeGateway.isCurrentRoute(nodeRoute),
+                  await self.operatorGateway.isCurrentRoute(operatorRoute),
+                  self.gatewayConfigurationGeneration == configuration,
+                  self.activeGatewayConnectConfig?.effectiveStableID == owner,
+                  !self.isAppleReviewDemoModeEnabled, !Task.isCancelled, stillCurrent()
+            else { return false }
+            // Payload encoding is synchronous after the final ownership check.
+            // Keep tokens out of diagnostics; true means only an unacknowledged write.
+            return await self.nodeGateway.sendEvent(
+                event: event.name, payloadJSON: try event.payloadJSON(), ifCurrentRoute: nodeRoute)
+        } catch {
+            return false
         }
     }
 
