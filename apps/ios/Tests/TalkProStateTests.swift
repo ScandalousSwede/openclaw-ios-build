@@ -2,6 +2,19 @@ import Testing
 @testable import OpenClaw
 
 @Suite struct TalkProStateTests {
+    @Test func headphonePauseIsVisibleAndRequiresExplicitResume() {
+        let state = TalkProState(
+            gatewayConnected: true, isDemoMode: false, isEnabled: true,
+            statusText: "Headphones disconnected — Talk paused", isConfigLoaded: true,
+            isListening: false, isSpeaking: false, isUserSpeechDetected: false,
+            permissionState: .ready, isPausedForHeadphones: true)
+        #expect(state.title == "Talk paused")
+        #expect(state.chipText == "Paused")
+        #expect(state.primaryAction == .resumeHeadphones)
+        #expect(state.primaryButtonTitle == "Resume Talk")
+        #expect(state.waveformMode(micLevel: 0.8) == .still)
+    }
+
     @Test func disabledTalkWithoutLoadedConfigCanStartAndRetryLoad() {
         let state = TalkProState(
             gatewayConnected: true,

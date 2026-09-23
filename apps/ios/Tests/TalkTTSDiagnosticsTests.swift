@@ -1661,6 +1661,91 @@ private final class TestGenerationState {
         #expect(restoreCount == 2)
     }
 
+    @Test func headphoneLossStopsEveryPlayerAndPreservesUnsentText() async {
+        for outputFormat in [nil, "pcm_44100", "mp3_44100_128"] as [String?] {
+            let manager = TalkModeManager(allowSimulatorCapture: true)
+            let pcm = TestPCMPlayer()
+            let mp3 = TestMP3Player()
+            let system = TestSystemSpeech()
+            manager.pcmPlayer = pcm
+            manager.mp3Player = mp3
+            manager.systemSpeech = system
+            manager._test_prepareContinuousRecognition(transcript: "Actually, keep the second draft")
+            manager._test_setSpeakingPlaybackFormat(outputFormat)
+            manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+            let oldRecognition = manager._test_recognitionCallbackGeneration()
+            manager._test_handleAudioRouteChange(
+                reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+                previousPortTypes: [AVAudioSession.Port.bluetoothHFP.rawValue], callbackGeneration: nil)
+            #expect(manager.isPausedForHeadphones)
+            #expect(!manager.isSpeaking && !manager.isListening && !manager.hasActiveAudioCapture)
+            #expect(pcm.stopCount > 0 && mp3.stopCount > 0 && system.stopCount > 0)
+            #expect(manager._test_lastTranscript() == "Actually, keep the second draft")
+            await manager._test_deliverRecognitionCallback(
+                transcript: "late microphone result", isFinal: true, generation: oldRecognition)
+            #expect(manager._test_lastTranscript() == "Actually, keep the second draft")
+            await manager.start()
+            await manager.resumeAfterHeadphonePause()
+            #expect(manager.isPausedForHeadphones)
+            #expect(!manager.isListening)
+            #expect(manager.statusText == "Reconnect headphones to resume Talk")
+            manager.stop()
+        }
+    }
+
+    @Test func headphoneLossRetiresSegmentWaitingBeforePlayback() async throws {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        let system = TestSystemSpeech()
+        let preSpeak = SuspendedIncrementalPreSpeak()
+        manager.systemSpeech = system
+        manager.pcmPlayer = TestPCMPlayer()
+        manager.mp3Player = TestMP3Player()
+        manager._test_setTTSAudioHooks(prepare: { Self.routeEvidence }, restore: {})
+        manager._test_setIncrementalSpeechBeforeSpeakHook { generation in
+            await preSpeak.suspendFirst(generation: generation)
+        }
+        manager._test_startIncrementalSpeech("A private reply waiting to play.")
+        let worker = try #require(manager._test_incrementalSpeechTaskHandle())
+        await preSpeak.waitUntilEntered()
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.headphones.rawValue], callbackGeneration: nil)
+        preSpeak.release()
+        await worker.value
+        #expect(!manager.isPausedForHeadphones && !manager.isEnabled)
+        #expect(system.spokenTexts.isEmpty)
+        #expect(!manager._test_hasIncrementalSpeechTask())
+        #expect(manager._test_incrementalSpeechState().queued == 0)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.headphones.rawValue])
+        await manager.resumeAfterHeadphonePause()
+        #expect(!manager.isEnabled && !manager.isListening)
+        manager.stop()
+    }
+
+    @Test func routeChangesDoNotPauseReplacementHeadphonesOrExplicitPhonePlayback() {
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        manager.systemSpeech = TestSystemSpeech()
+        manager.pcmPlayer = TestPCMPlayer()
+        manager.mp3Player = TestMP3Player()
+        manager._test_setSpeakingPlaybackFormat(nil)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.bluetoothHFP.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.headphones.rawValue], callbackGeneration: nil)
+        #expect(!manager.isPausedForHeadphones && manager.isSpeaking)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.categoryChange.rawValue,
+            previousPortTypes: [AVAudioSession.Port.bluetoothHFP.rawValue], callbackGeneration: nil)
+        #expect(!manager.isPausedForHeadphones && manager.isSpeaking)
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.builtInReceiver.rawValue], callbackGeneration: nil)
+        #expect(!manager.isPausedForHeadphones && manager.isSpeaking)
+        manager.stop()
+    }
+
     @Test func interruptionTimestampUsesAdmittedPCMPlayerAndRecordsOutcome() {
         let manager = TalkModeManager(allowSimulatorCapture: true)
         let pcm = TestPCMPlayer()

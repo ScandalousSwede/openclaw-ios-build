@@ -20,7 +20,8 @@ struct TalkProTab: View {
             isListening: self.appModel.talkMode.isListening,
             isSpeaking: self.appModel.talkMode.isSpeaking,
             isUserSpeechDetected: self.appModel.talkMode.isUserSpeechDetected,
-            permissionState: self.appModel.talkMode.gatewayTalkPermissionState)
+            permissionState: self.appModel.talkMode.gatewayTalkPermissionState,
+            isPausedForHeadphones: self.appModel.talkMode.isPausedForHeadphones)
     }
 
     var body: some View {
@@ -137,6 +138,10 @@ struct TalkProTab: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(self.state.primaryAction == .waiting)
+                if self.appModel.talkMode.isPausedForHeadphones {
+                    Button("End Talk", action: self.stopTalk)
+                        .buttonStyle(.bordered)
+                }
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
@@ -296,6 +301,9 @@ struct TalkProTab: View {
     }
 
     private var heroSubtitle: String {
+        if self.appModel.talkMode.isPausedForHeadphones {
+            return "Talk is paused to keep your conversation private. Reconnect your headphones, then resume."
+        }
         if self.state
             .prefersPermissionCopy { return "Gateway approval is required before this phone can capture voice." }
         if self.appModel.isAppleReviewDemoModeEnabled { return "Voice is disabled in Apple Review demo mode." }
@@ -373,6 +381,8 @@ struct TalkProTab: View {
         switch self.state.primaryAction {
         case .start:
             self.startTalk()
+        case .resumeHeadphones:
+            Task { await self.appModel.talkMode.resumeAfterHeadphonePause() }
         case .stop:
             self.stopTalk()
         case .enablePermission:
@@ -400,6 +410,7 @@ struct TalkProTab: View {
 
 enum TalkProPrimaryAction: Equatable {
     case start
+    case resumeHeadphones
     case stop
     case enablePermission
     case openSettings
@@ -424,6 +435,7 @@ struct TalkProState: Equatable {
     let isSpeaking: Bool
     let isUserSpeechDetected: Bool
     let permissionState: TalkGatewayPermissionState
+    var isPausedForHeadphones: Bool = false
 
     private var normalizedStatus: String {
         self.statusText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -432,6 +444,7 @@ struct TalkProState: Equatable {
     var title: String {
         if self.isDemoMode { return "Demo mode only" }
         if !self.gatewayConnected { return "Gateway offline" }
+        if self.isPausedForHeadphones { return "Talk paused" }
         switch self.permissionState {
         case .missingScope, .requestFailed:
             return "Gateway permission required"
@@ -458,6 +471,7 @@ struct TalkProState: Equatable {
     var chipText: String {
         if self.isDemoMode { return "Demo" }
         if !self.gatewayConnected { return "Offline" }
+        if self.isPausedForHeadphones { return "Paused" }
         switch self.permissionState {
         case .missingScope, .requestFailed:
             return "Needs approval"
@@ -480,6 +494,7 @@ struct TalkProState: Equatable {
     var icon: String {
         if self.isDemoMode { return "waveform.slash" }
         if !self.gatewayConnected { return "wifi.slash" }
+        if self.isPausedForHeadphones { return "headphones" }
         switch self.permissionState {
         case .missingScope, .requestFailed:
             return "key.fill"
@@ -503,6 +518,7 @@ struct TalkProState: Equatable {
     var color: Color {
         if self.isDemoMode { return .secondary }
         if !self.gatewayConnected { return .secondary }
+        if self.isPausedForHeadphones { return OpenClawBrand.warn }
         switch self.permissionState {
         case .requestFailed, .loadFailed:
             return OpenClawBrand.danger
@@ -525,6 +541,7 @@ struct TalkProState: Equatable {
         case .apiKeyMissing, .loadFailed:
             return .openSettings
         default:
+            if self.isPausedForHeadphones { return .resumeHeadphones }
             return self.isEnabled ? .stop : .start
         }
     }
@@ -532,6 +549,7 @@ struct TalkProState: Equatable {
     var primaryButtonTitle: String {
         switch self.primaryAction {
         case .start: "Start Talk"
+        case .resumeHeadphones: "Resume Talk"
         case .stop: "Stop Talk"
         case .enablePermission: "Enable Talk"
         case .openSettings: self.gatewayConnected ? "Open Voice Settings" : "Open Gateway Settings"
@@ -542,6 +560,7 @@ struct TalkProState: Equatable {
     var primaryButtonIcon: String {
         switch self.primaryAction {
         case .start: "play.fill"
+        case .resumeHeadphones: "headphones"
         case .stop: "stop.fill"
         case .enablePermission: "key.fill"
         case .openSettings: "gearshape.fill"
@@ -572,6 +591,7 @@ struct TalkProState: Equatable {
     func waveformMode(micLevel: Double) -> TalkProWaveformMode {
         if self.isDemoMode { return .still }
         if !self.gatewayConnected { return .still }
+        if self.isPausedForHeadphones { return .still }
         switch self.permissionState {
         case .requestingUpgrade, .upgradeRequested:
             return .indeterminate

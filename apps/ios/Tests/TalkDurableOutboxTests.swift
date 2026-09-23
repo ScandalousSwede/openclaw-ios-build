@@ -2652,6 +2652,144 @@ struct TalkDurableOutboxTests {
 @MainActor
 extension TalkDurableOutboxTests {
     #if targetEnvironment(simulator)
+    @Test(arguments: [false, true])
+    func headphonePauseRetainsOnlyUnsentSameContextSpeech(changeSession: Bool) async throws {
+        let recorder = DurableTalkRequestRecorder()
+        let admissionToken = UUID()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        defer { manager.stop() }
+        manager.gatewayTalkConfigLoaded = true
+        manager.gatewayTalkPermissionState = .ready
+        manager._test_setPTTPermissionHooks(microphone: { true }, speech: { true })
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: { durableTalkCaptureAdmission(token: admissionToken) },
+            persist: { request in
+                await recorder.append(request)
+                throw DurableTalkTestError.rejected
+            })
+        manager.updateGatewayConnected(true)
+        _ = try await manager._test_prepareActivePTT(transcript: "Keep the first draft")
+        manager._test_prepareContinuousRecognition(transcript: "Keep the first draft")
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.bluetoothHFP.rawValue], callbackGeneration: nil)
+        #expect(manager.isPausedForHeadphones)
+        #expect(manager._test_lastTranscript() == "Keep the first draft")
+        _ = manager.suspendForBackground(keepActive: true)
+        await manager.resumeAfterBackground(wasSuspended: true)
+        #expect(manager.isPausedForHeadphones && !manager.isListening)
+        #expect(manager._test_lastTranscript() == "Keep the first draft")
+        if changeSession { manager.updateMainSessionKey("different-session") }
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.bluetoothHFP.rawValue])
+        await manager.resumeAfterHeadphonePause()
+        #expect(!manager.isPausedForHeadphones && manager.isListening)
+        #expect(manager._test_lastTranscript() == (changeSession ? "" : "Keep the first draft"))
+        await manager._test_runSilenceCheck()
+        #expect(await recorder.snapshot().isEmpty)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "actually, use the second", isFinal: false,
+            generation: manager._test_recognitionCallbackGeneration())
+        #expect(manager._test_lastTranscript() == (changeSession
+            ? "actually, use the second" : "Keep the first draft actually, use the second"))
+        manager._test_backdateLastHeard(seconds: 3)
+        await manager._test_runSilenceCheck()
+        await manager._test_runSilenceCheck()
+        #expect(await recorder.snapshot().count == 1)
+    }
+
+    @Test(arguments: [0, 1, 2], [false, true])
+    func failedHeadphoneResumeRetainsSpeechOnlyUntilOrdinarySuspension(
+        failureMode: Int,
+        discardOnBackground: Bool) async throws
+    {
+        let recorder = DurableTalkRequestRecorder()
+        let admissionToken = UUID()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        defer { manager.stop() }
+        manager.gatewayTalkConfigLoaded = true
+        manager.gatewayTalkPermissionState = .ready
+        manager._test_setPTTPermissionHooks(microphone: { true }, speech: { true })
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: { durableTalkCaptureAdmission(token: admissionToken) },
+            persist: { request in
+                await recorder.append(request)
+                throw DurableTalkTestError.rejected
+            })
+        manager.updateGatewayConnected(true)
+        _ = try await manager._test_prepareActivePTT(transcript: "Unsent private correction")
+        manager._test_prepareContinuousRecognition(transcript: "Unsent private correction")
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.bluetoothHFP.rawValue], callbackGeneration: nil)
+        #expect(manager.isPausedForHeadphones)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.bluetoothHFP.rawValue])
+        if failureMode != 0 {
+            manager._test_setRecognitionStartOverride { throw DurableTalkTestError.rejected }
+        } else {
+            manager._test_setPTTPermissionHooks(microphone: { false }, speech: { true })
+        }
+        await manager.resumeAfterHeadphonePause()
+        #expect(!manager.isPausedForHeadphones && !manager.isListening)
+        #expect(manager._test_lastTranscript() == "Unsent private correction")
+        if discardOnBackground {
+            _ = manager.suspendForBackground()
+            #expect(manager._test_lastTranscript().isEmpty)
+        }
+        manager._test_setRecognitionStartOverride(nil)
+        manager._test_setPTTPermissionHooks(microphone: { true }, speech: { true })
+        if failureMode == 2 {
+            _ = try await manager.beginPushToTalk()
+        } else {
+            await manager.start()
+        }
+        #expect(manager.isListening)
+        #expect(manager._test_lastTranscript() == (discardOnBackground ? "" : "Unsent private correction"))
+        await manager._test_runSilenceCheck()
+        #expect(await recorder.snapshot().isEmpty)
+        await manager._test_deliverRecognitionCallback(
+            transcript: "Fresh words", isFinal: failureMode == 2,
+            generation: manager._test_recognitionCallbackGeneration())
+        #expect(manager._test_lastTranscript() == (discardOnBackground
+            ? "Fresh words" : "Unsent private correction Fresh words"))
+        if failureMode == 2 {
+            _ = await manager.endPushToTalk()
+        } else {
+            manager._test_backdateLastHeard(seconds: 3)
+            await manager._test_runSilenceCheck()
+        }
+        #expect(await recorder.snapshot().count == 1)
+    }
+
+    @Test func standalonePushToTalkHeadphoneLossDoesNotEnableContinuousTalk() async throws {
+        let recorder = DurableTalkRequestRecorder()
+        let admissionToken = UUID()
+        let manager = TalkModeManager(allowSimulatorCapture: true)
+        defer { manager.stop() }
+        manager.attachDurableChatOutbox(
+            gatewayOwnerID: { "gateway-talk" },
+            captureAdmission: { durableTalkCaptureAdmission(token: admissionToken) },
+            persist: { request in
+                await recorder.append(request)
+                throw DurableTalkTestError.rejected
+            })
+        manager.updateGatewayConnected(true)
+        _ = try await manager.beginPushToTalk()
+        #expect(!manager.isEnabled && manager.isPushToTalkActive)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.builtInSpeaker.rawValue])
+        manager._test_handleAudioRouteChange(
+            reasonValue: AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+            previousPortTypes: [AVAudioSession.Port.bluetoothHFP.rawValue], callbackGeneration: nil)
+        #expect(!manager.isPausedForHeadphones && !manager.isEnabled && !manager.isPushToTalkActive)
+        manager._test_setAudioOutputPortTypes([AVAudioSession.Port.bluetoothHFP.rawValue])
+        await manager.resumeAfterHeadphonePause()
+        #expect(!manager.isEnabled && !manager.isListening)
+        #expect(await recorder.snapshot().isEmpty)
+    }
+
     @Test func recognitionFinalCoalescesUntilConversationalSilenceOnce() async throws {
         let recorder = DurableTalkRequestRecorder()
         let admissionToken = UUID()
