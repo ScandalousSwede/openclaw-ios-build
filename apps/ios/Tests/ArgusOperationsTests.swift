@@ -44,7 +44,8 @@ struct ArgusOperationsTests {
             supersedes: "previous-event")
             .items.first)
         #expect(item.isAdmitted)
-        #expect(item.stateLabel == "Correction observed · Failed")
+        #expect(item.recordLabel == "Correction recorded · Recorded update")
+        #expect(item.supersedesEventId == "previous-event")
         #expect(item.heading == item.title)
         let event = item.eventId
         item.display = .init(
@@ -53,7 +54,30 @@ struct ArgusOperationsTests {
             artifactLabel: nil,
             continuationLabel: nil)
         #expect(item.heading == "Collector retry repaired")
+        #expect(item.recordSummary == "Disabled features remain disabled.")
         #expect(item.state == "failed" && item.eventId == event && item.isAdmitted)
+    }
+
+    @Test func `reports explain available actions without claiming live task state or owner approval`() throws {
+        for state in ["artifact_produced", "blocked", "delivered", "verified"] {
+            var item = try #require(self.page(
+                state: state, source: "canonical:codex-completion-adapter",
+                scope: "admitted_canonical_technical_operation",
+                artifacts: [["sha256": String(repeating: "a", count: 64), "bytes": 12]])
+                .items.first)
+            #expect(item.recordLabel == "Report with documents")
+            #expect(item.detailActionLabel == "Open report")
+            #expect(item.recordSummary == "Open this report to read its attached documents and recorded outcome.")
+            #expect(item.state == state && !item.ownerAccepted)
+            #expect(item.occurredAt != item.observedAt)
+            item.artifactContext = .init(
+                relation: "previous_attempt", currentAttemptId: "new", artifactAttemptId: "old")
+            #expect(item.recordSummary == "Documents from an earlier attempt are available in this report.")
+            #expect(item.detailActionLabel == "Open report")
+        }
+        let update = try #require(self.page().items.first)
+        #expect(update.detailActionLabel == "View update")
+        #expect(update.recordSummary == "A recorded update is available. No document is attached to this event.")
     }
 
     @Test func `observation times format ISO instants and preserve unrecognized evidence`() {

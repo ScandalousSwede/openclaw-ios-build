@@ -10,7 +10,7 @@ struct ArgusHomeResultContent: View {
     var body: some View {
         CommandPanel(isProminent: true, padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Recent work · \(self.store.project.rawValue)")
+                Text("Latest report · \(self.store.project.rawValue)")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
                 if let item = self.store.items.first {
@@ -23,7 +23,7 @@ struct ArgusHomeResultContent: View {
                         NavigationLink {
                             ArgusOperationDetailView(operation: item, client: client)
                         } label: {
-                            Label(item.artifacts.isEmpty ? "Open details" : "Open result", systemImage: "arrow.right")
+                            Label(item.detailActionLabel, systemImage: "arrow.right")
                         }
                         .buttonStyle(.borderedProminent)
                     }
@@ -50,21 +50,23 @@ struct ArgusOperationsContent: View {
     var body: some View {
         CommandPanel(padding: 12) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Work and results")
-                    .font(.headline)
-                    .accessibilityAddTraits(.isHeader)
-                Text("Recorded work, briefings and results. Open an item for its exact source and document.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Picker("Evidence project", selection: Binding(
-                    get: { self.store.project }, set: { self.store.selectProject($0) }))
-                {
-                    ForEach(ArgusEvidenceProject.allCases, id: \.self) { project in
-                        Text(project.rawValue).tag(project)
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Project").font(.subheadline)
+                    Picker("Project", selection: Binding(
+                        get: { self.store.project }, set: { self.store.selectProject($0) }))
+                    {
+                        ForEach(ArgusEvidenceProject.allCases, id: \.self) { project in
+                            Text(project.rawValue).tag(project)
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .accessibilityLabel("Project")
                 }
-                .pickerStyle(.menu)
-                .accessibilityLabel("Evidence project")
+                Text("Report history").font(.headline).accessibilityAddTraits(.isHeader)
+                Text("Current progress and requests aren't included in this history. Open a report for its recorded outcome and documents.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
                 if self.store.project != .argus {
                     Text(
                         "Technical observations only. This view does not control equipment or establish scientific authority.")
@@ -73,39 +75,29 @@ struct ArgusOperationsContent: View {
                 if self.store.unavailable {
                     Label(
                         self.store.items.isEmpty
-                            ? "Evidence unavailable. Connect and refresh."
-                            : "Offline or unavailable — showing last observed evidence.",
+                            ? "Reports unavailable. Connect and refresh."
+                            : "Offline or unavailable — showing the last report list.",
                         systemImage: "wifi.slash")
                         .font(.subheadline)
                 }
                 if let observed = self.store.coverage?.observedAt {
-                    Text("Last observed: \(ArgusOperation.observationLabel(observed))").font(.caption)
+                    Text("List checked: \(ArgusOperation.observationLabel(observed))").font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 if self.store.items.isEmpty, !self.store.unavailable, !self.store.isLoading {
                     Text("No results found in this returned \(self.store.project.rawValue) view.")
                         .font(.subheadline)
                 }
-                ForEach(self.store.items) { item in
-                    if let client {
-                        NavigationLink {
-                            ArgusOperationDetailView(operation: item, client: client)
-                        } label: {
-                            ArgusOperationRow(item: item)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        ArgusOperationRow(item: item)
-                    }
-                }
+                self.records(self.store.items.filter { !$0.artifacts.isEmpty }, heading: "Reports with documents")
+                self.records(self.store.items.filter { $0.artifacts.isEmpty }, heading: "Recorded updates")
                 if self.store.isLoading {
-                    ProgressView("Loading evidence")
+                    ProgressView("Loading reports")
                 }
                 if let client {
                     HStack {
                         Button("Refresh") { Task { await self.store.refresh(using: client) } }
                         if self.store.nextCursor != nil {
-                            Button("Load more evidence") { Task { await self.store.refresh(using: client, more: true) }
+                            Button("Load more reports") { Task { await self.store.refresh(using: client, more: true) }
                             }
                         }
                     }
@@ -122,21 +114,43 @@ struct ArgusOperationsContent: View {
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
     }
+
+    @ViewBuilder
+    private func records(_ items: [ArgusOperation], heading: String) -> some View {
+        if !items.isEmpty {
+            Text(heading).font(.headline).accessibilityAddTraits(.isHeader)
+            ForEach(items) { item in
+                if let client {
+                    NavigationLink {
+                        ArgusOperationDetailView(operation: item, client: client)
+                    } label: {
+                        ArgusOperationRow(item: item, showsAction: true)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    ArgusOperationRow(item: item)
+                }
+            }
+        }
+    }
 }
 
 private struct ArgusOperationRow: View {
     let item: ArgusOperation
+    var showsAction = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(self.item.heading).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-            if let summary = self.item.display?.changeSummary {
-                Text(summary).font(.subheadline)
-            }
-            Label(self.item.stateLabel, systemImage: "doc.text")
+            Text(self.item.recordSummary).font(.subheadline).foregroundStyle(.secondary)
+            Label(self.item.recordLabel, systemImage: "doc.text")
                 .font(.caption)
-            Text("Observed \(ArgusOperation.observationLabel(self.item.observedAt))").font(.caption)
+            Text("Report dated \(ArgusOperation.observationLabel(self.item.occurredAt))").font(.caption)
                 .foregroundStyle(.secondary)
+            if self.showsAction {
+                Label(self.item.detailActionLabel, systemImage: "arrow.right")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(OpenClawBrand.accent)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -225,7 +239,7 @@ struct ArgusOperationDetailView: View {
             }
             .padding()
         }
-        .navigationTitle("Evidence")
+        .navigationTitle("Report")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: ArgusOperationDetailTaskID(
             isVisible: self.isVisible,
@@ -380,7 +394,11 @@ struct ArgusOperationEvidenceContent: View {
             Text("Operation: \(item.id)")
             Text("Task: \(item.taskId)")
             Text("Event: \(item.eventId)")
+            if let superseded = item.supersedesEventId {
+                Text("Corrects event: \(superseded)")
+            }
             Text("Recorded state: \(item.state.replacingOccurrences(of: "_", with: " "))")
+            Text("Report dated: \(item.occurredAt)")
             Text("Observed: \(item.observedAt)")
             Text("Owner acceptance is not established by this evidence.")
         }

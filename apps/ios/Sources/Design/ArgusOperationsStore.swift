@@ -125,9 +125,29 @@ extension ArgusOperation {
         self.display?.label ?? self.title
     }
 
-    var stateLabel: String {
-        let state = self.state.replacingOccurrences(of: "_", with: " ").capitalized
-        return self.supersedesEventId == nil ? state : "Correction observed · \(state)"
+    // An operation is a recorded event, not a live task or an owner decision.
+    // Keep its original title/state in detail rather than implying current approval or completion.
+    var recordSummary: String {
+        if self.artifactContext?.relation == "previous_attempt" {
+            return "Documents from an earlier attempt are available in this report."
+        }
+        if let summary = self.display?.changeSummary,
+           !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            return summary
+        }
+        return self.artifacts.isEmpty
+            ? "A recorded update is available. No document is attached to this event."
+            : "Open this report to read its attached documents and recorded outcome."
+    }
+
+    var recordLabel: String {
+        let label = self.artifacts.isEmpty ? "Recorded update" : "Report with documents"
+        return self.supersedesEventId == nil ? label : "Correction recorded · \(label)"
+    }
+
+    var detailActionLabel: String {
+        self.artifacts.isEmpty ? "View update" : "Open report"
     }
 
     static func observationLabel(_ value: String) -> String {

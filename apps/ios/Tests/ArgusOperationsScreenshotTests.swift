@@ -156,7 +156,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 .environment(\.colorScheme, .dark)
                 .frame(width: 390, height: 844)
             let image = try self.hostedImage(root, requiredText: [
-                "ARGUS", "Recent work", "Synthetic morning briefing", "All work and results", "Connection details",
+                "ARGUS", "Latest report", "Synthetic morning briefing", "All work and results", "Connection details",
             ])
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-home-ordinary-result-synthetic-offline-\(name)"
@@ -262,6 +262,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
 
     @MainActor
     func testProductionEvidenceCardsAtStandardAndAccessibilitySizes() throws {
+        let model = NodeAppModel()
+        let client = ArgusOperationsClient(session: model.operatorSession, gatewayID: "simulator-fixture")
         let store = ArgusOperationsStore()
         store.selectGateway("simulator-fixture")
         var item = ArgusOperation(
@@ -269,7 +271,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             title: "Synthetic result: checkpoint retry verified",
             source: "federation:fixture-simulator", project: "Argus", kind: "test fixture", state: "observed",
             occurredAt: "2026-09-06T00:00:00Z", observedAt: "2026-09-06T00:01:00Z",
-            artifacts: [], supersedesEventId: nil, ownerAccepted: false)
+            artifacts: [.init(sha256: String(repeating: "a", count: 64), bytes: 12)],
+            supersedesEventId: nil, ownerAccepted: false)
         item.display = .init(
             label: "Checkpoint retry repaired",
             changeSummary: "A retry now resumes the recorded batch. The validation artifact is available in detail.",
@@ -283,7 +286,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             artifacts: [], supersedesEventId: "fixture-previous-event", ownerAccepted: false)
         try store.accept(ArgusOperationsPage(
             items: [item, earlier],
-            coverage: ArgusOperationsCoverage(complete: true, hasMore: false, observedAt: item.observedAt),
+            coverage: ArgusOperationsCoverage(complete: true, hasMore: false, observedAt: "2026-09-22T18:16:00Z"),
             nextCursor: nil, automaticDispatchEnabled: false), more: false)
 
         for (name, size) in [("standard", DynamicTypeSize.large), ("offline-accessibility", .accessibility1)] {
@@ -293,15 +296,24 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             let root = VStack(alignment: .leading, spacing: 12) {
                 Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
                     .font(.caption.bold()).padding(.horizontal)
-                ArgusOperationsContent(store: store, client: nil)
+                ArgusOperationsContent(store: store, client: name == "standard" ? client : nil)
             }
             .padding(.top)
             .background(Color(uiColor: .systemBackground))
+            .environment(model)
             .environment(\.dynamicTypeSize, size)
             .environment(\.colorScheme, .dark)
             .frame(width: 390)
             .fixedSize(horizontal: false, vertical: true)
-            let image = try self.hostedImage(root, selectedProject: store.project.rawValue)
+            let image = try self.hostedImage(
+                root, selectedProject: store.project.rawValue,
+                requiredText: [
+                    "Report history", "Current progress and requests", "Reports with documents", "Recorded updates",
+                    "Checkpoint retry repaired", "A retry now resumes the recorded batch", "Report dated",
+                    "Report with documents", "No document is attached to this event", "Correction recorded",
+                ] + (name == "standard" ? ["Open report", "View update"] : []),
+                forbiddenText: ["Artifact Produced", "Last observed", "Work and results", "Nothing needs you"]
+                    + (name == "standard" ? [] : ["Open report", "View update"]))
             let fullImage = try XCTUnwrap(image.cgImage)
             // Exclude the fixture warning: it must not make an empty content render pass.
             let labelExclusionHeight = 200
@@ -610,7 +622,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         // Card text alone must not satisfy the menu assertion: the selected project
         // must be visible ABOVE the observation timestamp, where the control lives.
         if let selectedProject {
-            let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("Last observed:") })
+            let timestamp = try XCTUnwrap(words.first { $0.0.hasPrefix("List checked:") })
             let aboveTimestamp = words.filter { $0.1.minY > timestamp.1.maxY }
             XCTAssertTrue(
                 aboveTimestamp.contains {
