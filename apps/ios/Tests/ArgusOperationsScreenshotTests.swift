@@ -1,3 +1,4 @@
+import OpenClawChatUI
 import OpenClawKit
 import SwiftUI
 import UIKit
@@ -7,6 +8,41 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testRetainedSessionListAtStandardAndAccessibilitySizes() async throws {
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID("synthetic-session-list-owner")
+        model._test_setGatewayRoleStates(node: .offline, operator: .offline)
+        let state = CommandSessionListState()
+        let owner = try XCTUnwrap(model.commandSessionListOwner)
+        let data = try JSONSerialization.data(withJSONObject: [[
+            "key": "fixture:retained-conversation",
+            "displayName": "Synthetic planning conversation",
+            "updatedAt": 1_700_000_000_000,
+        ]])
+        let entries = try JSONDecoder().decode([OpenClawChatSessionEntry].self, from: data)
+        await state.refresh(owner: owner, available: true, currentOwner: { owner }) { entries }
+        await state.refresh(owner: owner, available: false, currentOwner: { owner }) { [] }
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(spacing: 0) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                CommandSessionsScreen(sessionList: state, openChat: {})
+            }
+            .tint(OpenClawBrand.accent)
+            .environment(model)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390, height: 844)
+            let image = try self.hostedImage(root, requiredText: [
+                "last session list", "Synthetic planning conversation",
+            ], forbiddenText: ["Connect to the gateway", "No recent sessions"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-retained-sessions-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
     @MainActor
     func testHomeGatewayStatusIgnoresMisleadingTextAtBothSizes() throws {
         let cases: [(String, GatewayNodeRoleState, GatewayOperatorRoleState, String, String)] = [

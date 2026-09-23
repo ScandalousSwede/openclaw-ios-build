@@ -685,6 +685,7 @@ jobs:
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/ChatMarkdownRenderingTests \
             -only-testing:OpenClawTests/ArgusOperationsTests \
+            -only-testing:OpenClawTests/CommandSessionListStateTests \
             -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ArgusWorkContractTests \
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
@@ -1342,6 +1343,7 @@ jobs:
             -only-testing:OpenClawTests/SwiftUIRenderSmokeTests \
             -only-testing:OpenClawTests/ChatMarkdownRenderingTests \
             -only-testing:OpenClawTests/ArgusOperationsTests \
+            -only-testing:OpenClawTests/CommandSessionListStateTests \
             -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ArgusWorkContractTests \
             -only-testing:OpenClawTests/ArgusOperationsScreenshotTests \
