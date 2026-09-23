@@ -256,7 +256,7 @@ struct CommandCenterTab: View {
             detail: self.defaultChatActivityText,
             state: isOpen ? "open" : "default",
             trailing: "chat",
-            color: isOpen ? OpenClawBrand.accent : OpenClawBrand.ok,
+            color: isOpen ? OpenClawBrand.accent : .secondary,
             progress: nil,
             route: .chat(nil))
     }
@@ -353,7 +353,7 @@ struct CommandCenterTab: View {
             detail: Self.sessionDetail(session),
             state: isCurrent ? "open" : "recent",
             trailing: "chat",
-            color: isCurrent ? OpenClawBrand.accent : OpenClawBrand.ok,
+            color: isCurrent ? OpenClawBrand.accent : .secondary,
             progress: nil,
             route: .chat(session.key))
     }
