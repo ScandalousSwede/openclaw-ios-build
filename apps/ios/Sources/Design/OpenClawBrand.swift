@@ -78,6 +78,27 @@ enum OpenClawBrand {
     })
     static let ok = Color(red: 34 / 255.0, green: 197 / 255.0, blue: 94 / 255.0)
     static let warn = Color(red: 245 / 255.0, green: 158 / 255.0, blue: 11 / 255.0)
+    static let decisionAttention = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 200 / 255.0, green: 180 / 255.0, blue: 255 / 255.0, alpha: 1)
+            : UIColor(red: 91 / 255.0, green: 49 / 255.0, blue: 145 / 255.0, alpha: 1)
+    })
+    static let reconciliationAttention = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 255 / 255.0, green: 211 / 255.0, blue: 139 / 255.0, alpha: 1)
+            : UIColor(red: 124 / 255.0, green: 75 / 255.0, blue: 0 / 255.0, alpha: 1)
+    })
+
+    static func decisionSurface(for colorScheme: ColorScheme) -> LinearGradient {
+        LinearGradient(
+            colors: colorScheme == .dark ? [
+                Color(red: 37 / 255.0, green: 36 / 255.0, blue: 73 / 255.0),
+                Color(red: 17 / 255.0, green: 28 / 255.0, blue: 49 / 255.0),
+            ] : [self.decisionAttention.opacity(0.08), Color(uiColor: .systemBackground)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing)
+    }
+
     static let graphite = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
             ? UIColor(red: 7 / 255.0, green: 17 / 255.0, blue: 30 / 255.0, alpha: 1)

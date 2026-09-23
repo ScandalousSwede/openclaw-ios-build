@@ -199,6 +199,7 @@ final class ArgusCurrentWorkStore {
 }
 
 struct ArgusCurrentWorkContent: View {
+    @Environment(\.colorScheme) private var colorScheme
     let store: ArgusCurrentWorkStore
     let client: ArgusOperationsClient?
 
@@ -248,7 +249,10 @@ struct ArgusCurrentWorkContent: View {
     private func group(_ page: ArgusCurrentWorkPage, responsibility: String, heading: String) -> some View {
         let entries = page.items.enumerated().filter { $0.element.responsibility == responsibility }
         if !entries.isEmpty {
-            Text(heading).font(.subheadline.weight(.semibold)).accessibilityAddTraits(.isHeader)
+            Text(heading)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(self.groupColor(responsibility))
+                .accessibilityAddTraits(.isHeader)
             ForEach(entries, id: \.offset) { entry in
                 let item = entry.element
                 VStack(alignment: .leading, spacing: 8) {
@@ -283,8 +287,20 @@ struct ArgusCurrentWorkContent: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                .proPanelSurface(
+                    tint: responsibility == "agent_action" ? nil : self.groupColor(responsibility).opacity(0.55),
+                    radius: 12,
+                    isProminent: responsibility == "agent_action",
+                    fill: responsibility == "owner_choice" ? OpenClawBrand.decisionSurface(for: self.colorScheme) : nil)
             }
+        }
+    }
+
+    private func groupColor(_ responsibility: String) -> Color {
+        switch responsibility {
+        case "owner_choice": OpenClawBrand.decisionAttention
+        case "engineering_reconciliation": OpenClawBrand.reconciliationAttention
+        default: .primary
         }
     }
 }

@@ -86,6 +86,7 @@ private struct ProPanelBackground: View {
     let radius: CGFloat
     let tint: Color?
     let isProminent: Bool
+    let fillOverride: LinearGradient?
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: self.radius, style: .continuous)
@@ -114,6 +115,7 @@ private struct ProPanelBackground: View {
     }
 
     private var fill: AnyShapeStyle {
+        if let fillOverride { return AnyShapeStyle(fillOverride) }
         if self.colorScheme == .dark {
             return AnyShapeStyle(LinearGradient(
                 stops: self.isProminent ? [
@@ -221,12 +223,14 @@ extension View {
     func proPanelSurface(
         tint: Color? = nil,
         radius: CGFloat = OpenClawProMetric.cardRadius,
-        isProminent: Bool = false) -> some View
+        isProminent: Bool = false,
+        fill: LinearGradient? = nil) -> some View
     {
         self.modifier(ProPanelSurfaceModifier(
             tint: tint,
             radius: radius,
-            isProminent: isProminent))
+            isProminent: isProminent,
+            fill: fill))
     }
 
     func proGlassSurface(
@@ -250,6 +254,7 @@ private struct ProPanelSurfaceModifier: ViewModifier {
     let tint: Color?
     let radius: CGFloat
     let isProminent: Bool
+    let fill: LinearGradient?
 
     func body(content: Content) -> some View {
         content
@@ -257,7 +262,8 @@ private struct ProPanelSurfaceModifier: ViewModifier {
                 ProPanelBackground(
                     radius: self.radius,
                     tint: self.tint,
-                    isProminent: self.isProminent)
+                    isProminent: self.isProminent,
+                    fillOverride: self.fill)
             }
             .modifier(ProLightGlassModifier(radius: self.radius))
             .shadow(
@@ -315,14 +321,14 @@ struct ProValuePill: View {
 
 struct OpenClawProMark: View {
     var size: CGFloat = 42
-    var shadowRadius: CGFloat = 10
+    var shadowRadius: CGFloat = 8
 
     var body: some View {
         Image("ArgusMark")
             .resizable()
             .scaledToFit()
             .frame(width: self.size, height: self.size)
-            .shadow(color: OpenClawBrand.accent.opacity(0.28), radius: self.shadowRadius, y: self.shadowRadius / 2)
+            .shadow(color: OpenClawBrand.accent.opacity(0.18), radius: self.shadowRadius, y: self.shadowRadius / 2)
             .accessibilityLabel("Argus")
     }
 }

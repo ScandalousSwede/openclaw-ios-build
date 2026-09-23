@@ -11,11 +11,32 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
     func testCurrentWorkAtBothTextSizesAndRetainedState() async throws {
         let store = ArgusCurrentWorkStore()
-        let page = try ArgusOperationsTests.currentWorkFixture()
+        let page = try ArgusOperationsTests.currentWorkFixture { payload in
+            var items = payload["items"] as! [[String: Any]]
+            items.append([
+                "kind": "reconciliation_gap", "responsibility": "engineering_reconciliation",
+                "next_actor": "existing_engineering_owner", "outcome": "unknown_or_changed",
+                "next_action": "Engineering will reconcile the source.", "source": "synthetic-source",
+                "operation_id": "synthetic-unmatched-operation", "receipt_id": "synthetic-unmatched-receipt",
+                "presentation": ["title": "Synthetic source check", "provenance": [
+                    "title_basis": "synthetic", "summary_basis": "unavailable", "fallback": false,
+                ]],
+            ])
+            payload["items"] = items
+            var coverage = payload["coverage"] as! [String: Any]
+            coverage["returned"] = items.count
+            payload["coverage"] = coverage
+        }
         store.selectGateway("synthetic-current-work")
         await store.refresh(gatewayID: "synthetic-current-work") { page }
-        for (name, size) in [("standard", DynamicTypeSize.large), ("retained-accessibility", .accessibility1)] {
-            if name == "retained-accessibility" { store.markUnavailable() }
+        for (name, size, appearance) in [
+            ("standard", DynamicTypeSize.large, ColorScheme.dark),
+            ("retained-accessibility", .accessibility1, .dark),
+            ("retained-light-standard", .large, .light),
+            ("retained-light-accessibility", .accessibility1, .light),
+        ] {
+            let retained = name.hasPrefix("retained")
+            if retained { store.markUnavailable() }
             let root = VStack(alignment: .leading, spacing: 16) {
                 Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
                 ArgusCurrentWorkContent(store: store, client: nil)
@@ -24,16 +45,17 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             .background { CommandControlBackground() }
             .tint(OpenClawBrand.accent)
             .environment(\.dynamicTypeSize, size)
-            .environment(\.colorScheme, .dark)
+            .environment(\.colorScheme, appearance)
             .frame(width: 390)
             .fixedSize(horizontal: false, vertical: true)
-            let image = try self.hostedImage(root, requiredText: [
+            let image = try self.hostedImage(root, userInterfaceStyle: appearance == .dark ? .dark : .light, requiredText: [
                 "Current decisions", "Recorded choices for you", "Engineering follow-through",
                 "Synthetic research grant", "Synthetic package recovery", "Next: Engineering",
                 "Document acceptance recorded", "Recorded report", "activation remains unapproved",
-                "Other work may not be included", "Source coverage",
-            ] + (name == "retained-accessibility" ? ["Showing the last check", "may have changed"] : []),
-            forbiddenText: ["Nothing needs you", "All work complete", "synthetic-operation"])
+                "Other work may not be included", "Source coverage", "Source reconciliation",
+                "Synthetic source check", "Engineering will reconcile the source",
+            ] + (retained ? ["Showing the last check", "may have changed"] : []),
+            forbiddenText: ["Nothing needs you", "All work complete", "synthetic-operation", "synthetic-unmatched"])
             let attachment = XCTAttachment(image: image)
             attachment.name = "argus-current-work-synthetic-\(name)"
             attachment.lifetime = .keepAlways
@@ -632,14 +654,15 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     /// production control and capture its real hosted view hierarchy instead.
     @MainActor
     private func hostedImage(
-        _ content: some View, selectedProject: String? = nil, artifactNames: [String] = [],
+        _ content: some View, userInterfaceStyle: UIUserInterfaceStyle = .dark,
+        selectedProject: String? = nil, artifactNames: [String] = [],
         requiredText: [String] = [], forbiddenText: [String] = []) throws -> UIImage
     {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
         let host = UIHostingController(rootView: content)
         host.safeAreaRegions = []
-        host.overrideUserInterfaceStyle = .dark
+        host.overrideUserInterfaceStyle = userInterfaceStyle
         let window = UIWindow(windowScene: scene)
         let container = ScreenshotContainerController()
         window.rootViewController = container

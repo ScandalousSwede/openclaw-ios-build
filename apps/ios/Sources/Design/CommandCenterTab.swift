@@ -69,8 +69,8 @@ struct CommandCenterTab: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 11) {
-            OpenClawProMark(size: 42, shadowRadius: 4)
+        HStack(alignment: .center, spacing: 14) {
+            OpenClawProMark(size: 42)
             Text("ARGUS")
                 .font(.title2.weight(.medium))
                 .tracking(4.5)
