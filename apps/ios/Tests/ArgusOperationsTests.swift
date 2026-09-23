@@ -66,6 +66,94 @@ struct ArgusOperationsTests {
         #expect(!page.coverage.programmeComplete && page.coverage.programmeCount == nil)
     }
 
+    static func recordedChoicesFixture(
+        mutate: (inout [String: Any]) -> Void = { _ in }) throws -> ArgusCurrentWorkPage
+    {
+        try Self.currentWorkFixture { payload in
+            var items = payload["items"] as! [[String: Any]]
+            items[0]["kind"] = "grant_follow_through"
+            items[0]["responsibility"] = "agent_action"
+            items[0]["next_actor"] = "grant-draft-owner"
+            items[0]["question"] = nil
+            items[0]["outcome"] = "recorded_choices_pending_incorporation"
+            items[0]["next_action"] = "Incorporate the recorded choices in the next bound draft."
+            items[0]["recorded_choices"] = [
+                "status": "recorded", "source": "memory/decisions.jsonl",
+                "records": [
+                    ["decision_id": "synthetic-scope", "recorded_at": "2026-09-23T15:02:17Z",
+                     "summary": "Synthetic scope recorded; sharing remains open.", "state": "active",
+                     "supersedes": [], "superseded_by": ["synthetic-sharing"],
+                     "source_sha256": String(repeating: "d", count: 64)],
+                    ["decision_id": "synthetic-sharing", "recorded_at": "2026-09-23T15:03:19Z",
+                     "summary": "Synthetic choice: no sharing; closes the earlier open item.", "state": "active",
+                     "supersedes": ["synthetic-scope"], "superseded_by": [],
+                     "source_sha256": String(repeating: "e", count: 64)],
+                ],
+            ]
+            mutate(&items[0])
+            payload["items"] = items
+        }
+    }
+
+    @Test func recordedGrantChoicesKeepHistoryAndDraftOwnerWithoutApproval() throws {
+        let page = try Self.recordedChoicesFixture()
+        try page.validate()
+        let item = page.items[0]
+        let choices = try #require(item.recordedChoices)
+        #expect(item.question == nil && item.responsibility == "agent_action")
+        #expect(item.actorLabel == "Grant draft owner")
+        #expect(item.outcomeLabel == "Choices recorded · draft update next")
+        #expect(item.revisionId == "synthetic-revision")
+        #expect(choices.records[0].supersededBy == [choices.records[1].decisionId])
+        #expect(choices.records[1].supersedes == [choices.records[0].decisionId])
+        #expect(!page.effects.canApprove && !page.effects.canSubmit && !page.effects.canDispatch)
+    }
+
+    @Test func unavailableRecordedChoicesRequireReconciliationInsteadOfAnotherQuestion() throws {
+        let page = try Self.recordedChoicesFixture { item in
+            item["outcome"] = "recorded_choices_reconciliation_required"
+            item["recorded_choices"] = [
+                "status": "unavailable", "source": "memory/decisions.jsonl", "records": [],
+            ]
+        }
+        try page.validate()
+        #expect(page.items[0].question == nil)
+        #expect(page.items[0].actorLabel == "Grant draft owner")
+        #expect(page.items[0].outcomeLabel == "Recorded choices need reconciliation")
+    }
+
+    @Test func recordedChoicesRejectMissingHistoryContradictoryAuthorityAndMalformedRecords() throws {
+        for change in 0..<16 {
+            let page = try Self.recordedChoicesFixture { item in
+                var choices = item["recorded_choices"] as! [String: Any]
+                var records = choices["records"] as! [[String: Any]]
+                switch change {
+                case 0: item["recorded_choices"] = nil; return
+                case 1: item["next_actor"] = "Synthetic owner"
+                case 2: item["question"] = "Please answer the same question again"
+                case 3: item["outcome"] = "draft_approved_follow_through"
+                case 4: choices["status"] = "unavailable"
+                case 5: choices["source"] = "other-source"
+                case 6: records[1]["decision_id"] = records[0]["decision_id"]
+                case 7: records[0]["source_sha256"] = "invalid"
+                case 8: records[0]["summary"] = String(repeating: "x", count: 501)
+                case 9: records[0]["supersedes"] = Array(repeating: "id", count: 17)
+                case 10: records = [records[0]]
+                case 11: records[0]["superseded_by"] = ["missing-decision"]
+                case 12: records[0]["supersedes"] = ["synthetic-scope"]
+                case 13: records[1]["supersedes"] = []
+                case 14:
+                    records[0]["supersedes"] = ["synthetic-sharing"]
+                    records[1]["superseded_by"] = ["synthetic-scope"]
+                default: records[0]["superseded_by"] = ["synthetic-sharing", "synthetic-sharing"]
+                }
+                choices["records"] = records
+                item["recorded_choices"] = choices
+            }
+            #expect(throws: ArgusOperationsError.self) { try page.validate() }
+        }
+    }
+
     @Test func currentWorkRejectsInventedOwnerNeedsAndBroaderEffects() throws {
         for (field, value) in [
             ("responsibility", "owner_choice"), ("outcome", "decision_not_recorded"),

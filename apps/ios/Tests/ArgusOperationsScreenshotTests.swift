@@ -139,6 +139,36 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     }
 
     @MainActor
+    func testRecordedChoicesAtBothTextSizes() async throws {
+        let page = try ArgusOperationsTests.recordedChoicesFixture()
+        let store = ArgusCurrentWorkStore()
+        store.selectGateway("synthetic-current-work")
+        await store.refresh(gatewayID: "synthetic-current-work") { page }
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusCurrentWorkContent(store: store, client: nil)
+            }
+            .padding(.vertical)
+            .background { CommandControlBackground() }
+            .tint(OpenClawBrand.accent)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Choices recorded", "draft update next", "Earlier choice", "updated later",
+                "Synthetic scope recorded", "no sharing", "closes the earlier open item",
+                "Next: Grant draft owner", "Draft approval and submission remain separate",
+            ], forbiddenText: ["Recorded choices for you", "Which project scope", "Decision not yet recorded"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-recorded-choices-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testExactDecisionReceiptAtBothTextSizes() throws {
         for status in ["accepted_exact_artifact", "unavailable"] {
             let (item, work) = try ArgusWorkContractTests.fixture(

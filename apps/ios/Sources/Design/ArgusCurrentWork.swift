@@ -39,6 +39,22 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
     }
 
     struct Item: Decodable, Sendable {
+        struct RecordedChoices: Decodable, Sendable {
+            struct Record: Decodable, Sendable, Identifiable {
+                let decisionId: String
+                let recordedAt: String
+                let summary: String
+                let state: String
+                let supersedes: [String]
+                let supersededBy: [String]
+                let sourceSha256: String
+                var id: String { self.decisionId }
+            }
+            let status: String
+            let source: String
+            let records: [Record]
+        }
+
         struct Presentation: Decodable, Sendable {
             struct Provenance: Decodable, Sendable {
                 let titleBasis: String
@@ -70,6 +86,7 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
         let source: String?
         let activationAuthorized: Bool?
         let programmeComplete: Bool?
+        var recordedChoices: RecordedChoices? = nil
 
         var reviewURL: URL? {
             guard let reviewUrl, let url = URL(string: reviewUrl), url.scheme == "https",
@@ -92,6 +109,8 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
             case "exact_artifact_accepted": "Document acceptance recorded"
             case "draft_approved_follow_through": "Draft approved · follow-through remains"
             case "revision_requested_follow_through": "Revision requested"
+            case "recorded_choices_pending_incorporation": "Choices recorded · draft update next"
+            case "recorded_choices_reconciliation_required": "Recorded choices need reconciliation"
             default: "Source reconciliation needed"
             }
         }
@@ -125,7 +144,8 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
                 } else {
                     guard self.responsibility == "agent_action", self.question == nil,
                           ["draft_approved_follow_through", "revision_requested_follow_through",
-                           "grant_follow_through_state_unknown"].contains(self.outcome)
+                           "grant_follow_through_state_unknown", "recorded_choices_pending_incorporation",
+                           "recorded_choices_reconciliation_required"].contains(self.outcome)
                     else { throw ArgusOperationsError.invalidResponse }
                 }
             case "accepted_work":
@@ -150,6 +170,53 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
                       self.artifactSha256 == nil, self.decisionId == nil
                 else { throw ArgusOperationsError.invalidResponse }
             default: throw ArgusOperationsError.invalidResponse
+            }
+            if let choices = self.recordedChoices {
+                guard self.kind == "grant_follow_through", self.nextActor == "grant-draft-owner",
+                      choices.source == "memory/decisions.jsonl",
+                      choices.status == "recorded" || choices.status == "unavailable"
+                else { throw ArgusOperationsError.invalidResponse }
+                if choices.status == "unavailable" {
+                    guard self.outcome == "recorded_choices_reconciliation_required", choices.records.isEmpty
+                    else { throw ArgusOperationsError.invalidResponse }
+                } else {
+                    guard self.outcome == "recorded_choices_pending_incorporation",
+                          (2...16).contains(choices.records.count),
+                          Set(choices.records.map(\.decisionId)).count == choices.records.count
+                    else { throw ArgusOperationsError.invalidResponse }
+                    for record in choices.records {
+                        guard text(record.decisionId, max: 200), text(record.recordedAt, max: 80),
+                              text(record.summary), text(record.state, max: 40), hash(record.sourceSha256),
+                              record.supersedes.count <= 16, record.supersededBy.count <= 16,
+                              (record.supersedes + record.supersededBy).allSatisfy({ text($0, max: 200) })
+                        else { throw ArgusOperationsError.invalidResponse }
+                    }
+                    let recordsByID = Dictionary(uniqueKeysWithValues: choices.records.map { ($0.id, $0) })
+                    for record in choices.records {
+                        guard Set(record.supersedes).count == record.supersedes.count,
+                              Set(record.supersededBy).count == record.supersededBy.count,
+                              record.supersedes.allSatisfy({ id in
+                                  id != record.id && recordsByID[id]?.supersededBy.contains(record.id) == true
+                              }),
+                              record.supersededBy.allSatisfy({ id in
+                                  id != record.id && recordsByID[id]?.supersedes.contains(record.id) == true
+                              })
+                        else { throw ArgusOperationsError.invalidResponse }
+                        // A reciprocal cycle is still not a valid earlier/later choice history.
+                        var pending = record.supersedes
+                        var visited = Set<String>()
+                        while let id = pending.popLast() {
+                            guard id != record.id else { throw ArgusOperationsError.invalidResponse }
+                            if visited.insert(id).inserted, let predecessor = recordsByID[id] {
+                                pending.append(contentsOf: predecessor.supersedes)
+                            }
+                        }
+                    }
+                }
+            } else if ["recorded_choices_pending_incorporation", "recorded_choices_reconciliation_required"]
+                .contains(self.outcome)
+            {
+                throw ArgusOperationsError.invalidResponse
             }
         }
     }
@@ -310,7 +377,21 @@ struct ArgusCurrentWorkContent: View {
                         Text(item.presentation.title).font(.headline)
                         Text(item.outcomeLabel).font(.subheadline.weight(.semibold))
                     }
-                    if let summary = item.presentation.summary { Text(summary).font(.subheadline) }
+                    if let choices = item.recordedChoices, choices.status == "recorded" {
+                        ForEach(choices.records) { record in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(record.supersededBy.isEmpty ? "Recorded choice" : "Earlier choice · updated later")
+                                    .font(.subheadline.weight(.semibold))
+                                Text(record.summary).font(.subheadline).textSelection(.enabled)
+                                Text(ArgusOperation.observationLabel(record.recordedAt))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        Text("The draft owner will incorporate these choices. Draft approval and submission remain separate.")
+                            .font(.subheadline)
+                    } else if let summary = item.presentation.summary {
+                        Text(summary).font(.subheadline)
+                    }
                     Text("Next: \(item.actorLabel)").font(.subheadline)
                     if let question = item.question, question != item.presentation.title { Text(question) }
                     Text(item.nextAction).font(.subheadline)
@@ -325,6 +406,19 @@ struct ArgusCurrentWorkContent: View {
                             if let id = item.artifactSha256 { Text("Document: \(id)") }
                             if let id = item.receiptId { Text("Receipt: \(id)") }
                             if let id = item.decisionId { Text("Decision: \(id)") }
+                            if let choices = item.recordedChoices {
+                                Text("Choice source: \(choices.source) · \(choices.status)")
+                                ForEach(choices.records) { record in
+                                    Text("Decision: \(record.decisionId) · source state: \(record.state)")
+                                    Text("Source digest: \(record.sourceSha256)")
+                                    if !record.supersedes.isEmpty {
+                                        Text("Supersedes: \(record.supersedes.joined(separator: ", "))")
+                                    }
+                                    if !record.supersededBy.isEmpty {
+                                        Text("Updated by: \(record.supersededBy.joined(separator: ", "))")
+                                    }
+                                }
+                            }
                             Text("Title source: \(item.presentation.provenance.titleBasis)")
                             if item.presentation.provenance.fallback { Text("The source has no more specific display title.") }
                         }
