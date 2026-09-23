@@ -234,7 +234,7 @@ struct CommandEmptyStateRow: View {
     var iconColor: Color = .secondary
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: self.icon)
                 .font(.caption.weight(.bold))
                 .foregroundStyle(self.iconColor)
@@ -246,13 +246,13 @@ struct CommandEmptyStateRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(self.title)
                     .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(self.detail)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 9)

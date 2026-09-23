@@ -9,6 +9,34 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testEmptySessionStateWrapsAtBothSizes() throws {
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                CommandPanel(padding: 12) {
+                    CommandEmptyStateRow(
+                        icon: "wifi.slash",
+                        title: "Sessions unavailable",
+                        detail: "Recent conversations will appear here when available.")
+                }
+            }
+            .padding(20)
+            .background { CommandControlBackground() }
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Sessions unavailable", "Recent conversations will appear here when available",
+            ])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-empty-sessions-wrapping-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testRetainedSessionListAtStandardAndAccessibilitySizes() async throws {
         let model = NodeAppModel()
         model._test_setChatOutboxGatewayOwnerID("synthetic-session-list-owner")
