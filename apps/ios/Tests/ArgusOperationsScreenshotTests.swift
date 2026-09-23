@@ -9,6 +9,38 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testBriefingBodyInProductionReaderWhileOfflineAtBothTextSizes() throws {
+        let (item, preview) = try ArgusOperationsTests.briefingFixture()
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID("synthetic-briefing-owner")
+        model.argusBriefingCache.selectOwner("synthetic-briefing-owner")
+        model.argusBriefingCache.retain(
+            preview, for: item, owner: "synthetic-briefing-owner", generation: model.argusBriefingCache.generation)
+        let detail = ArgusOperationDetail(
+            item: item, requested: item, timeline: [],
+            coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt), ownerAccepted: false)
+        let client = ArgusOperationsClient(session: model.operatorSession, gatewayID: "synthetic-briefing-owner")
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = NavigationStack {
+                ArgusOperationDetailView(operation: item, client: client, initialDetail: detail)
+            }
+            .environment(model)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390, height: 1800)
+            let image = try self.hostedImage(root, requiredText: [
+                "Synthetic morning briefing", "Next actions", "Read the existing draft",
+                "Keep this unsent follow-up attached", "labelled fixture", "Open SYNTHETIC-1",
+                "Offline", "Report details and earlier observations",
+            ], forbiddenText: ["Synthetic delivery envelope", "Source and provenance", "Artifact"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-briefing-reader-offline-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testTaskActivitySelectionAtBothTextSizes() throws {
         let task = ArgusTaskActivityList.Item(
             taskId: "d6b7479f-8a75-4d6b-88d9-377c4bdcc823",

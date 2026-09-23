@@ -788,6 +788,104 @@ struct ArgusOperationsTests {
         return (item, artifact, response)
     }
 
+    static func briefingFixture() throws -> (ArgusOperation, ArgusArtifactPreview) {
+        let text = """
+        **Synthetic morning briefing**
+
+        **Next actions:**
+        1. Read the existing draft: https://linear.app/argus-egillese/issue/SYNTHETIC-1
+        2. Keep this unsent follow-up attached to the same briefing.
+
+        **Recorded context:** This is a labelled fixture, not a live request.
+        """
+        let data = Data(text.utf8)
+        let digest = SHA256.hash(data).map { String(format: "%02x", $0) }.joined()
+        let payload: [String: Any] = [
+            "operation_id": "synthetic-briefing", "task_id": "synthetic-summary-task", "event_id": "synthetic-summary-event",
+            "title": "Synthetic delivery envelope", "source": "federation:synthetic", "project": "Argus",
+            "display": ["label": "Synthetic delivery envelope"],
+            "kind": "result.proposed", "state": "observed", "owner_accepted": false,
+            "occurred_at": "2026-09-23T14:30:00Z", "observed_at": "2026-09-23T14:31:00Z",
+            "artifacts": [["sha256": digest, "bytes": data.count]],
+            "native": ["adapter": "openclaw-cron", "native_event": "summary.available"],
+        ]
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let item = try decoder.decode(ArgusOperation.self, from: JSONSerialization.data(withJSONObject: payload))
+        return (item, ArgusArtifactPreview(id: "\(item.eventId):\(digest)", data: data, mimeType: "text/plain"))
+    }
+
+    @Test func briefingClassificationUsesSourceContractInsteadOfDeliveryTitle() throws {
+        var (item, _) = try Self.briefingFixture()
+        #expect(item.heading == "Briefing" && item.detailActionLabel == "Read briefing")
+        #expect(item.briefingArtifact?.sha256 == item.artifacts[0].sha256)
+        item.native = .init(adapter: "openclaw-cron", nativeEvent: "other.event")
+        #expect(item.briefingArtifact == nil && item.heading == "Synthetic delivery envelope")
+        item.display = .init(label: "Readable ordinary report", changeSummary: nil, artifactLabel: nil, continuationLabel: nil)
+        #expect(item.heading == "Readable ordinary report")
+    }
+
+    @Test func briefingReopenRetainsExactBytesAcrossTransientReaderClosureButNotOwnerOrPurge() throws {
+        let (item, preview) = try Self.briefingFixture()
+        let cache = ArgusBriefingCache()
+        cache.selectOwner("gateway-a")
+        let generation = cache.generation
+        cache.retain(preview, for: item, owner: "gateway-a", generation: generation)
+        // Closing the detail/transport retires its loader, not the verified session cache.
+        let loader = ArgusArtifactOpenStore()
+        loader.setAvailable(false)
+        #expect(cache.value(for: item, owner: "gateway-a")?.data == preview.data)
+        #expect(cache.value(for: item, owner: "gateway-b") == nil)
+        cache.clear()
+        cache.retain(preview, for: item, owner: "gateway-a", generation: generation)
+        #expect(cache.value(for: item, owner: "gateway-a") == nil)
+        cache.retain(preview, for: item, owner: "gateway-a", generation: cache.generation)
+        cache.selectOwner("gateway-b")
+        #expect(cache.value(for: item, owner: "gateway-a") == nil)
+        cache.selectOwner("gateway-a")
+        #expect(cache.value(for: item, owner: "gateway-a") == nil)
+    }
+
+    @Test func briefingCacheRejectsWrongBytesEventAndMime() throws {
+        let (item, preview) = try Self.briefingFixture()
+        let cache = ArgusBriefingCache()
+        cache.selectOwner("gateway-a")
+        for invalid in [
+            ArgusArtifactPreview(id: preview.id, data: Data("altered".utf8), mimeType: "text/plain"),
+            ArgusArtifactPreview(id: "different-event", data: preview.data, mimeType: "text/plain"),
+            ArgusArtifactPreview(id: preview.id, data: preview.data, mimeType: "text/html"),
+        ] {
+            cache.retain(invalid, for: item, owner: "gateway-a", generation: cache.generation)
+            #expect(cache.value(for: item, owner: "gateway-a") == nil)
+        }
+        let text = try #require(String(data: preview.data, encoding: .utf8))
+        #expect(ArgusBriefingContent.links(in: text).map(\.absoluteString) == [
+            "https://linear.app/argus-egillese/issue/SYNTHETIC-1",
+        ])
+        #expect(ArgusBriefingContent.links(in: "http://example.com javascript:bad").isEmpty)
+        let manyLinks = (0..<1000).map { "https://example.com/document-\($0)" }.joined(separator: "\n")
+        let boundedLinks = ArgusBriefingContent.links(in: manyLinks)
+        #expect(boundedLinks.count == 32 && boundedLinks.last?.lastPathComponent == "document-31")
+        let markdown = "**Briefing** [Custom](openclaw://example) [Credentials](https://user:pass@example.com/private) [Report](https://example.org/report)"
+        let formatted = ArgusBriefingContent.formattedBody(markdown)
+        #expect(formatted.runs.allSatisfy { $0.link == nil })
+        #expect(String(formatted.characters) == "Briefing Custom Credentials Report")
+        #expect(formatted.runs.contains { $0.inlinePresentationIntent?.contains(.stronglyEmphasized) == true })
+        #expect(ArgusBriefingContent.links(in: markdown).map(\.absoluteString) == ["https://example.org/report"])
+    }
+
+    @Test func gatewayTransitionClearsBriefingEvenWithoutAMountedReader() throws {
+        let (item, preview) = try Self.briefingFixture()
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID("gateway-a")
+        model.argusBriefingCache.retain(
+            preview, for: item, owner: "gateway-a", generation: model.argusBriefingCache.generation)
+        #expect(model.argusBriefingCache.value(for: item, owner: "gateway-a")?.data == preview.data)
+        model._test_setChatOutboxGatewayOwnerID("gateway-b")
+        model._test_setChatOutboxGatewayOwnerID("gateway-a")
+        #expect(model.argusBriefingCache.value(for: item, owner: "gateway-a") == nil)
+    }
+
     @Test func `historical artifact request and response bind exact event`() async throws {
         let (item, artifact, response) = try self.historicalArtifactFixture()
         let store = ArgusArtifactOpenStore()

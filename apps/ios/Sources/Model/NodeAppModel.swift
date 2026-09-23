@@ -349,7 +349,9 @@ final class NodeAppModel {
 
     var gatewayServerName: String?
     var gatewayRemoteAddress: String?
-    var connectedGatewayID: String?
+    var connectedGatewayID: String? {
+        didSet { self.synchronizeBriefingCacheOwner() }
+    }
     var gatewayAutoReconnectEnabled: Bool = true
     // When the gateway requires pairing approval, we pause reconnect churn and show a stable UX.
     // Reconnect loops (both our own and the underlying WebSocket watchdog) can otherwise generate
@@ -427,7 +429,9 @@ final class NodeAppModel {
     private(set) var chatOutboxOwnerGeneration: UInt64 = 0
     #if DEBUG
     private var testChatOutboxGatewayOwnerOverrideEnabled = false
-    private var testChatOutboxGatewayOwnerID: String?
+    private var testChatOutboxGatewayOwnerID: String? {
+        didSet { self.synchronizeBriefingCacheOwner() }
+    }
     @ObservationIgnored private var testChatOutboxStoreProvider:
         (@MainActor @Sendable (String) async throws -> OpenClawChatOutboxStore)?
     @ObservationIgnored private var testChatOutboxTransportProvider:
@@ -496,6 +500,11 @@ final class NodeAppModel {
     @ObservationIgnored private var apnsRegistrationIntentState = AIESAPNsRegistrationIntentState()
     @ObservationIgnored private var apnsRegistrationsInFlight: [APNsRegistrationAttempt] = []
     @ObservationIgnored private let pushRegistrationManager = PushRegistrationManager()
+    let argusBriefingCache = ArgusBriefingCache()
+
+    private func synchronizeBriefingCacheOwner() {
+        self.argusBriefingCache.selectOwner(self.chatOutboxGatewayOwnerID)
+    }
     var gatewaySession: GatewayNodeSession {
         self.nodeGateway
     }
@@ -803,6 +812,7 @@ final class NodeAppModel {
             throw OpenClawChatOutboxError.retired
         }
         self.chatOutboxPurgeInProgress = true
+        self.argusBriefingCache.clear()
         self.talkMode.beginCredentialReset()
         self.releaseAllPTTVoiceWakeLeases()
         await self.retireChatOutboxDeliveryOwner()
@@ -890,7 +900,9 @@ final class NodeAppModel {
     }
     #endif
 
-    private(set) var activeGatewayConnectConfig: GatewayConnectConfig?
+    private(set) var activeGatewayConnectConfig: GatewayConnectConfig? {
+        didSet { self.synchronizeBriefingCacheOwner() }
+    }
 
     private static let watchExecApprovalBridgeStateKey = "watch.execApproval.bridge.state.v1"
     private static let foregroundResumeHealthTimeoutSeconds = 1

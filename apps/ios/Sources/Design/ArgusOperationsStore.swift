@@ -10,6 +10,10 @@ enum ArgusEvidenceProject: String, CaseIterable, Sendable {
 }
 
 struct ArgusOperation: Decodable, Identifiable, Sendable {
+    struct Native: Decodable, Sendable {
+        let adapter: String?
+        let nativeEvent: String?
+    }
     struct Artifact: Decodable, Identifiable, Sendable {
         let sha256: String
         let bytes: Int?
@@ -96,6 +100,7 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
     var display: Display? = nil
     var evidenceScope: String? = nil
     var artifactContext: ArgusArtifactContext? = nil
+    var native: Native? = nil
     var id: String {
         self.operationId
     }
@@ -121,13 +126,21 @@ struct ArgusOperation: Decodable, Identifiable, Sendable {
 
 /// Presentation uses admitted metadata only; it never changes canonical state or artifact identity.
 extension ArgusOperation {
+    var briefingArtifact: Artifact? {
+        guard self.isAdmitted, self.native?.adapter == "openclaw-cron",
+              self.native?.nativeEvent == "summary.available", self.artifacts.count == 1,
+              self.artifactContext?.relation != "previous_attempt" else { return nil }
+        return self.artifacts.first
+    }
+
     var heading: String {
-        self.display?.label ?? self.title
+        self.briefingArtifact != nil ? "Briefing" : self.display?.label ?? self.title
     }
 
     // An operation is a recorded event, not a live task or an owner decision.
     // Keep its original title/state in detail rather than implying current approval or completion.
     var recordSummary: String {
+        if self.briefingArtifact != nil { return "Read the original briefing and its linked work." }
         if self.artifactContext?.relation == "previous_attempt" {
             return "Documents from an earlier attempt are available in this report."
         }
@@ -147,7 +160,7 @@ extension ArgusOperation {
     }
 
     var detailActionLabel: String {
-        self.artifacts.isEmpty ? "View update" : "Open report"
+        self.briefingArtifact != nil ? "Read briefing" : self.artifacts.isEmpty ? "View update" : "Open report"
     }
 
     static func observationLabel(_ value: String) -> String {
@@ -242,6 +255,53 @@ struct ArgusArtifactPreview: Identifiable {
     let id: String
     let data: Data
     let mimeType: String
+}
+
+/// Bounded session retention of verified briefing bytes; no unprotected file cache.
+@MainActor
+@Observable
+final class ArgusBriefingCache {
+    struct Key: Hashable {
+        let operation: String
+        let event: String
+        let digest: String
+    }
+    private(set) var generation = 0
+    private var owner: String?
+    private var values: [Key: ArgusArtifactPreview] = [:]
+    private var order: [Key] = []
+
+    func selectOwner(_ owner: String?) {
+        guard self.owner != owner else { return }
+        self.clear()
+        self.owner = owner
+    }
+
+    func clear() {
+        self.generation += 1
+        self.values = [:]
+        self.order = []
+    }
+
+    func value(for item: ArgusOperation, owner: String) -> ArgusArtifactPreview? {
+        guard self.owner == owner, let artifact = item.briefingArtifact else { return nil }
+        return self.values[Key(operation: item.id, event: item.eventId, digest: artifact.sha256)]
+    }
+
+    func retain(_ preview: ArgusArtifactPreview, for item: ArgusOperation, owner: String, generation: Int) {
+        guard self.owner == owner, self.generation == generation, let artifact = item.briefingArtifact,
+              preview.id == "\(item.eventId):\(artifact.sha256)", preview.mimeType == "text/plain",
+              preview.data.count <= 1_048_576,
+              String(data: preview.data, encoding: .utf8) != nil,
+              artifact.bytes.map({ $0 == preview.data.count }) ?? true,
+              SHA256.hash(data: preview.data).map({ String(format: "%02x", $0) }).joined() == artifact.sha256
+        else { return }
+        let key = Key(operation: item.id, event: item.eventId, digest: artifact.sha256)
+        self.order.removeAll { $0 == key }
+        self.order.append(key)
+        self.values[key] = preview
+        while self.order.count > 8 { self.values.removeValue(forKey: self.order.removeFirst()) }
+    }
 }
 
 @MainActor

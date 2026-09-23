@@ -190,6 +190,8 @@ struct ArgusOperationDetailView: View {
     @State private var isVisible = false
     @State private var detailLoadGeneration = 0
     @State private var skipInitialLoad = false
+    @State private var showArtifactSheet = false
+    @State private var artifactOwnerGeneration = 0
 
     init(
         operation: ArgusOperation,
@@ -208,15 +210,37 @@ struct ArgusOperationDetailView: View {
         self.appModel.chatOutboxGatewayOwnerID == self.client.gatewayID
     }
 
+    private var requestedItem: ArgusOperation { self.detail?.requested ?? self.operation }
+
+    private var briefing: ArgusArtifactPreview? {
+        guard self.sameGateway else { return nil }
+        return self.appModel.argusBriefingCache.value(for: self.requestedItem, owner: self.client.gatewayID)
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if !self.sameGateway {
                     Text("The paired gateway changed. Return Home to load its evidence.")
                 } else {
-                    ArgusOperationRow(item: self.detail?.item ?? self.operation)
+                    if self.requestedItem.briefingArtifact != nil {
+                        Text(self.requestedItem.heading).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                        Text("Recorded \(ArgusOperation.observationLabel(self.requestedItem.occurredAt))")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if let briefing = self.briefing {
+                            ArgusBriefingContent(preview: briefing)
+                        } else if self.appModel.isOperatorGatewayConnected, self.error == nil,
+                                  self.artifactOpen.error == nil {
+                            ProgressView("Opening briefing")
+                        } else {
+                            Text("Briefing text is unavailable. Reconnect to retrieve this exact recorded item.")
+                        }
+                    } else {
+                        ArgusOperationRow(item: self.detail?.item ?? self.operation)
+                    }
                     if !self.appModel.isOperatorGatewayConnected {
-                        Label("Offline — last observed detail", systemImage: "wifi.slash")
+                        Label(self.briefing == nil ? "Offline — last observed detail"
+                            : "Offline — briefing retained for this app session", systemImage: "wifi.slash")
                     }
                     if let error {
                         Text(error).foregroundStyle(.secondary)
@@ -225,13 +249,13 @@ struct ArgusOperationDetailView: View {
                         Text(error).foregroundStyle(.secondary)
                     }
                     if let detail {
-                        ArgusOperationEvidenceContent(
-                            detail: detail,
-                            artifactsAvailable: !self.artifactOpen.isLoading && self.appModel
-                                .isOperatorGatewayConnected,
-                            openArtifact: { artifact, item in
-                                Task { await self.openArtifact(artifact, item: item) }
-                            })
+                        if self.requestedItem.briefingArtifact != nil {
+                            DisclosureGroup("Report details and earlier observations") {
+                                self.evidenceContent(detail)
+                            }
+                        } else {
+                            self.evidenceContent(detail)
+                        }
                     } else if self.error == nil {
                         ProgressView("Loading detail")
                     }
@@ -239,7 +263,7 @@ struct ArgusOperationDetailView: View {
             }
             .padding()
         }
-        .navigationTitle("Report")
+        .navigationTitle(self.requestedItem.briefingArtifact == nil ? "Report" : "Briefing")
         .navigationBarTitleDisplayMode(.inline)
         .task(id: ArgusOperationDetailTaskID(
             isVisible: self.isVisible,
@@ -248,6 +272,7 @@ struct ArgusOperationDetailView: View {
             routeGeneration: self.client.pinnedRoute?.diagnosticRouteGeneration,
             socketGeneration: self.client.pinnedRoute?.diagnosticSocketGeneration))
         {
+            self.appModel.argusBriefingCache.selectOwner(self.appModel.chatOutboxGatewayOwnerID)
             self.detailLoadGeneration += 1
             if self.isVisible, self.sameGateway, self.appModel.isOperatorGatewayConnected {
                 if self.skipInitialLoad {
@@ -258,14 +283,29 @@ struct ArgusOperationDetailView: View {
                 guard !Task.isCancelled, self.isVisible, self.sameGateway else { return }
                 if let detail = self.detail {
                     // A corrected current observation must never substitute its artifact for the tapped event.
-                    await self.artifactOpen.openPendingArtifact(for: detail.requested, fetch: self.fetchArtifact)
+                    if detail.requested.briefingArtifact != nil {
+                        await self.loadBriefing(detail.requested)
+                    } else {
+                        let generation = self.appModel.argusBriefingCache.generation
+                        await self.artifactOpen.openPendingArtifact(for: detail.requested, fetch: self.fetchArtifact)
+                        guard generation == self.appModel.argusBriefingCache.generation,
+                              self.sameGateway, !Task.isCancelled else { self.artifactOpen.invalidate(); return }
+                        self.artifactOwnerGeneration = generation
+                        self.showArtifactSheet = self.artifactOpen.preview != nil
+                    }
                 }
             }
         }
-        .refreshable { await self.load() }
+        .refreshable {
+            await self.load()
+            if let detail = self.detail { await self.loadBriefing(detail.requested) }
+        }
             .sheet(item: Binding(
-                get: { self.artifactOpen.preview },
-                set: { _ in self.artifactOpen.dismissPreview() }))
+                get: {
+                    self.showArtifactSheet && self.artifactOwnerGeneration == self.appModel.argusBriefingCache.generation
+                        ? self.artifactOpen.preview : nil
+                },
+                set: { _ in self.showArtifactSheet = false; self.artifactOpen.dismissPreview() }))
             { preview in
                 NavigationStack {
                     ArgusArtifactView(preview: preview)
@@ -275,6 +315,7 @@ struct ArgusOperationDetailView: View {
                 }
             }
             .onChange(of: self.sameGateway) { _, same in
+                    self.appModel.argusBriefingCache.selectOwner(self.appModel.chatOutboxGatewayOwnerID)
                     self.artifactOpen.setAvailable(self.isVisible && same && self.appModel.isOperatorGatewayConnected)
                     if !same {
                         self.detail = nil
@@ -291,6 +332,30 @@ struct ArgusOperationDetailView: View {
                     self.isVisible = false
                     self.artifactOpen.setAvailable(false)
                 }
+    }
+
+    private func evidenceContent(_ detail: ArgusOperationDetail) -> some View {
+        ArgusOperationEvidenceContent(
+            detail: detail,
+            artifactsAvailable: !self.artifactOpen.isLoading && self.appModel.isOperatorGatewayConnected,
+            openArtifact: { artifact, item in
+                Task { await self.openArtifact(artifact, item: item) }
+            })
+    }
+
+    private func loadBriefing(_ item: ArgusOperation) async {
+        guard self.sameGateway, self.isVisible, self.appModel.isOperatorGatewayConnected,
+              let artifact = item.briefingArtifact else { return }
+        let cache = self.appModel.argusBriefingCache
+        if cache.value(for: item, owner: self.client.gatewayID) != nil { return }
+        let generation = cache.generation
+        await self.artifactOpen.open(artifact, item: item, fetch: self.fetchArtifact)
+        guard self.sameGateway, self.isVisible, !Task.isCancelled,
+              cache.generation == generation, let preview = self.artifactOpen.preview else { return }
+        cache.retain(preview, for: item, owner: self.client.gatewayID, generation: generation)
+        if cache.value(for: item, owner: self.client.gatewayID) == nil {
+            self.error = "This briefing could not be displayed as verified text. Its document is in Report details."
+        }
     }
 
     private func load() async {
@@ -313,7 +378,12 @@ struct ArgusOperationDetailView: View {
 
     private func openArtifact(_ artifact: ArgusOperation.Artifact, item: ArgusOperation) async {
         guard self.sameGateway, self.appModel.isOperatorGatewayConnected else { return }
+        let generation = self.appModel.argusBriefingCache.generation
         await self.artifactOpen.open(artifact, item: item, fetch: self.fetchArtifact)
+        guard generation == self.appModel.argusBriefingCache.generation, self.sameGateway,
+              self.isVisible, !Task.isCancelled else { self.artifactOpen.invalidate(); return }
+        self.artifactOwnerGeneration = generation
+        self.showArtifactSheet = self.artifactOpen.preview != nil
     }
 
     private func fetchArtifact(_ params: [String: String]) async throws -> ArgusOperationArtifact {
@@ -322,6 +392,51 @@ struct ArgusOperationDetailView: View {
         guard self.sameGateway, self.isVisible, self.appModel.isOperatorGatewayConnected,
               !Task.isCancelled else { throw ArgusOperationsError.unavailable }
         return response
+    }
+}
+
+struct ArgusBriefingContent: View {
+    let preview: ArgusArtifactPreview
+
+    var body: some View {
+        if preview.mimeType == "text/plain", let text = String(data: preview.data, encoding: .utf8) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(Self.formattedBody(text))
+                    .font(.body).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ForEach(Self.links(in: text), id: \.absoluteString) { url in
+                    Link(destination: url) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Open \(url.lastPathComponent.isEmpty ? "linked work" : url.lastPathComponent)")
+                            Text(url.host ?? "").font(.caption)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static func formattedBody(_ text: String) -> AttributedString {
+        var body = (try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        // Parsed Markdown must not create a second actionable URL path. Only
+        // the bounded HTTPS controls below open links and disclose their host.
+        body.link = nil
+        return body
+    }
+
+    static func links(in text: String) -> [URL] {
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return [] }
+        var seen = Set<String>()
+        var links: [URL] = []
+        detector.enumerateMatches(in: text, range: NSRange(text.startIndex..., in: text)) { match, _, stop in
+            guard let url = match?.url, url.scheme == "https", url.user == nil, url.password == nil,
+                  seen.insert(url.absoluteString).inserted else { return }
+            links.append(url)
+            if links.count == 32 { stop.pointee = true }
+        }
+        return links
     }
 }
 
