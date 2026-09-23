@@ -799,7 +799,7 @@ struct ArgusOperationsTests {
         **Recorded context:** This is a labelled fixture, not a live request.
         """
         let data = Data(text.utf8)
-        let digest = SHA256.hash(data).map { String(format: "%02x", $0) }.joined()
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let payload: [String: Any] = [
             "operation_id": "synthetic-briefing", "task_id": "synthetic-summary-task", "event_id": "synthetic-summary-event",
             "title": "Synthetic delivery envelope", "source": "federation:synthetic", "project": "Argus",
