@@ -55,6 +55,7 @@ final class TalkModeManager: NSObject {
     var isSpeaking: Bool = false
     var isUserSpeechDetected: Bool = false
     var isPushToTalkActive: Bool = false
+    private(set) var isPausedForHeadphones: Bool = false
     var statusText: String = "Off"
     /// 0..1-ish (not calibrated). Intended for UI feedback only.
     var micLevel: Double = 0
@@ -91,12 +92,12 @@ final class TalkModeManager: NSObject {
     }
 
     var hasActiveAudioCapture: Bool {
-        self.isEnabled || self.isListening || self.isPushToTalkActive || self.realtimeRelaySession != nil
-            || self.realtimeRelayStartInFlight || self.pttStartReservationID != nil
+        !self.isPausedForHeadphones && (self.isEnabled || self.isListening || self.isPushToTalkActive ||
+            self.realtimeRelaySession != nil || self.realtimeRelayStartInFlight || self.pttStartReservationID != nil)
     }
 
     var canUseBackgroundTalkOptIn: Bool {
-        !self.isStarting && self.pttStartReservationID == nil && self.pendingDurableChat == nil &&
+        !self.isPausedForHeadphones && !self.isStarting && self.pttStartReservationID == nil && self.pendingDurableChat == nil &&
             !self.isPushToTalkActive && self.activePTTCaptureId == nil && self.pttEndTask == nil &&
             self.durableResponseTask == nil && self.durableResponseSpeechGeneration == nil &&
             !self.isPersistingDurableMessage
@@ -216,6 +217,7 @@ final class TalkModeManager: NSObject {
         let destructiveSessionAdmissionToken: UUID
         let captureRouteSnapshot: OpenClawChatOutboxRouteSnapshot
     }
+    private var headphonePausedCapture: (context: DurableCaptureContext, transcript: String)?
     private struct ContinuousStartAdmission {
         let attemptID: Int
         let stableGatewayID: String
@@ -248,7 +250,9 @@ final class TalkModeManager: NSObject {
     #if DEBUG
     private var pttMicrophonePermissionOverride: (() async -> Bool)?
     private var pttSpeechPermissionOverride: (() async -> Bool)?
+    private var recognitionStartOverride: (() throws -> Void)?
     private var ttsPrepareAudioOverride: (() throws -> TalkAudioRouteEvidence)?
+    private var audioOutputPortTypesOverride: [String]?
     private var ttsRestoreAudioOverride: (() -> Void)?
     private var incrementalSpeechBeforeSpeakOverride: ((UInt64) async -> Void)?
     private var durableEventObservedOverride: (@Sendable (_ runID: String?, _ matched: Bool) -> Void)?
@@ -416,6 +420,8 @@ final class TalkModeManager: NSObject {
     }
 
     func beginCredentialReset() {
+        self.isPausedForHeadphones = false
+        self.headphonePausedCapture = nil
         self.durableDeliveryGeneration &+= 1
         self.pttStartReservationID = nil
         self.cancelDurableResponse()
@@ -492,6 +498,10 @@ final class TalkModeManager: NSObject {
     }
 
     func applyProviderSelectionChanged() {
+        guard !self.isPausedForHeadphones else {
+            Task { await self.reloadConfig() }
+            return
+        }
         let shouldRestart = self.isEnabled
         if shouldRestart {
             self.stop()
@@ -503,6 +513,7 @@ final class TalkModeManager: NSObject {
     }
 
     func applyAudioRoutePreferenceChanged() {
+        guard !self.isPausedForHeadphones else { return }
         guard self.isEnabled || self.isListening || self.isSpeaking else { return }
         do {
             if self.realtimeRelaySession != nil {
@@ -521,6 +532,10 @@ final class TalkModeManager: NSObject {
             "talk.timeline manager start enter enabled=\(self.isEnabled) "
                 + "listening=\(self.isListening) gatewayConnected=\(self.gatewayConnected)")
         guard self.isEnabled else { return }
+        guard !self.isPausedForHeadphones else {
+            self.statusText = "Headphones disconnected — Talk paused"
+            return
+        }
         guard self.pendingDurableChat == nil else {
             self.statusText = "Retry the previous Talk message"
             GatewayDiagnostics.log("talk start blocked: pending durable message requires review")
@@ -635,6 +650,7 @@ final class TalkModeManager: NSObject {
             self.captureMode = .continuous
             self.beginTranscriptCapture(context: durableContext)
             try self.startRecognition()
+            self.headphonePausedCapture = nil
             self.isListening = true
             self.statusText = "Listening"
             self.startSilenceMonitor()
@@ -648,7 +664,7 @@ final class TalkModeManager: NSObject {
     }
 
     private func isCurrentStartAttempt(_ attemptID: Int) -> Bool {
-        !Task.isCancelled && self.foregroundAudioCaptureAllowed && self.gatewayConnected &&
+        !Task.isCancelled && !self.isPausedForHeadphones && self.foregroundAudioCaptureAllowed && self.gatewayConnected &&
             self.pttStartReservationID == nil && self.startAttemptID == attemptID && self.isEnabled &&
             self.captureMode != .pushToTalk
     }
@@ -708,6 +724,8 @@ final class TalkModeManager: NSObject {
     }
 
     func stop() {
+        self.isPausedForHeadphones = false
+        self.headphonePausedCapture = nil
         let pttEnding = self.pttEndTask != nil
         self.pttStartReservationID = nil
         self.isEnabled = false
@@ -760,10 +778,14 @@ final class TalkModeManager: NSObject {
     /// Suspends microphone usage without disabling Talk Mode.
     /// Used when the app backgrounds (or when we need to temporarily release the mic).
     func suspendForBackground(keepActive: Bool = false) -> Bool {
-        if keepActive {
+        if keepActive, !self.isPausedForHeadphones {
             self.statusText = self.isListening ? "Listening" : self.statusText
             return false
         }
+        return self.suspendAudioCapture(preserveTranscript: self.isPausedForHeadphones)
+    }
+
+    private func suspendAudioCapture(preserveTranscript: Bool) -> Bool {
         let wasActive = self.isEnabled || self.isListening || self.isSpeaking ||
             self.pttStartReservationID != nil ||
             self.isPushToTalkActive || self.activePTTCaptureId != nil || self.isPersistingDurableMessage
@@ -772,12 +794,16 @@ final class TalkModeManager: NSObject {
         self.pttStartReservationID = nil
         self.cancelPendingStart()
         self.isListening = false
+        self.isUserSpeechDetected = false
         if !pttEnding {
             self.isPushToTalkActive = false
             self.captureMode = .idle
         }
         self.statusText = "Paused"
-        if self.pendingDurableChat == nil, !pttEnding {
+        if !preserveTranscript {
+            self.headphonePausedCapture = nil
+        }
+        if !preserveTranscript, self.pendingDurableChat == nil, !pttEnding {
             self.lastTranscript = ""
             self.lastHeard = nil
             self.durableCaptureContext = nil
@@ -839,6 +865,11 @@ final class TalkModeManager: NSObject {
     }
 
     func beginPushToTalk() async throws -> OpenClawTalkPTTStartPayload {
+        guard !self.isPausedForHeadphones else {
+            throw NSError(domain: "TalkMode", code: 13, userInfo: [
+                NSLocalizedDescriptionKey: "Reconnect headphones and resume Talk before recording",
+            ])
+        }
         guard self.pendingDurableChat == nil else {
             self.statusText = "Retry the previous Talk message"
             throw NSError(domain: "TalkMode", code: 12, userInfo: [
@@ -945,6 +976,7 @@ final class TalkModeManager: NSObject {
             self.currentAudioActivation = .active
             self.captureMode = .pushToTalk
             try self.startRecognition()
+            self.headphonePausedCapture = nil
             self.isListening = true
             self.isPushToTalkActive = true
             self.statusText = "Listening (PTT)"
@@ -1193,6 +1225,9 @@ final class TalkModeManager: NSObject {
         self.recognitionCallbackGeneration &+= 1
         let callbackGeneration = self.recognitionCallbackGeneration
 
+        #if DEBUG
+        try self.recognitionStartOverride?()
+        #endif
         #if targetEnvironment(simulator)
         if self.allowSimulatorCapture {
             self.recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
@@ -1464,7 +1499,7 @@ final class TalkModeManager: NSObject {
         }
 
         guard self.isListening else { return }
-        let combined = self.captureMode == .continuous && !self.finalizedTranscriptPrefix.isEmpty
+        let combined = !self.finalizedTranscriptPrefix.isEmpty
             ? [self.finalizedTranscriptPrefix, trimmed].filter { !$0.isEmpty }.joined(separator: " ")
             : trimmed
         if !combined.isEmpty, combined != self.lastTranscript {
@@ -1490,9 +1525,9 @@ final class TalkModeManager: NSObject {
                 }
                 return
             }
-            self.lastTranscript = trimmed
-            guard !trimmed.isEmpty else { return }
-            GatewayDiagnostics.log("talk speech: final transcript chars=\(trimmed.count)")
+            self.lastTranscript = combined
+            guard !combined.isEmpty else { return }
+            GatewayDiagnostics.log("talk speech: final transcript chars=\(combined.count)")
             self.recordRecognitionEvent("speech_transcript_final_received", result: "success")
             self.loggedPartialThisCycle = false
             if self.captureMode == .pushToTalk, self.pttAutoStopEnabled, self.isPushToTalkActive {
@@ -2153,8 +2188,17 @@ final class TalkModeManager: NSObject {
 
     private func beginTranscriptCapture(context: DurableCaptureContext) {
         self.transcriptGeneration &+= 1
-        self.finalizedTranscriptPrefix = ""
-        self.lastTranscript = ""
+        let retained = self.headphonePausedCapture
+        let sameCaptureOwner = retained?.context.stableGatewayID == context.stableGatewayID &&
+            retained?.context.sessionKey == context.sessionKey &&
+            retained?.context.deliveryGeneration == context.deliveryGeneration &&
+            retained?.context.destructiveSessionAdmissionToken == context.destructiveSessionAdmissionToken
+        // Keep same-owner speech until recognition starts, so a failed resume can retry.
+        if !sameCaptureOwner { self.headphonePausedCapture = nil }
+        let transcript = sameCaptureOwner ? (retained?.transcript ?? "") : ""
+        self.finalizedTranscriptPrefix = transcript
+        self.lastTranscript = transcript
+        // Resuming alone must not submit an unfinished utterance. Fresh input starts the silence clock.
         self.lastHeard = nil
         self.durableCaptureContext = context
     }
@@ -3366,7 +3410,10 @@ final class TalkModeManager: NSObject {
     }
 
     private var currentAudioPortTypes: [String] {
-        AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }
+        #if DEBUG
+        if let audioOutputPortTypesOverride { return audioOutputPortTypesOverride }
+        #endif
+        return AVAudioSession.sharedInstance().currentRoute.outputs.map { $0.portType.rawValue }
     }
 
     private func audioSessionCallbackContext(
@@ -3391,6 +3438,43 @@ final class TalkModeManager: NSObject {
             previousPortTypes: previousPortTypes,
             currentPortTypes: self.currentAudioPortTypes,
             context: self.audioSessionCallbackContext(callbackGeneration: callbackGeneration))
+        guard reasonValue == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue,
+              Self.hasHeadphoneOutput(previousPortTypes ?? []),
+              !Self.hasHeadphoneOutput(self.currentAudioPortTypes),
+              callbackGeneration == nil || callbackGeneration == self.activeTTSGeneration,
+              !self.isPausedForHeadphones,
+              self.isSpeechOutputActive || self.hasActiveAudioCapture || self.durableResponseTask != nil
+        else { return }
+        if self.captureMode == .continuous, self.pendingDurableChat == nil,
+           let context = self.durableCaptureContext
+        {
+            self.headphonePausedCapture = (context, self.lastTranscript)
+        }
+        // Standalone playback/PTT is cancelled without promoting it to continuous microphone capture.
+        self.isPausedForHeadphones = self.isEnabled
+        _ = self.suspendAudioCapture(preserveTranscript: self.isPausedForHeadphones)
+        self.statusText = self.isPausedForHeadphones
+            ? "Headphones disconnected — Talk paused" : "Playback stopped — headphones disconnected"
+    }
+
+    func resumeAfterHeadphonePause() async {
+        guard self.isPausedForHeadphones else { return }
+        guard Self.hasHeadphoneOutput(self.currentAudioPortTypes) else {
+            self.statusText = "Reconnect headphones to resume Talk"
+            return
+        }
+        self.isPausedForHeadphones = false
+        await self.start()
+    }
+
+    private static func hasHeadphoneOutput(_ ports: [String]) -> Bool {
+        let headphonePorts: Set<String> = [
+            AVAudioSession.Port.headphones.rawValue,
+            AVAudioSession.Port.bluetoothHFP.rawValue,
+            AVAudioSession.Port.bluetoothA2DP.rawValue,
+            AVAudioSession.Port.bluetoothLE.rawValue,
+        ]
+        return ports.contains(where: headphonePorts.contains)
     }
 
     private func handleAudioSessionInterruption(
@@ -5111,6 +5195,10 @@ extension TalkModeManager: TalkRealtimeWebRTCSessionDelegate {
 
 #if DEBUG
 extension TalkModeManager {
+    func _test_setRecognitionStartOverride(_ hook: (() throws -> Void)?) {
+        self.recognitionStartOverride = hook
+    }
+
     static func _test_isPCMFormatRejectedByAPI(_ error: Error?) -> Bool {
         TalkTTSFailureClassification.isPCMFormatRejected(error)
     }
@@ -5146,6 +5234,7 @@ extension TalkModeManager {
         let captureID = UUID().uuidString
         self.activePTTCaptureId = captureID
         self.beginTranscriptCapture(context: context)
+        self.headphonePausedCapture = nil
         self.lastTranscript = transcript
         self.lastHeard = Date()
         self.captureMode = .pushToTalk
@@ -5409,6 +5498,10 @@ extension TalkModeManager {
             reasonValue: reasonValue,
             previousPortTypes: previousPortTypes,
             callbackGeneration: callbackGeneration)
+    }
+
+    func _test_setAudioOutputPortTypes(_ ports: [String]) {
+        self.audioOutputPortTypesOverride = ports
     }
 
     func _test_handleAudioSessionInterruption(
