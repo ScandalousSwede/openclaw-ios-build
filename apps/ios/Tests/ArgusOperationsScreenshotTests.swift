@@ -64,6 +64,52 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     }
 
     @MainActor
+    func testCurrentWorkPartialCoverageAtBothTextSizes() async throws {
+        let page = try ArgusOperationsTests.currentWorkFixture { payload in
+            let original = payload["items"] as! [[String: Any]]
+            payload["items"] = [original[1], [
+                "kind": "reconciliation_gap", "responsibility": "engineering_reconciliation",
+                "next_actor": "existing_engineering_owner", "outcome": "unknown_or_changed",
+                "next_action": "Engineering will reconcile the source.", "source": "grant_review",
+                "presentation": ["title": "Grant source unavailable", "provenance": [
+                    "title_basis": "synthetic", "summary_basis": "unavailable", "fallback": true,
+                ]],
+            ]]
+            var coverage = payload["coverage"] as! [String: Any]
+            var sources = coverage["sources"] as! [String: [String: Any]]
+            sources["grant_review"]!["status"] = "unavailable"
+            coverage["sources"] = sources
+            coverage["status"] = "partial"
+            payload["coverage"] = coverage
+        }
+        let store = ArgusCurrentWorkStore()
+        store.selectGateway("synthetic-current-work")
+        await store.refresh(gatewayID: "synthetic-current-work") { page }
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusCurrentWorkContent(store: store, client: nil)
+            }
+            .padding(.vertical)
+            .background { CommandControlBackground() }
+            .tint(OpenClawBrand.accent)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Some current-work sources are unavailable", "Missing state remains unknown",
+                "Grant review: unavailable", "Recorded document decisions", "checked within this limited read",
+                "Engineering follow-through", "Document acceptance recorded", "Source reconciliation",
+            ], forbiddenText: ["Recorded choices for you", "All work complete", "synthetic-operation"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-current-work-partial-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testExactDecisionReceiptAtBothTextSizes() throws {
         for status in ["accepted_exact_artifact", "unavailable"] {
             let (item, work) = try ArgusWorkContractTests.fixture(

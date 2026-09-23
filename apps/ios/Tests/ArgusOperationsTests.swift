@@ -40,7 +40,10 @@ struct ArgusOperationsTests {
                 "status": "bounded", "scope": "current_grant_review_and_recorded_exact_artifact_acceptances",
                 "observed_at": "2026-09-22T18:16:00Z", "programme_count": NSNull(),
                 "programme_complete": false, "returned": 2, "has_more": false,
-                "sources": ["grant_review": ["status": "bounded", "scope": "current_grant_review"]],
+                "sources": [
+                    "grant_review": ["status": "bounded", "scope": "current_grant_review"],
+                    "recorded_acceptances": ["status": "bounded", "scope": "recorded_exact_artifact_acceptance_receipts"],
+                ],
             ],
             "effects": ["read_only": true, "can_submit": false, "can_approve": false, "can_dispatch": false],
         ]
@@ -165,6 +168,92 @@ struct ArgusOperationsTests {
             return page
         }
         #expect(store.page == nil && store.unavailable)
+    }
+
+    @Test func currentWorkPartialCoverageKeepsTheAvailableWorkAndExposesUnknownSourceState() async throws {
+        for missing in ["grant_review", "recorded_acceptances"] {
+            let page = try Self.currentWorkFixture { payload in
+                let items = payload["items"] as! [[String: Any]]
+                payload["items"] = [items[missing == "grant_review" ? 1 : 0]]
+                var coverage = payload["coverage"] as! [String: Any]
+                var sources = coverage["sources"] as! [String: [String: Any]]
+                sources[missing]!["status"] = "unavailable"
+                coverage["sources"] = sources
+                coverage["status"] = "partial"
+                coverage["returned"] = 1
+                payload["coverage"] = coverage
+            }
+            let store = ArgusCurrentWorkStore()
+            store.selectGateway("synthetic-owner")
+            await store.refresh(gatewayID: "synthetic-owner") { page }
+            #expect(store.page?.items.count == 1 && !store.unavailable)
+            #expect(page.coverage.hasUnavailableSources)
+            #expect(page.coverage.sourceStatus.contains { $0.contains("unavailable; state unknown") })
+            #expect(page.coverage.sourceStatus.contains { $0.contains("checked within this limited read") })
+        }
+    }
+
+    @Test func currentWorkAllUnavailableKeepsUnknownCoverage() throws {
+        let page = try Self.currentWorkFixture { payload in
+            payload["items"] = [[String: Any]]()
+            var coverage = payload["coverage"] as! [String: Any]
+            var sources = coverage["sources"] as! [String: [String: Any]]
+            for name in sources.keys { sources[name]!["status"] = "unavailable" }
+            coverage["sources"] = sources
+            coverage["status"] = "unavailable"
+            coverage["returned"] = 0
+            payload["coverage"] = coverage
+        }
+        try page.validate()
+        #expect(page.coverage.hasUnavailableSources)
+        #expect(page.coverage.sourceStatus.allSatisfy { $0.contains("state unknown") })
+    }
+
+    @Test func currentWorkRejectsContradictoryCoverageWithoutDiscardingThePriorPage() async throws {
+        let store = ArgusCurrentWorkStore()
+        store.selectGateway("synthetic-owner")
+        let valid = try Self.currentWorkFixture()
+        await store.refresh(gatewayID: "synthetic-owner") { valid }
+        for defect in ["missing-source", "wrong-scope", "wrong-status", "overall-status", "unavailable-row"] {
+            let page = try Self.currentWorkFixture { payload in
+                var coverage = payload["coverage"] as! [String: Any]
+                var sources = coverage["sources"] as! [String: [String: Any]]
+                switch defect {
+                case "missing-source": sources.removeValue(forKey: "recorded_acceptances")
+                case "wrong-scope": sources["recorded_acceptances"]!["scope"] = "current_grant_review"
+                case "wrong-status": sources["recorded_acceptances"]!["status"] = "failed"
+                case "overall-status": coverage["status"] = "partial"
+                default:
+                    sources["recorded_acceptances"]!["status"] = "unavailable"
+                    coverage["status"] = "partial"
+                }
+                coverage["sources"] = sources
+                payload["coverage"] = coverage
+            }
+            await store.refresh(gatewayID: "synthetic-owner") { page }
+            #expect(store.unavailable && store.page?.items.count == 2)
+            #expect(store.page?.coverage.status == "bounded")
+        }
+    }
+
+    @Test func currentWorkKeepsGrantDraftOwnerAndRejectsChangedFixedActor() throws {
+        let page = try Self.currentWorkFixture { payload in
+            var items = payload["items"] as! [[String: Any]]
+            items[0]["kind"] = "grant_follow_through"
+            items[0]["responsibility"] = "agent_action"
+            items[0]["next_actor"] = "grant-draft-owner"
+            items[0]["question"] = nil
+            items[0]["outcome"] = "revision_requested_follow_through"
+            payload["items"] = items
+        }
+        try page.validate()
+        #expect(page.items[0].actorLabel == "Grant draft owner")
+        let malformed = try Self.currentWorkFixture { payload in
+            var items = payload["items"] as! [[String: Any]]
+            items[1]["next_actor"] = "Synthetic owner"
+            payload["items"] = items
+        }
+        #expect(throws: ArgusOperationsError.self) { try malformed.validate() }
     }
 
     @Test func emptyCurrentWorkKeepsBoundedCoverageAndUnknownProgrammeCount() async throws {

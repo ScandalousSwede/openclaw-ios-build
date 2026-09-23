@@ -24,6 +24,18 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
         let returned: Int
         let hasMore: Bool
         let sources: [String: Source]
+
+        var hasUnavailableSources: Bool {
+            self.sources.values.contains { $0.status == "unavailable" }
+        }
+
+        var sourceStatus: [String] {
+            [("grant_review", "Grant review"), ("recorded_acceptances", "Recorded document decisions")].map { name, label in
+                let state = self.sources[name]?.status == "bounded"
+                    ? "checked within this limited read." : "unavailable; state unknown."
+                return "\(label): \(state)"
+            }
+        }
     }
 
     struct Item: Decodable, Sendable {
@@ -67,7 +79,11 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
         }
 
         var actorLabel: String {
-            self.nextActor == "existing_engineering_owner" ? "Engineering" : self.nextActor
+            switch self.nextActor {
+            case "existing_engineering_owner": "Engineering"
+            case "grant-draft-owner": "Grant draft owner"
+            default: self.nextActor
+            }
         }
 
         var outcomeLabel: String {
@@ -114,6 +130,7 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
                 }
             case "accepted_work":
                 guard self.responsibility == "agent_action", self.outcome == "exact_artifact_accepted",
+                      self.nextActor == "existing_engineering_owner",
                       self.question == nil, self.reviewURL != nil,
                       self.activationAuthorized == false, self.programmeComplete == false,
                       self.reviewId == nil, self.applicationId == nil, self.revisionId == nil,
@@ -126,6 +143,7 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
                 // identifying the broken join. They are context, not acceptance;
                 // outcome/responsibility stay unknown/Engineering reconciliation.
                 guard self.responsibility == "engineering_reconciliation", self.question == nil,
+                      self.nextActor == "existing_engineering_owner",
                       self.outcome == "unknown_or_changed", self.reviewUrl == nil,
                       self.reviewId == nil, self.applicationId == nil, self.revisionId == nil,
                       self.mapSha == nil, self.payloadSha == nil, self.eventId == nil,
@@ -149,6 +167,27 @@ struct ArgusCurrentWorkPage: Decodable, Sendable {
               self.effects.readOnly, !self.effects.canSubmit, !self.effects.canApprove, !self.effects.canDispatch
         else { throw ArgusOperationsError.invalidResponse }
         try self.items.forEach { try $0.validate() }
+        let expectedScopes = [
+            "grant_review": "current_grant_review",
+            "recorded_acceptances": "recorded_exact_artifact_acceptance_receipts",
+        ]
+        guard Set(self.coverage.sources.keys) == Set(expectedScopes.keys)
+        else { throw ArgusOperationsError.invalidResponse }
+        for (name, scope) in expectedScopes {
+            guard let source = self.coverage.sources[name], source.scope == scope,
+                  ["bounded", "unavailable"].contains(source.status)
+            else { throw ArgusOperationsError.invalidResponse }
+            if source.status == "unavailable" {
+                let kinds = name == "grant_review" ? ["owner_decision", "grant_follow_through"] : ["accepted_work"]
+                guard !self.items.contains(where: { kinds.contains($0.kind) })
+                else { throw ArgusOperationsError.invalidResponse }
+            }
+        }
+        // The producer intentionally retains valid work and reconciliation gaps
+        // when a sibling source is unavailable. Partial coverage is not a failed page.
+        let unavailable = self.coverage.sources.values.filter { $0.status == "unavailable" }.count
+        let expectedStatus = unavailable == 0 ? "bounded" : unavailable == 1 ? "partial" : "unavailable"
+        guard self.coverage.status == expectedStatus else { throw ArgusOperationsError.invalidResponse }
     }
 }
 
@@ -216,13 +255,20 @@ struct ArgusCurrentWorkContent: View {
                 if let page = self.store.page {
                     Text("Checked: \(ArgusOperation.observationLabel(page.coverage.observedAt))")
                         .font(.caption).foregroundStyle(.secondary)
+                    if page.coverage.hasUnavailableSources {
+                        Label("Some current-work sources are unavailable. Missing state remains unknown.", systemImage: "exclamationmark.triangle")
+                            .font(.subheadline)
+                    }
+                    ForEach(page.coverage.sourceStatus, id: \.self) { status in
+                        Text(status).font(.caption).foregroundStyle(.secondary)
+                    }
                     self.group(page, responsibility: "owner_choice", heading: "Recorded choices for you")
                     self.group(page, responsibility: "agent_action", heading: "Engineering follow-through")
                     self.group(page, responsibility: "engineering_reconciliation", heading: "Source reconciliation")
                     if page.items.isEmpty {
                         Text("No decisions or follow-through were returned by these sources.")
                     }
-                    Text("Covers grant review and recorded document decisions. Other work may not be included.")
+                    Text("Other work may not be included; this is not a programme-wide count.")
                         .font(.caption).foregroundStyle(.secondary)
                     if page.coverage.hasMore {
                         Text("More entries exist beyond this returned list.").font(.caption)
