@@ -59,6 +59,8 @@ struct ArgusWorkContract: Decodable, Sendable {
     let coverage: Coverage
     let ownerAccepted: Bool
     let isStateTransition: Bool
+    // Older qualified servers omit this additive, exact-document decision join.
+    var decisionReceiptProjection: ArgusDecisionReceipt? = nil
 
     func validate(for item: ArgusOperation) throws {
         let hashes = Set(item.artifacts.map(\.sha256))
@@ -92,6 +94,8 @@ struct ArgusWorkContract: Decodable, Sendable {
                   hashes.contains($0.artifactSha256) && ["PASS", "FAIL"].contains($0.outcome)
                       && !$0.semanticCorrectnessEstablished
               }) else { throw ArgusOperationsError.invalidResponse }
+        try self.decisionReceiptProjection?.validate(
+            operationID: item.id, eventID: item.eventId, artifacts: item.artifacts.map(\.sha256))
     }
 }
 
@@ -101,6 +105,9 @@ struct ArgusWorkSummary: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let receipt = self.work.decisionReceiptProjection {
+                ArgusDecisionReceiptSummary(receipt: receipt)
+            }
             if !self.work.pendingOwnerFeedback.isEmpty {
                 Text("Recorded owner requests").font(.headline).accessibilityAddTraits(.isHeader)
                 ForEach(self.work.pendingOwnerFeedback, id: \.eventId) { request in
@@ -136,7 +143,7 @@ struct ArgusWorkSummary: View {
                             "\(assessment.verificationKind == "structural_artifact_contract" ? "Independent structural contract" : "Bound verifier assessment"): \(assessment.outcome)")
                     }
                     Text(self.work.independentVerification.coversAllCurrentArtifacts
-                        ? "Recorded assessments cover all current artifacts. Semantic correctness and owner acceptance remain unestablished."
+                        ? "Recorded assessments cover all current artifacts. These checks alone do not establish semantic correctness or owner acceptance."
                         : "Complete independent coverage of current artifacts is not established.")
                     if self.work.pendingOwnerFeedback.isEmpty {
                         Text("No owner request recorded in this returned scope. Other scopes may contain requests.")

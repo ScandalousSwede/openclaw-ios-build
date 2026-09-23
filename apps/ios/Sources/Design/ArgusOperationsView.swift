@@ -400,7 +400,7 @@ struct ArgusOperationEvidenceContent: View {
             Text("Recorded state: \(item.state.replacingOccurrences(of: "_", with: " "))")
             Text("Report dated: \(item.occurredAt)")
             Text("Observed: \(item.observedAt)")
-            Text("Owner acceptance is not established by this evidence.")
+            Text("The original event alone does not establish owner acceptance.")
         }
         .font(.subheadline)
         .textSelection(.enabled)

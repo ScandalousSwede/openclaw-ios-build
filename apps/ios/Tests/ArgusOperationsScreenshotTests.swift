@@ -9,6 +9,43 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testExactDecisionReceiptAtBothTextSizes() throws {
+        for status in ["accepted_exact_artifact", "unavailable"] {
+            let (item, work) = try ArgusWorkContractTests.fixture(
+                decision: ArgusWorkContractTests.decisionPayload(status: status))
+            let detail = ArgusOperationDetail(
+                item: item, requested: item, timeline: [],
+                coverage: .init(complete: true, hasMore: false, observedAt: item.observedAt),
+                ownerAccepted: false, workContract: work)
+            try detail.validate(for: item)
+            for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+                let root = VStack(alignment: .leading, spacing: 16) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    ArgusOperationEvidenceContent(
+                        detail: detail, artifactsAvailable: true, openArtifact: { _, _ in })
+                }
+                .padding(20)
+                .background { CommandControlBackground() }
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, .dark)
+                .frame(width: 390)
+                .fixedSize(horizontal: false, vertical: true)
+                let required = status == "accepted_exact_artifact"
+                    ? ["Document acceptance recorded", "Next: Engineering",
+                       "Engineering will reconcile the remaining operational work", "Read recorded decision"]
+                    : ["Engineering reconciliation needed", "This is not a new request for your approval"]
+                let image = try self.hostedImage(
+                    root, requiredText: required + ["Decision checked", "Decision details"],
+                    forbiddenText: status == "unavailable" ? ["Document acceptance recorded", "Read recorded decision"] : [])
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-decision-receipt-synthetic-\(status)-\(name)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
+    @MainActor
     func testEmptySessionStateWrapsAtBothSizes() throws {
         for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
             let root = VStack(alignment: .leading, spacing: 16) {
