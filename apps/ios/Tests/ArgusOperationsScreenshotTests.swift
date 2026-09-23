@@ -9,6 +9,35 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testTaskActivitySelectionAtBothTextSizes() throws {
+        let task = ArgusTaskActivityList.Item(
+            taskId: "d6b7479f-8a75-4d6b-88d9-377c4bdcc823",
+            title: "Synthetic administrative document review and follow-up",
+            status: .completed, updatedAt: 2000)
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                CommandPanel(padding: 16) { ArgusTaskActivityRow(item: task) }
+            }
+            .padding()
+            .background { CommandControlBackground() }
+            .tint(OpenClawBrand.accent)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Synthetic administrative document review and follow-up",
+                "Execution ended", "outcome not checked", "Open task context",
+            ], forbiddenText: [task.taskId, "Done", "Delivered"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-task-activity-row-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testCurrentWorkAtBothTextSizesAndRetainedState() async throws {
         let store = ArgusCurrentWorkStore()
         let page = try ArgusOperationsTests.currentWorkFixture { payload in

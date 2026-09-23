@@ -732,6 +732,7 @@ struct OpenClawApp: App {
 extension OpenClawApp {
     @MainActor
     private func handleOpenURL(_ url: URL) async {
+        if self.appModel.handleTaskActivityURL(url) { return }
         guard let route = DeepLinkParser.parse(url) else { return }
 
         switch route {

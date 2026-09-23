@@ -391,6 +391,15 @@ final class NodeAppModel {
     }
     private(set) var lastArgusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest?
     var argusEvidenceNotificationPresentationID: Int = 0
+    var argusTaskActivityRequest: ArgusTaskActivityRequest? {
+        didSet {
+            if let request = self.argusTaskActivityRequest {
+                self.lastArgusTaskActivityRequest = request
+            }
+        }
+    }
+    private(set) var lastArgusTaskActivityRequest: ArgusTaskActivityRequest?
+    var argusTaskActivityPresentationID: Int = 0
     var gatewaySetupRequestID: Int = 0
     private(set) var pendingAgentDeepLinkPrompt: AgentDeepLinkPrompt?
     private var pendingGatewaySetupLink: GatewayConnectDeepLink?
@@ -6607,6 +6616,7 @@ extension NodeAppModel {
     }
 
     func handleDeepLink(url: URL) async {
+        if self.handleTaskActivityURL(url) { return }
         guard let route = DeepLinkParser.parse(url) else { return }
 
         switch route {

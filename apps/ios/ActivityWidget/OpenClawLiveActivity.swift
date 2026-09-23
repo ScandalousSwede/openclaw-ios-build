@@ -6,16 +6,16 @@ struct OpenClawLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: OpenClawActivityAttributes.self) { context in
             self.lockScreenView(context: context)
+                .widgetURL(context.attributes.taskReference?.url)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
                     self.statusDot(state: context.state)
                 }
                 DynamicIslandExpandedRegion(.center) {
-                    Text(context.state.statusText)
+                    Text(self.statusText(context))
                         .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .lineLimit(2)
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     self.trailingView(state: context.state)
@@ -27,6 +27,7 @@ struct OpenClawLiveActivity: Widget {
             } minimal: {
                 self.statusDot(state: context.state)
             }
+            .widgetURL(context.attributes.taskReference?.url)
         }
     }
 
@@ -36,14 +37,14 @@ struct OpenClawLiveActivity: Widget {
                 .frame(width: 30, height: 30)
                 .background(.thinMaterial, in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text("OpenClaw")
+                // Session and task activities belong to the same Argus client.
+                Text("Argus")
                     .font(.subheadline.bold())
                     .lineLimit(1)
-                Text(context.state.statusText)
+                Text(self.statusText(context))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             self.trailingView(state: context.state)
@@ -72,7 +73,10 @@ struct OpenClawLiveActivity: Widget {
 
     @ViewBuilder
     private func statusIcon(state: OpenClawActivityAttributes.ContentState) -> some View {
-        if state.isConnecting {
+        if let task = state.task {
+            Image(systemName: self.taskIcon(task))
+                .foregroundStyle(self.dotColor(state: state))
+        } else if state.isConnecting {
             Image(systemName: "arrow.triangle.2.circlepath")
                 .foregroundStyle(.cyan)
         } else if state.isDisconnected {
@@ -88,9 +92,39 @@ struct OpenClawLiveActivity: Widget {
     }
 
     private func dotColor(state: OpenClawActivityAttributes.ContentState) -> Color {
+        if let task = state.task {
+            if task.trackingEnded { return .secondary }
+            switch task.phase {
+            case .queued, .running: return .cyan
+            case .succeeded: return .green
+            case .blocked: return .orange
+            case .failed, .timedOut, .lost: return .red
+            case .cancelled: return .secondary
+            }
+        }
         if state.isDisconnected { return .red }
         if state.isConnecting { return .cyan }
         if state.isIdle { return .green }
         return .orange
+    }
+
+    private func statusText(_ context: ActivityViewContext<OpenClawActivityAttributes>) -> String {
+        guard let task = context.state.task else { return context.state.statusText }
+        if task.phase.isTerminal { return task.phase.headline }
+        if task.trackingEnded { return "Tracking ended" }
+        if context.isStale { return "Tracking period ended. Open Argus to check." }
+        return task.phase.headline
+    }
+
+    private func taskIcon(_ task: ArgusTaskActivityState) -> String {
+        if task.trackingEnded && !task.phase.isTerminal { return "pause.circle" }
+        switch task.phase {
+        case .queued: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .succeeded: return "checkmark"
+        case .blocked: return "exclamationmark.triangle"
+        case .failed, .timedOut, .lost: return "exclamationmark.circle"
+        case .cancelled: return "xmark.circle"
+        }
     }
 }

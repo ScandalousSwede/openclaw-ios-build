@@ -46,6 +46,12 @@ struct CommandCenterTab: View {
                             }
                             .padding(.horizontal, OpenClawProMetric.pagePadding)
                         }
+                        if self.appModel.lastArgusTaskActivityRequest != nil {
+                            CommandPanel(padding: 12) {
+                                ArgusTaskActivityResumeButton { self.appModel.reopenLastTaskActivity() }
+                            }
+                            .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        }
                         self.gatewayCard
                         self.defaultChatSessionSection
                         self.recentSessions

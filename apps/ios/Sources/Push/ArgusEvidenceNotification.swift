@@ -86,12 +86,14 @@ extension NodeAppModel {
     func reopenLastArgusEvidenceNotification() {
         guard let request = self.lastArgusEvidenceNotificationRequest else { return }
         // Keep the original route binding; reopening must not rebind old evidence to a new gateway.
+        self.argusTaskActivityRequest = nil
         self.argusEvidenceNotificationRequest = request
         self.argusEvidenceNotificationPresentationID &+= 1
     }
 
     func openArgusEvidenceNotification(_ reference: ArgusEvidenceNotificationReference) {
         // One pending destination; duplicate taps never enqueue work or acknowledge delivery.
+        self.argusTaskActivityRequest = nil
         self.argusEvidenceNotificationRequest = .init(
             reference: reference, gatewayOwnerID: self.chatOutboxGatewayOwnerID)
         self.argusEvidenceNotificationPresentationID &+= 1

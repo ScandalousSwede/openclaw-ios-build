@@ -1,6 +1,7 @@
 @preconcurrency import ActivityKit
 import Foundation
 import OpenClawKit
+import Observation
 import os
 
 enum LiveActivityFeatureFlag {
@@ -37,6 +38,7 @@ protocol LiveActivityHandle: AnyObject {
     var id: String { get }
     var agentName: String { get }
     var sessionKey: String { get }
+    var taskReference: ArgusTaskActivityReference? { get }
     var state: OpenClawActivityAttributes.ContentState { get }
     var staleDate: Date? { get }
     var isActive: Bool { get }
@@ -66,6 +68,7 @@ private final class ActivityKitLiveActivityHandle: LiveActivityHandle {
     var id: String { self.activity.id }
     var agentName: String { self.activity.attributes.agentName }
     var sessionKey: String { self.activity.attributes.sessionKey }
+    var taskReference: ArgusTaskActivityReference? { self.activity.attributes.taskReference }
     var state: OpenClawActivityAttributes.ContentState { self.activity.content.state }
     var staleDate: Date? { self.activity.content.staleDate }
     var isActive: Bool { self.activity.activityState == .active }
@@ -105,6 +108,7 @@ private final class ActivityKitLiveActivityDriver: LiveActivityDriving {
 /// Owns one serialized ActivityKit worker. Updates coalesce to the latest
 /// presentation, while an end remains a barrier before any replacement starts.
 @MainActor
+@Observable
 final class LiveActivityManager {
     static let shared = LiveActivityManager()
 
@@ -113,6 +117,8 @@ final class LiveActivityManager {
         let sessionKey: String
         let state: OpenClawActivityAttributes.ContentState
         let staleDate: Date?
+        var taskReference: ArgusTaskActivityReference? = nil
+        var startsTask = false
     }
 
     private struct CurrentActivity {
@@ -128,10 +134,14 @@ final class LiveActivityManager {
 
     private var current: CurrentActivity?
     private var pendingPresentation: Presentation?
+    private var inFlightPresentation: Presentation?
     private var pendingEndReason: String?
     private var orphanedActivities: [any LiveActivityHandle] = []
     private var worker: Task<Void, Never>?
+    private var expiryTask: Task<Void, Never>?
+    private var taskObservation: (reference: ArgusTaskActivityReference, snapshot: ArgusTaskActivitySnapshot)?
     private(set) var activityGeneration: UInt64 = 0
+    private(set) var failedTaskStart: ArgusTaskActivityReference?
 
     private convenience init() {
         self.init(
@@ -155,6 +165,7 @@ final class LiveActivityManager {
     }
 
     func showConnecting(statusText: String = "Connecting...", agentName: String, sessionKey: String) {
+        guard !self.hasTaskPresentation else { return }
         guard self.featureEnabled() else {
             self.enqueueEnd(reason: "feature_disabled")
             return
@@ -168,6 +179,7 @@ final class LiveActivityManager {
     }
 
     func showAttention(statusText: String, agentName: String, sessionKey: String) {
+        guard !self.hasTaskPresentation else { return }
         guard self.featureEnabled() else {
             self.enqueueEnd(reason: "feature_disabled")
             return
@@ -181,6 +193,7 @@ final class LiveActivityManager {
     }
 
     func handleConnecting(statusText: String = "Connecting...") {
+        guard !self.hasTaskPresentation else { return }
         guard self.featureEnabled(), let owner = self.presentationOwner else {
             if !self.featureEnabled() { self.enqueueEnd(reason: "feature_disabled") }
             return
@@ -193,15 +206,90 @@ final class LiveActivityManager {
     }
 
     func handleReconnect() {
+        guard !self.hasTaskPresentation else { return }
         self.enqueueEnd(reason: "connected")
     }
 
     func handleDisconnect() {
+        guard !self.hasTaskPresentation else { return }
         self.enqueueEnd(reason: "disconnected")
     }
 
     func endActivity(reason: String) {
+        if self.hasTaskPresentation,
+           ["background_idle", "operator_disconnected", "gateway_loop_stopped"].contains(reason) { return }
         self.enqueueEnd(reason: reason)
+    }
+
+    func isTracking(_ reference: ArgusTaskActivityReference) -> Bool {
+        self.featureEnabled() && self.current?.handle.isActive == true
+            && self.current?.handle.taskReference == reference
+            && self.current?.handle.state.task?.trackingEnded == false
+    }
+
+    func trackTask(_ snapshot: ArgusTaskActivitySnapshot, reference: ArgusTaskActivityReference) throws {
+        guard self.featureEnabled(), self.driver.areActivitiesEnabled,
+              snapshot.canStartActivity(at: .now) else { throw ArgusOperationsError.unavailable }
+        try self.admitTask(snapshot, reference: reference)
+        self.failedTaskStart = nil
+        self.enqueueTask(snapshot, reference: reference, startsTask: true)
+    }
+
+    func refreshTask(_ snapshot: ArgusTaskActivitySnapshot, reference: ArgusTaskActivityReference) throws {
+        guard self.pendingEndReason == nil else { return }
+        if let pending = self.pendingPresentation?.taskReference, pending != reference { return }
+        if self.pendingPresentation == nil,
+           let inFlight = self.inFlightPresentation?.taskReference, inFlight != reference { return }
+        guard self.current?.handle.taskReference == reference || self.pendingPresentation?.taskReference == reference
+            || self.inFlightPresentation?.taskReference == reference
+        else { return }
+        try self.admitTask(snapshot, reference: reference)
+        self.enqueueTask(snapshot, reference: reference, startsTask: false)
+    }
+
+    func stopTracking(_ reference: ArgusTaskActivityReference) {
+        guard self.current?.handle.taskReference == reference || self.pendingPresentation?.taskReference == reference
+            || self.inFlightPresentation?.taskReference == reference
+        else { return }
+        self.enqueueEnd(reason: "tracking_stopped")
+    }
+
+    private var hasTaskPresentation: Bool {
+        self.pendingPresentation?.taskReference != nil || self.current?.handle.taskReference != nil
+            || self.inFlightPresentation?.taskReference != nil
+    }
+
+    private func admitTask(_ snapshot: ArgusTaskActivitySnapshot, reference: ArgusTaskActivityReference) throws {
+        try snapshot.validate(taskID: reference.taskID, requestID: reference.requestID)
+        if let handle = self.current?.handle, handle.taskReference == reference, let old = handle.state.task {
+            guard snapshot.lifecycleRevision >= old.lifecycleRevision,
+                  snapshot.activityExpiresAt == old.expiresAtMs,
+                  snapshot.lifecycleRevision != old.lifecycleRevision || snapshot.phase == old.phase
+            else { throw ArgusOperationsError.invalidResponse }
+        }
+        if let previous = self.taskObservation, previous.reference == reference {
+            try snapshot.validateSuccessor(of: previous.snapshot)
+        }
+        self.taskObservation = (reference, snapshot)
+    }
+
+    private func enqueueTask(
+        _ snapshot: ArgusTaskActivitySnapshot, reference: ArgusTaskActivityReference, startsTask: Bool)
+    {
+        let startedAt: Date
+        if let handle = self.current?.handle, handle.taskReference == reference { startedAt = handle.state.startedAt }
+        else { startedAt = .now }
+        // Refreshes may arrive before the worker consumes an explicit start or
+        // while replacement awaits the previous activity's end barrier.
+        // Coalescing state must not discard the user's start intent.
+        let startsTask = startsTask || (self.pendingPresentation?.taskReference == reference &&
+            self.pendingPresentation?.startsTask == true) ||
+            (self.inFlightPresentation?.taskReference == reference && self.inFlightPresentation?.startsTask == true)
+        self.enqueuePresentation(Presentation(
+            agentName: "Argus", sessionKey: "task",
+            state: .init(statusText: snapshot.phase.headline, isIdle: false, isDisconnected: false,
+                         isConnecting: false, startedAt: startedAt, task: snapshot.activityState),
+            staleDate: snapshot.expiresAt, taskReference: reference, startsTask: startsTask))
     }
 
     func waitUntilIdleForTesting() async {
@@ -258,6 +346,8 @@ final class LiveActivityManager {
         }
         self.pendingEndReason = reason
         self.pendingPresentation = nil
+        // Retire explicit start intent immediately; a later read cannot revive it.
+        self.inFlightPresentation = nil
         self.recordDiagnostic(state: "end_queued")
         self.startWorkerIfNeeded()
     }
@@ -275,7 +365,7 @@ final class LiveActivityManager {
         while !Task.isCancelled {
             if !self.orphanedActivities.isEmpty {
                 let orphan = self.orphanedActivities.removeFirst()
-                await orphan.end(state: self.disconnectedState(startedAt: orphan.state.startedAt))
+                await orphan.end(state: self.endedState(orphan.state))
                 continue
             }
             if let reason = self.pendingEndReason {
@@ -285,7 +375,9 @@ final class LiveActivityManager {
             }
             guard let presentation = self.pendingPresentation else { break }
             self.pendingPresentation = nil
+            self.inFlightPresentation = presentation
             await self.apply(presentation)
+            self.inFlightPresentation = nil
         }
 
         self.worker = nil
@@ -298,13 +390,23 @@ final class LiveActivityManager {
             return
         }
 
+        if let task = presentation.state.task,
+           task.phase.isTerminal || task.expiresAt <= .now {
+            if self.current?.handle.taskReference == presentation.taskReference {
+                await self.endCurrent(reason: "task_tracking_ended", finalState: presentation.state)
+            }
+            return
+        }
+
         if let current = self.current {
             let sameOwner = current.handle.agentName == presentation.agentName &&
-                current.handle.sessionKey == presentation.sessionKey
+                current.handle.sessionKey == presentation.sessionKey &&
+                current.handle.taskReference == presentation.taskReference
             if !current.handle.isActive || !sameOwner {
                 await self.endCurrent(reason: sameOwner ? "inactive" : "context_changed")
                 // A newer presentation received while end awaited supersedes this one.
                 guard self.pendingPresentation == nil, self.pendingEndReason == nil else { return }
+                if presentation.taskReference != nil && !presentation.startsTask { return }
             } else {
                 guard current.handle.state != presentation.state ||
                     current.handle.staleDate != presentation.staleDate
@@ -333,6 +435,7 @@ final class LiveActivityManager {
         }
 
         guard self.pendingPresentation == nil, self.pendingEndReason == nil else { return }
+        if presentation.taskReference != nil && !presentation.startsTask { return }
         guard self.driver.areActivitiesEnabled else {
             self.logger.info("Live Activities disabled by system; skipping start")
             return
@@ -342,17 +445,19 @@ final class LiveActivityManager {
             let handle = try self.driver.request(
                 attributes: OpenClawActivityAttributes(
                     agentName: presentation.agentName,
-                    sessionKey: presentation.sessionKey),
+                    sessionKey: presentation.sessionKey, taskReference: presentation.taskReference),
                 state: presentation.state,
                 staleDate: presentation.staleDate)
             self.activityGeneration &+= 1
             self.current = CurrentActivity(handle: handle, generation: self.activityGeneration)
+            self.scheduleTaskExpiry(for: handle)
             self.logger.info(
                 "started live activity id=\(handle.id, privacy: .public) generation=\(self.activityGeneration)")
             self.recordDiagnostic(
                 state: "started",
                 sessionIdentifier: presentation.sessionKey)
         } catch {
+            self.failedTaskStart = presentation.taskReference
             self.logger.error("failed to start live activity: \(error.localizedDescription, privacy: .public)")
             self.recordDiagnostic(
                 state: "start_failed",
@@ -360,18 +465,49 @@ final class LiveActivityManager {
         }
     }
 
-    private func endCurrent(reason: String, generationAlreadyInvalidated: Bool = false) async {
+    private func endCurrent(
+        reason: String, generationAlreadyInvalidated: Bool = false,
+        finalState: OpenClawActivityAttributes.ContentState? = nil) async
+    {
         guard let current = self.current else { return }
         self.current = nil
+        self.expiryTask?.cancel()
+        self.expiryTask = nil
         if !generationAlreadyInvalidated {
             self.activityGeneration &+= 1
         }
         self.logger.info(
             "ending live activity generation=\(self.activityGeneration) reason=\(reason, privacy: .public)")
-        await current.handle.end(state: self.disconnectedState(startedAt: current.handle.state.startedAt))
+        let state = self.endedState(finalState ?? current.handle.state)
+        await current.handle.end(state: state)
         self.recordDiagnostic(
             state: "ended",
             sessionIdentifier: current.handle.sessionKey)
+    }
+
+    private func endedState(
+        _ original: OpenClawActivityAttributes.ContentState) -> OpenClawActivityAttributes.ContentState
+    {
+        var state = original
+        if state.task != nil {
+            state.task?.trackingEnded = true
+            if state.task?.phase.isTerminal != true { state.statusText = "Tracking ended" }
+        } else {
+            state = self.disconnectedState(startedAt: state.startedAt)
+        }
+        return state
+    }
+
+    private func scheduleTaskExpiry(for handle: any LiveActivityHandle) {
+        self.expiryTask?.cancel()
+        guard let task = handle.state.task else { return }
+        let id = handle.id
+        self.expiryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, task.expiresAt.timeIntervalSinceNow))) }
+            catch { return }
+            guard let self, self.current?.handle.id == id else { return }
+            self.enqueueEnd(reason: "activity_lease_expired")
+        }
     }
 
     private func recordDiagnostic(
@@ -398,6 +534,10 @@ final class LiveActivityManager {
         let now = Date()
         let candidates = activities.filter { activity in
             let state = activity.state
+            if activity.taskReference != nil {
+                guard let task = state.task else { return false }
+                return activity.isActive && !task.trackingEnded && !task.phase.isTerminal && task.expiresAt > now
+            }
             guard activity.isActive, !state.isIdle, !state.isDisconnected else { return false }
             return now.timeIntervalSince(state.startedAt) < self.hydrationStaleSeconds
         }
@@ -407,6 +547,7 @@ final class LiveActivityManager {
         if let keeper {
             self.activityGeneration &+= 1
             self.current = CurrentActivity(handle: keeper, generation: self.activityGeneration)
+            self.scheduleTaskExpiry(for: keeper)
             self.orphanedActivities = activities.filter { $0.id != keeper.id }
         } else {
             self.orphanedActivities = activities

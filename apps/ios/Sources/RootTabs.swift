@@ -177,12 +177,19 @@ struct RootTabs: View {
                             if self.argusWorkStore.project == .argus {
                                 ArgusCurrentWorkContent(store: self.argusCurrentWorkStore, client: self.argusWorkClient)
                             }
+                            ArgusTaskActivitySelection()
                             ArgusOperationsContent(store: self.argusWorkStore, client: self.argusWorkClient)
                         }
                         .padding(.vertical)
                     }
                 }
                 .navigationTitle("Work & results")
+                .navigationDestination(item: Binding(
+                    get: { self.appModel.argusTaskActivityRequest },
+                    set: { self.appModel.argusTaskActivityRequest = $0 }))
+                { request in
+                    ArgusTaskActivityContextView(request: request).id(request.id)
+                }
             }
             .tabItem { Label("Work", systemImage: "doc.text") }
             .tag(AppTab.work)
@@ -384,6 +391,9 @@ struct RootTabs: View {
             }
             .onChange(of: self.appModel.openChatRequestID) { _, _ in
                 self.selectedTab = .chat
+            }
+            .onChange(of: self.appModel.argusTaskActivityPresentationID, initial: true) { _, _ in
+                if self.appModel.argusTaskActivityRequest != nil { self.selectedTab = .work }
             }
             .onChange(of: self.appModel.gatewaySetupRequestID) { _, _ in
                 self.maybeOpenSettingsForGatewaySetup()
