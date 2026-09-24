@@ -120,6 +120,11 @@ struct ChatReplyNotificationView: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button("Open conversation") {
+                        // Global session keys resolve through the selected agent. Match the
+                        // authenticated reply pointer before opening that conversation.
+                        if SessionKey.agentId(from: self.request.reference.sessionKey) == nil {
+                            self.appModel.setSelectedAgentId(self.request.reference.agentId)
+                        }
                         self.appModel.openChat(sessionKey: self.request.reference.sessionKey)
                     }
                 } else if let error {
