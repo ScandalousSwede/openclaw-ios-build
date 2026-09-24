@@ -16,9 +16,9 @@ struct ChatForegroundLeaseState {
         return params
     }
 
-    mutating func accept(_ reply: ChatForegroundLeaseReply, nowMs: Int) throws {
+    mutating func accept(_ reply: ChatForegroundLeaseReply) throws {
         guard reply.state == "active", let leaseID = reply.leaseId, !leaseID.isEmpty,
-              let expiresAtMs = reply.expiresAtMs, expiresAtMs > nowMs + 5_000,
+              let expiresAtMs = reply.expiresAtMs, expiresAtMs > 0,
               let ttlMs = reply.ttlMs, ttlMs >= 5_000 else {
             throw ArgusOperationsError.invalidResponse
         }
@@ -44,7 +44,7 @@ enum ChatForegroundLease {
             do {
                 let reply = try await pinnedClient.request(
                     "chat.foreground.set", params: state.activeParameters, as: ChatForegroundLeaseReply.self)
-                try state.accept(reply, nowMs: Int(Date().timeIntervalSince1970 * 1000))
+                try state.accept(reply)
             } catch {
                 // An older server or a shared-token/password operator connection cannot
                 // suppress a foreground alert. Do not claim a lease or retry noisily.
