@@ -1159,7 +1159,8 @@ struct OpenClawChatOutboxIntegrationTests {
 
     @Test @MainActor func `composer capacity failure prevents otherwise available enqueue`() async throws {
         let fixture = try await S3TestStoreFixture.make()
-        try await fixture.store.saveVerifiedRouteSnapshot(s3Route())
+        let verifiedRoute = s3Route()
+        try await fixture.store.saveVerifiedRouteSnapshot(verifiedRoute)
         for index in 0..<OpenClawChatOutboxDatabase.maxSavedComposerDrafts {
             let session = "synthetic-filled-\(index)"
             let loaded = try await fixture.store.loadComposerDraft(sessionKey: session)
@@ -1180,7 +1181,7 @@ struct OpenClawChatOutboxIntegrationTests {
         // Queue storage itself is healthy and has capacity; the failed prerequisite
         // is specifically composer persistence, not a mocked global database failure.
         let control = try await fixture.store.persistBeforeDraftClear(
-            s3Draft(rawCommandID: "synthetic-control", route: s3Route()))
+            s3Draft(rawCommandID: "synthetic-control", route: verifiedRoute))
         #expect(control.rawCommandID == "synthetic-control")
         vm.shutdown(saveComposerDraft: false)
         try await fixture.close()
