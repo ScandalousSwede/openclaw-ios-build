@@ -218,6 +218,10 @@ struct RootTabs: View {
                 catch { return }
             }
         }
+        .task(id: "\(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\(self.appModel.isOperatorGatewayConnected)|\(self.scenePhase)") {
+            guard self.scenePhase == .active, let client = self.argusWorkClient else { return }
+            await ChatForegroundLease.maintain(client: client)
+        }
     }
 
     private var argusWorkClient: ArgusOperationsClient? {
