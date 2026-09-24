@@ -673,7 +673,7 @@ struct ChatViewModelTests {
         try await store.saveComposerDraft(.init(text: "Keep this other chat"), sessionKey: "other", lease: otherLease)
         try await database.close()
         let fixtureWriter = try DatabaseQueue(path: url.path)
-        try fixtureWriter.write { db in
+        try await fixtureWriter.write { db in
             try db.execute(sql: "UPDATE composer_drafts SET payload = ? WHERE session_key = 'main'", arguments: [Data([0xff])])
         }
         let reopened = try OpenClawChatOutboxDatabase(databaseURL: url)
@@ -693,7 +693,7 @@ struct ChatViewModelTests {
             let encoder = PropertyListEncoder()
             encoder.outputFormat = .binary
             let repaired = try encoder.encode(draft)
-            try fixtureWriter.write { db in
+            try await fixtureWriter.write { db in
                 try db.execute(sql: "UPDATE composer_drafts SET payload = ? WHERE session_key = 'main'", arguments: [repaired])
             }
         }
