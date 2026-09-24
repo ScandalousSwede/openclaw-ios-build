@@ -24,17 +24,20 @@ public enum OpenClawChatOutboxOutcome: String, Codable, CaseIterable, Hashable, 
     }
 }
 
-public struct OpenClawChatOutboxAttachment: Hashable, Sendable {
+public struct OpenClawChatOutboxAttachment: Codable, Hashable, Sendable {
     public let type: String
     public let mimeType: String
     public let fileName: String
     public let data: Data
+    public let resultSource: OpenClawResultSourceReference?
 
-    public init(type: String, mimeType: String, fileName: String, data: Data) {
+    public init(type: String, mimeType: String, fileName: String, data: Data,
+                resultSource: OpenClawResultSourceReference? = nil) {
         self.type = type
         self.mimeType = mimeType
         self.fileName = fileName
         self.data = data
+        self.resultSource = resultSource
     }
 }
 
@@ -62,6 +65,32 @@ public struct OpenClawChatOutboxRouteSnapshot: Hashable, Sendable {
     }
 }
 
+/// Unsent composition is separate from queued commands and never authorizes delivery.
+public struct OpenClawChatComposerDraft: Codable, Hashable, Sendable {
+    public let revision: UUID
+    public let text: String
+    public let attachments: [OpenClawChatOutboxAttachment]
+
+    public init(revision: UUID = UUID(), text: String = "", attachments: [OpenClawChatOutboxAttachment] = []) {
+        self.revision = revision
+        self.text = text
+        self.attachments = attachments
+    }
+
+    public var isEmpty: Bool { self.text.isEmpty && self.attachments.isEmpty }
+}
+
+private struct ComposerDraftRecord: Codable, FetchableRecord, PersistableRecord {
+    static let databaseTableName = "composer_drafts"
+    let stableGatewayID: String
+    let sessionKey: String
+    let revision: String
+    let payload: Data
+    enum CodingKeys: String, CodingKey {
+        case stableGatewayID = "stable_gateway_id", sessionKey = "session_key", revision, payload
+    }
+}
+
 public struct OpenClawChatOutboxDraft: Hashable, Sendable {
     public let rawCommandID: String
     public let sessionKey: String
@@ -70,6 +99,8 @@ public struct OpenClawChatOutboxDraft: Hashable, Sendable {
     public let thinkingLevel: String
     public let route: OpenClawChatOutboxRouteSnapshot
     public let createdAt: Date
+    public let composerRevision: UUID?
+    public let composerLease: UUID?
 
     public init(
         rawCommandID: String,
@@ -78,7 +109,9 @@ public struct OpenClawChatOutboxDraft: Hashable, Sendable {
         attachments: [OpenClawChatOutboxAttachment] = [],
         thinkingLevel: String,
         route: OpenClawChatOutboxRouteSnapshot,
-        createdAt: Date = Date())
+        createdAt: Date = Date(),
+        composerRevision: UUID? = nil,
+        composerLease: UUID? = nil)
     {
         self.rawCommandID = rawCommandID
         self.sessionKey = sessionKey
@@ -87,6 +120,8 @@ public struct OpenClawChatOutboxDraft: Hashable, Sendable {
         self.thinkingLevel = thinkingLevel
         self.route = route
         self.createdAt = createdAt
+        self.composerRevision = composerRevision
+        self.composerLease = composerLease
     }
 }
 
@@ -199,6 +234,9 @@ public actor OpenClawChatOutboxDatabase {
     public static let routingCapability = "chat-send-routing-contract"
     public static let requiredOperatorScopes = ["operator.read", "operator.write"]
     static let finalMigrationIdentifier = "openclaw-chat-outbox-v1-final"
+    static let composerMigrationIdentifier = "openclaw-chat-composer-v1"
+    public static let maxSavedComposerDrafts = 100
+    private static let maxComposerBytes = 50_000_000
     private static let processClaimOwnerID = UUID().uuidString.lowercased()
 
     public nonisolated let databaseURL: URL
@@ -211,6 +249,8 @@ public actor OpenClawChatOutboxDatabase {
     private var gatewayGenerations: [String: UInt64] = [:]
     private var blockedGatewayIDs = Set<String>()
     private var debugFailNextPostCommitMaintenance = false
+    private var composerLeases: [String: (session: String, token: UUID)] = [:]
+    private var submittedComposerRevisions: [String: UUID] = [:]
 
     public init(databaseURL: URL) throws {
         guard databaseURL.isFileURL,
@@ -296,6 +336,8 @@ public actor OpenClawChatOutboxDatabase {
         do {
             try Self.scrubAndClose(queue)
             self.queue = nil
+            // Physical removal also purges tables added by newer clients after a downgrade.
+            // Credential reset must never be implemented as only a known-table row deletion.
             try Self.removeDatabaseFiles(at: self.databaseURL)
             self.queue = try Self.openDatabase(
                 at: self.databaseURL,
@@ -357,6 +399,21 @@ public struct OpenClawChatOutboxStore: Sendable {
         try await self.database.loadVerifiedRouteSnapshot(
             stableGatewayID: self.stableGatewayID,
             scope: self.scope)
+    }
+
+    public func loadComposerDraft(sessionKey: String) async throws -> (draft: OpenClawChatComposerDraft, lease: UUID) {
+        try await self.database.loadComposerDraft(sessionKey: sessionKey, stableGatewayID: self.stableGatewayID, scope: self.scope)
+    }
+
+    /// Called only after the user confirms discarding an unreadable draft.
+    public func discardUnreadableComposerDraft(sessionKey: String) async throws {
+        try await self.database.discardUnreadableComposerDraft(
+            sessionKey: sessionKey, stableGatewayID: self.stableGatewayID, scope: self.scope)
+    }
+
+    public func saveComposerDraft(_ draft: OpenClawChatComposerDraft, sessionKey: String, lease: UUID) async throws {
+        try await self.database.saveComposerDraft(draft, sessionKey: sessionKey, lease: lease,
+                                                stableGatewayID: self.stableGatewayID, scope: self.scope)
     }
 
     public func persistBeforeDraftClear(
@@ -584,6 +641,15 @@ extension OpenClawChatOutboxDatabase {
                 ON outbox_receipts(stable_gateway_id, recorded_at DESC, receipt_sequence DESC);
             """)
         }
+        migrator.registerMigration(self.composerMigrationIdentifier) { db in
+            try db.create(table: "composer_drafts") { table in
+                table.column("stable_gateway_id", .text).notNull()
+                table.column("session_key", .text).notNull()
+                table.column("revision", .text).notNull()
+                table.column("payload", .blob).notNull()
+                table.primaryKey(["stable_gateway_id", "session_key"])
+            }
+        }
         try migrator.migrate(queue)
         let recoveredPriorProcessClaims = try queue.write { db in
             try db.execute(
@@ -608,6 +674,7 @@ extension OpenClawChatOutboxDatabase {
 
     private static func scrubAndClose(_ queue: DatabaseQueue) throws {
         try queue.write { db in
+            try ComposerDraftRecord.deleteAll(db)
             try db.execute(sql: "DELETE FROM outbox_attachments")
             try db.execute(sql: "DELETE FROM outbox_commands")
             try db.execute(sql: "DELETE FROM outbox_receipts")
@@ -753,6 +820,9 @@ extension OpenClawChatOutboxDatabase {
                     limit: self.maxAttachmentBytesPerCommand)
             }
             attachmentBytes = nextBytes
+            if let source = attachment.resultSource, !source.matches(data: attachment.data) {
+                throw OpenClawChatOutboxError.invalidField("attachment.resultSource")
+            }
             normalizedAttachments.append(OpenClawChatOutboxAttachment(
                 type: try self.normalizeIdentifier(attachment.type, field: "attachment.type"),
                 mimeType: try self.normalizeIdentifier(
@@ -761,7 +831,7 @@ extension OpenClawChatOutboxDatabase {
                 fileName: try self.normalizeIdentifier(
                     attachment.fileName,
                     field: "attachment.fileName"),
-                data: attachment.data))
+                data: attachment.data, resultSource: attachment.resultSource))
         }
         guard !draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             !normalizedAttachments.isEmpty
@@ -782,7 +852,9 @@ extension OpenClawChatOutboxDatabase {
             attachments: normalizedAttachments,
             thinkingLevel: thinkingLevel,
             route: try self.normalizeRoute(draft.route),
-            createdAt: draft.createdAt)
+            createdAt: draft.createdAt,
+            composerRevision: draft.composerRevision,
+            composerLease: draft.composerLease)
     }
 
     private func validatedQueue(
@@ -949,6 +1021,140 @@ extension OpenClawChatOutboxDatabase {
         }
     }
 
+    fileprivate func loadComposerDraft(
+        sessionKey: String, stableGatewayID: String, scope: Scope)
+        throws -> (draft: OpenClawChatComposerDraft, lease: UUID)
+    {
+        let session = try Self.normalizeIdentifier(sessionKey, field: "sessionKey")
+        let draft = try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
+            try queue.read { db in
+                guard let record = try ComposerDraftRecord
+                    .filter(Column("stable_gateway_id") == stableGatewayID && Column("session_key") == session)
+                    .fetchOne(db) else { return OpenClawChatComposerDraft() }
+                return try Self.decodeComposerDraft(record.payload, stableGatewayID: stableGatewayID)
+            }
+        }
+        // A new composer owns future writes for this gateway. Retired views cannot
+        // overwrite a replacement composer, including an A→B→A session return.
+        let lease = UUID()
+        self.composerLeases[stableGatewayID] = (session, lease)
+        self.submittedComposerRevisions[stableGatewayID] = nil
+        return (draft, lease)
+    }
+
+    private static func decodeComposerDraft(_ payload: Data, stableGatewayID: String) throws -> OpenClawChatComposerDraft {
+        let draft: OpenClawChatComposerDraft
+        do {
+            draft = try PropertyListDecoder().decode(OpenClawChatComposerDraft.self, from: payload)
+        } catch {
+            // A payload decode failure is local to this unsent draft, not
+            // a database failure that retires every gateway's outbox.
+            throw OpenClawChatOutboxError.invalidField("composerDraft.payload")
+        }
+        for attachment in draft.attachments {
+            if let source = attachment.resultSource {
+                guard source.gatewayID == stableGatewayID, source.matches(data: attachment.data) else {
+                    throw OpenClawChatOutboxError.invalidField("attachment.resultSource")
+                }
+            }
+        }
+        return draft
+    }
+
+    fileprivate func discardUnreadableComposerDraft(
+        sessionKey: String, stableGatewayID: String, scope: Scope) throws
+    {
+        let session = try Self.normalizeIdentifier(sessionKey, field: "sessionKey")
+        try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
+            try queue.write { db in
+                let current = ComposerDraftRecord.filter(
+                    Column("stable_gateway_id") == stableGatewayID && Column("session_key") == session)
+                guard let record = try current.fetchOne(db) else { return }
+                do {
+                    _ = try Self.decodeComposerDraft(record.payload, stableGatewayID: stableGatewayID)
+                    // Confirmation can outlive the error. Never delete a repaired
+                    // or replaced readable draft; restore that current row instead.
+                    return
+                } catch OpenClawChatOutboxError.invalidField(let field)
+                    where field == "composerDraft.payload" || field == "attachment.resultSource" {
+                    _ = try current.deleteAll(db)
+                    try db.execute(sql: "UPDATE outbox_maintenance SET needs_checkpoint = 1 WHERE id = 1")
+                }
+            }
+        }
+    }
+
+    fileprivate func saveComposerDraft(
+        _ draft: OpenClawChatComposerDraft, sessionKey: String, lease: UUID,
+        stableGatewayID: String, scope: Scope) throws
+    {
+        _ = try self.validatedQueue(stableGatewayID: stableGatewayID, scope: scope)
+        let session = try Self.normalizeIdentifier(sessionKey, field: "sessionKey")
+        guard self.composerLeases[stableGatewayID]?.session == session,
+              self.composerLeases[stableGatewayID]?.token == lease else { throw OpenClawChatOutboxError.retired }
+        // A navigation flush can arrive after enqueue committed but before the UI
+        // observed it. Never resurrect that submitted revision as unsent text.
+        if self.submittedComposerRevisions[stableGatewayID] == draft.revision { return }
+        guard draft.text.utf8.count <= Self.maxTextBytes else {
+            throw OpenClawChatOutboxError.textTooLarge(limit: Self.maxTextBytes)
+        }
+        guard draft.attachments.count <= Self.maxAttachmentsPerCommand else {
+            throw OpenClawChatOutboxError.attachmentCountExceeded(limit: Self.maxAttachmentsPerCommand)
+        }
+        var attachmentBytes = 0
+        for attachment in draft.attachments {
+            if let source = attachment.resultSource {
+                guard source.gatewayID == stableGatewayID, source.matches(data: attachment.data) else {
+                    throw OpenClawChatOutboxError.invalidField("attachment.resultSource")
+                }
+            }
+            guard attachment.data.count <= Self.maxAttachmentBytes else {
+                throw OpenClawChatOutboxError.attachmentTooLarge(limit: Self.maxAttachmentBytes)
+            }
+            _ = try Self.normalizeIdentifier(attachment.fileName, field: "attachment.fileName")
+            _ = try Self.normalizeIdentifier(attachment.mimeType, field: "attachment.mimeType")
+            _ = try Self.normalizeIdentifier(attachment.type, field: "attachment.type")
+            attachmentBytes += attachment.data.count
+        }
+        guard attachmentBytes <= Self.maxAttachmentBytesPerCommand else {
+            throw OpenClawChatOutboxError.attachmentBudgetExceeded(limit: Self.maxAttachmentBytesPerCommand)
+        }
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        let payload = try encoder.encode(draft)
+        try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
+            try queue.write { db in
+                let current = ComposerDraftRecord.filter(
+                    Column("stable_gateway_id") == stableGatewayID && Column("session_key") == session)
+                if draft.isEmpty {
+                    if try current.deleteAll(db) > 0 {
+                        try db.execute(sql: "UPDATE outbox_maintenance SET needs_checkpoint = 1 WHERE id = 1")
+                    }
+                    return
+                }
+                let exists = try current.fetchCount(db) > 0
+                let count = try ComposerDraftRecord.fetchCount(db)
+                if !exists, count >= Self.maxSavedComposerDrafts {
+                    throw OpenClawChatOutboxError.capacityReached(limit: Self.maxSavedComposerDrafts)
+                }
+                // Bound total retained payload without loading other private drafts.
+                let otherBytes = try Int.fetchOne(db, sql: """
+                    SELECT COALESCE(SUM(length(payload)), 0) FROM composer_drafts
+                    WHERE NOT (stable_gateway_id = ? AND session_key = ?)
+                    """, arguments: [stableGatewayID, session]) ?? 0
+                guard otherBytes <= Self.maxComposerBytes - payload.count else {
+                    throw OpenClawChatOutboxError.attachmentBudgetExceeded(limit: Self.maxComposerBytes)
+                }
+                try ComposerDraftRecord(stableGatewayID: stableGatewayID, sessionKey: session,
+                                        revision: draft.revision.uuidString, payload: payload).save(db)
+                if exists {
+                    // Replaced draft text/attachments must not remain in old WAL frames either.
+                    try db.execute(sql: "UPDATE outbox_maintenance SET needs_checkpoint = 1 WHERE id = 1")
+                }
+            }
+        }
+    }
+
     fileprivate func persistBeforeDraftClear(
         _ draft: OpenClawChatOutboxDraft,
         stableGatewayID: String,
@@ -956,12 +1162,23 @@ extension OpenClawChatOutboxDatabase {
         now: Date) throws -> OpenClawChatOutboxCommand
     {
         let draft = try Self.normalizeDraft(draft)
+        guard draft.attachments.allSatisfy({ $0.resultSource.map { $0.gatewayID == stableGatewayID } ?? true }) else {
+            throw OpenClawChatOutboxError.invalidField("attachment.resultSource")
+        }
+        if draft.composerRevision != nil || draft.composerLease != nil {
+            // Admission and commit share this actor turn. A replacement composer
+            // must not have its restored draft silently consumed by a retired sender.
+            guard draft.composerRevision != nil, let lease = draft.composerLease,
+                  self.composerLeases[stableGatewayID]?.session == draft.sessionKey,
+                  self.composerLeases[stableGatewayID]?.token == lease
+            else { throw OpenClawChatOutboxError.retired }
+        }
         guard now.timeIntervalSince1970.isFinite,
               draft.createdAt.addingTimeInterval(Self.commandLifetime) > now
         else {
             throw OpenClawChatOutboxError.invalidField("createdAt")
         }
-        return try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
+        let command = try self.perform(stableGatewayID: stableGatewayID, scope: scope) { queue in
             try Self.expireAllCommands(in: queue, now: now)
             return try queue.write { db in
                 guard let verifiedRoute = try Self.readVerifiedRouteSnapshot(
@@ -1078,9 +1295,22 @@ extension OpenClawChatOutboxDatabase {
                 else {
                     throw OpenClawChatOutboxError.storageUnavailable
                 }
+                if let revision = draft.composerRevision {
+                    // The queued command and removal of its exact unsent revision
+                    // commit together; newer edits remain a separate user-owned draft.
+                    let removed = try ComposerDraftRecord.filter(
+                        Column("stable_gateway_id") == stableGatewayID
+                            && Column("session_key") == draft.sessionKey
+                            && Column("revision") == revision.uuidString).deleteAll(db)
+                    if removed > 0 {
+                        try db.execute(sql: "UPDATE outbox_maintenance SET needs_checkpoint = 1 WHERE id = 1")
+                    }
+                }
                 return command
             }
         }
+        if let revision = draft.composerRevision { self.submittedComposerRevisions[stableGatewayID] = revision }
+        return command
     }
 
     fileprivate func loadQueueState(
@@ -1424,6 +1654,7 @@ extension OpenClawChatOutboxDatabase {
         guard let queue = self.queue else { throw OpenClawChatOutboxError.closed }
         do {
             try queue.write { db in
+                try ComposerDraftRecord.filter(Column("stable_gateway_id") == stableGatewayID).deleteAll(db)
                 try db.execute(
                     sql: "DELETE FROM outbox_commands WHERE stable_gateway_id = ?",
                     arguments: [stableGatewayID])
@@ -1757,6 +1988,7 @@ extension OpenClawChatOutboxDatabase {
         }
         let stableGatewayID = try Self.normalizeStableGatewayID(stableGatewayID)
         try queue.write { db in
+            try ComposerDraftRecord.filter(Column("stable_gateway_id") == stableGatewayID).deleteAll(db)
             try db.execute(
                 sql: "DELETE FROM outbox_commands WHERE stable_gateway_id = ?",
                 arguments: [stableGatewayID])

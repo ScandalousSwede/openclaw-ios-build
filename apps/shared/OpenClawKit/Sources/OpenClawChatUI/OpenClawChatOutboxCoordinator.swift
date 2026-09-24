@@ -78,7 +78,9 @@ public actor OpenClawChatOutboxDeliveryOwner {
         thinkingLevel: String,
         createdAt: Date = Date(),
         expectedDestructiveSessionAdmissionToken: UUID? = nil,
-        expectedCaptureRouteSnapshot: OpenClawChatOutboxRouteSnapshot? = nil)
+        expectedCaptureRouteSnapshot: OpenClawChatOutboxRouteSnapshot? = nil,
+        composerRevision: UUID? = nil,
+        composerLease: UUID? = nil)
         async throws -> OpenClawChatOutboxCommand
     {
         _ = try self.requireCurrentGeneration()
@@ -99,7 +101,9 @@ public actor OpenClawChatOutboxDeliveryOwner {
             attachments: attachments,
             thinkingLevel: thinkingLevel,
             createdAt: createdAt,
-            expectedCaptureRouteSnapshot: expectedCaptureRouteSnapshot)
+            expectedCaptureRouteSnapshot: expectedCaptureRouteSnapshot,
+            composerRevision: composerRevision,
+            composerLease: composerLease)
         // A successful return from storage is the persist-before-clear proof.
         // Retirement after commit may fence delivery, but must never turn that
         // committed row back into a failed enqueue that a caller could duplicate.
@@ -633,7 +637,9 @@ actor OpenClawChatOutboxCoordinator {
         attachments: [OpenClawChatOutboxAttachment],
         thinkingLevel: String,
         createdAt: Date = Date(),
-        expectedCaptureRouteSnapshot: OpenClawChatOutboxRouteSnapshot? = nil)
+        expectedCaptureRouteSnapshot: OpenClawChatOutboxRouteSnapshot? = nil,
+        composerRevision: UUID? = nil,
+        composerLease: UUID? = nil)
         async throws -> OpenClawChatOutboxCommand
     {
         await self.acquireRouteStoreOperation()
@@ -649,7 +655,9 @@ actor OpenClawChatOutboxCoordinator {
             attachments: attachments,
             thinkingLevel: thinkingLevel,
             route: route,
-            createdAt: createdAt)
+            createdAt: createdAt,
+            composerRevision: composerRevision,
+            composerLease: composerLease)
         return try await self.store.persistBeforeDraftClear(persisted)
     }
 

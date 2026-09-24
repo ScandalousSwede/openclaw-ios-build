@@ -8,17 +8,23 @@ import AppKit
 import UIKit
 #endif
 
+typealias ChatAttachmentURLReceiver = @MainActor @Sendable ([URL]) -> Bool
+typealias ChatImageAttachmentReceiver = @MainActor @Sendable (Data, String, String) -> Bool
+
 extension OpenClawChatViewModel {
-    func loadAttachments(urls: [URL]) async {
+    func loadAttachments(urls: [URL], generation: UInt64) async {
         for url in urls {
+            guard self.canAcceptAttachment(generation: generation) else { return }
             do {
                 let data = try await Task.detached { try Data(contentsOf: url) }.value
                 await self.addImageAttachment(
                     url: url,
                     data: data,
                     fileName: url.lastPathComponent,
-                    mimeType: Self.mimeType(for: url) ?? "application/octet-stream")
+                    mimeType: Self.mimeType(for: url) ?? "application/octet-stream",
+                    generation: generation)
             } catch {
+                guard self.canAcceptAttachment(generation: generation) else { return }
                 await MainActor.run { self.errorText = error.localizedDescription }
             }
         }
@@ -30,7 +36,11 @@ extension OpenClawChatViewModel {
         return (UTType(filenameExtension: ext) ?? .data).preferredMIMEType
     }
 
-    func addImageAttachment(url: URL?, data: Data, fileName: String, mimeType: String) async {
+    func addImageAttachment(
+        url: URL?, data: Data, fileName: String, mimeType: String, generation: UInt64,
+        processor: (@Sendable (Data) async throws -> Data)? = nil) async
+    {
+        guard self.canAcceptAttachment(generation: generation) else { return }
         let uti: UTType = {
             if let url {
                 return UTType(filenameExtension: url.pathExtension) ?? .data
@@ -44,13 +54,20 @@ extension OpenClawChatViewModel {
 
         let processed: Data
         do {
-            processed = try await Task.detached(priority: .userInitiated) {
-                try ChatImageProcessor.processForUpload(data: data)
-            }.value
+            if let processor {
+                processed = try await processor(data)
+            } else {
+                processed = try await Task.detached(priority: .userInitiated) {
+                    try ChatImageProcessor.processForUpload(data: data)
+                }.value
+            }
         } catch {
+            guard self.canAcceptAttachment(generation: generation) else { return }
             self.errorText = "Could not process \(fileName): \(error.localizedDescription)"
             return
         }
+
+        guard self.canAcceptAttachment(generation: generation) else { return }
 
         if processed.count > Self.maxAttachmentBytes {
             self.errorText = "Attachment \(fileName) exceeds 5 MB limit after resizing"

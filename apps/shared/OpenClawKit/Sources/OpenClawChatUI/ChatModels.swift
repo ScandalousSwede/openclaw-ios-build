@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OpenClawKit
 
@@ -440,6 +441,34 @@ public struct OpenClawGatewayHealthOK: Codable, Sendable {
     public let ok: Bool?
 }
 
+/// Client provenance for an explicitly selected result document. It is not an
+/// instruction, approval, remote URL, or a substitute for the exact attachment bytes.
+public struct OpenClawResultSourceReference: Codable, Hashable, Sendable {
+    public let gatewayID: String
+    public let operationID: String
+    public let eventID: String
+    public let artifactSHA256: String
+    public let title: String
+
+    public init(gatewayID: String, operationID: String, eventID: String, artifactSHA256: String, title: String) {
+        self.gatewayID = gatewayID
+        self.operationID = operationID
+        self.eventID = eventID
+        self.artifactSHA256 = artifactSHA256
+        self.title = title
+    }
+
+    public func matches(data: Data) -> Bool {
+        let identifiers = [self.gatewayID, self.operationID, self.eventID, self.title]
+        guard identifiers.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && $0.utf8.count <= 2048 && $0.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) } }),
+            self.artifactSHA256.utf8.count == 64,
+            self.artifactSHA256.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+            data.count <= 1_048_576 else { return false }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() == self.artifactSHA256
+    }
+}
+
 public struct OpenClawPendingAttachment: Identifiable {
     public let id = UUID()
     public let url: URL?
@@ -448,6 +477,7 @@ public struct OpenClawPendingAttachment: Identifiable {
     public let mimeType: String
     public let type: String
     public let preview: OpenClawPlatformImage?
+    public let resultSource: OpenClawResultSourceReference?
 
     public init(
         url: URL?,
@@ -455,7 +485,8 @@ public struct OpenClawPendingAttachment: Identifiable {
         fileName: String,
         mimeType: String,
         type: String = "file",
-        preview: OpenClawPlatformImage?)
+        preview: OpenClawPlatformImage?,
+        resultSource: OpenClawResultSourceReference? = nil)
     {
         self.url = url
         self.data = data
@@ -463,6 +494,7 @@ public struct OpenClawPendingAttachment: Identifiable {
         self.mimeType = mimeType
         self.type = type
         self.preview = preview
+        self.resultSource = resultSource
     }
 }
 

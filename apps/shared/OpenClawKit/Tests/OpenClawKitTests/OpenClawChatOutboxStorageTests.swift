@@ -1,9 +1,31 @@
+import CryptoKit
 import Foundation
+import GRDB
 import Testing
 @testable import OpenClawChatUI
 
 @Suite(.serialized)
 struct OpenClawChatOutboxStorageTests {
+    @Test func resultSourceCannotBeSavedWithChangedBytesOrAnotherGateway() async throws {
+        try await self.withFixture { fixture in
+            let bytes = Data("Synthetic retained source".utf8)
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            let lease = try await fixture.store.loadComposerDraft(sessionKey: "main").lease
+            for (owner, payload) in [("other-gateway", bytes), ("gateway-a", Data("changed".utf8))] {
+                let source = OpenClawResultSourceReference(gatewayID: owner, operationID: "synthetic-operation",
+                    eventID: "synthetic-event", artifactSHA256: digest, title: "Synthetic source")
+                let attachment = OpenClawChatOutboxAttachment(type: "file", mimeType: "text/plain",
+                    fileName: "result.txt", data: payload, resultSource: source)
+                await #expect(throws: OpenClawChatOutboxError.self) {
+                    try await fixture.store.saveComposerDraft(.init(text: "Unsent", attachments: [attachment]),
+                                                             sessionKey: "main", lease: lease)
+                }
+            }
+            #expect(try await fixture.store.loadComposerDraft(sessionKey: "main").draft.isEmpty)
+            #expect(try await fixture.store.loadUnresolved().isEmpty)
+        }
+    }
+
     private struct Fixture: Sendable {
         let directoryURL: URL
         let databaseURL: URL
@@ -107,6 +129,7 @@ struct OpenClawChatOutboxStorageTests {
             #expect(state.secureDeleteEnabled)
             #expect(state.migrationIdentifiers == [
                 OpenClawChatOutboxDatabase.finalMigrationIdentifier,
+                OpenClawChatOutboxDatabase.composerMigrationIdentifier,
             ])
 
             let directoryValues = try fixture.directoryURL.resourceValues(
@@ -115,6 +138,183 @@ struct OpenClawChatOutboxStorageTests {
                 forKeys: [.isExcludedFromBackupKey])
             #expect(directoryValues.isExcludedFromBackup == true)
             #expect(databaseValues.isExcludedFromBackup == true)
+        }
+    }
+
+    @Test("composer migration preserves the existing queue and route")
+    func composerMigrationKeepsPriorQueue() async throws {
+        try await self.withFixture { fixture in
+            let route = self.route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            let command = try await fixture.store.persistBeforeDraftClear(self.draft(id: "synthetic-before-migration"),
+                now: Date(timeIntervalSince1970: 1_800_000_011))
+            try await fixture.database.close()
+            // Only this isolated fixture is reduced to the unchanged pre-composer schema.
+            let prior = try DatabaseQueue(path: fixture.databaseURL.path)
+            try prior.write { db in
+                try db.drop(table: "composer_drafts")
+                try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = ?",
+                               arguments: [OpenClawChatOutboxDatabase.composerMigrationIdentifier])
+            }
+            try prior.close()
+            let upgraded = try OpenClawChatOutboxDatabase(databaseURL: fixture.databaseURL)
+            let store = try await upgraded.store(stableGatewayID: "gateway-a")
+            #expect(try await store.loadVerifiedRouteSnapshot() == route)
+            #expect(try await store.loadUnresolved(now: Date(timeIntervalSince1970: 1_800_000_011)) == [command])
+            #expect(try await store.loadComposerDraft(sessionKey: "main").draft.isEmpty)
+            try await upgraded.close()
+        }
+    }
+
+    @Test("unsent drafts survive database reopen and stay gateway and session bound")
+    func composerReopenAndIsolation() async throws {
+        try await self.withFixture { fixture in
+            let first = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let draft = OpenClawChatComposerDraft(text: "Unsent follow-up", attachments: [self.attachment()])
+            try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: first.lease)
+            #expect(try await fixture.store.loadUnresolved().isEmpty)
+            let otherSession = try await fixture.store.loadComposerDraft(sessionKey: "other")
+            #expect(otherSession.draft.isEmpty)
+            try await fixture.store.saveComposerDraft(.init(text: "Other draft"), sessionKey: "other", lease: otherSession.lease)
+            try await fixture.database.close()
+            let reopened = try OpenClawChatOutboxDatabase(databaseURL: fixture.databaseURL)
+            let gatewayA = try await reopened.store(stableGatewayID: "gateway-a")
+            let gatewayB = try await reopened.store(stableGatewayID: "gateway-b")
+            #expect(try await gatewayA.loadComposerDraft(sessionKey: "main").draft == draft)
+            #expect(try await gatewayA.loadComposerDraft(sessionKey: "other").draft.text == "Other draft")
+            #expect(try await gatewayB.loadComposerDraft(sessionKey: "main").draft.isEmpty)
+            try await reopened.close()
+        }
+    }
+
+    @Test("retired composer leases cannot overwrite a replacement and queued drafts cannot resurrect")
+    func composerLeaseAndAtomicEnqueue() async throws {
+        try await self.withFixture { fixture in
+            let old = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let current = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let draft = OpenClawChatComposerDraft(text: "Ready only after explicit send")
+            await self.expectError(.retired) {
+                try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: old.lease)
+            }
+            try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: current.lease)
+            let route = self.route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            _ = try await fixture.store.persistBeforeDraftClear(.init(
+                rawCommandID: "synthetic-composer-send", sessionKey: "main", text: draft.text,
+                thinkingLevel: "off", route: route, createdAt: Date(timeIntervalSince1970: 1_800_000_010),
+                composerRevision: draft.revision, composerLease: current.lease),
+                now: Date(timeIntervalSince1970: 1_800_000_011))
+            try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: current.lease)
+            #expect(try await fixture.store.loadComposerDraft(sessionKey: "main").draft.isEmpty)
+            #expect(try await fixture.store.loadUnresolved(now: Date(timeIntervalSince1970: 1_800_000_011)).count == 1)
+        }
+    }
+
+    @Test("enqueue removes only its captured revision and leaves subsequent unsent edits")
+    func composerEnqueuePreservesNewerRevision() async throws {
+        try await self.withFixture { fixture in
+            let current = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let captured = OpenClawChatComposerDraft(text: "Earlier text")
+            let edited = OpenClawChatComposerDraft(text: "New unsent edit")
+            try await fixture.store.saveComposerDraft(edited, sessionKey: "main", lease: current.lease)
+            let route = self.route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            _ = try await fixture.store.persistBeforeDraftClear(.init(
+                rawCommandID: "synthetic-earlier-send", sessionKey: "main", text: captured.text,
+                thinkingLevel: "off", route: route, createdAt: Date(timeIntervalSince1970: 1_800_000_010),
+                composerRevision: captured.revision, composerLease: current.lease),
+                now: Date(timeIntervalSince1970: 1_800_000_011))
+            #expect(try await fixture.store.loadComposerDraft(sessionKey: "main").draft == edited)
+        }
+    }
+
+    @Test("an enqueue admitted by a retired composer cannot consume its replacement's restored draft")
+    func composerReplacementRejectsOldEnqueue() async throws {
+        try await self.withFixture { fixture in
+            let old = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let draft = OpenClawChatComposerDraft(text: "Still visibly unsent in the replacement")
+            try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: old.lease)
+            let replacement = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            #expect(replacement.draft == draft)
+            let route = self.route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            await self.expectError(.retired) {
+                _ = try await fixture.store.persistBeforeDraftClear(.init(
+                    rawCommandID: "synthetic-retired-composer", sessionKey: "main", text: draft.text,
+                    thinkingLevel: "off", route: route, createdAt: Date(timeIntervalSince1970: 1_800_000_010),
+                    composerRevision: draft.revision, composerLease: old.lease),
+                    now: Date(timeIntervalSince1970: 1_800_000_011))
+            }
+            #expect(try await fixture.store.loadUnresolved().isEmpty)
+            #expect(try await fixture.store.loadComposerDraft(sessionKey: "main").draft == draft)
+        }
+    }
+
+    @Test("failed draft writes preserve the stored revision and secure reset retires their handles")
+    func composerFailureAndPurge() async throws {
+        try await self.withFixture { fixture in
+            let current = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let draft = OpenClawChatComposerDraft(text: "Keep until explicitly cleared")
+            try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: current.lease)
+            await self.expectError(.textTooLarge(limit: OpenClawChatOutboxDatabase.maxTextBytes)) {
+                try await fixture.store.saveComposerDraft(.init(text: String(repeating: "x", count: 256_001)),
+                                                         sessionKey: "main", lease: current.lease)
+            }
+            let retained = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            #expect(retained.draft == draft)
+            try await fixture.store.securePurge()
+            await self.expectError(.retired) {
+                try await fixture.store.saveComposerDraft(draft, sessionKey: "main", lease: retained.lease)
+            }
+            let fresh = try await fixture.database.store(stableGatewayID: "gateway-a")
+            let empty = try await fresh.loadComposerDraft(sessionKey: "main")
+            #expect(empty.draft.isEmpty)
+            try await fresh.saveComposerDraft(draft, sessionKey: "main", lease: empty.lease)
+            try await fixture.database.securePurgeAll()
+            let clean = try await fixture.database.store(stableGatewayID: "gateway-a")
+            #expect(try await clean.loadComposerDraft(sessionKey: "main").draft.isEmpty)
+        }
+    }
+
+    @Test("clearing and replacing drafts scrub obsolete payload bytes before database close")
+    func composerDeletionCheckpointsPrivatePayloads() async throws {
+        try await self.withFixture { fixture in
+            let current = try await fixture.store.loadComposerDraft(sessionKey: "main")
+            let secret = "synthetic-obsolete-composer-payload-" + UUID().uuidString
+            let attachmentSecret = "synthetic-obsolete-attachment-" + UUID().uuidString
+            let original = OpenClawChatComposerDraft(text: secret, attachments: [
+                .init(type: "file", mimeType: "text/plain", fileName: "synthetic.txt",
+                      data: Data(attachmentSecret.utf8)),
+            ])
+            for replacement in [OpenClawChatComposerDraft(text: "Replacement"), .init()] {
+                try await fixture.store.saveComposerDraft(original, sessionKey: "main", lease: current.lease)
+                try await fixture.store.saveComposerDraft(replacement, sessionKey: "main", lease: current.lease)
+                #expect(try await fixture.database.debugState().needsCheckpoint == false)
+                for suffix in ["", "-wal", "-shm", "-journal"] {
+                    let file = URL(fileURLWithPath: fixture.databaseURL.path + suffix)
+                    guard FileManager.default.fileExists(atPath: file.path) else { continue }
+                    let bytes = try Data(contentsOf: file)
+                    #expect(bytes.range(of: Data(secret.utf8)) == nil)
+                    #expect(bytes.range(of: Data(attachmentSecret.utf8)) == nil)
+                }
+            }
+            // The explicit-send path removes the captured composer row through
+            // the same barrier; queued command contents remain intentionally stored.
+            try await fixture.store.saveComposerDraft(original, sessionKey: "main", lease: current.lease)
+            let route = self.route()
+            try await fixture.store.saveVerifiedRouteSnapshot(route)
+            _ = try await fixture.store.persistBeforeDraftClear(.init(
+                rawCommandID: "synthetic-scrub-send", sessionKey: "main", text: "Submitted fixture text",
+                thinkingLevel: "off", route: route, createdAt: Date(timeIntervalSince1970: 1_800_000_010),
+                composerRevision: original.revision, composerLease: current.lease),
+                now: Date(timeIntervalSince1970: 1_800_000_011))
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                let file = URL(fileURLWithPath: fixture.databaseURL.path + suffix)
+                guard FileManager.default.fileExists(atPath: file.path) else { continue }
+                let bytes = try Data(contentsOf: file)
+                #expect(bytes.range(of: Data(secret.utf8)) == nil)
+                #expect(bytes.range(of: Data(attachmentSecret.utf8)) == nil)
+            }
         }
     }
 

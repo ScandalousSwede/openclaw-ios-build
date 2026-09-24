@@ -9,6 +9,35 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testUnsentResultSourceCardAtBothTextSizes() throws {
+        let (item, preview) = try ArgusOperationsTests.briefingFixture()
+        let request = try ArgusResultAskRequest(item: item, preview: preview,
+            gatewayID: "synthetic-briefing-owner", resetGeneration: 0, sessionKey: "main")
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility1)] {
+            let root = VStack(alignment: .leading, spacing: 16) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusResultSourceCard(attachment: request.attachment)
+                Text("Synthetic unsent follow-up").font(.body)
+            }
+            .padding()
+            .background { CommandControlBackground() }
+            .tint(OpenClawBrand.accent)
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Reference for this draft", "Briefing", "Open exact document",
+                "Source details", "Synthetic unsent follow-up",
+            ], forbiddenText: [item.id, item.eventId, "Draft saved", "Message sent"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-unsent-result-source-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
+    @MainActor
     func testBriefingBodyInProductionReaderWhileOfflineAtBothTextSizes() throws {
         let (item, preview) = try ArgusOperationsTests.briefingFixture()
         let model = NodeAppModel()

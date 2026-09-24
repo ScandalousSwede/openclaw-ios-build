@@ -1,4 +1,5 @@
 import ImageIO
+import OpenClawChatUI
 import PDFKit
 import SwiftUI
 
@@ -192,6 +193,7 @@ struct ArgusOperationDetailView: View {
     @State private var skipInitialLoad = false
     @State private var showArtifactSheet = false
     @State private var artifactOwnerGeneration = 0
+    @State private var artifactSourceItem: ArgusOperation?
 
     init(
         operation: ArgusOperation,
@@ -229,6 +231,11 @@ struct ArgusOperationDetailView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         if let briefing = self.briefing {
                             ArgusBriefingContent(preview: briefing)
+                            Button("Ask about this briefing") {
+                                self.ask(about: briefing, item: self.requestedItem)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .accessibilityHint("Opens an unsent follow-up with this exact document attached")
                         } else if self.appModel.isOperatorGatewayConnected, self.error == nil,
                                   self.artifactOpen.error == nil {
                             ProgressView("Opening briefing")
@@ -291,6 +298,7 @@ struct ArgusOperationDetailView: View {
                         guard generation == self.appModel.argusBriefingCache.generation,
                               self.sameGateway, !Task.isCancelled else { self.artifactOpen.invalidate(); return }
                         self.artifactOwnerGeneration = generation
+                        self.artifactSourceItem = detail.requested
                         self.showArtifactSheet = self.artifactOpen.preview != nil
                     }
                 }
@@ -311,7 +319,16 @@ struct ArgusOperationDetailView: View {
                     ArgusArtifactView(preview: preview)
                         .navigationTitle("Verified artifact")
                         .navigationBarTitleDisplayMode(.inline)
-                        .toolbar { Button("Done") { self.artifactOpen.dismissPreview() } }
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("Done") { self.artifactOpen.dismissPreview() }
+                            }
+                            ToolbarItem(placement: .bottomBar) {
+                                if let item = self.artifactSourceItem {
+                                    Button("Ask about this document") { self.ask(about: preview, item: item) }
+                                }
+                            }
+                        }
                 }
             }
             .onChange(of: self.sameGateway) { _, same in
@@ -383,7 +400,19 @@ struct ArgusOperationDetailView: View {
         guard generation == self.appModel.argusBriefingCache.generation, self.sameGateway,
               self.isVisible, !Task.isCancelled else { self.artifactOpen.invalidate(); return }
         self.artifactOwnerGeneration = generation
+        self.artifactSourceItem = item
         self.showArtifactSheet = self.artifactOpen.preview != nil
+    }
+
+    private func ask(about preview: ArgusArtifactPreview, item: ArgusOperation) {
+        guard self.sameGateway, self.isVisible else { return }
+        do {
+            try self.appModel.openAsk(for: item, preview: preview, gatewayID: self.client.gatewayID)
+            self.showArtifactSheet = false
+            self.artifactOpen.dismissPreview()
+        } catch {
+            self.error = "This document could not be attached to Ask. Your existing draft was not changed."
+        }
     }
 
     private func fetchArtifact(_ params: [String: String]) async throws -> ArgusOperationArtifact {
@@ -523,7 +552,53 @@ struct ArgusOperationEvidenceContent: View {
     }
 }
 
-private struct ArgusArtifactView: View {
+struct ArgusResultSourceCard: View {
+    let attachment: OpenClawPendingAttachment
+    @State private var isShowingDocument = false
+
+    var body: some View {
+        if let source = self.attachment.resultSource,
+           source.matches(data: self.attachment.data) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Reference for this draft").font(.caption).foregroundStyle(.secondary)
+                Text(source.title).font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Open exact document", systemImage: "doc.text") {
+                    self.isShowingDocument = true
+                }
+                .accessibilityHint("Opens the retained document attached to this unsent draft")
+                DisclosureGroup("Source details") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Operation: \(source.operationID)")
+                        Text("Event: \(source.eventID)")
+                        Text("SHA256: \(source.artifactSHA256)")
+                    }
+                    .font(.caption).textSelection(.enabled)
+                }
+                .font(.caption)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(OpenClawBrand.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+            .sheet(isPresented: self.$isShowingDocument) {
+                NavigationStack {
+                    ArgusArtifactView(preview: ArgusArtifactPreview(
+                        id: "\(source.eventID):\(source.artifactSHA256)",
+                        data: self.attachment.data, mimeType: self.attachment.mimeType))
+                        .navigationTitle(source.title)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { self.isShowingDocument = false }
+                            }
+                        }
+                }
+            }
+        }
+    }
+}
+
+struct ArgusArtifactView: View {
     let preview: ArgusArtifactPreview
 
     var body: some View {

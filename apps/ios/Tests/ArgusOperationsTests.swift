@@ -886,6 +886,51 @@ struct ArgusOperationsTests {
         #expect(model.argusBriefingCache.value(for: item, owner: "gateway-a") == nil)
     }
 
+    @Test func resultAskCarriesExactDocumentAndRejectsMismatchedPreview() throws {
+        let (item, preview) = try Self.briefingFixture()
+        let request = try ArgusResultAskRequest(item: item, preview: preview, gatewayID: "gateway-a",
+            resetGeneration: 7, sessionKey: "existing-chat")
+        #expect(request.attachment.data == preview.data)
+        #expect(request.attachment.mimeType == "text/plain")
+        #expect(request.sessionKey == "existing-chat" && request.resetGeneration == 7)
+        #expect(request.attachment.resultSource?.operationID == item.id)
+        #expect(request.attachment.resultSource?.eventID == item.eventId)
+        #expect(request.attachment.resultSource?.artifactSHA256 == item.artifacts.first?.sha256)
+        #expect(request.attachment.resultSource?.title == "Briefing")
+        #expect(request.attachment.resultSource?.matches(data: preview.data) == true)
+        for invalid in [
+            ArgusArtifactPreview(id: "wrong-event", data: preview.data, mimeType: preview.mimeType),
+            ArgusArtifactPreview(id: preview.id, data: Data("tampered".utf8), mimeType: preview.mimeType),
+            ArgusArtifactPreview(id: preview.id, data: preview.data, mimeType: "text/html"),
+        ] {
+            #expect(throws: ArgusOperationsError.self) {
+                try ArgusResultAskRequest(item: item, preview: invalid, gatewayID: "gateway-a",
+                    resetGeneration: 7, sessionKey: "existing-chat")
+            }
+        }
+    }
+
+    @Test func resultAskNavigationIsSameOwnerUnsentAndConsumesOnlyTheMatchingRequest() throws {
+        let (item, preview) = try Self.briefingFixture()
+        let model = NodeAppModel()
+        model._test_setChatOutboxGatewayOwnerID("gateway-a")
+        model.focusChatSession("existing-chat")
+        let before = model.openChatRequestID
+        try model.openAsk(for: item, preview: preview, gatewayID: "gateway-a")
+        let first = try #require(model.resultAskRequest)
+        #expect(model.openChatRequestID == before + 1 && model.chatSessionKey == "existing-chat")
+        #expect(first.attachment.data == preview.data)
+        try model.openAsk(for: item, preview: preview, gatewayID: "gateway-a")
+        let second = try #require(model.resultAskRequest)
+        model.consumeResultAskRequest(first.id)
+        #expect(model.resultAskRequest?.id == second.id)
+        model._test_setChatOutboxGatewayOwnerID("gateway-b")
+        #expect(model.resultAskRequest == nil)
+        #expect(throws: ArgusOperationsError.self) {
+            try model.openAsk(for: item, preview: preview, gatewayID: "gateway-a")
+        }
+    }
+
     @Test func `historical artifact request and response bind exact event`() async throws {
         let (item, artifact, response) = try self.historicalArtifactFixture()
         let store = ArgusArtifactOpenStore()

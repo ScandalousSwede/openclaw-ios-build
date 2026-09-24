@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import OpenClawChatUI
 import OpenClawKit
 
 enum ArgusEvidenceProject: String, CaseIterable, Sendable {
@@ -255,6 +256,42 @@ struct ArgusArtifactPreview: Identifiable {
     let id: String
     let data: Data
     let mimeType: String
+}
+
+struct ArgusResultAskRequest: Identifiable {
+    let id = UUID()
+    let gatewayID: String
+    let resetGeneration: UInt64
+    let sessionKey: String
+    let attachment: OpenClawPendingAttachment
+
+    init(item: ArgusOperation, preview: ArgusArtifactPreview, gatewayID: String,
+         resetGeneration: UInt64, sessionKey: String) throws
+    {
+        guard item.isAdmitted, !sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let artifact = item.artifacts.first(where: { preview.id == "\(item.eventId):\($0.sha256)" })
+        else { throw ArgusOperationsError.invalidResponse }
+        let source = OpenClawResultSourceReference(gatewayID: gatewayID, operationID: item.id,
+            eventID: item.eventId, artifactSHA256: artifact.sha256, title: String(item.heading.prefix(160)))
+        let payload = ArgusOperationArtifact(sha256: artifact.sha256, bytes: preview.data.count,
+            mimeType: preview.mimeType, contentBase64: preview.data.base64EncodedString(),
+            operationId: item.id, eventId: item.eventId)
+        let bytes = try payload.validatedData(for: item.id, eventID: item.eventId, artifact: artifact)
+        guard source.matches(data: bytes) else { throw ArgusOperationsError.invalidResponse }
+        let suffix: String
+        switch preview.mimeType {
+        case "text/plain": suffix = "txt"
+        case "application/pdf": suffix = "pdf"
+        case "image/png": suffix = "png"
+        case "image/jpeg": suffix = "jpg"
+        default: throw ArgusOperationsError.invalidResponse
+        }
+        self.gatewayID = gatewayID
+        self.resetGeneration = resetGeneration
+        self.sessionKey = sessionKey
+        self.attachment = OpenClawPendingAttachment(url: nil, data: bytes,
+            fileName: "Result document.\(suffix)", mimeType: preview.mimeType, preview: nil, resultSource: source)
+    }
 }
 
 /// Bounded session retention of verified briefing bytes; no unprotected file cache.

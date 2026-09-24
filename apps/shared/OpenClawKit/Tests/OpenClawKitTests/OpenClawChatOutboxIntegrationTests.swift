@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OpenClawKit
 import os
@@ -40,6 +41,11 @@ private actor S3TestUpdateBox {
 }
 
 private actor S3TestRouteState {
+    struct SentPayload: Sendable {
+        let sessionKey: String
+        let message: String
+        let attachments: [OpenClawChatAttachmentPayload]
+    }
     struct Route: Sendable {
         var stableGatewayID = "gateway-test"
         var routingContract = "per-sender|main|main"
@@ -57,6 +63,7 @@ private actor S3TestRouteState {
     private var historyMessages: [AnyCodable] = []
     private var historyOffsets: [Int] = []
     private var dispatchedRawIDs: [String] = []
+    private var sentPayloads: [SentPayload] = []
     private var acquireCalls = 0
     private var healthCalls = 0
     private var createCalls = 0
@@ -82,6 +89,7 @@ private actor S3TestRouteState {
     func setCreateGate(_ gate: S3TestGate?) { self.createGate = gate }
     func setResetGate(_ gate: S3TestGate?) { self.resetGate = gate }
     func dispatchedIDs() -> [String] { self.dispatchedRawIDs }
+    func dispatchedPayloads() -> [SentPayload] { self.sentPayloads }
     func acquireCallCount() -> Int { self.acquireCalls }
     func healthCallCount() -> Int { self.healthCalls }
     func createCallCount() -> Int { self.createCalls }
@@ -111,8 +119,9 @@ private actor S3TestRouteState {
         return self.availability
     }
 
-    func dispatch(rawCommandID: String) async -> OpenClawChatDispatchOutcome {
+    func dispatch(rawCommandID: String, payload: SentPayload) async -> OpenClawChatDispatchOutcome {
         self.dispatchedRawIDs.append(rawCommandID)
+        self.sentPayloads.append(payload)
         let outcome = self.dispatchOutcomes.isEmpty
             ? .accepted(runID: rawCommandID, status: "ok")
             : self.dispatchOutcomes.removeFirst()
@@ -177,8 +186,9 @@ private final class S3TestTransport: @unchecked Sendable, OpenClawChatTransport 
                 operatorScopes: route.scopes,
                 diagnosticSocketGeneration: 41,
                 diagnosticRouteGeneration: 43,
-                dispatchMessage: { _, _, _, rawCommandID, _ in
-                    await state.dispatch(rawCommandID: rawCommandID)
+                dispatchMessage: { sessionKey, message, _, rawCommandID, attachments in
+                    await state.dispatch(rawCommandID: rawCommandID,
+                        payload: .init(sessionKey: sessionKey, message: message, attachments: attachments))
                 },
                 requestHistoryPage: { sessionKey, limit, offset, _ in
                     await state.historyPage(sessionKey: sessionKey, limit: limit, offset: offset)
@@ -1144,6 +1154,73 @@ struct OpenClawChatOutboxIntegrationTests {
         }
         #expect(vm.input == "keep this draft")
         vm.shutdown()
+        try await fixture.close()
+    }
+
+    @Test @MainActor func `composer capacity failure prevents otherwise available enqueue`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        try await fixture.store.saveVerifiedRouteSnapshot(s3Route())
+        for index in 0..<OpenClawChatOutboxDatabase.maxSavedComposerDrafts {
+            let session = "synthetic-filled-\(index)"
+            let loaded = try await fixture.store.loadComposerDraft(sessionKey: session)
+            try await fixture.store.saveComposerDraft(.init(text: "Unsent fixture"), sessionKey: session, lease: loaded.lease)
+        }
+        let transport = S3TestTransport()
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport,
+            outboxStore: fixture.store, outboxStableGatewayID: "gateway-test", composerDraftStore: fixture.store)
+        try await waitUntil("composer restore despite full capacity") { await MainActor.run { vm.isComposerDraftReady } }
+        vm.input = "Do not queue until this draft is saved"
+        vm.send()
+        try await waitUntil("composer failure stops send") { await MainActor.run {
+            vm.errorText?.contains("not queued") == true && !vm.isSending
+        } }
+        #expect(vm.input == "Do not queue until this draft is saved")
+        #expect(try await fixture.store.loadUnresolved().isEmpty)
+        #expect(await transport.state.dispatchedIDs().isEmpty)
+        // Queue storage itself is healthy and has capacity; the failed prerequisite
+        // is specifically composer persistence, not a mocked global database failure.
+        let control = try await fixture.store.persistBeforeDraftClear(
+            s3Draft(rawCommandID: "synthetic-control", route: s3Route()))
+        #expect(control.rawCommandID == "synthetic-control")
+        vm.shutdown(saveComposerDraft: false)
+        try await fixture.close()
+    }
+
+    @Test @MainActor func `retained result sends exact bytes only after explicit send`() async throws {
+        let fixture = try await S3TestStoreFixture.make()
+        try await fixture.store.saveVerifiedRouteSnapshot(s3Route())
+        let transport = S3TestTransport()
+        let bytes = Data("Synthetic retained document\nExact follow-up context.\n".utf8)
+        let reference = OpenClawResultSourceReference(gatewayID: "gateway-test", operationID: "synthetic-operation",
+            eventID: "synthetic-event", artifactSHA256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(),
+            title: "Synthetic administrative result")
+        let source = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: fixture.store)
+        try await waitUntil("source draft ready") { await MainActor.run { source.isComposerDraftReady } }
+        source.input = "Synthetic unsent question"
+        #expect(await source.retainResultAttachment(.init(url: nil, data: bytes, fileName: "Result document.txt",
+            mimeType: "text/plain", preview: nil, resultSource: reference), sessionKey: "main"))
+        #expect(await source.prepareForReplacement())
+        let reopened = OpenClawChatViewModel(sessionKey: "main", transport: transport,
+            outboxStore: fixture.store, outboxStableGatewayID: "gateway-test", composerDraftStore: fixture.store)
+        try await waitUntil("reopened draft ready") { await MainActor.run { reopened.isComposerDraftReady } }
+        #expect(await transport.state.dispatchedIDs().isEmpty)
+        #expect(try await fixture.store.loadUnresolved().isEmpty)
+        #expect(reopened.attachments.first?.resultSource == reference)
+        reopened.send()
+        try await waitUntil("one explicitly requested fake dispatch") {
+            await transport.state.dispatchedIDs().count == 1
+        }
+        let sent = try #require(await transport.state.dispatchedPayloads().first)
+        #expect(sent.sessionKey == "main" && sent.message == "Synthetic unsent question")
+        #expect(sent.attachments.count == 1)
+        #expect(sent.attachments.first?.mimeType == "text/plain")
+        #expect(sent.attachments.first?.fileName == "Result document.txt")
+        #expect(Data(base64Encoded: sent.attachments.first?.content ?? "") == bytes)
+        try await waitUntil("sent draft clear applied") { await MainActor.run {
+            reopened.input.isEmpty && reopened.attachments.isEmpty && !reopened.isSending
+        } }
+        #expect(await reopened.prepareForReplacement())
+        #expect(try await fixture.store.loadComposerDraft(sessionKey: "main").draft.isEmpty)
         try await fixture.close()
     }
 

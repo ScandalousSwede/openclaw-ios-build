@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import GRDB
 import OpenClawKit
 import os
 import Testing
@@ -657,6 +659,387 @@ extension TestChatTransportState {
 
 @Suite(.serialized)
 struct ChatViewModelTests {
+    @Test(arguments: ["retry-repaired", "discard-unreadable", "discard-repaired"])
+    @MainActor func composerRestoreHasUserRecoveryWithoutDeletingReadableDrafts(recovery: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename)
+        let database = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let lease = try await store.loadComposerDraft(sessionKey: "main").lease
+        let draft = OpenClawChatComposerDraft(text: "Synthetic recoverable unsent draft")
+        try await store.saveComposerDraft(draft, sessionKey: "main", lease: lease)
+        let otherLease = try await store.loadComposerDraft(sessionKey: "other").lease
+        try await store.saveComposerDraft(.init(text: "Keep this other chat"), sessionKey: "other", lease: otherLease)
+        try await database.close()
+        let fixtureWriter = try DatabaseQueue(path: url.path)
+        try fixtureWriter.write { db in
+            try db.execute(sql: "UPDATE composer_drafts SET payload = ? WHERE session_key = 'main'", arguments: [Data([0xff])])
+        }
+        let reopened = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let reopenedStore = try await reopened.store(stableGatewayID: "synthetic-draft-owner")
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                      composerDraftStore: reopenedStore)
+        #expect(!vm.isComposerDraftReady && !vm.composerDraftRestoreFailed)
+        #expect(!(await vm.discardUnreadableComposerDraft()))
+        vm.retryComposerDraftRestore()
+        try await waitUntil("failed restore offers recovery") { await MainActor.run { vm.composerDraftRestoreFailed } }
+        #expect(!vm.isComposerDraftReady && vm.canDiscardUnreadableComposerDraft)
+        #expect(try await reopenedStore.loadUnresolved().isEmpty)
+        #expect(try await reopenedStore.loadVerifiedRouteSnapshot() == nil)
+        let unaffectedStore = try await reopened.store(stableGatewayID: "synthetic-other-owner")
+        #expect(try await unaffectedStore.loadComposerDraft(sessionKey: "other").draft.isEmpty)
+        if recovery != "discard-unreadable" {
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            let repaired = try encoder.encode(draft)
+            try fixtureWriter.write { db in
+                try db.execute(sql: "UPDATE composer_drafts SET payload = ? WHERE session_key = 'main'", arguments: [repaired])
+            }
+        }
+        try fixtureWriter.close()
+        if recovery == "retry-repaired" {
+            vm.retryComposerDraftRestore()
+            try await waitUntil("retry restores exact draft") { await MainActor.run { vm.isComposerDraftReady } }
+        } else {
+            // Same method as the confirmed UI action; no repair for the unreadable case.
+            #expect(await vm.discardUnreadableComposerDraft())
+        }
+        let expected = recovery == "discard-unreadable" ? "" : draft.text
+        #expect(vm.input == expected && vm.isComposerDraftReady && !vm.composerDraftRestoreFailed)
+        #expect(!vm.canDiscardUnreadableComposerDraft)
+        vm.syncSession(to: "other")
+        try await waitUntil("recovery allows other chat") { await MainActor.run {
+            vm.sessionKey == "other" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == "Keep this other chat")
+        vm.syncSession(to: "main")
+        try await waitUntil("recovery survives return") { await MainActor.run {
+            vm.sessionKey == "main" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == expected)
+        #expect(try await reopenedStore.loadUnresolved().isEmpty)
+        vm.shutdown(saveComposerDraft: false)
+        try await reopened.close()
+    }
+
+    @Test @MainActor func overlappingExplicitComposerFlushesBothReportThePersistedRevision() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OpenClawChatOutboxDatabase(
+            databaseURL: directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename))
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                      composerDraftStore: store)
+        try await waitUntil("composer ready") { await MainActor.run { vm.isComposerDraftReady } }
+        vm.input = "Synthetic same-revision flush"
+        let sendFlush = Task { await vm.flushComposerDraft() }
+        let navigationFlush = Task { await vm.flushComposerDraft() }
+        #expect(await sendFlush.value)
+        #expect(await navigationFlush.value)
+        vm.shutdown(saveComposerDraft: false)
+        #expect(try await store.loadComposerDraft(sessionKey: "main").draft.text == "Synthetic same-revision flush")
+        #expect(try await store.loadUnresolved().isEmpty)
+        try await database.close()
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func delayedPickerDropAndPasteCallbacksKeepTheirOriginatingChat(replaceOwner: Bool) async throws {
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []))
+        let receiveFiles = vm.makeAttachmentURLReceiver()
+        let receivePastedImage = vm.makeImageAttachmentReceiver()
+        let gate = AsyncGate()
+        // These are the same captured receivers used by NSOpenPanel, NSItemProvider
+        // and asynchronous pasteboard file loading, before any selection completes.
+        let completion = Task {
+            await gate.wait()
+            let fileAccepted = receiveFiles([URL(fileURLWithPath: "/synthetic/not-read/stale.png")])
+            let imageAccepted = receivePastedImage(Data("not processed".utf8), "stale.png", "image/png")
+            return fileAccepted || imageAccepted
+        }
+        let destination: OpenClawChatViewModel
+        if replaceOwner {
+            vm.shutdown(saveComposerDraft: false)
+            destination = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []))
+        } else {
+            vm.syncSession(to: "other")
+            #expect(vm.sessionKey == "other")
+            destination = vm
+        }
+        let errorBeforeCompletion = destination.errorText
+        await gate.open()
+        #expect(!(await completion.value))
+        #expect(destination.attachments.isEmpty && destination.errorText == errorBeforeCompletion)
+        destination.shutdown(saveComposerDraft: false)
+    }
+
+    @Test @MainActor func imageImportCannotCrossAComposerSessionBoundary() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OpenClawChatOutboxDatabase(
+            databaseURL: directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename))
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                      composerDraftStore: store)
+        try await waitUntil("source composer ready") { await MainActor.run { vm.isComposerDraftReady } }
+        let generation = vm.attachmentImportGeneration
+        let gate = AsyncGate()
+        let calls = AsyncCounter()
+        let importing = Task {
+            await vm.addImageAttachment(url: nil, data: Data("synthetic processed image".utf8),
+                fileName: "private.png", mimeType: "image/png", generation: generation,
+                processor: { data in
+                    _ = await calls.increment()
+                    await gate.wait()
+                    return data
+                })
+        }
+        try await waitUntil("processing in flight") { await calls.current() == 1 }
+        vm.syncSession(to: "other")
+        try await waitUntil("destination composer ready") { await MainActor.run {
+            vm.sessionKey == "other" && vm.isComposerDraftReady
+        } }
+        await gate.open()
+        await importing.value
+        #expect(vm.attachments.isEmpty)
+        await vm.flushComposerDraft()
+        vm.shutdown(saveComposerDraft: false)
+        #expect(try await store.loadComposerDraft(sessionKey: "other").draft.attachments.isEmpty)
+        try await database.close()
+    }
+
+    @Test @MainActor func composerDraftFollowsItsSessionAndSurvivesViewModelRecreation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databaseURL = directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename)
+        let database = try OpenClawChatOutboxDatabase(databaseURL: databaseURL)
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let transport = TestChatTransport(historyResponses: [])
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: store)
+        try await waitUntil("composer restore") { await MainActor.run { vm.isComposerDraftReady } }
+        vm.input = "Unsent main follow-up"
+        vm.attachments = [.init(url: nil, data: Data("synthetic document".utf8), fileName: "note.txt",
+                                mimeType: "text/plain", preview: nil)]
+        vm.syncSession(to: "other")
+        try await waitUntil("other draft restore") { await MainActor.run {
+            vm.sessionKey == "other" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input.isEmpty)
+        vm.input = "Unsent other follow-up"
+        vm.syncSession(to: "main")
+        try await waitUntil("main draft return") { await MainActor.run {
+            vm.sessionKey == "main" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == "Unsent main follow-up")
+        #expect(vm.attachments.first?.data == Data("synthetic document".utf8))
+        vm.input += " — edited"
+        vm.shutdown()
+        await vm.flushComposerDraft()
+        try await database.close()
+
+        let reopened = try OpenClawChatOutboxDatabase(databaseURL: databaseURL)
+        let reopenedStore = try await reopened.store(stableGatewayID: "synthetic-draft-owner")
+        let restored = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: reopenedStore)
+        try await waitUntil("recreated composer") { await MainActor.run { restored.isComposerDraftReady } }
+        #expect(restored.input == "Unsent main follow-up — edited")
+        #expect(restored.attachments.count == 1)
+        #expect(restored.composerDraftStatus == "Draft saved on this device")
+        #expect(try await reopenedStore.loadUnresolved().isEmpty)
+        restored.shutdown()
+        await restored.flushComposerDraft()
+        try await reopened.close()
+    }
+
+    @Test @MainActor func composerStorageFailureNeverClaimsSavedOrDiscardsVisibleEdits() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OpenClawChatOutboxDatabase(
+            databaseURL: directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename))
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                      composerDraftStore: store)
+        try await waitUntil("composer restore") { await MainActor.run { vm.isComposerDraftReady } }
+        try await database.close()
+        vm.input = "Do not lose this unsent edit"
+        await vm.flushComposerDraft()
+        #expect(vm.composerDraftSaveFailed)
+        #expect(vm.composerDraftStatus?.contains("not saved") == true)
+        #expect(vm.input == "Do not lose this unsent edit")
+        vm.shutdown()
+        await vm.flushComposerDraft()
+    }
+
+    @Test(arguments: [false, true]) @MainActor
+    func newSessionAcquiresItsOwnDraftAndKeepsEditsMadeDuringCreation(saveFails: Bool) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OpenClawChatOutboxDatabase(
+            databaseURL: directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename))
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let gate = AsyncGate()
+        let calls = AsyncCounter()
+        let transport = TestChatTransport(historyResponses: [], createSessionHook: { _, _ in
+            _ = await calls.increment()
+            await gate.wait()
+        })
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: store)
+        try await waitUntil("initial composer restore") { await MainActor.run { vm.isComposerDraftReady } }
+        vm.input = "/new"
+        let creating = Task { await vm._test_performStartNewSession(preserving: "/new") }
+        try await waitUntil("create admitted") { await calls.current() == 1 }
+        let oldEdit = saveFails
+            ? String(repeating: "x", count: OpenClawChatOutboxDatabase.maxTextBytes + 1)
+            : "Keep this edit with the old chat"
+        vm.input = oldEdit
+        await gate.open()
+        await creating.value
+        if saveFails {
+            #expect(vm.sessionKey == "main" && vm.input == oldEdit && vm.composerDraftSaveFailed)
+            #expect(try await store.loadUnresolved().isEmpty)
+            let createdKeys = await transport.createdSessionKeys()
+            #expect(createdKeys.count == 1)
+            vm.input = "/new"
+            await vm._test_performStartNewSession(preserving: "/new")
+            try await waitUntil("saved retry reuses created session") { await MainActor.run {
+                vm.sessionKey != "main" && vm.isComposerDraftReady
+            } }
+            #expect(await transport.createdSessionKeys() == createdKeys)
+            #expect(vm.sessionKey == createdKeys.first)
+            vm.shutdown()
+            await vm.flushComposerDraft()
+            try await database.close()
+            return
+        }
+        try await waitUntil("new composer restore") { await MainActor.run { vm.isComposerDraftReady } }
+        let next = vm.sessionKey
+        #expect(next != "main")
+        #expect(vm.input.isEmpty)
+        vm.input = "Durable new chat draft"
+        await vm.flushComposerDraft()
+        #expect(!vm.composerDraftSaveFailed)
+        vm.syncSession(to: "main")
+        try await waitUntil("old chat draft restore") { await MainActor.run {
+            vm.sessionKey == "main" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == "Keep this edit with the old chat")
+        vm.syncSession(to: next)
+        try await waitUntil("new chat draft reopened") { await MainActor.run {
+            vm.sessionKey == next && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == "Durable new chat draft")
+        #expect(try await store.loadUnresolved().isEmpty)
+        vm.shutdown()
+        await vm.flushComposerDraft()
+        try await database.close()
+    }
+
+    @Test(arguments: ["new", "reset", "compact"]) @MainActor
+    func durableSessionCommandsAreConsumedBeforeRemoteEffect(action: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename)
+        let database = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let store = try await database.store(stableGatewayID: "synthetic-command-owner")
+        // Losing storage at the remote effect must not resurrect the command.
+        let transport = TestChatTransport(historyResponses: [],
+            createSessionHook: { _, _ in try await database.close() },
+            resetSessionHook: { _ in try await database.close() },
+            compactSessionHook: { _ in try await database.close() })
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: store)
+        try await waitUntil("command draft ready") { await MainActor.run { vm.isComposerDraftReady } }
+        let command = "/\(action)"
+        vm.input = command
+        #expect(await vm.flushComposerDraft())
+        if action == "new" { await vm._test_performStartNewSession(preserving: command) }
+        else if action == "reset" { await vm._test_performReset(preserving: command) }
+        else { await vm._test_performCompact(preserving: command) }
+        #expect(vm.input.isEmpty)
+        #expect(await transport.createdSessionKeys().count == (action == "new" ? 1 : 0))
+        #expect(await transport.resetSessionKeys() == (action == "reset" ? ["main"] : []))
+        #expect(await transport.compactSessionKeys() == (action == "compact" ? ["main"] : []))
+        vm.shutdown(saveComposerDraft: false)
+        let reopened = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let reopenedStore = try await reopened.store(stableGatewayID: "synthetic-command-owner")
+        let saved = try await reopenedStore.loadComposerDraft(sessionKey: "main")
+        #expect(saved.draft.text.isEmpty)
+        #expect(try await reopenedStore.loadUnresolved().isEmpty)
+        try await reopened.close()
+    }
+
+    @Test(arguments: ["new", "reset", "compact"]) @MainActor
+    func failedCommandDraftConsumptionPreventsRemoteEffect(action: String) async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename)
+        let database = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let store = try await database.store(stableGatewayID: "synthetic-command-owner")
+        let transport = TestChatTransport(historyResponses: [])
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport, composerDraftStore: store)
+        try await waitUntil("command draft ready") { await MainActor.run { vm.isComposerDraftReady } }
+        let command = "/\(action)"
+        vm.input = command
+        #expect(await vm.flushComposerDraft())
+        try await database.close()
+        if action == "new" { await vm._test_performStartNewSession(preserving: command) }
+        else if action == "reset" { await vm._test_performReset(preserving: command) }
+        else { await vm._test_performCompact(preserving: command) }
+        #expect(vm.input == command)
+        #expect(vm.errorText?.contains("Command not run") == true)
+        #expect(await transport.createdSessionKeys().isEmpty)
+        #expect(await transport.resetSessionKeys().isEmpty)
+        #expect(await transport.compactSessionKeys().isEmpty)
+        vm.shutdown(saveComposerDraft: false)
+        let reopened = try OpenClawChatOutboxDatabase(databaseURL: url)
+        let reopenedStore = try await reopened.store(stableGatewayID: "synthetic-command-owner")
+        let saved = try await reopenedStore.loadComposerDraft(sessionKey: "main")
+        #expect(saved.draft.text == command)
+        #expect(try await reopenedStore.loadUnresolved().isEmpty)
+        try await reopened.close()
+    }
+
+    @Test @MainActor func failedComposerFlushKeepsCurrentChatAndVisibleEdits() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try OpenClawChatOutboxDatabase(
+            databaseURL: directory.appendingPathComponent(OpenClawChatOutboxDatabase.databaseFilename))
+        let store = try await database.store(stableGatewayID: "synthetic-draft-owner")
+        let vm = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                      composerDraftStore: store)
+        try await waitUntil("composer ready") { await MainActor.run { vm.isComposerDraftReady } }
+        let oversized = String(repeating: "x", count: OpenClawChatOutboxDatabase.maxTextBytes + 1)
+        vm.input = oversized
+        vm.attachments = [.init(url: nil, data: Data("keep attachment".utf8), fileName: "keep.txt",
+                                mimeType: "text/plain", preview: nil)]
+        vm.syncSession(to: "other")
+        try await waitUntil("navigation save fails visibly") { await MainActor.run {
+            vm.isComposerDraftReady && vm.composerDraftSaveFailed
+        } }
+        #expect(vm.sessionKey == "main" && vm.input == oversized && vm.attachments.count == 1)
+        vm.input = "Corrected and still unsent"
+        vm.syncSession(to: "other")
+        try await waitUntil("navigation retries successfully") { await MainActor.run {
+            vm.sessionKey == "other" && vm.isComposerDraftReady
+        } }
+        vm.syncSession(to: "main")
+        try await waitUntil("corrected draft reopens") { await MainActor.run {
+            vm.sessionKey == "main" && vm.isComposerDraftReady
+        } }
+        #expect(vm.input == "Corrected and still unsent" && vm.attachments.count == 1)
+        #expect(try await store.loadUnresolved().isEmpty)
+        vm.input = oversized
+        #expect(await vm.prepareForReplacement() == false)
+        #expect(vm.input == oversized && vm.attachments.count == 1 && vm.isComposerDraftReady)
+        vm.input = "Replacement retains this corrected draft"
+        #expect(await vm.prepareForReplacement())
+        let replacement = OpenClawChatViewModel(sessionKey: "main", transport: TestChatTransport(historyResponses: []),
+                                               composerDraftStore: store)
+        try await waitUntil("replacement readback") { await MainActor.run { replacement.isComposerDraftReady } }
+        #expect(replacement.input == "Replacement retains this corrected draft" && replacement.attachments.count == 1)
+        replacement.shutdown()
+        await replacement.flushComposerDraft()
+        try await database.close()
+    }
+
     @Test func `displays error message fallback only for assistant error turns`() throws {
         func decodeMessage(role: String, stopReason: String, contentText: String? = nil) throws -> OpenClawChatMessage {
             let contentJSON = contentText.map { #"[{"type":"text","text":"\#($0)"}]"# } ?? "[]"

@@ -93,9 +93,16 @@ enum ChatConnectionPresentation {
 struct ChatProTab: View {
     @Environment(NodeAppModel.self) private var appModel
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel: OpenClawChatViewModel?
+    @State private var confirmsUnreadableDraftDiscard = false
+    @State private var unreadableDraftTarget: OpenClawChatViewModel?
+    @State private var viewModelOwner: String?
+    @State private var viewModelResetGeneration: UInt64 = 0
     @State private var chatPreparationError: String?
     @State private var chatPreparationRetry = ChatPreparationRetryState()
+    @State private var resultAskError: String?
+    @State private var resultAskRetry = 0
 
     var body: some View {
         NavigationStack {
@@ -103,7 +110,44 @@ struct ChatProTab: View {
                 OpenClawProBackground()
                 VStack(spacing: 0) {
                     self.header
-                    if let viewModel {
+                    if let viewModel = self.currentViewModel {
+                        if let resultAskError {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(resultAskError).font(.subheadline)
+                                Button("Retry adding result") { self.resultAskRetry &+= 1 }
+                            }
+                            .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        }
+                        if viewModel.attachments.contains(where: { $0.resultSource != nil }) {
+                            ScrollView {
+                                VStack(spacing: 8) {
+                                    ForEach(viewModel.attachments.filter { $0.resultSource != nil }) { attachment in
+                                        ArgusResultSourceCard(attachment: attachment)
+                                    }
+                                }
+                                .padding(.horizontal, OpenClawProMetric.pagePadding)
+                            }
+                            .frame(maxHeight: 210)
+                        }
+                        if let status = viewModel.composerDraftStatus {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(status).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                if viewModel.composerDraftRestoreFailed {
+                                    Button("Retry draft") { viewModel.retryComposerDraftRestore() }
+                                    if viewModel.canDiscardUnreadableComposerDraft {
+                                        Button("Discard unreadable draft", role: .destructive) {
+                                            self.unreadableDraftTarget = viewModel
+                                            self.confirmsUnreadableDraftDiscard = true
+                                        }
+                                    }
+                                } else if viewModel.composerDraftSaveFailed {
+                                    Button("Retry save") { Task { await viewModel.flushComposerDraft() } }
+                                }
+                            }
+                            .padding(.horizontal, OpenClawProMetric.pagePadding)
+                            .padding(.vertical, 4)
+                        }
                         OpenClawChatView(
                             viewModel: viewModel,
                             drawsBackground: false,
@@ -155,15 +199,35 @@ struct ChatProTab: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .navigationBarHidden(true)
         }
+        .alert("Discard unreadable draft?", isPresented: self.$confirmsUnreadableDraftDiscard) {
+            Button("Discard draft", role: .destructive) {
+                guard let target = self.unreadableDraftTarget, self.currentViewModel === target else { return }
+                self.unreadableDraftTarget = nil
+                Task { await target.discardUnreadableComposerDraft() }
+            }
+            Button("Cancel", role: .cancel) { self.unreadableDraftTarget = nil }
+        } message: {
+            Text("This permanently removes this chat’s unreadable unsent text and attachments from this device. Other drafts and queued messages are kept.")
+        }
         .task(id: self.chatOwnerTaskID) {
             await self.prepareChatViewModel(taskID: self.chatOwnerTaskID)
         }
+        .task(id: self.resultAskTaskID) {
+            await self.consumeResultAskRequest()
+        }
         .onChange(of: self.appModel.chatSessionKey) { _, _ in
-            self.viewModel?.syncSession(to: self.appModel.chatSessionKey)
+            self.currentViewModel?.syncSession(to: self.appModel.chatSessionKey)
+        }
+        .onChange(of: self.scenePhase) { _, phase in
+            guard phase != .active else { return }
+            Task { await self.currentViewModel?.flushComposerDraft() }
+        }
+        .onDisappear {
+            Task { await self.currentViewModel?.flushComposerDraft() }
         }
         .onChange(of: self.appModel.isOperatorGatewayConnected) { _, connected in
             guard connected else { return }
-            if let viewModel = self.viewModel {
+            if let viewModel = self.currentViewModel {
                 viewModel.refresh()
             } else {
                 // One retry per reconnect edge. Persistent failures remain a
@@ -214,12 +278,41 @@ struct ChatProTab: View {
     }
 
     private var chatOwnerTaskID: String {
-        let owner = self.appModel.isAppleReviewDemoModeEnabled
+        self.chatPreparationRetry.taskID(
+            owner: self.chatOwnerID,
+            ownerGeneration: self.appModel.chatOutboxOwnerGeneration)
+    }
+
+    private var resultAskTaskID: String {
+        let modelID = self.currentViewModel.map { String(describing: ObjectIdentifier($0)) } ?? "unavailable"
+        return "\(modelID)|\(self.appModel.resultAskRequest?.id.uuidString ?? "none")|\(self.resultAskRetry)"
+    }
+
+    private func consumeResultAskRequest() async {
+        self.resultAskError = nil
+        guard let request = self.appModel.resultAskRequest, let viewModel = self.currentViewModel,
+              request.gatewayID == self.chatOwnerID,
+              request.resetGeneration == self.appModel.chatOutboxOwnerGeneration else { return }
+        let saved = await viewModel.retainResultAttachment(request.attachment, sessionKey: request.sessionKey)
+        guard !Task.isCancelled, self.currentViewModel === viewModel,
+              self.appModel.resultAskRequest?.id == request.id else { return }
+        if saved {
+            self.appModel.consumeResultAskRequest(request.id)
+        } else {
+            self.resultAskError = "The result could not be saved with this draft. Your message has not been sent. Return to the selected chat or retry."
+        }
+    }
+
+    private var currentViewModel: OpenClawChatViewModel? {
+        guard self.viewModelOwner == self.chatOwnerID,
+              self.viewModelResetGeneration == self.appModel.chatOutboxOwnerGeneration else { return nil }
+        return self.viewModel
+    }
+
+    private var chatOwnerID: String {
+        self.appModel.isAppleReviewDemoModeEnabled
             ? "apple-review-demo"
             : (self.appModel.chatOutboxGatewayOwnerID ?? "unavailable")
-        return self.chatPreparationRetry.taskID(
-            owner: owner,
-            ownerGeneration: self.appModel.chatOutboxOwnerGeneration)
     }
 
     private func requestChatPreparationRetry() {
@@ -227,8 +320,24 @@ struct ChatProTab: View {
     }
 
     private func prepareChatViewModel(taskID: String) async {
-        self.viewModel?.shutdown()
+        let priorViewModel = self.viewModel
+        if let priorViewModel,
+           self.viewModelResetGeneration == self.appModel.chatOutboxOwnerGeneration {
+            guard await priorViewModel.prepareForReplacement() else {
+                // Keep the only visible buffer alive on storage failure. A different
+                // gateway cannot display it; returning to its owner permits repair.
+                guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
+                self.chatPreparationError = "An unsent draft could not be saved. Return to its gateway to edit or clear it, then retry."
+                return
+            }
+        }
+        guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
+        // This generation changes only for an explicit credential-reset purge.
+        // Never restore or re-save the old buffer across that security boundary.
+        priorViewModel?.shutdown(saveComposerDraft: false)
         self.viewModel = nil
+        self.viewModelOwner = self.chatOwnerID
+        self.viewModelResetGeneration = self.appModel.chatOutboxOwnerGeneration
         self.chatPreparationError = nil
         let usesDemoTransport = self.appModel.isAppleReviewDemoModeEnabled
         if usesDemoTransport {
@@ -251,6 +360,7 @@ struct ChatProTab: View {
         do {
             let outboxDeliveryOwner = try await self.appModel.chatOutboxDelivery(
                 stableGatewayID: stableGatewayID)
+            let composerDraftStore = try await self.appModel.chatOutboxStore(stableGatewayID: stableGatewayID)
             guard !Task.isCancelled, taskID == self.chatOwnerTaskID else { return }
             // Session focus can change while the durable database is opening.
             // Capture it only after the suspension, in the same MainActor turn
@@ -260,6 +370,7 @@ struct ChatProTab: View {
                 sessionKey: currentSessionKey,
                 transport: self.appModel.makeOperatorChatTransport(stableGatewayID: stableGatewayID),
                 outboxDeliveryOwner: outboxDeliveryOwner,
+                composerDraftStore: composerDraftStore,
                 onSessionChanged: { sessionKey in
                     self.appModel.focusChatSession(sessionKey)
                 },
@@ -320,9 +431,9 @@ struct ChatProTab: View {
         ChatConnectionPresentation.readinessText(
             blockingText: self.chatBlockingConditionText,
             gatewayConnected: self.gatewayConnected,
-            hasViewModel: self.viewModel != nil,
-            isLoading: self.viewModel?.isLoading == true,
-            hasError: self.chatPreparationError != nil || self.viewModel?.errorText != nil)
+            hasViewModel: self.currentViewModel != nil,
+            isLoading: self.currentViewModel?.isLoading == true,
+            hasError: self.chatPreparationError != nil || self.currentViewModel?.errorText != nil)
     }
 
     private var messagePlaceholder: String {
@@ -330,13 +441,13 @@ struct ChatProTab: View {
             agentName: self.agentDisplayName,
             blockingText: self.chatBlockingConditionText,
             gatewayConnected: self.gatewayConnected,
-            canQueueOffline: self.viewModel?.canQueueOffline == true,
-            supportsDurableOutbox: self.viewModel?.supportsDurableOutbox == true)
+            canQueueOffline: self.currentViewModel?.canQueueOffline == true,
+            supportsDurableOutbox: self.currentViewModel?.supportsDurableOutbox == true)
     }
 
     private var chatBlockingConditionText: String? {
         ChatConnectionPresentation.blockingText(
-            deliveryGate: self.viewModel?.outboxStatus.deliveryGate,
+            deliveryGate: self.currentViewModel?.outboxStatus.deliveryGate,
             nodeState: self.appModel.nodeRoleState,
             operatorState: self.appModel.operatorRoleState)
     }

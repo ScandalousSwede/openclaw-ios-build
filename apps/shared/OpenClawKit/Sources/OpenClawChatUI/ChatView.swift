@@ -171,7 +171,7 @@ public struct OpenClawChatView: View {
             assistantAvatarText: self.assistantAvatarText,
             assistantAvatarTint: self.assistantAvatarTint,
             composerChrome: self.composerChrome,
-            isComposerEnabled: self.isComposerEnabled,
+            isComposerEnabled: self.isComposerEnabled && self.viewModel.isComposerDraftReady,
             messagePlaceholder: self.messagePlaceholder,
             talkControl: self.talkControl)
     }

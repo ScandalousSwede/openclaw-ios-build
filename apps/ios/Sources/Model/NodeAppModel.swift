@@ -383,6 +383,7 @@ final class NodeAppModel {
     var homeCanvasRevision: Int = 0
     var lastShareEventText: String = "No share events yet."
     var openChatRequestID: Int = 0
+    private(set) var resultAskRequest: ArgusResultAskRequest?
     var argusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest? {
         didSet {
             // Navigation clears the presented destination on Back, not the last exact reference.
@@ -504,6 +505,7 @@ final class NodeAppModel {
 
     private func synchronizeBriefingCacheOwner() {
         self.argusBriefingCache.selectOwner(self.chatOutboxGatewayOwnerID)
+        if self.resultAskRequest?.gatewayID != self.chatOutboxGatewayOwnerID { self.resultAskRequest = nil }
     }
     var gatewaySession: GatewayNodeSession {
         self.nodeGateway
@@ -813,6 +815,7 @@ final class NodeAppModel {
         }
         self.chatOutboxPurgeInProgress = true
         self.argusBriefingCache.clear()
+        self.resultAskRequest = nil
         self.talkMode.beginCredentialReset()
         self.releaseAllPTTVoiceWakeLeases()
         await self.retireChatOutboxDeliveryOwner()
@@ -2938,6 +2941,19 @@ extension NodeAppModel {
     func openChat(sessionKey: String?) {
         self.focusChatSession(sessionKey)
         self.openChatRequestID &+= 1
+    }
+
+    func openAsk(for item: ArgusOperation, preview: ArgusArtifactPreview, gatewayID: String) throws {
+        guard self.chatOutboxGatewayOwnerID == gatewayID, !self.chatOutboxPurgeInProgress else {
+            throw ArgusOperationsError.unavailable
+        }
+        self.resultAskRequest = try ArgusResultAskRequest(item: item, preview: preview, gatewayID: gatewayID,
+            resetGeneration: self.chatOutboxOwnerGeneration, sessionKey: self.chatSessionKey)
+        self.openChat(sessionKey: self.chatSessionKey)
+    }
+
+    func consumeResultAskRequest(_ id: UUID) {
+        if self.resultAskRequest?.id == id { self.resultAskRequest = nil }
     }
 
     func focusChatSession(_ sessionKey: String?) {

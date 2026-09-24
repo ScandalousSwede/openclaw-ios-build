@@ -17,7 +17,10 @@ public final class OpenClawChatViewModel {
     }
     public var input: String = "" {
         didSet {
-            if self.input != oldValue { self.draftRevision &+= 1 }
+            if self.input != oldValue {
+                self.draftRevision &+= 1
+                self.composerDraftDidChange()
+            }
         }
     }
     public private(set) var thinkingLevel: String
@@ -29,7 +32,10 @@ public final class OpenClawChatViewModel {
     public private(set) var isAborting = false
     public var errorText: String?
     public var attachments: [OpenClawPendingAttachment] = [] {
-        didSet { self.draftRevision &+= 1 }
+        didSet {
+            self.draftRevision &+= 1
+            self.composerDraftDidChange()
+        }
     }
     public private(set) var healthOK: Bool = false
     public private(set) var pendingRunCount: Int = 0
@@ -74,6 +80,20 @@ public final class OpenClawChatViewModel {
     private var pendingOutboxFlushTrigger: OpenClawDiagnosticOutboxFlushTrigger?
     private var lastAppliedOutboxUpdateSequence: UInt64 = 0
     private var draftRevision: UInt64 = 0
+    public private(set) var isComposerDraftReady = true
+    public private(set) var composerDraftStatus: String?
+    public private(set) var composerDraftSaveFailed = false
+    public private(set) var composerDraftRestoreFailed = false
+    public private(set) var canDiscardUnreadableComposerDraft = false
+    private let composerDraftStore: OpenClawChatOutboxStore?
+    private var composerDraftRevision = UUID()
+    private var composerDraftLease: UUID?
+    private var composerRestoreGeneration: UInt64 = 0
+    @ObservationIgnored private var composerRestoreTask: Task<Void, Never>?
+    @ObservationIgnored private var composerSaveTask: Task<Bool, Never>?
+    private var composerSaveIsImmediate = false
+    @ObservationIgnored private var composerSwitchTask: Task<Void, Never>?
+    private var createdSessionAwaitingDraftSave: (parent: SessionSnapshot, key: String)?
 
     private var pendingLocalUserEchoMessageIDsByRunID: [String: UUID] = [:]
     // Canonical rows observed directly on the live session stream remain
@@ -209,12 +229,14 @@ public final class OpenClawChatViewModel {
         outboxDeliveryOwner: OpenClawChatOutboxDeliveryOwner? = nil,
         outboxStore: OpenClawChatOutboxStore? = nil,
         outboxStableGatewayID: String? = nil,
+        composerDraftStore: OpenClawChatOutboxStore? = nil,
         onSessionChanged: (@MainActor (String) -> Void)? = nil,
         onThinkingLevelChanged: (@MainActor @Sendable (String) -> Void)? = nil,
         diagnosticsLog: (@MainActor @Sendable (String) -> Void)? = nil)
     {
         self.sessionKey = sessionKey
         self.transport = transport
+        self.composerDraftStore = composerDraftStore
         let normalizedGatewayID = outboxStableGatewayID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let outboxDeliveryOwner {
@@ -245,6 +267,7 @@ public final class OpenClawChatViewModel {
         self.diagnosticsLog = diagnosticsLog
 
         self.startEventSubscription()
+        self.restoreComposerDraft()
         if let outboxCoordinator = self.outboxCoordinator {
             self.outboxUpdateTask = Task { [weak self, outboxCoordinator] in
                 let updates = await outboxCoordinator.updates()
@@ -271,9 +294,16 @@ public final class OpenClawChatViewModel {
         }
     }
 
-    public func shutdown() {
+    public func shutdown(saveComposerDraft: Bool = true) {
         guard !self.isShutDown else { return }
+        if saveComposerDraft { self.persistComposerDraft(immediately: true) }
+        else { self.composerSaveTask?.cancel() }
+        self.composerRestoreTask?.cancel()
+        self.composerSwitchTask?.cancel()
         self.isShutDown = true
+        self.composerDraftRestoreFailed = false
+        self.canDiscardUnreadableComposerDraft = false
+        self.isComposerDraftReady = false
         self.eventSubscriptionGeneration &+= 1
         self.outboxWorkerGeneration &+= 1
         self.outboxWakeRequested = false
@@ -311,12 +341,18 @@ public final class OpenClawChatViewModel {
     }
 
     public func send() {
+        guard self.isComposerDraftReady else { return }
         self.logDiagnostic(
             "chat.ui send invoked sessionKey=\(self.sessionKey) "
                 + "inputLen=\(self.input.count) attachments=\(self.attachments.count) "
                 + "pending=\(self.pendingRunCount) sending=\(self.isSending) "
                 + "health=\(self.healthOK)")
-        Task { await self.performSend() }
+        let session = self.currentSessionSnapshot()
+        let revision = self.draftRevision
+        Task {
+            guard self.isCurrentSession(session), self.draftRevision == revision else { return }
+            await self.performSend()
+        }
     }
 
     public func abort() {
@@ -459,11 +495,40 @@ public final class OpenClawChatViewModel {
     ]
 
     public func addAttachments(urls: [URL]) {
-        Task { await self.loadAttachments(urls: urls) }
+        _ = self.makeAttachmentURLReceiver()(urls)
     }
 
     public func addImageAttachment(data: Data, fileName: String, mimeType: String) {
-        Task { await self.addImageAttachment(url: nil, data: data, fileName: fileName, mimeType: mimeType) }
+        _ = self.makeImageAttachmentReceiver()(data, fileName, mimeType)
+    }
+
+    // Capture before opening a picker or loading a provider/pasteboard. Capturing
+    // in its completion would silently assign an old selection to the new chat.
+    func makeAttachmentURLReceiver() -> ChatAttachmentURLReceiver {
+        let generation = self.sessionGeneration
+        return { [weak self] urls in
+            guard let self, self.canAcceptAttachment(generation: generation) else { return false }
+            Task { await self.loadAttachments(urls: urls, generation: generation) }
+            return true
+        }
+    }
+
+    func makeImageAttachmentReceiver() -> ChatImageAttachmentReceiver {
+        let generation = self.sessionGeneration
+        return { [weak self] data, fileName, mimeType in
+            guard let self, self.canAcceptAttachment(generation: generation) else { return false }
+            Task {
+                await self.addImageAttachment(url: nil, data: data, fileName: fileName,
+                                              mimeType: mimeType, generation: generation)
+            }
+            return true
+        }
+    }
+
+    var attachmentImportGeneration: UInt64 { self.sessionGeneration }
+
+    func canAcceptAttachment(generation: UInt64) -> Bool {
+        !self.isShutDown && self.isComposerDraftReady && self.sessionGeneration == generation
     }
 
     public func removeAttachment(_ id: OpenClawPendingAttachment.ID) {
@@ -1349,6 +1414,7 @@ public final class OpenClawChatViewModel {
     private static let compactTriggers: Set<String> = ["/compact"]
 
     private func performSend() async {
+        guard self.isComposerDraftReady else { return }
         guard !self.isSending else {
             self.logDiagnostic("chat.ui send ignored reason=sending sessionKey=\(self.sessionKey)")
             return
@@ -1517,6 +1583,8 @@ public final class OpenClawChatViewModel {
         let capturedAttachments = self.attachments
         let capturedAttachmentIDs = capturedAttachments.map(\.id)
         let capturedDraftRevision = self.draftRevision
+        let capturedComposerRevision = self.composerDraftStore == nil ? nil : self.composerDraftRevision
+        let capturedComposerLease = self.composerDraftLease
         let rawCommandID = UUID().uuidString.lowercased()
         let messageText = trimmed.isEmpty && !capturedAttachments.isEmpty ? "See attached." : trimmed
         let thinkingLevel = self.thinkingLevel
@@ -1526,14 +1594,22 @@ public final class OpenClawChatViewModel {
                 type: $0.type,
                 mimeType: $0.mimeType,
                 fileName: $0.fileName,
-                data: $0.data)
+                data: $0.data, resultSource: $0.resultSource)
         }
 
         self.isSending = true
         self.errorText = nil
         defer { self.isSending = false }
 
+        // Drain earlier autosaves before enqueue's atomic removal of this revision.
+        // A later user edit has a new revision and is never removed by this send.
+        let saved = await self.flushComposerDraft()
+
         guard self.isCurrentSession(sessionSnapshot), !self.isShutDown else { return }
+        guard saved else {
+            self.errorText = "Draft could not be saved. Your message was not queued; retry after saving the draft."
+            return
+        }
 
         self.recordOutboxDiagnostic(
             state: "outbox_enqueue_started",
@@ -1548,7 +1624,9 @@ public final class OpenClawChatViewModel {
                 text: messageText,
                 attachments: durableAttachments,
                 thinkingLevel: thinkingLevel,
-                createdAt: createdAt)
+                createdAt: createdAt,
+                composerRevision: capturedComposerRevision,
+                composerLease: capturedComposerLease)
             guard !self.isShutDown else { return }
             self.recordOutboxDiagnostic(
                 state: "outbox_enqueue_persisted",
@@ -1839,12 +1917,224 @@ public final class OpenClawChatViewModel {
         }
     }
 
+    @discardableResult
+    public func flushComposerDraft() async -> Bool {
+        self.persistComposerDraft(immediately: true)
+        return await self.composerSaveTask?.value ?? (self.composerDraftStore == nil)
+    }
+
+    /// Explicit document selection only appends to the unsent composer. Restoring
+    /// the existing draft first prevents a handoff from overwriting earlier edits.
+    public func retainResultAttachment(_ attachment: OpenClawPendingAttachment, sessionKey: String) async -> Bool {
+        await self.composerSwitchTask?.value
+        await self.composerRestoreTask?.value
+        guard !Task.isCancelled, !self.isShutDown, self.isComposerDraftReady,
+              self.sessionKey == sessionKey, let store = self.composerDraftStore,
+              let source = attachment.resultSource, source.gatewayID == store.stableGatewayID,
+              source.matches(data: attachment.data) else { return false }
+        let snapshot = self.currentSessionSnapshot()
+        let alreadyAttached = self.attachments.contains {
+            guard let retained = $0.resultSource else { return false }
+            return retained.gatewayID == source.gatewayID && retained.operationID == source.operationID
+                && retained.eventID == source.eventID && retained.artifactSHA256 == source.artifactSHA256
+                && $0.data == attachment.data
+        }
+        if !alreadyAttached {
+            guard self.attachments.count < OpenClawChatOutboxDatabase.maxAttachmentsPerCommand else {
+                self.errorText = "Remove an attachment before adding this result. Your existing draft is unchanged."
+                return false
+            }
+            self.attachments.append(attachment)
+        }
+        let saved = await self.flushComposerDraft()
+        return saved && !Task.isCancelled && !self.isShutDown && self.isCurrentSession(snapshot)
+    }
+
+    public func prepareForReplacement() async -> Bool {
+        await self.composerSwitchTask?.value
+        if self.isShutDown { return await self.composerSaveTask?.value ?? (self.composerDraftStore == nil) }
+        guard await self.saveBeforeLeavingComposer() else { return false }
+        // Retire in this same actor turn, before another edit can arrive between
+        // successful persistence and the caller releasing the old view model.
+        self.shutdown(saveComposerDraft: false)
+        return true
+    }
+
+    /// The UI must confirm loss of this chat's unreadable unsent text/attachments.
+    @discardableResult
+    public func discardUnreadableComposerDraft() async -> Bool {
+        guard self.composerDraftRestoreFailed, self.canDiscardUnreadableComposerDraft,
+              !self.isShutDown, let store = self.composerDraftStore else { return false }
+        let generation = self.composerRestoreGeneration
+        let session = self.sessionKey
+        self.composerDraftRestoreFailed = false
+        self.canDiscardUnreadableComposerDraft = false
+        self.composerDraftStatus = "Discarding unreadable draft…"
+        do {
+            try await store.discardUnreadableComposerDraft(sessionKey: session)
+            guard !self.isShutDown, self.composerRestoreGeneration == generation else { return false }
+            self.restoreComposerDraft()
+            await self.composerRestoreTask?.value
+            return !self.isShutDown && self.isComposerDraftReady
+        } catch {
+            guard !self.isShutDown, self.composerRestoreGeneration == generation else { return false }
+            self.composerDraftRestoreFailed = true
+            self.composerDraftStatus = "Draft could not be discarded. Reopen Argus and retry."
+            return false
+        }
+    }
+
+    public func retryComposerDraftRestore() {
+        // Not-ready also covers in-progress restore and navigation saves. Only
+        // a failed restore may clear/reload the visible composer for retry.
+        guard self.composerDraftRestoreFailed, !self.isShutDown else { return }
+        self.restoreComposerDraft()
+    }
+
+    private func composerDraftDidChange() {
+        guard self.composerDraftStore != nil, self.isComposerDraftReady, !self.isShutDown else { return }
+        self.composerDraftRevision = UUID()
+        self.persistComposerDraft(immediately: false)
+    }
+
+    private func persistComposerDraft(immediately: Bool) {
+        guard let store = self.composerDraftStore, self.isComposerDraftReady,
+              let lease = self.composerDraftLease else { return }
+        let session = self.sessionKey
+        let generation = self.composerRestoreGeneration
+        let draft = OpenClawChatComposerDraft(revision: self.composerDraftRevision, text: self.input,
+            attachments: self.attachments.map {
+                OpenClawChatOutboxAttachment(type: $0.type, mimeType: $0.mimeType, fileName: $0.fileName,
+                                            data: $0.data, resultSource: $0.resultSource)
+            })
+        let previous = self.composerSaveTask
+        // Explicit flushes have callers awaiting their result. Serialize them;
+        // only a superseded debounce may be cancelled by a newer save.
+        if !self.composerSaveIsImmediate { previous?.cancel() }
+        self.composerSaveIsImmediate = immediately
+        self.composerDraftStatus = "Saving draft on this device…"
+        self.composerDraftSaveFailed = false
+        // Each write waits for the preceding write, even when its delay was cancelled.
+        // The captured payload/store survives view destruction without retaining the view model.
+        self.composerSaveTask = Task { [weak self, store, previous, draft] in
+            _ = await previous?.value
+            do {
+                if !immediately { try await Task.sleep(nanoseconds: 250_000_000) }
+                try Task.checkCancellation()
+                try await store.saveComposerDraft(draft, sessionKey: session, lease: lease)
+                guard let self, self.composerRestoreGeneration == generation,
+                      self.composerDraftRevision == draft.revision else { return true }
+                self.composerDraftStatus = draft.isEmpty ? nil : "Draft saved on this device"
+                return true
+            } catch is CancellationError {
+                return false
+            } catch {
+                guard let self, self.composerRestoreGeneration == generation,
+                      self.composerDraftRevision == draft.revision else { return false }
+                self.composerDraftStatus = "Draft not saved on this device. Keep this chat open and retry."
+                self.composerDraftSaveFailed = true
+                return false
+            }
+        }
+    }
+
+    private func restoreComposerDraft() {
+        guard let store = self.composerDraftStore else { return }
+        self.composerRestoreGeneration &+= 1
+        let generation = self.composerRestoreGeneration
+        let session = self.sessionKey
+        let previousSave = self.composerSaveTask
+        self.composerRestoreTask?.cancel()
+        self.isComposerDraftReady = false
+        self.composerDraftLease = nil
+        self.input = ""
+        self.attachments = []
+        self.composerDraftStatus = "Restoring draft…"
+        self.composerDraftSaveFailed = false
+        self.composerDraftRestoreFailed = false
+        self.canDiscardUnreadableComposerDraft = false
+        self.composerRestoreTask = Task { [weak self, store, previousSave] in
+            _ = await previousSave?.value
+            guard let self, !self.isShutDown, !Task.isCancelled,
+                  self.composerRestoreGeneration == generation else { return }
+            do {
+                let restored = try await store.loadComposerDraft(sessionKey: session)
+                guard !self.isShutDown, !Task.isCancelled,
+                      self.composerRestoreGeneration == generation else { return }
+                self.input = restored.draft.text
+                self.attachments = restored.draft.attachments.map {
+                    OpenClawPendingAttachment(url: nil, data: $0.data, fileName: $0.fileName,
+                                             mimeType: $0.mimeType, type: $0.type, preview: nil, resultSource: $0.resultSource)
+                }
+                self.composerDraftRevision = restored.draft.revision
+                self.composerDraftLease = restored.lease
+                self.isComposerDraftReady = true
+                self.composerDraftStatus = restored.draft.isEmpty ? nil : "Draft saved on this device"
+            } catch {
+                guard !self.isShutDown, !Task.isCancelled,
+                      self.composerRestoreGeneration == generation else { return }
+                self.composerDraftRestoreFailed = true
+                if case OpenClawChatOutboxError.invalidField(let field) = error,
+                   field == "composerDraft.payload" || field == "attachment.resultSource" {
+                    self.canDiscardUnreadableComposerDraft = true
+                    self.composerDraftStatus = "This saved draft is unreadable. You can discard it to use this chat."
+                } else {
+                    self.composerDraftStatus = "Draft could not be restored. Retry or reopen Argus before editing this chat."
+                }
+            }
+        }
+    }
+
     private func applySessionSwitch(to sessionKey: String, intent: SessionSwitchIntent) {
         let next = sessionKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !next.isEmpty else { return }
+        if self.composerDraftStore != nil {
+            let previous = self.composerSwitchTask
+            previous?.cancel()
+            self.composerSwitchTask = Task { [weak self, previous] in
+                await previous?.value
+                guard let self, !self.isShutDown, !Task.isCancelled else { return }
+                guard next != self.sessionKey else { return }
+                let admitted = self.currentSessionSnapshot()
+                let saved = await self.saveBeforeLeavingComposer()
+                guard !Task.isCancelled, self.isCurrentSession(admitted), !self.isShutDown else { return }
+                guard saved else {
+                    self.onSessionChanged?(self.sessionKey)
+                    return
+                }
+                self.completeSessionSwitch(to: next, intent: intent)
+            }
+            return
+        }
+        self.completeSessionSwitch(to: next, intent: intent)
+    }
+
+    private func saveBeforeLeavingComposer() async -> Bool {
+        guard self.composerDraftStore != nil else { return true }
+        await self.composerRestoreTask?.value
+        guard self.isComposerDraftReady, !self.isShutDown, !Task.isCancelled else { return false }
+        let revision = self.draftRevision
+        self.persistComposerDraft(immediately: true)
+        self.isComposerDraftReady = false
+        let saved = await self.composerSaveTask?.value ?? false
+        self.isComposerDraftReady = true
+        // Keep the current visible buffer if storage failed or a programmatic edit
+        // arrived while controls were disabled. Never replace it with an older row.
+        guard saved, self.draftRevision == revision else {
+            self.composerDraftRevision = UUID()
+            self.composerDraftSaveFailed = true
+            self.composerDraftStatus = "Draft not saved on this device. Stay in this chat and retry."
+            return false
+        }
+        return true
+    }
+
+    private func completeSessionSwitch(to next: String, intent: SessionSwitchIntent) {
         guard next != self.sessionKey else { return }
+        self.createdSessionAwaitingDraftSave = nil
         self.advanceSessionGeneration()
         self.sessionKey = next
+        self.restoreComposerDraft()
         self.recordChatDiagnostic(
             state: "selected_session_generation_changed",
             resultClass: "success",
@@ -1869,51 +2159,63 @@ public final class OpenClawChatViewModel {
         guard await self.destructiveSessionActionIsAllowed(for: admittedSession),
               self.isCurrentSession(admittedSession)
         else { return }
-        self.input = ""
+        guard await self.prepareDurableSessionCommand(commandInput, session: admittedSession) else { return }
+        if self.composerDraftStore == nil { self.input = "" }
         let requested = self.generatedNewSessionKey()
         let parentSessionKey = admittedSession.key
         let next: String
-        do {
-            let transport = self.transport
-            let created: OpenClawChatCreateSessionResponse
-            if let outboxCoordinator = self.outboxCoordinator {
-                created = try await outboxCoordinator.performDestructiveSessionAction(
-                    admissionCheck: { [weak self] in
-                        guard await MainActor.run(body: {
-                            self?.isCurrentSession(admittedSession) == true
-                        }) else { throw CancellationError() }
-                    }) {
-                        try await transport.createSession(
-                            key: requested,
-                            label: nil,
-                            parentSessionKey: parentSessionKey)
-                    }
-            } else {
-                guard self.isCurrentSession(admittedSession) else { throw CancellationError() }
-                created = try await transport.createSession(
-                    key: requested,
-                    label: nil,
-                    parentSessionKey: parentSessionKey)
-            }
-            guard self.isCurrentSession(admittedSession) else { return }
-            let createdKey = created.key.trimmingCharacters(in: .whitespacesAndNewlines)
-            next = createdKey.isEmpty ? requested : createdKey
-        } catch {
-            guard self.isCurrentSession(admittedSession) else { return }
-            if Self.isUnsupportedCreateSessionError(error) {
-                chatUILogger.info("sessions.create unsupported; falling back to sessions.reset")
-                await self.performReset(preserving: commandInput, clearInputOnAdmission: false)
+        if let pending = self.createdSessionAwaitingDraftSave, self.isCurrentSession(pending.parent) {
+            // The prior RPC already succeeded. A local save retry must not create
+            // another remote chat for this same requested transition.
+            next = pending.key
+        } else {
+            do {
+                let transport = self.transport
+                let created: OpenClawChatCreateSessionResponse
+                if let outboxCoordinator = self.outboxCoordinator {
+                    created = try await outboxCoordinator.performDestructiveSessionAction(
+                        admissionCheck: { [weak self] in
+                            guard await MainActor.run(body: {
+                                self?.isCurrentSession(admittedSession) == true
+                            }) else { throw CancellationError() }
+                        }) {
+                            try await transport.createSession(
+                                key: requested,
+                                label: nil,
+                                parentSessionKey: parentSessionKey)
+                        }
+                } else {
+                    guard self.isCurrentSession(admittedSession) else { throw CancellationError() }
+                    created = try await transport.createSession(
+                        key: requested,
+                        label: nil,
+                        parentSessionKey: parentSessionKey)
+                }
+                guard self.isCurrentSession(admittedSession) else { return }
+                let createdKey = created.key.trimmingCharacters(in: .whitespacesAndNewlines)
+                next = createdKey.isEmpty ? requested : createdKey
+            } catch {
+                guard self.isCurrentSession(admittedSession) else { return }
+                if Self.isUnsupportedCreateSessionError(error) {
+                    chatUILogger.info("sessions.create unsupported; falling back to sessions.reset")
+                    await self.performReset(preserving: commandInput, clearInputOnAdmission: false)
+                    return
+                }
+                chatUILogger.error("sessions.create failed \(error.localizedDescription, privacy: .public)")
+                self.errorText = error.localizedDescription
+                if self.input.isEmpty {
+                    self.input = commandInput
+                }
                 return
             }
-            chatUILogger.error("sessions.create failed \(error.localizedDescription, privacy: .public)")
-            self.errorText = error.localizedDescription
-            if self.input.isEmpty {
-                self.input = commandInput
-            }
-            return
+            self.createdSessionAwaitingDraftSave = (admittedSession, next)
         }
+        // Edits made while createSession awaited still belong to the old chat.
+        guard await self.saveBeforeLeavingComposer(), self.isCurrentSession(admittedSession) else { return }
+        self.createdSessionAwaitingDraftSave = nil
         self.advanceSessionGeneration()
         self.sessionKey = next
+        self.restoreComposerDraft()
         self.recordChatDiagnostic(
             state: "selected_session_generation_changed",
             resultClass: "success",
@@ -1938,11 +2240,29 @@ public final class OpenClawChatViewModel {
             && nsError.localizedDescription == "sessions.create not supported by this transport"
     }
 
+    /// Consume command text before the remote effect. Clearing only after success
+    /// leaves an already-executed command recoverable after a crash or disk failure.
+    private func prepareDurableSessionCommand(_ commandInput: String, session: SessionSnapshot) async -> Bool {
+        guard self.composerDraftStore != nil else { return true }
+        await self.composerRestoreTask?.value
+        guard self.isCurrentSession(session), self.isComposerDraftReady else { return false }
+        if self.input == commandInput { self.input = "" }
+        guard await self.saveBeforeLeavingComposer(), self.isCurrentSession(session) else {
+            if self.isCurrentSession(session) {
+                if self.input.isEmpty { self.input = commandInput }
+                self.errorText = "Command not run. Save this draft successfully before trying again."
+            }
+            return false
+        }
+        return true
+    }
+
     private func performReset(
         preserving commandInput: String,
         clearInputOnAdmission: Bool) async
     {
         let admittedSession = self.currentSessionSnapshot()
+        guard await self.prepareDurableSessionCommand(commandInput, session: admittedSession) else { return }
         self.isLoading = true
         self.errorText = nil
 
@@ -1977,7 +2297,7 @@ public final class OpenClawChatViewModel {
         }
 
         guard self.isCurrentSession(admittedSession) else { return }
-        if clearInputOnAdmission, self.input == commandInput {
+        if self.composerDraftStore == nil, clearInputOnAdmission, self.input == commandInput {
             self.input = ""
         }
         self.applySuccessfulDestructiveSessionMutation()
@@ -2021,11 +2341,12 @@ public final class OpenClawChatViewModel {
 
         let admittedSession = self.currentSessionSnapshot()
         self.isCompacting = true
-        self.isLoading = true
         self.errorText = nil
         defer {
             self.isCompacting = false
         }
+        guard await self.prepareDurableSessionCommand(commandInput, session: admittedSession) else { return }
+        self.isLoading = true
 
         do {
             let transport = self.transport
@@ -2061,7 +2382,7 @@ public final class OpenClawChatViewModel {
         }
 
         guard self.isCurrentSession(admittedSession) else { return }
-        if self.input == commandInput {
+        if self.composerDraftStore == nil, self.input == commandInput {
             self.input = ""
         }
         lastCompactAt = Date()

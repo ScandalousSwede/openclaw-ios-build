@@ -50,7 +50,15 @@ struct OpenClawChatComposer: View {
     let talkControl: OpenClawChatTalkControl?
 
     #if !os(macOS)
+    private struct PhotoImportRequest {
+        let id = UUID()
+        let viewModel: OpenClawChatViewModel
+        let generation: UInt64
+    }
+
     @State private var pickerItems: [PhotosPickerItem] = []
+    @State private var presentsPhotosPicker = false
+    @State private var photoImportRequest: PhotoImportRequest?
     @FocusState private var isFocused: Bool
     #else
     @State private var shouldFocusTextView = false
@@ -226,28 +234,48 @@ struct OpenClawChatComposer: View {
         }
         #else
         if self.composerChrome == .clean {
-            PhotosPicker(selection: self.$pickerItems, maxSelectionCount: 8, matching: .images) {
+            Button {
+                // The binding is also the next picker's initial selection. Old
+                // transfers own their captured array, not this fresh selection.
+                self.pickerItems = []
+                self.photoImportRequest = PhotoImportRequest(
+                    viewModel: self.viewModel, generation: self.viewModel.attachmentImportGeneration)
+                self.presentsPhotosPicker = true
+            } label: {
                 Image(systemName: "paperclip")
             }
+            .photosPicker(isPresented: self.$presentsPhotosPicker, selection: self.$pickerItems,
+                          maxSelectionCount: 8, matching: .images)
             .help("Add Image")
             .accessibilityLabel("Attachments")
             .buttonStyle(.plain)
             .controlSize(.small)
             .disabled(!self.isComposerEnabled)
             .onChange(of: self.pickerItems) { _, newItems in
-                Task { await self.loadPhotosPickerItems(newItems) }
+                guard !newItems.isEmpty, let request = self.photoImportRequest else { return }
+                Task { await self.loadPhotosPickerItems(newItems, request: request) }
             }
         } else {
-            PhotosPicker(selection: self.$pickerItems, maxSelectionCount: 8, matching: .images) {
+            Button {
+                // The binding is also the next picker's initial selection. Old
+                // transfers own their captured array, not this fresh selection.
+                self.pickerItems = []
+                self.photoImportRequest = PhotoImportRequest(
+                    viewModel: self.viewModel, generation: self.viewModel.attachmentImportGeneration)
+                self.presentsPhotosPicker = true
+            } label: {
                 Image(systemName: "paperclip")
             }
+            .photosPicker(isPresented: self.$presentsPhotosPicker, selection: self.$pickerItems,
+                          maxSelectionCount: 8, matching: .images)
             .help("Add Image")
             .accessibilityLabel("Attachments")
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(!self.isComposerEnabled)
             .onChange(of: self.pickerItems) { _, newItems in
-                Task { await self.loadPhotosPickerItems(newItems) }
+                guard !newItems.isEmpty, let request = self.photoImportRequest else { return }
+                Task { await self.loadPhotosPickerItems(newItems, request: request) }
             }
         }
         #endif
@@ -268,7 +296,7 @@ struct OpenClawChatComposer: View {
                                 .frame(width: 22, height: 22)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         } else {
-                            Image(systemName: "photo")
+                            Image(systemName: att.mimeType.hasPrefix("image/") ? "photo" : "doc.text")
                         }
 
                         Text(att.fileName)
@@ -280,6 +308,8 @@ struct OpenClawChatComposer: View {
                             Image(systemName: "xmark.circle.fill")
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(att.fileName)")
+                        .disabled(!self.isComposerEnabled)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
@@ -501,9 +531,9 @@ struct OpenClawChatComposer: View {
                 onSend: {
                     self.sendDraftIfEnabled()
                 },
-                onPasteImageAttachment: { data, fileName, mimeType in
-                    guard self.isComposerEnabled else { return }
-                    self.viewModel.addImageAttachment(data: data, fileName: fileName, mimeType: mimeType)
+                makePasteImageReceiver: {
+                    guard self.isComposerEnabled else { return { _, _, _ in false } }
+                    return self.viewModel.makeImageAttachmentReceiver()
                 })
                 .frame(minHeight: self.textMinHeight, idealHeight: self.textMinHeight, maxHeight: self.textMaxHeight)
                 .padding(.horizontal, 4)
@@ -675,6 +705,7 @@ struct OpenClawChatComposer: View {
     #if os(macOS)
     private func pickFilesMac() {
         guard self.isComposerEnabled else { return }
+        let receive = self.viewModel.makeAttachmentURLReceiver()
         let panel = NSOpenPanel()
         panel.title = "Select image attachments"
         panel.allowsMultipleSelection = true
@@ -682,7 +713,7 @@ struct OpenClawChatComposer: View {
         panel.allowedContentTypes = [.image]
         panel.begin { resp in
             guard resp == .OK else { return }
-            self.viewModel.addAttachments(urls: panel.urls)
+            _ = receive(panel.urls)
         }
     }
 
@@ -690,37 +721,43 @@ struct OpenClawChatComposer: View {
         guard self.isComposerEnabled else { return false }
         let fileProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
         guard !fileProviders.isEmpty else { return false }
+        let receive = self.viewModel.makeAttachmentURLReceiver()
         for item in fileProviders {
             item.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil)
                 else { return }
                 Task { @MainActor in
-                    self.viewModel.addAttachments(urls: [url])
+                    _ = receive([url])
                 }
             }
         }
         return true
     }
     #else
-    private func loadPhotosPickerItems(_ items: [PhotosPickerItem]) async {
-        guard self.isComposerEnabled else {
-            self.pickerItems = []
-            return
+    private func loadPhotosPickerItems(_ items: [PhotosPickerItem], request: PhotoImportRequest) async {
+        // Capture both owner and chat before showing the picker, not after its
+        // selection callback. Navigation or owner replacement may occur meanwhile.
+        let owner = request.viewModel
+        defer {
+            if self.photoImportRequest?.id == request.id { self.pickerItems = [] }
         }
+        guard owner.canAcceptAttachment(generation: request.generation) else { return }
         for item in items {
             do {
+                guard owner.canAcceptAttachment(generation: request.generation) else { return }
                 guard let data = try await item.loadTransferable(type: Data.self) else { continue }
                 let type = item.supportedContentTypes.first ?? .image
                 let ext = type.preferredFilenameExtension ?? "jpg"
                 let mime = type.preferredMIMEType ?? "image/jpeg"
                 let name = "photo-\(UUID().uuidString.prefix(8)).\(ext)"
-                self.viewModel.addImageAttachment(data: data, fileName: name, mimeType: mime)
+                await owner.addImageAttachment(url: nil, data: data, fileName: name,
+                    mimeType: mime, generation: request.generation)
             } catch {
-                self.viewModel.errorText = error.localizedDescription
+                guard owner.canAcceptAttachment(generation: request.generation) else { return }
+                owner.errorText = error.localizedDescription
             }
         }
-        self.pickerItems = []
     }
     #endif
 
@@ -739,7 +776,7 @@ private struct ChatComposerTextView: NSViewRepresentable {
     @Binding var shouldFocus: Bool
     var isEnabled: Bool
     var onSend: () -> Void
-    var onPasteImageAttachment: (_ data: Data, _ fileName: String, _ mimeType: String) -> Void
+    var makePasteImageReceiver: () -> ChatImageAttachmentReceiver
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -757,7 +794,7 @@ private struct ChatComposerTextView: NSViewRepresentable {
             composerTextView?.window?.makeFirstResponder(nil)
             self.onSend()
         }
-        composerTextView.onPasteImageAttachment = self.onPasteImageAttachment
+        composerTextView.makePasteImageReceiver = self.makePasteImageReceiver
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -772,7 +809,7 @@ private struct ChatComposerTextView: NSViewRepresentable {
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? ChatComposerNSTextView else { return }
-        textView.onPasteImageAttachment = self.onPasteImageAttachment
+        textView.makePasteImageReceiver = self.makePasteImageReceiver
         textView.isEditable = self.isEnabled
         textView.isSelectable = self.isEnabled
 
@@ -845,7 +882,7 @@ enum ChatComposerTextViewFactory {
 
 private final class ChatComposerNSTextView: NSTextView {
     var onSend: (() -> Void)?
-    var onPasteImageAttachment: ((_ data: Data, _ fileName: String, _ mimeType: String) -> Void)?
+    var makePasteImageReceiver: (() -> ChatImageAttachmentReceiver)?
 
     override var readablePasteboardTypes: [NSPasteboard.PasteboardType] {
         var types = super.readablePasteboardTypes
@@ -893,37 +930,41 @@ private final class ChatComposerNSTextView: NSTextView {
         from pasteboard: NSPasteboard,
         matching preferredType: NSPasteboard.PasteboardType?) -> Bool
     {
+        guard let receive = self.makePasteImageReceiver?() else { return false }
         let attachments = ChatComposerPasteSupport.imageAttachments(from: pasteboard, matching: preferredType)
         if !attachments.isEmpty {
-            self.deliver(attachments)
+            self.deliver(attachments, to: receive)
             return true
         }
 
         let fileReferences = ChatComposerPasteSupport.imageFileReferences(from: pasteboard, matching: preferredType)
         if !fileReferences.isEmpty {
-            self.loadAndDeliver(fileReferences)
+            self.loadAndDeliver(fileReferences, to: receive)
             return true
         }
 
         return false
     }
 
-    private func deliver(_ attachments: [ChatComposerPasteSupport.ImageAttachment]) {
+    private func deliver(_ attachments: [ChatComposerPasteSupport.ImageAttachment], to receive: ChatImageAttachmentReceiver) {
         for attachment in attachments {
-            self.onPasteImageAttachment?(
+            _ = receive(
                 attachment.data,
                 attachment.fileName,
                 attachment.mimeType)
         }
     }
 
-    private func loadAndDeliver(_ fileReferences: [ChatComposerPasteSupport.FileImageReference]) {
+    private func loadAndDeliver(
+        _ fileReferences: [ChatComposerPasteSupport.FileImageReference],
+        to receive: @escaping ChatImageAttachmentReceiver)
+    {
         DispatchQueue.global(qos: .userInitiated).async { [weak self, fileReferences] in
             let attachments = ChatComposerPasteSupport.loadImageAttachments(from: fileReferences)
             guard !attachments.isEmpty else { return }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.deliver(attachments)
+                self.deliver(attachments, to: receive)
             }
         }
     }
