@@ -151,7 +151,7 @@ struct OpenClawChatOutboxStorageTests {
             try await fixture.database.close()
             // Only this isolated fixture is reduced to the unchanged pre-composer schema.
             let prior = try DatabaseQueue(path: fixture.databaseURL.path)
-            try prior.write { db in
+            try await prior.write { db in
                 try db.drop(table: "composer_drafts")
                 try db.execute(sql: "DELETE FROM grdb_migrations WHERE identifier = ?",
                                arguments: [OpenClawChatOutboxDatabase.composerMigrationIdentifier])
