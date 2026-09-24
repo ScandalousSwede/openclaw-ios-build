@@ -1167,8 +1167,10 @@ struct OpenClawChatOutboxIntegrationTests {
             try await fixture.store.saveComposerDraft(.init(text: "Unsent fixture"), sessionKey: session, lease: loaded.lease)
         }
         let transport = S3TestTransport()
+        let owner = OpenClawChatOutboxDeliveryOwner(
+            store: fixture.store, stableGatewayID: "gateway-test", transport: transport)
         let vm = OpenClawChatViewModel(sessionKey: "main", transport: transport,
-            outboxStore: fixture.store, outboxStableGatewayID: "gateway-test", composerDraftStore: fixture.store)
+            outboxDeliveryOwner: owner, composerDraftStore: fixture.store)
         try await waitUntil("composer restore despite full capacity") { await MainActor.run { vm.isComposerDraftReady } }
         vm.input = "Do not queue until this draft is saved"
         vm.send()
@@ -1178,12 +1180,18 @@ struct OpenClawChatOutboxIntegrationTests {
         #expect(vm.input == "Do not queue until this draft is saved")
         #expect(try await fixture.store.loadUnresolved().isEmpty)
         #expect(await transport.state.dispatchedIDs().isEmpty)
-        // Queue storage itself is healthy and has capacity; the failed prerequisite
-        // is specifically composer persistence, not a mocked global database failure.
-        let control = try await fixture.store.persistBeforeDraftClear(
-            s3Draft(rawCommandID: "synthetic-control", route: verifiedRoute))
-        #expect(control.rawCommandID == "synthetic-control")
+        // Retire the shared owner to await any subscriber route refresh before
+        // reading its current evidence. Queue storage must still be healthy;
+        // only the separate composer-capacity prerequisite failed closed.
         vm.shutdown(saveComposerDraft: false)
+        await owner.retire()
+        let currentRoute = try #require(await fixture.store.loadVerifiedRouteSnapshot())
+        #expect(currentRoute.routingContract == verifiedRoute.routingContract)
+        #expect(Set(currentRoute.capabilities) == Set(verifiedRoute.capabilities))
+        #expect(Set(currentRoute.operatorScopes) == Set(verifiedRoute.operatorScopes))
+        let control = try await fixture.store.persistBeforeDraftClear(
+            s3Draft(rawCommandID: "synthetic-control", route: currentRoute))
+        #expect(control.rawCommandID == "synthetic-control")
         try await fixture.close()
     }
 
