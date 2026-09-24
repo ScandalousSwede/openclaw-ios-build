@@ -33,6 +33,7 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
     private var backgroundWakeTask: Task<Bool, Never>?
     private var pendingAPNsDeviceToken: PendingAPNsDeviceToken?
     private var pendingArgusEvidenceReference: ArgusEvidenceNotificationReference?
+    private var pendingChatReplyReference: ChatReplyNotificationReference?
     private var pendingWatchPromptActions: [PendingWatchPromptAction] = []
     private var pendingExecApprovalPrompts: [PendingExecApprovalPrompt] = []
     private var pendingExecApprovalRequestedPushIDs: [String] = []
@@ -44,6 +45,10 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
             if let reference = self.pendingArgusEvidenceReference {
                 self.pendingArgusEvidenceReference = nil
                 model.openArgusEvidenceNotification(reference)
+            }
+            if let reference = self.pendingChatReplyReference {
+                self.pendingChatReplyReference = nil
+                model.openChatReplyNotification(reference)
             }
             if let token = self.pendingAPNsDeviceToken {
                 self.pendingAPNsDeviceToken = nil
@@ -392,12 +397,30 @@ final class OpenClawAppDelegate: NSObject, UIApplicationDelegate, @preconcurrenc
         return true
     }
 
+    @discardableResult
+    func routeChatReplyNotification(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> Bool {
+        guard let reference = ChatReplyNotificationReference.parse(
+            actionIdentifier: actionIdentifier, userInfo: userInfo) else { return false }
+        if let model = self.resolvedAppModel() {
+            model.openChatReplyNotification(reference)
+        } else {
+            self.pendingChatReplyReference = reference
+        }
+        return true
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void)
     {
         if self.routeArgusEvidenceNotification(
+            actionIdentifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
+        {
+            completionHandler()
+            return
+        }
+        if self.routeChatReplyNotification(
             actionIdentifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
         {
             completionHandler()

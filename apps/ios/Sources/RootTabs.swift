@@ -389,6 +389,11 @@ struct RootTabs: View {
                     self.selectedTab = .control
                 }
             }
+            .onChange(of: self.appModel.chatReplyNotificationPresentationID, initial: true) { _, _ in
+                if self.appModel.chatReplyNotificationRequest != nil {
+                    self.selectedTab = .control
+                }
+            }
             .onChange(of: self.appModel.openChatRequestID) { _, _ in
                 self.selectedTab = .chat
             }

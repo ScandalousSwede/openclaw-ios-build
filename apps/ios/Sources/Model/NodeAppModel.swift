@@ -394,6 +394,15 @@ final class NodeAppModel {
     }
     private(set) var lastArgusEvidenceNotificationRequest: ArgusEvidenceNotificationRequest?
     var argusEvidenceNotificationPresentationID: Int = 0
+    var chatReplyNotificationRequest: ChatReplyNotificationRequest? {
+        didSet {
+            if let request = self.chatReplyNotificationRequest {
+                self.lastChatReplyNotificationRequest = request
+            }
+        }
+    }
+    private(set) var lastChatReplyNotificationRequest: ChatReplyNotificationRequest?
+    var chatReplyNotificationPresentationID: Int = 0
     var argusTaskActivityRequest: ArgusTaskActivityRequest? {
         didSet {
             if let request = self.argusTaskActivityRequest {

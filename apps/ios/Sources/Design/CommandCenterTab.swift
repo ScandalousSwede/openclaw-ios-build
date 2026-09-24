@@ -46,6 +46,16 @@ struct CommandCenterTab: View {
                             }
                             .padding(.horizontal, OpenClawProMetric.pagePadding)
                         }
+                        if self.appModel.lastChatReplyNotificationRequest != nil {
+                            CommandPanel(padding: 12) {
+                                Button("Reopen last reply") {
+                                    self.appModel.reopenLastChatReplyNotification()
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .accessibilityIdentifier("argus.reopenLastReply")
+                            }
+                            .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        }
                         if self.appModel.lastArgusTaskActivityRequest != nil {
                             CommandPanel(padding: 12) {
                                 ArgusTaskActivityResumeButton { self.appModel.reopenLastTaskActivity() }
@@ -67,6 +77,12 @@ struct CommandCenterTab: View {
                 set: { self.appModel.argusEvidenceNotificationRequest = $0 }))
             { request in
                 ArgusEvidenceNotificationView(request: request).id(request.id)
+            }
+            .navigationDestination(item: Binding(
+                get: { self.appModel.chatReplyNotificationRequest },
+                set: { self.appModel.chatReplyNotificationRequest = $0 }))
+            { request in
+                ChatReplyNotificationView(request: request).id(request.id)
             }
         }
         .task(id: self.recentSessionsRefreshID) {
