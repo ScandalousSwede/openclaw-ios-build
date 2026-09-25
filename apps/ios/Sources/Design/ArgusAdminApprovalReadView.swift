@@ -41,10 +41,16 @@ struct ArgusAdminApprovalReadView: View {
                                 .font(.subheadline.monospaced())
                                 .textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
-                            Text("Requested by \(request.requestedBy) · \(request.issue)")
+                            Text("Requested by \(request.requestedBy)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if let issueURL = URL(string: "https://linear.app/argus-egillese/issue/\(request.issue)") {
+                                Link("Open \(request.issue) in Linear", destination: issueURL)
+                                    .font(.subheadline)
+                                    .frame(minHeight: 44)
+                                    .accessibilityIdentifier("argus.adminApprovals.issue")
+                            }
                             Text("Expires \(request.expiresAt)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -70,11 +76,17 @@ struct ArgusAdminApprovalReadView: View {
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityIdentifier("argus.adminApprovals.exactScript")
+                        Text("Arguments")
+                            .font(.subheadline.weight(.semibold))
+                        Text(reviewed.request.argsCanonical)
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("argus.adminApprovals.arguments")
                         DisclosureGroup("Technical details") {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Commit: \(reviewed.request.gitCommit)")
                                 Text("Script SHA-256: \(reviewed.request.scriptSha256)")
-                                Text("Arguments: \(reviewed.request.argsCanonical)")
                                 Text("Arguments SHA-256: \(reviewed.request.argsSha256)")
                             }
                             .font(.caption.monospaced())
