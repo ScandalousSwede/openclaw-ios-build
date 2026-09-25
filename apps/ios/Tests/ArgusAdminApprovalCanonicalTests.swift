@@ -12,7 +12,7 @@ struct ArgusAdminApprovalCanonicalTests {
         #expect(ArgusAdminApprovalCanonical.sha256(args)
             == "1f320185d26e4606034da6947f9f1a81927fc3e56db961a45179f59255c79292")
 
-        let script = Data("ok\n".utf8)
+        let script = Data("'ok'\n".utf8)
         let scriptHash = ArgusAdminApprovalCanonical.sha256(script)
         #expect(scriptHash == "cddd1879475bcede88339fe1c3775d12e77ef9485231bebe48cd0076404bb5f3")
 
