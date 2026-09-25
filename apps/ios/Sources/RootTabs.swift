@@ -413,12 +413,17 @@ struct RootTabs: View {
         content
             .sheet(isPresented: self.$showAgentTools) {
                 AgentProTab()
-                    .safeAreaInset(edge: .top) {
-                        HStack {
-                            Spacer()
-                            Button("Close agent tools") { self.showAgentTools = false }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        Button { self.showAgentTools = false } label: {
+                            Label("Close agent tools", systemImage: "xmark")
+                                .font(.body.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, minHeight: 44)
                         }
-                        .padding()
+                        .buttonStyle(.bordered)
+                        .padding(.horizontal, OpenClawProMetric.pagePadding)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial)
                     }
                     .preferredColorScheme(self.appearancePreference.colorScheme)
             }
