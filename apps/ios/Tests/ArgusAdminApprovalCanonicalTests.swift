@@ -60,4 +60,30 @@ struct ArgusAdminApprovalCanonicalTests {
                 expiresAt: valid.expiresAt, brokerID: valid.brokerID))
         }
     }
+
+    @Test func onlyExactDisplayablePendingBytesCanBeReviewed() throws {
+        let script = Data("Write-Output 'ok'\r\n".utf8)
+        let digest = ArgusAdminApprovalCanonical.sha256(script)
+        #expect(try ArgusAdminApprovalCanonical.reviewedScript(script, expectedSHA256: digest)
+            == "Write-Output 'ok'\r\n")
+        #expect(throws: ArgusAdminApprovalCanonical.FormatError.self) {
+            try ArgusAdminApprovalCanonical.reviewedScript(
+                Data("Write-Output 'changed'\r\n".utf8), expectedSHA256: digest)
+        }
+        #expect(throws: ArgusAdminApprovalCanonical.FormatError.self) {
+            try ArgusAdminApprovalCanonical.reviewedScript(
+                Data([87, 114, 105, 116, 101, 0, 10]),
+                expectedSHA256: ArgusAdminApprovalCanonical.sha256(Data([87, 114, 105, 116, 101, 0, 10])))
+        }
+
+        let values: [String: ArgusAdminApprovalCanonical.Value] = ["Interface": .string("Ethernet")]
+        let args = try ArgusAdminApprovalCanonical.arguments(values)
+        #expect(try ArgusAdminApprovalCanonical.reviewedArguments(
+            values, expectedSHA256: ArgusAdminApprovalCanonical.sha256(args)) == args)
+        #expect(throws: ArgusAdminApprovalCanonical.FormatError.self) {
+            try ArgusAdminApprovalCanonical.reviewedArguments(
+                ["Interface": .string("Wi-Fi")],
+                expectedSHA256: ArgusAdminApprovalCanonical.sha256(args))
+        }
+    }
 }

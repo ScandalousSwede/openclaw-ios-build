@@ -13,6 +13,8 @@ enum ArgusAdminApprovalCanonical {
     enum FormatError: Error {
         case invalidArgument
         case invalidStatement
+        case unrenderableScript
+        case hashMismatch
     }
 
     struct Statement {
@@ -53,6 +55,26 @@ enum ArgusAdminApprovalCanonical {
 
     static func sha256(_ bytes: Data) -> String {
         SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // A relay-supplied digest cannot make a different script or argument set reviewable.
+    // Keep the exact bytes for hashing; never hash a normalized display string.
+    static func reviewedScript(_ bytes: Data, expectedSHA256: String) throws -> String {
+        guard !bytes.isEmpty, bytes.count <= 262_144,
+              bytes.allSatisfy({ (32...126).contains($0) || $0 == 9 || $0 == 10 || $0 == 13 }),
+              let text = String(data: bytes, encoding: .utf8) else {
+            throw FormatError.unrenderableScript
+        }
+        guard matches(expectedSHA256, "^[0-9a-f]{64}$"),
+              sha256(bytes) == expectedSHA256 else { throw FormatError.hashMismatch }
+        return text
+    }
+
+    static func reviewedArguments(_ values: [String: Value], expectedSHA256: String) throws -> Data {
+        let canonical = try arguments(values)
+        guard matches(expectedSHA256, "^[0-9a-f]{64}$"),
+              sha256(canonical) == expectedSHA256 else { throw FormatError.hashMismatch }
+        return canonical
     }
 
     static func statement(_ input: Statement) throws -> Data {
