@@ -4,7 +4,7 @@ import Foundation
 // Pure, offline formatting for the broker's ARGUS-APPROVAL-V1 statement.
 // No call site should sign until the broker has proved trusted script provenance.
 enum ArgusAdminApprovalCanonical {
-    enum Value: Equatable {
+    enum Value: Equatable, Sendable {
         case string(String)
         case integer(Int64)
         case boolean(Bool)

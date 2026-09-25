@@ -53,7 +53,7 @@ struct ArgusAdminApprovalRequest: Decodable, Equatable, Sendable {
     }
 }
 
-extension ArgusAdminApprovalCanonical.Value: Decodable, Sendable {
+extension ArgusAdminApprovalCanonical.Value: Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let value = try? container.decode(Bool.self) { self = .boolean(value) }
