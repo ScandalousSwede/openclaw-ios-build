@@ -144,11 +144,16 @@ extension SettingsProTab {
         VStack(spacing: 10) {
             self.settingsListRow(
                 icon: "checkmark.shield.fill",
-                title: "Approvals",
+                title: "Gateway approvals",
                 detail: self.approvalsDetail,
                 route: .approvals,
                 color: self.pendingApproval == nil ? .secondary : OpenClawBrand.warn,
                 badgeValue: self.pendingApproval == nil ? nil : "1")
+            self.settingsListRow(
+                icon: "lock.shield",
+                title: "Admin approvals",
+                detail: "Read pending elevated requests",
+                route: .adminApprovals)
             self.settingsListRow(
                 icon: "person.2",
                 title: "Permissions",
@@ -227,6 +232,8 @@ extension SettingsProTab {
                         self.gatewayDestination
                     case .approvals:
                         self.approvalsDestination
+                    case .adminApprovals:
+                        ArgusAdminApprovalReadView()
                     case .permissions:
                         self.permissionsDestination
                     case .voice:
