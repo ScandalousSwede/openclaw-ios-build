@@ -3560,9 +3560,9 @@ extension NodeAppModel {
         switch authError.detail {
         case .authTokenMismatch, .authDeviceTokenMismatch, .authTokenMissing,
              .authPasswordMissing, .authScopeMismatch, .pairingRequired:
-            true
+            return true
         default:
-            false
+            return false
         }
     }
 
