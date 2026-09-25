@@ -31,12 +31,20 @@ extension SettingsProTab {
                         }
                     }
                     .pickerStyle(.segmented)
-                    Text("Follows iOS appearance.")
+                    Text(self.appearanceExplanation)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, OpenClawProMetric.pagePadding)
+        }
+    }
+
+    private var appearanceExplanation: String {
+        switch AppAppearancePreference(rawValue: self.appearancePreferenceRaw) ?? .system {
+        case .system: "Follows iOS appearance."
+        case .light: "Uses light appearance."
+        case .dark: "Uses dark appearance."
         }
     }
 
