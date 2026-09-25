@@ -1738,8 +1738,11 @@ public actor GatewayChannelActor {
         return authError.detail == .authDeviceTokenMismatch
     }
 
-    private func isTrustedDeviceRetryEndpoint() -> Bool {
-        guard let host = self.url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+    public nonisolated static func isTrustedDeviceTokenEndpoint(
+        url: URL,
+        session: WebSocketSessioning?) -> Bool
+    {
+        guard let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !host.isEmpty
         else {
             return false
@@ -1747,12 +1750,16 @@ public actor GatewayChannelActor {
         if host == "localhost" || host == "::1" || host == "127.0.0.1" || host.hasPrefix("127.") {
             return true
         }
-        if self.url.scheme?.lowercased() == "wss",
-           let trust = self.session as? GatewayDeviceTokenRetryTrustProviding
+        if url.scheme?.lowercased() == "wss",
+           let trust = session as? GatewayDeviceTokenRetryTrustProviding
         {
             return trust.allowsDeviceTokenRetryAuth
         }
         return false
+    }
+
+    private func isTrustedDeviceRetryEndpoint() -> Bool {
+        Self.isTrustedDeviceTokenEndpoint(url: self.url, session: self.session)
     }
 
     private nonisolated func sleepUnlessCancelled(nanoseconds: UInt64) async -> Bool {

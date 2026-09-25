@@ -575,6 +575,74 @@ private final class MockBootstrapNotificationCenter: NotificationCentering, @unc
                 hasStoredOperatorToken: false))
     }
 
+    @Test func pairedOperatorUsesDeviceAuthOnlyWithFullGrantAndNoFreshSetup() {
+        let scopes = ["operator.read", "operator.write", "operator.talk.secrets", "operator.admin"]
+        let entry = DeviceAuthEntry(
+            token: "paired-device-token", role: "operator", scopes: scopes, updatedAtMs: 1)
+        func useStored(
+            token: String? = "shared-token",
+            bootstrapToken: String? = nil,
+            password: String? = nil,
+            entry: DeviceAuthEntry? = entry,
+            requestedScopes: [String] = scopes,
+            endpointURL: URL = URL(string: "ws://localhost:18789")!,
+            sessionBox: WebSocketSessionBox? = nil,
+            upgrading: Bool = false,
+            fallback: Bool = false) -> Bool
+        {
+            NodeAppModel._test_shouldPreferStoredOperatorToken(
+                token: token,
+                bootstrapToken: bootstrapToken,
+                password: password,
+                storedEntry: entry,
+                requestedScopes: requestedScopes,
+                endpointURL: endpointURL,
+                sessionBox: sessionBox,
+                forceTalkPermissionUpgradeRequest: upgrading,
+                forceConfiguredOperatorAuth: fallback)
+        }
+        #expect(useStored())
+        #expect(useStored(token: nil, password: "shared-password"))
+        #expect(!useStored(endpointURL: URL(string: "ws://192.168.1.10:18789")!))
+        #expect(!useStored(endpointURL: URL(string: "wss://gateway.example.com")!))
+        let pinnedSession = GatewayTLSPinningSession(params: GatewayTLSParams(
+            required: true, expectedFingerprint: String(repeating: "a", count: 64),
+            allowTOFU: false, storeKey: nil))
+        #expect(useStored(
+            endpointURL: URL(string: "wss://gateway.example.com")!,
+            sessionBox: WebSocketSessionBox(session: pinnedSession)))
+        #expect(!useStored(entry: nil))
+        #expect(!useStored(token: nil))
+        #expect(!useStored(bootstrapToken: "fresh-setup"))
+        #expect(!useStored(upgrading: true))
+        #expect(!useStored(fallback: true))
+        #expect(!useStored(requestedScopes: scopes + ["operator.approvals"]))
+        #expect(!useStored(entry: DeviceAuthEntry(
+            token: "paired-device-token", role: "operator",
+            scopes: ["operator.read", "operator.admin"], updatedAtMs: 1)))
+    }
+
+    @Test func rejectedStoredOperatorTokenRetriesConfiguredCredentialOnce() {
+        for detail in [
+            GatewayConnectAuthDetailCode.authTokenMismatch,
+            .authDeviceTokenMismatch, .authTokenMissing, .authPasswordMissing,
+            .authScopeMismatch, .pairingRequired,
+        ] {
+            let error = GatewayConnectAuthError(
+                message: "paired auth rejected", detailCode: detail.rawValue,
+                canRetryWithDeviceToken: false)
+            #expect(NodeAppModel._test_shouldRetryConfiguredOperatorAuth(after: error))
+        }
+        for detail in [GatewayConnectAuthDetailCode.authRateLimited, .deviceAuthInvalid] {
+            let error = GatewayConnectAuthError(
+                message: "unrelated auth failure", detailCode: detail.rawValue,
+                canRetryWithDeviceToken: false)
+            #expect(!NodeAppModel._test_shouldRetryConfiguredOperatorAuth(after: error))
+        }
+        #expect(!NodeAppModel._test_shouldRetryConfiguredOperatorAuth(
+            after: NSError(domain: "network", code: 1)))
+    }
+
     @Test @MainActor func successfulBootstrapOnboardingRequestsNotificationAuthorization() async {
         let center = MockBootstrapNotificationCenter()
         let appModel = NodeAppModel(notificationCenter: center)

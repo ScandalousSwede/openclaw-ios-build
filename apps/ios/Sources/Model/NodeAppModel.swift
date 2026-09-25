@@ -3524,6 +3524,48 @@ extension NodeAppModel {
         }
     }
 
+    fileprivate nonisolated static func shouldPreferStoredOperatorToken(
+        token: String?,
+        bootstrapToken: String?,
+        password: String?,
+        storedEntry: DeviceAuthEntry?,
+        requestedScopes: [String],
+        endpointURL: URL,
+        sessionBox: WebSocketSessionBox?,
+        forceTalkPermissionUpgradeRequest: Bool,
+        forceConfiguredOperatorAuth: Bool) -> Bool
+    {
+        guard !forceTalkPermissionUpgradeRequest, !forceConfiguredOperatorAuth,
+              GatewayChannelActor.isTrustedDeviceTokenEndpoint(
+                  url: endpointURL, session: sessionBox?.session),
+              bootstrapToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false,
+              let storedEntry,
+              !storedEntry.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              Set(requestedScopes).isSubset(of: Set(storedEntry.scopes))
+        else { return false }
+        // Keep fresh setup and scope upgrades on their explicit credential. A
+        // complete paired grant can use its device token for connection-bound leases.
+        switch GatewayAuthSource.explicitCredentialSource(
+            token: token,
+            bootstrapToken: bootstrapToken,
+            password: password)
+        {
+        case .sharedToken, .password: return true
+        case .bootstrapToken, .deviceToken, .none: return false
+        }
+    }
+
+    fileprivate nonisolated static func shouldRetryConfiguredOperatorAuth(after error: Error) -> Bool {
+        guard let authError = error as? GatewayConnectAuthError else { return false }
+        switch authError.detail {
+        case .authTokenMismatch, .authDeviceTokenMismatch, .authTokenMissing,
+             .authPasswordMissing, .authScopeMismatch, .pairingRequired:
+            true
+        default:
+            false
+        }
+    }
+
     fileprivate nonisolated static func clearingBootstrapToken(in config: GatewayConnectConfig?)
     -> GatewayConnectConfig? {
         guard let config else { return nil }
@@ -3881,6 +3923,7 @@ extension NodeAppModel {
         self.operatorGatewayTask = Task { [weak self] in
             guard let self else { return }
             var attempt = 0
+            var forceConfiguredOperatorAuth = false
             var forcePhysicalReconnectOnNextAttempt = forceSessionReconnect
             operatorReconnectLoop: while !Task.isCancelled {
                 guard self.isCurrentGatewayConnectionOwner(loopOwner) else { break }
@@ -3924,6 +3967,18 @@ extension NodeAppModel {
                         password: reconnectAuth.password,
                         forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest),
                     forceExplicitScopes: true)
+                let identity = DeviceIdentityStore.loadOrCreate()
+                let storedOperator = DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator")
+                let useStoredOperator = Self.shouldPreferStoredOperatorToken(
+                    token: reconnectAuth.token,
+                    bootstrapToken: reconnectAuth.bootstrapToken,
+                    password: reconnectAuth.password,
+                    storedEntry: storedOperator,
+                    requestedScopes: operatorOptions.scopes,
+                    endpointURL: url,
+                    sessionBox: sessionBox,
+                    forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest,
+                    forceConfiguredOperatorAuth: forceConfiguredOperatorAuth)
 
                 await MainActor.run {
                     guard !self.isAppleReviewDemoModeEnabled else { return }
@@ -3940,9 +3995,9 @@ extension NodeAppModel {
                     forcePhysicalReconnectOnNextAttempt = false
                     try await self.operatorGateway.connect(
                         url: url,
-                        token: reconnectAuth.token,
+                        token: useStoredOperator ? nil : reconnectAuth.token,
                         bootstrapToken: reconnectAuth.bootstrapToken,
-                        password: reconnectAuth.password,
+                        password: useStoredOperator ? nil : reconnectAuth.password,
                         connectOptions: operatorOptions,
                         sessionBox: sessionBox,
                         forceReconnect: forcePhysicalReconnect,
@@ -4102,6 +4157,12 @@ extension NodeAppModel {
                     guard !Task.isCancelled,
                           self.isCurrentGatewayConnectionOwner(loopOwner)
                     else { break }
+                    if useStoredOperator, Self.shouldRetryConfiguredOperatorAuth(after: error) {
+                        // One rejected paired attempt may use the already configured
+                        // credential; do not strand ordinary chat on a stale local token.
+                        forceConfiguredOperatorAuth = true
+                        continue
+                    }
                     attempt += 1
                     GatewayDiagnostics.log("operator gateway connect error: \(error.localizedDescription)")
                     let problem: GatewayConnectionProblem? = await MainActor.run {
@@ -7237,6 +7298,33 @@ extension NodeAppModel {
             bootstrapToken: bootstrapToken,
             password: password,
             hasStoredOperatorToken: hasStoredOperatorToken)
+    }
+
+    nonisolated static func _test_shouldPreferStoredOperatorToken(
+        token: String?,
+        bootstrapToken: String?,
+        password: String?,
+        storedEntry: DeviceAuthEntry?,
+        requestedScopes: [String],
+        endpointURL: URL,
+        sessionBox: WebSocketSessionBox? = nil,
+        forceTalkPermissionUpgradeRequest: Bool = false,
+        forceConfiguredOperatorAuth: Bool = false) -> Bool
+    {
+        self.shouldPreferStoredOperatorToken(
+            token: token,
+            bootstrapToken: bootstrapToken,
+            password: password,
+            storedEntry: storedEntry,
+            requestedScopes: requestedScopes,
+            endpointURL: endpointURL,
+            sessionBox: sessionBox,
+            forceTalkPermissionUpgradeRequest: forceTalkPermissionUpgradeRequest,
+            forceConfiguredOperatorAuth: forceConfiguredOperatorAuth)
+    }
+
+    nonisolated static func _test_shouldRetryConfiguredOperatorAuth(after error: Error) -> Bool {
+        self.shouldRetryConfiguredOperatorAuth(after: error)
     }
 
     nonisolated static func _test_shouldRequestOperatorApprovalScope(
