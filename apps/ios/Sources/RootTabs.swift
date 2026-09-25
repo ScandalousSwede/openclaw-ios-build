@@ -420,6 +420,7 @@ struct RootTabs: View {
                         }
                         .padding()
                     }
+                    .preferredColorScheme(self.appearancePreference.colorScheme)
             }
             .gatewayActionsDialog(
                 isPresented: self.$showGatewayActions,
