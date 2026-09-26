@@ -50,6 +50,17 @@ describe("server chat stream text merge", () => {
     ).toBe("Hello world");
   });
 
+  it("honors explicit prefix replacement rather than treating it as a stale snapshot", () => {
+    expect(
+      resolveMergedAssistantText({
+        previousText: "Meet at noon tomorrow",
+        nextText: "Meet at noon",
+        nextDelta: "",
+        replace: true,
+      }),
+    ).toBe("Meet at noon");
+  });
+
   it("keeps non-prefix incremental segments after tool calls", () => {
     expect(
       resolveMergedAssistantText({

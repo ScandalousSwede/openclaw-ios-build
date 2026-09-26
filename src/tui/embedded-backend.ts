@@ -900,6 +900,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
         previousText: run.buffer,
         nextText: cleaned.text,
         nextDelta: cleaned.delta,
+        replace: evt.data.replace === true,
       });
       this.emitChatDelta(evt.runId, run);
       return;

@@ -1121,6 +1121,110 @@ describe("agent event handler", () => {
     nowSpy.mockRestore();
   });
 
+  it.each([false, true])(
+    "keeps explicit prefix correction through terminal flush (abort=%s)",
+    (abort) => {
+      let now = 20_000;
+      const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+      const { broadcast, nodeSendToSession, chatRunState, handler } = createHarness();
+      chatRunState.registry.add("voice-source", {
+        sessionKey: "voice-session",
+        clientRunId: "voice-client",
+      });
+      handler({
+        runId: "voice-source",
+        seq: 1,
+        stream: "assistant",
+        ts: now,
+        data: { text: "Meet at noon tomorrow", delta: "Meet at noon tomorrow" },
+      });
+      now += 40;
+      handler({
+        runId: "voice-source",
+        seq: 2,
+        stream: "assistant",
+        ts: now,
+        data: { text: "Meet at noon", delta: "", replace: true },
+      });
+      if (abort) {
+        chatRunState.abortedRuns.set("voice-client", now);
+        handler({
+          runId: "voice-source",
+          seq: 3,
+          stream: "assistant",
+          ts: now,
+          data: { text: "Meet at noon tomorrow again", delta: " tomorrow again" },
+        });
+      }
+      handler({
+        runId: "voice-source",
+        seq: 4,
+        stream: "lifecycle",
+        ts: now,
+        data: { phase: "end", stopReason: abort ? "rpc" : "stop", aborted: abort },
+      });
+      const chats = chatBroadcastCalls(broadcast);
+      if (abort) {
+        expect(chats).toHaveLength(1);
+        expect(chatRunState.abortedRuns.has("voice-client")).toBe(true);
+      } else {
+        expect(chats).toHaveLength(3);
+        expectPayloadFields(chats[1][1], {
+          state: "delta",
+          deltaText: "Meet at noon",
+          replace: true,
+        });
+        expectPayloadFields(chats[2][1], {
+          state: "final",
+          stopReason: "stop",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Meet at noon" }],
+            timestamp: now,
+          },
+        });
+        expect(sessionChatCalls(nodeSendToSession)).toHaveLength(3);
+      }
+      nowSpy.mockRestore();
+    },
+  );
+
+  it("preserves newer cumulative text when an unmarked shorter snapshot arrives late", () => {
+    let now = 21_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, chatRunState, handler } = createHarness();
+    chatRunState.registry.add("voice-snapshot", {
+      sessionKey: "voice-session",
+      clientRunId: "voice-client",
+    });
+    handler({
+      runId: "voice-snapshot",
+      seq: 1,
+      stream: "assistant",
+      ts: now,
+      data: {
+        text: "Complete sentence with final suffix",
+        delta: "Complete sentence with final suffix",
+      },
+    });
+    now += 200;
+    handler({
+      runId: "voice-snapshot",
+      seq: 2,
+      stream: "assistant",
+      ts: now,
+      data: { text: "Complete sentence", delta: "" },
+    });
+    emitLifecycleEnd(handler, "voice-snapshot", 3);
+    const chats = chatBroadcastCalls(broadcast);
+    expect(chats).toHaveLength(2);
+    const message = requireRecord(requireRecord(chats[1][1], "final").message, "message");
+    expect(message.content).toEqual([
+      { type: "text", text: "Complete sentence with final suffix" },
+    ]);
+    nowSpy.mockRestore();
+  });
+
   it("marks non-prefix replacement deltas explicitly", () => {
     let now = 11_300;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);

@@ -27,8 +27,14 @@ export function resolveMergedAssistantText(params: {
   previousText: string;
   nextText: string;
   nextDelta: string;
+  replace?: boolean;
 }): string {
   const { previousText, nextText, nextDelta } = params;
+  // An explicit visible-text correction is authoritative; an unmarked shorter
+  // cumulative snapshot can instead be delayed and must not truncate current text.
+  if (params.replace === true && nextText) {
+    return capLiveAssistantBuffer(nextText);
+  }
   if (nextText && previousText) {
     if (nextText.startsWith(previousText) && nextText.length > previousText.length) {
       return capLiveAssistantBuffer(nextText);

@@ -266,6 +266,62 @@ describe("EmbeddedTuiBackend", () => {
     defaultRuntime.error = originalRuntimeError;
   });
 
+  it("retains a producer-marked prefix correction in embedded chat final output", async () => {
+    const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
+    const pending = deferred<{
+      payloads: Array<{ text: string }>;
+      meta: Record<string, unknown>;
+    }>();
+    agentCommandFromIngressMock.mockReturnValueOnce(pending.promise);
+    const backend = new EmbeddedTuiBackend();
+    const chats: unknown[] = [];
+    backend.onEvent = (event) => {
+      if (event.event === "chat") {
+        chats.push(event.payload);
+      }
+    };
+    backend.start();
+    await flushMicrotasks();
+    await backend.sendChat({
+      sessionKey: "agent:main:main",
+      message: "fixture",
+      runId: "voice-correction",
+    });
+    registeredListener?.({
+      runId: "voice-correction",
+      stream: "assistant",
+      data: { text: "Meet at noon tomorrow", delta: "Meet at noon tomorrow" },
+    });
+    registeredListener?.({
+      runId: "voice-correction",
+      stream: "assistant",
+      data: { text: "Meet at noon", delta: "", replace: true },
+    });
+    registeredListener?.({
+      runId: "voice-correction",
+      stream: "lifecycle",
+      data: { phase: "end", stopReason: "stop" },
+    });
+    pending.resolve({ payloads: [{ text: "Meet at noon" }], meta: {} });
+    await flushMicrotasks();
+    expect(chats).toContainEqual(
+      expect.objectContaining({
+        state: "delta",
+        deltaText: "Meet at noon",
+        replace: true,
+        message: expect.objectContaining({ content: [{ type: "text", text: "Meet at noon" }] }),
+      }),
+    );
+    expect(chats.at(-1)).toEqual(
+      expect.objectContaining({
+        state: "final",
+        stopReason: "stop",
+        message: expect.objectContaining({ content: [{ type: "text", text: "Meet at noon" }] }),
+      }),
+    );
+    await backend.stop();
+  });
+
   it("bridges assistant and lifecycle events into chat events", async () => {
     const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
     const pending = deferred<{
