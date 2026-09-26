@@ -1813,6 +1813,149 @@ describe("EmbeddedTuiBackend", () => {
     ]);
   });
 
+  it("does not project late assistant output after an accepted local abort", async () => {
+    const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
+    const pending = deferred<{
+      payloads: Array<{ text: string }>;
+      meta: Record<string, unknown>;
+    }>();
+    agentCommandFromIngressMock.mockReturnValueOnce(pending.promise);
+    const backend = new EmbeddedTuiBackend();
+    const chats: unknown[] = [];
+    backend.onEvent = (event) => {
+      if (event.event === "chat") {
+        chats.push(event.payload);
+      }
+    };
+    backend.start();
+    await backend.sendChat({
+      sessionKey: "agent:main:main",
+      message: "fixture",
+      runId: "cancelled",
+    });
+    registeredListener?.({
+      runId: "cancelled",
+      stream: "assistant",
+      data: { text: "initial", delta: "initial" },
+    });
+    const beforeAbort = chats.length;
+    expect(await backend.abortChat({ sessionKey: "agent:main:main", runId: "cancelled" })).toEqual({
+      ok: true,
+      aborted: true,
+    });
+    registeredListener?.({
+      runId: "cancelled",
+      stream: "assistant",
+      data: { text: "initial stale suffix", delta: " stale suffix" },
+    });
+    expect(chats).toHaveLength(beforeAbort);
+    registeredListener?.({
+      runId: "cancelled",
+      stream: "lifecycle",
+      data: { phase: "end", aborted: true },
+    });
+    const afterTerminal = chats.length;
+    registeredListener?.({
+      runId: "cancelled",
+      stream: "assistant",
+      data: { text: "late correction", delta: "", replace: true },
+    });
+    expect(chats).toHaveLength(afterTerminal);
+    pending.resolve({ payloads: [{ text: "stale result" }], meta: {} });
+    await flushMicrotasks();
+    expect(chats.slice(beforeAbort)).toEqual([
+      expect.objectContaining({ runId: "cancelled", state: "aborted" }),
+    ]);
+    await backend.stop();
+  });
+
+  it("does not reopen chat output after the lifecycle error grace has expired", async () => {
+    const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
+    const pending = deferred<{
+      payloads: Array<{ text: string }>;
+      meta: Record<string, unknown>;
+    }>();
+    agentCommandFromIngressMock.mockReturnValueOnce(pending.promise);
+    const backend = new EmbeddedTuiBackend();
+    const chats: unknown[] = [];
+    backend.onEvent = (event) => {
+      if (event.event === "chat") {
+        chats.push(event.payload);
+      }
+    };
+    backend.start();
+    await backend.sendChat({ sessionKey: "agent:main:main", message: "fixture", runId: "failed" });
+    registeredListener?.({
+      runId: "failed",
+      stream: "lifecycle",
+      data: { phase: "error", error: "terminal fixture failure" },
+    });
+    vi.advanceTimersByTime(15_001);
+    expect(chats.at(-1)).toEqual(
+      expect.objectContaining({
+        runId: "failed",
+        state: "error",
+        errorMessage: "terminal fixture failure",
+      }),
+    );
+    const afterTerminal = chats.length;
+    registeredListener?.({
+      runId: "failed",
+      stream: "assistant",
+      data: { text: "stale answer", delta: "stale answer" },
+    });
+    expect(chats).toHaveLength(afterTerminal);
+    pending.resolve({ payloads: [{ text: "stale answer" }], meta: {} });
+    await flushMicrotasks();
+    expect(chats).toHaveLength(afterTerminal);
+    await backend.stop();
+  });
+
+  it("retains an ordinary suffix after lifecycle end while dispatch is still completing", async () => {
+    const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
+    const pending = deferred<{
+      payloads: Array<{ text: string }>;
+      meta: Record<string, unknown>;
+    }>();
+    agentCommandFromIngressMock.mockReturnValueOnce(pending.promise);
+    const backend = new EmbeddedTuiBackend();
+    const chats: unknown[] = [];
+    backend.onEvent = (event) => {
+      if (event.event === "chat") {
+        chats.push(event.payload);
+      }
+    };
+    backend.start();
+    await backend.sendChat({ sessionKey: "agent:main:main", message: "fixture", runId: "current" });
+    registeredListener?.({
+      runId: "current",
+      stream: "assistant",
+      data: { text: "complete", delta: "complete" },
+    });
+    registeredListener?.({
+      runId: "current",
+      stream: "lifecycle",
+      data: { phase: "end", stopReason: "stop" },
+    });
+    registeredListener?.({
+      runId: "current",
+      stream: "assistant",
+      data: { text: "complete final suffix", delta: " final suffix" },
+    });
+    pending.resolve({ payloads: [{ text: "complete final suffix" }], meta: {} });
+    await flushMicrotasks();
+    expect(chats.at(-1)).toEqual(
+      expect.objectContaining({
+        runId: "current",
+        state: "final",
+        message: expect.objectContaining({
+          content: [{ type: "text", text: "complete final suffix" }],
+        }),
+      }),
+    );
+    await backend.stop();
+  });
+
   it("aborts active local runs", async () => {
     const { EmbeddedTuiBackend } = await import("./embedded-backend.js");
     let capturedSignal: AbortSignal | undefined;

@@ -888,6 +888,8 @@ export class EmbeddedTuiBackend implements TuiBackend {
 
     if (
       evt.stream === "assistant" &&
+      !run.finalSent &&
+      !run.controller.signal.aborted &&
       !run.isBtw &&
       typeof evt.data?.text === "string" &&
       !shouldSuppressAssistantEventForLiveChat(evt.data)
