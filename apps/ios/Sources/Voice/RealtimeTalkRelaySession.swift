@@ -296,14 +296,13 @@ final class RealtimeTalkRelaySession {
     }
 
     private func handleGatewayEvent(_ event: EventFrame) async {
-        guard event.event == "talk.event",
-              let payload = event.payload?.dictionaryValue
+        // Retirement clears the binding. A nil ID must refuse late events, not disable filtering.
+        guard !self.isClosed,
+              let relaySessionId = self.relaySessionId,
+              event.event == "talk.event",
+              let payload = event.payload?.dictionaryValue,
+              payload["relaySessionId"]?.stringValue == relaySessionId
         else { return }
-        if let relaySessionId,
-           payload["relaySessionId"]?.stringValue != relaySessionId
-        {
-            return
-        }
         guard let type = payload["type"]?.stringValue else { return }
         switch type {
         case "ready":
