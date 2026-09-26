@@ -1,5 +1,6 @@
 import OpenClawChatUI
 import OpenClawKit
+import OpenClawProtocol
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -8,6 +9,224 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testProductionCronControlsAndFullJobNameAtBothTextSizes() throws {
+        let job = try AppCoverageTests.cronConfirmationFixture()
+        let model = NodeAppModel()
+        let snapshot = AgentOverviewSnapshot(
+            skills: nil, presence: nil, cronStatus: nil, cronJobs: [job],
+            dreaming: nil, dreamDiary: nil, usage: nil,
+            activeAgentId: "synthetic-cron-agent", agentSkillFilter: nil,
+            loadedAt: Date(timeIntervalSince1970: 0))
+        for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                let root = VStack(alignment: .leading, spacing: 12) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    // Mount the production owner before its environment-dependent rows evaluate.
+                    AgentProTab(initialRoute: .cron, initialOverview: snapshot)
+                }
+                .padding(.vertical)
+                .background { OpenClawProBackground() }
+                .environment(model)
+                .environment(\.scenePhase, .inactive)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, appearance)
+                .frame(width: 390, height: 1800)
+                let image = try self.hostedImage(root,
+                    userInterfaceStyle: appearance == .dark ? .dark : .light,
+                    requiredText: ["Run now", "Enable"],
+                    requiredWrappedValues: [job.name])
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-cron-controls-native-synthetic-\(appearance)-\(sizeName)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
+    @MainActor
+    func testFullAgentIdentityAndTechnicalDisclosureAtBothTextSizes() throws {
+        let snapshot = AgentIdentitySnapshot(agent: AppCoverageTests.agentIdentityFixture())
+        let model = NodeAppModel()
+        model.selectedAgentId = "synthetic-existing-selected-agent"
+        model.focusChatSession("synthetic-existing-chat-session")
+        let route = AgentProTab.AgentRoute.agentDetails(snapshot)
+        // A roster update must not change the identity already opened or select its agent.
+        model.gatewayAgents = [AgentSummary(
+            id: snapshot.id, name: "Synthetic revised roster name", identity: nil,
+            workspace: nil, model: ["primary": AnyCodable("synthetic-provider/different-model")], agentruntime: nil)]
+        for (name, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                for expanded in [false, true] {
+                    let root = VStack(spacing: 0) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                        NavigationStack {
+                            if expanded {
+                                AgentIdentityDetails(snapshot: snapshot, technicalDetailsExpanded: true)
+                            } else {
+                                AgentProTab().destination(for: route)
+                            }
+                        }
+                    }
+                    .background { OpenClawProBackground() }
+                    .environment(model)
+                    .environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, appearance)
+                    .frame(width: 390, height: 1800)
+                    let required = ["Agent details", "Synthetic administrative research and engineering agent",
+                                    "Model reported by gateway", "Technical details"]
+                        + (expanded ? ["Agent ID", "Workspace", "Runtime reported by gateway"] : [])
+                    let image = try self.hostedImage(root,
+                        userInterfaceStyle: appearance == .dark ? .dark : .light,
+                        requiredText: required,
+                        forbiddenText: expanded ? [] : [snapshot.id],
+                        requiredWrappedValues: [try XCTUnwrap(snapshot.model)])
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-full-agent-identity-native-synthetic-\(appearance)-\(name)-technical-\(expanded)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    XCTAssertEqual(model.selectedAgentId, "synthetic-existing-selected-agent")
+                    XCTAssertEqual(model.chatSessionKey, "synthetic-existing-chat-session")
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProductionUsageCostCoverageRemainsReadable() throws {
+        let model = NodeAppModel()
+        for (state, missing, expected) in [
+            ("unknown", nil, "Cost coverage not reported"),
+            ("zero", 0, "No entries reported without cost data"),
+            ("partial", 3, "Partial cost"),
+        ] as [(String, Int?, String)] {
+            let snapshot = try AppCoverageTests.usageCostCoverageFixture(missingEntries: missing)
+            let tab = AgentProTab(initialOverview: snapshot)
+            let day = try XCTUnwrap(snapshot.usage?.daily?.first)
+            for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+                for appearance in [ColorScheme.light, .dark] {
+                    let root = VStack(alignment: .leading, spacing: 12) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                        tab.usageTotalsCard
+                        tab.usageDayRow(day)
+                    }
+                    .padding(.vertical)
+                    .background { OpenClawProBackground() }
+                    .environment(model)
+                    .environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, appearance)
+                    .frame(width: 390)
+                    .fixedSize(horizontal: false, vertical: true)
+                    let image = try self.hostedImage(root,
+                        userInterfaceStyle: appearance == .dark ? .dark : .light)
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-usage-native-synthetic-\(state)-\(appearance)-\(sizeName)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                    let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                        .joined(separator: " ")
+                    XCTAssertTrue(text.localizedCaseInsensitiveContains("Reported cost"))
+                    XCTAssertTrue(text.localizedCaseInsensitiveContains(expected))
+                    if missing == 3 {
+                        XCTAssertTrue(text.localizedCaseInsensitiveContains("3 entries have no cost data"))
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProductionMetricCardsKeepUnavailableAndZeroReadable() throws {
+        let model = NodeAppModel()
+        for reported in [false, true] {
+            let snapshot = try AppCoverageTests.metricAvailabilityFixture(reported: reported)
+            let tab = AgentProTab(initialOverview: snapshot)
+            let nodes = AgentProNodesDestination(
+                overview: snapshot, gatewayConnected: false, agentCount: reported ? 0 : nil,
+                instancesValue: "offline", instancesDetail: "Synthetic report", instancesColor: .secondary,
+                refresh: {})
+            let dreaming = AgentProDreamingDestination(
+                overview: snapshot, gatewayConnected: false, overviewLoading: false,
+                dreamingValue: "offline", dreamingDetail: "Synthetic report", dreamingColor: .secondary,
+                refresh: {})
+            let cards: [(String, AnyView, [String], Int, Int)] = [
+                ("presence", AnyView(nodes.totalsCard), ["Presence", "Reported", "Agents", "Gateway"], 2, 2),
+                ("memory", AnyView(dreaming.dreamingTotalsCard), ["Memory State", "Short-term", "Signals", "Promoted"], 3, 3),
+                // Includes the separate "Cron unavailable" empty-list heading as well as three card values.
+                ("scheduler", AnyView(AgentProTab(initialRoute: .cron, initialOverview: snapshot)
+                    .frame(height: 1800)), ["Scheduler", "Jobs", "Next"], 4, 1),
+                ("usage", AnyView(tab.usageTotalsCard), ["Totals", "Cost", "Tokens", "Cache"], 3, 2),
+            ]
+            for (name, card, labels, missingCount, zeroCount) in cards {
+                for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+                    for appearance in [ColorScheme.light, .dark] {
+                        let root = VStack(alignment: .leading, spacing: 12) {
+                            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                            card
+                        }
+                        .padding(.vertical)
+                        .background { OpenClawProBackground() }
+                        .environment(model)
+                        .environment(\.scenePhase, .inactive)
+                        .environment(\.dynamicTypeSize, size)
+                        .environment(\.colorScheme, appearance)
+                        .frame(width: 390)
+                        .fixedSize(horizontal: false, vertical: true)
+                        let image = try self.hostedImage(root,
+                            userInterfaceStyle: appearance == .dark ? .dark : .light)
+                        let attachment = XCTAttachment(image: image)
+                        attachment.name = "argus-metrics-native-synthetic-\(name)-\(reported ? "zero" : "missing")-\(appearance)-\(sizeName)"
+                        attachment.lifetime = .keepAlways
+                        self.add(attachment)
+                        let request = VNRecognizeTextRequest()
+                        request.recognitionLevel = .accurate
+                        request.recognitionLanguages = ["en-US"]
+                        try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                        for label in labels {
+                            XCTAssertTrue(text.localizedCaseInsensitiveContains(label), "Complete metric label: \(label)")
+                        }
+                        let unavailable = try NSRegularExpression(pattern: "(?i)\\bUnavail(?:-\\s*|\\s*)able\\b")
+                        let zeros = try NSRegularExpression(pattern: "\\b0\\b")
+                        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                        if reported {
+                            XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), 0)
+                            // Keep language correction for complete labels, but inspect numeric glyphs
+                            // with raw recognition. Never normalize an alphabetic O into a reported zero.
+                            let numericRequest = VNRecognizeTextRequest()
+                            // Accurate recognition omitted isolated visible digits in the retained run.
+                            // Use the alternative detector and admit small glyphs; require the same literal counts.
+                            numericRequest.recognitionLevel = .fast
+                            numericRequest.minimumTextHeight = 0
+                            numericRequest.recognitionLanguages = ["en-US"]
+                            numericRequest.usesLanguageCorrection = false
+                            try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:])
+                                .perform([numericRequest])
+                            let numericText = (numericRequest.results ?? [])
+                                .compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                            let numericRange = NSRange(numericText.startIndex..<numericText.endIndex, in: numericText)
+                            let candidates = (numericRequest.results ?? []).map {
+                                $0.topCandidates(3).map(\.string).joined(separator: " / ")
+                            }.joined(separator: " | ")
+                            XCTAssertGreaterThanOrEqual(
+                                zeros.numberOfMatches(in: numericText, range: numericRange), zeroCount,
+                                "\(name) \(appearance) \(sizeName): raw numeric OCR: \(numericText); " +
+                                    "candidates: \(candidates); corrected label OCR: \(text)")
+                        } else {
+                            // Counts complete words, even when Vision combines neighboring metric regions.
+                            XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), missingCount)
+                            XCTAssertEqual(zeros.numberOfMatches(in: text, range: range), 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @MainActor
     func testMaintainedOperationsGridKeepsEveryOfflineValueAtBothTextSizes() throws {
         let tiles: [(String, String, String)] = [
@@ -987,7 +1206,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     private func hostedImage(
         _ content: some View, userInterfaceStyle: UIUserInterfaceStyle = .dark,
         selectedProject: String? = nil, artifactNames: [String] = [],
-        requiredText: [String] = [], forbiddenText: [String] = []) throws -> UIImage
+        requiredText: [String] = [], forbiddenText: [String] = [],
+        requiredWrappedValues: [String] = []) throws -> UIImage
     {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
@@ -1066,12 +1286,43 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 renderedText.localizedCaseInsensitiveContains(phrase),
                 "The production detail must visibly render: \(phrase)")
         }
+        for value in requiredWrappedValues {
+            XCTAssertTrue(Self.containsCompleteWrappedValue(renderedText, value: value),
+                "The complete production value must render across line wraps: \(value)")
+        }
         for phrase in forbiddenText {
             XCTAssertFalse(
                 renderedText.localizedCaseInsensitiveContains(phrase),
                 "The production view must not display a contradictory state: \(phrase)")
         }
         return image
+    }
+
+    // Vision inserts whitespace at visual line breaks, including inside long provider/model IDs.
+    // Preserve every non-whitespace character; a missing hyphen, suffix or different model still fails.
+    private static func containsCompleteWrappedValue(_ text: String, value: String) -> Bool {
+        text.filter { !$0.isWhitespace }.contains(value.filter { !$0.isWhitespace })
+    }
+
+    func testUnavailableOCRRequiresTheCompleteWrappedWord() throws {
+        let pattern = try NSRegularExpression(pattern: "(?i)\\bUnavail(?:-\\s*|\\s*)able\\b")
+        for (text, count) in [("Unavailable", 1), ("Unavail- able", 1), ("Unavail able", 1),
+                              ("Unavail", 0), ("Available", 0), ("UnavailableX", 0),
+                              ("Unavail- able Unavailable", 2)] {
+            XCTAssertEqual(pattern.numberOfMatches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)), count)
+        }
+    }
+
+    func testWrappedValueOCRRetainsCompleteModelAndDate() {
+        let model = "synthetic-provider/synthetic-full-model-revision-2026-09-26"
+        XCTAssertTrue(Self.containsCompleteWrappedValue(
+            "synthetic- provider/ synthetic-full- model- revision-2026-09 -26", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-09", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-09-27", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-0926", value: model))
     }
 
     private static func containsProjectLabel(_ text: String, project: String) -> Bool {

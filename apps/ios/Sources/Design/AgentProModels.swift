@@ -24,9 +24,10 @@ enum AgentProValueReader {
 
 struct AgentOverviewSnapshot {
     let skills: SkillStatusReportLite?
-    let presence: [PresenceEntry]
+    // nil means the presence request failed; an empty report is a known zero.
+    let presence: [PresenceEntry]?
     let cronStatus: CronStatusLite?
-    let cronJobs: [CronJob]
+    let cronJobs: [CronJob]?
     let dreaming: DreamingStatusLite?
     let dreamDiary: DreamDiaryLite?
     let usage: CostUsageSummaryLite?
@@ -36,9 +37,9 @@ struct AgentOverviewSnapshot {
 
     var hasAnyLiveData: Bool {
         self.skills != nil
-            || !self.presence.isEmpty
+            || self.presence != nil
             || self.cronStatus != nil
-            || !self.cronJobs.isEmpty
+            || self.cronJobs != nil
             || self.dreaming != nil
             || self.dreamDiary != nil
             || self.usage != nil
@@ -385,10 +386,27 @@ struct CostUsageSummaryLite: Decodable {
     var totalTokens: Int? {
         AgentProValueReader.intValue(self.totals?["totalTokens"])
     }
+
+    var costCoverageText: String {
+        Self.costCoverageText(missingEntries: AgentProValueReader.intValue(self.totals?["missingCostEntries"]))
+    }
+
+    // A returned cost can exclude unpriced entries; missing coverage is not zero.
+    static func costCoverageText(missingEntries: Int?) -> String {
+        guard let count = missingEntries, count >= 0 else { return "Cost coverage not reported." }
+        guard count > 0 else { return "No entries reported without cost data." }
+        let entries = count == 1 ? "1 entry has" : "\(count) entries have"
+        return "Partial cost: \(entries) no cost data."
+    }
 }
 
 struct CostUsageDailyEntryLite: Decodable {
     let date: String
     let totalTokens: Int?
     let totalCost: Double?
+    let missingCostEntries: Int?
+
+    var costCoverageText: String {
+        CostUsageSummaryLite.costCoverageText(missingEntries: self.missingCostEntries)
+    }
 }
