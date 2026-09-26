@@ -206,7 +206,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                             }
                             XCTAssertEqual(valueLabels.count, zeroCount)
                             let reference = try self.glyphReference("0", size: size, appearance: appearance)
-                            let currencyReference = try self.glyphReference("$", size: size, appearance: appearance)
+                            let currencyReference = try self.glyphReference("$0", size: size, appearance: appearance)
                             let readings = try self.metricZeroValueCounts(
                                 image, labels: valueLabels, observations: request.results ?? [],
                                 reference: reference, currencyReference: currencyReference)
@@ -373,10 +373,16 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             Text(literal).font(.subheadline.weight(.semibold))
                 .foregroundStyle(appearance == .dark ? Color.white : Color.black)
                 .padding(24).background(appearance == .dark ? Color.black : Color.white)
-                .environment(\.dynamicTypeSize, size).frame(width: 390),
+                .environment(\.dynamicTypeSize, size).frame(width: 390, alignment: .leading),
             userInterfaceStyle: appearance == .dark ? .dark : .light)
-        let masks = try self.glyphMasks(try XCTUnwrap(image.cgImage))
-        XCTAssertEqual(masks.count, 1, "Independent literal reference must render one complete glyph")
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "metric-reference-\(literal)-\(size)-\(appearance)"
+        attachment.lifetime = .keepAlways
+        self.add(attachment)
+        let masks = try self.glyphMasks(try XCTUnwrap(image.cgImage)).sorted { $0.bounds.minX < $1.bounds.minX }
+        XCTAssertEqual(masks.count, literal == "$0" ? 2 : 1,
+            "Independent literal reference must render the complete value")
+        // The dollar reference comes from its actual adjacent-zero context, in reading order.
         return try XCTUnwrap(masks.first)
     }
 
@@ -385,7 +391,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
             for appearance in [ColorScheme.light, .dark] {
                 let reference = try self.glyphReference("0", size: size, appearance: appearance)
-                let currencyReference = try self.glyphReference("$", size: size, appearance: appearance)
+                let currencyReference = try self.glyphReference("$0", size: size, appearance: appearance)
                 let values = [
                     "0", "$0", "O", "1", "2", "3", "4", "5", "6", "7", "8", "9", "",
                     "10", "01", "80", "00", "0O", "O0", "0 1", "$10", "$01", "$80", "$O",
