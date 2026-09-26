@@ -232,68 +232,66 @@ extension AgentProTab {
     func agentRow(_ agent: AgentSummary) -> some View {
         let isActive = agent.id == self.activeAgentID
         let state = self.agentRosterState(for: agent)
+        let snapshot = AgentIdentitySnapshot(agent: agent)
         return HStack(alignment: .top, spacing: 12) {
-            self.agentAvatar(agent, state: state)
-
-            VStack(alignment: .leading, spacing: 8) {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(self.agentName(for: agent))
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(state.color)
-                                .frame(width: 6, height: 6)
-                            Text(state.title)
-                                .font(.caption2.weight(.semibold))
+            NavigationLink(value: AgentRoute.agentDetails(snapshot)) {
+                HStack(alignment: .top, spacing: 12) {
+                    self.agentAvatar(agent, state: state)
+                    VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(snapshot.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                HStack(spacing: 4) {
+                                    Circle().fill(state.color).frame(width: 6, height: 6)
+                                    Text(state.title).font(.caption2.weight(.semibold))
+                                }
+                                .foregroundStyle(state.color)
+                                .lineLimit(1)
+                            }
+                            Text(self.agentDetail(for: agent))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
                         }
-                        .foregroundStyle(state.color)
-                        .lineLimit(1)
+                        HStack(spacing: 0) {
+                            self.agentMetric(label: "Sessions", value: self.agentSessionSummary(agent))
+                            Divider().frame(height: 24).padding(.horizontal, 12)
+                            self.agentMetric(label: "Runtime", value: self.agentRuntimeSummary(agent))
+                        }
+                        Label("View details", systemImage: "chevron.right")
+                            .font(.caption)
+                            .foregroundStyle(OpenClawBrand.accent)
                     }
-
-                    Text(self.agentDetail(for: agent))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-
-                HStack(spacing: 0) {
-                    self.agentMetric(label: "Sessions", value: self.agentSessionSummary(agent))
-                    Divider()
-                        .frame(height: 24)
-                        .padding(.horizontal, 12)
-                    self.agentMetric(label: "Runtime", value: self.agentRuntimeSummary(agent))
-                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("View details for \(snapshot.name)")
             .layoutPriority(1)
 
+            // Reading identity must not change the app's agent/session. Selection stays explicit.
             Button {
                 self.appModel.setSelectedAgentId(agent.id)
             } label: {
                 Image(systemName: isActive ? "checkmark" : "arrow.right")
                     .font(.caption.weight(.bold))
+                    .frame(width: 44, height: 44)
+                    .background {
+                        Circle()
+                            .fill(self.iconButtonFill)
+                            .overlay { Circle().strokeBorder(self.iconButtonStroke, lineWidth: 1) }
+                    }
             }
             .buttonStyle(.plain)
             .foregroundStyle(isActive ? OpenClawBrand.accent : .primary)
-            .frame(width: AgentLayout.actionButtonSize, height: AgentLayout.actionButtonSize)
-            .background {
-                Circle()
-                    .fill(self.iconButtonFill)
-                    .overlay {
-                        Circle().strokeBorder(self.iconButtonStroke, lineWidth: 1)
-                    }
-            }
-            .accessibilityLabel(isActive ? "Default agent" : "Set default agent")
+            .accessibilityLabel(isActive ? "Selected agent" : "Use \(snapshot.name)")
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 13)
         .frame(minHeight: AgentLayout.rowMinHeight, alignment: .center)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            self.appModel.setSelectedAgentId(agent.id)
-        }
     }
 
     func headerIconButton(
@@ -452,15 +450,24 @@ extension AgentProTab {
         }
     }
 
+    var emptyCronTitle: String {
+        self.overview?.cronJobs != nil ? "No scheduled jobs reported" : "Cron unavailable"
+    }
+
+    var emptyCronDetail: String {
+        if self.overview?.cronJobs != nil { return "The gateway returned an empty scheduled-work list at this check." }
+        return self.gatewayConnected
+            ? "The scheduled-work list could not load at this check."
+            : "Connect a gateway to load scheduled work."
+    }
+
     var emptyCronRow: some View {
         HStack(spacing: 12) {
             ProIconBadge(systemName: "clock.badge.questionmark", color: .secondary)
             VStack(alignment: .leading, spacing: 3) {
-                Text(self.gatewayConnected ? "No scheduled jobs" : "Cron unavailable")
+                Text(self.emptyCronTitle)
                     .font(.subheadline.weight(.semibold))
-                Text(self.gatewayConnected
-                    ? "The gateway has no visible cron jobs."
-                    : "Connect a gateway to load scheduled work.")
+                Text(self.emptyCronDetail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -592,7 +599,7 @@ extension AgentProTab {
     var skillsValue: String {
         guard self.gatewayConnected else { return "offline" }
         guard let skills = self.overview?.skills else {
-            return self.overviewLoading ? "..." : "live"
+            return self.overviewLoading ? "..." : "Unavailable"
         }
         return "\(skills.totalCount)"
     }
@@ -607,8 +614,8 @@ extension AgentProTab {
 
     var instancesValue: String {
         guard self.gatewayConnected else { return "offline" }
-        guard let count = self.overview?.presence.count else {
-            return self.overviewLoading ? "..." : "live"
+        guard let count = self.overview?.presence?.count else {
+            return self.overviewLoading ? "..." : "Unavailable"
         }
         return "\(count)"
     }
@@ -616,7 +623,7 @@ extension AgentProTab {
     var instancesDetail: String {
         guard self.gatewayConnected else { return "Connect a gateway to load instances." }
         guard let presence = self.overview?.presence else {
-            return self.overviewLoading ? "Loading instance presence." : "Instance presence is available."
+            return self.overviewLoading ? "Loading instance presence." : "Instance presence could not load at this check."
         }
         let labels = presence.prefix(2).compactMap(self.presenceLabel)
         if labels.isEmpty {
@@ -627,13 +634,13 @@ extension AgentProTab {
 
     var instancesColor: Color {
         guard self.gatewayConnected else { return .secondary }
-        return (self.overview?.presence.isEmpty == false) ? OpenClawBrand.accent : .secondary
+        return (self.overview?.presence?.isEmpty == false) ? OpenClawBrand.accent : .secondary
     }
 
     var cronValue: String {
         guard self.gatewayConnected else { return "offline" }
         guard let cronStatus = self.overview?.cronStatus else {
-            return self.overviewLoading ? "..." : "live"
+            return self.overviewLoading ? "..." : "Unavailable"
         }
         return cronStatus.enabled ? "\(cronStatus.jobs)" : "off"
     }
@@ -641,7 +648,7 @@ extension AgentProTab {
     var cronDetail: String {
         guard self.gatewayConnected else { return "Connect a gateway to load cron." }
         guard let cronStatus = self.overview?.cronStatus else {
-            return self.overviewLoading ? "Loading cron status." : "Cron status is available."
+            return self.overviewLoading ? "Loading cron status." : "Cron status could not load at this check."
         }
         if let nextWakeAtMs = cronStatus.nextwakeatms {
             return "Next wake \(Self.relativeTime(fromMilliseconds: nextWakeAtMs))"
@@ -657,32 +664,28 @@ extension AgentProTab {
     var usageValue: String {
         guard self.gatewayConnected else { return "offline" }
         guard let usage = self.overview?.usage else {
-            return self.overviewLoading ? "..." : "7d"
+            return self.overviewLoading ? "..." : "Unavailable"
         }
-        if let cost = usage.totalCost {
-            return Self.currency(cost)
-        }
-        if let tokens = usage.totalTokens, tokens > 0 {
-            return Self.compactNumber(tokens)
-        }
-        return "7d"
+        if let cost = usage.totalCost { return Self.currency(cost) }
+        if let tokens = usage.totalTokens { return "\(Self.compactNumber(tokens)) tokens" }
+        return "Unavailable"
     }
 
     var usageDetail: String {
         guard self.gatewayConnected else { return "Connect a gateway to load usage." }
         guard let usage = self.overview?.usage else {
-            return self.overviewLoading ? "Loading recent usage." : "Recent usage is available."
+            return self.overviewLoading ? "Loading recent usage." : "Recent usage could not load at this check."
         }
-        if let tokens = usage.totalTokens, tokens > 0 {
-            return "\(Self.compactNumber(tokens)) tokens in \(usage.days ?? 7)d"
-        }
-        return "No token usage reported for \(usage.days ?? 7)d."
+        let period = usage.days.map { " in \($0)d" } ?? ""
+        let tokens = usage.totalTokens.map { "\(Self.compactNumber($0)) tokens\(period)." }
+            ?? "Token total was not reported."
+        return "\(tokens) \(usage.costCoverageText)"
     }
 
     var dreamingValue: String {
         guard self.gatewayConnected else { return "offline" }
         guard let dreaming = self.overview?.dreaming else {
-            return self.overviewLoading ? "..." : "live"
+            return self.overviewLoading ? "..." : "Unavailable"
         }
         return dreaming.enabled ? "on" : "off"
     }
@@ -690,12 +693,14 @@ extension AgentProTab {
     var dreamingDetail: String {
         guard self.gatewayConnected else { return "Connect a gateway to load dreaming." }
         guard let dreaming = self.overview?.dreaming else {
-            return self.overviewLoading ? "Loading dreaming status." : "Background memory status is available."
+            return self.overviewLoading ? "Loading dreaming status." : "Background memory status could not load at this check."
         }
         if let nextRunAtMs = dreaming.nextRunAtMs {
             return "Next cycle \(Self.relativeTime(fromMilliseconds: nextRunAtMs))"
         }
-        return "\(dreaming.totalSignalCount ?? 0) signals, \(dreaming.promotedToday ?? 0) promoted today"
+        let signals = dreaming.totalSignalCount.map { "\(Self.compactNumber($0)) signals" } ?? "Signals not reported"
+        let promoted = dreaming.promotedToday.map { "\(Self.compactNumber($0)) promoted today" } ?? "Promotions not reported"
+        return "\(signals) · \(promoted)"
     }
 
     var dreamingColor: Color {

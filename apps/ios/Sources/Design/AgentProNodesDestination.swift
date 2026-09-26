@@ -5,7 +5,7 @@ import UIKit
 struct AgentProNodesDestination: View {
     let overview: AgentOverviewSnapshot?
     let gatewayConnected: Bool
-    let agentCount: Int
+    let agentCount: Int?
     let instancesValue: String
     let instancesDetail: String
     let instancesColor: Color
@@ -37,18 +37,13 @@ struct AgentProNodesDestination: View {
             detail: self.instancesDetail, color: self.instancesColor)
     }
 
-    private var totalsCard: some View {
+    var totalsCard: some View {
         ProCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Presence")
-                        .font(.headline)
-                    Spacer()
-                    ProValuePill(value: self.instancesValue, color: self.instancesColor)
-                }
-                HStack(spacing: 10) {
-                    self.detailMetric(label: "Connected", value: "\(self.overview?.presence.count ?? 0)")
-                    self.detailMetric(label: "Agents", value: "\(self.agentCount)")
+                AgentToolsMetricHeading(title: "Presence", value: self.instancesValue, color: self.instancesColor)
+                AgentToolsMetricRow {
+                    self.detailMetric(label: "Reported", value: (self.overview?.presence?.count).map(String.init) ?? "Unavailable")
+                    self.detailMetric(label: "Agents", value: self.agentCount.map(String.init) ?? "Unavailable")
                     self.detailMetric(label: "Gateway", value: self.gatewayConnected ? "online" : "offline")
                 }
             }
@@ -58,16 +53,19 @@ struct AgentProNodesDestination: View {
 
     private var nodesList: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ProSectionHeader(title: "Connected Nodes")
+            ProSectionHeader(title: "Reported instances")
             ProCard(padding: 0) {
                 let nodes = self.sortedPresenceEntries
                 if nodes.isEmpty {
+                    let reported = self.overview?.presence != nil
                     self.emptyRow(
                         icon: "display",
-                        title: self.gatewayConnected ? "No nodes connected" : "Nodes unavailable",
-                        detail: self.gatewayConnected
-                            ? "The gateway did not report any system presence entries."
-                            : "Connect a gateway to inspect connected nodes.")
+                        title: self.gatewayConnected && reported ? "No instances reported" : "Nodes unavailable",
+                        detail: !self.gatewayConnected
+                            ? "Connect a gateway to inspect reported instances."
+                            : reported
+                                ? "The gateway returned an empty system presence report."
+                                : "Instance presence could not load at this check.")
                         .padding(14)
                 } else {
                     VStack(spacing: 0) {
@@ -220,18 +218,7 @@ struct AgentProNodesDestination: View {
     }
 
     private func detailMetric(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        AgentToolsMetricTile(label: label, value: value)
     }
 
     private func emptyRow(icon: String, title: String, detail: String) -> some View {

@@ -6,6 +6,8 @@ extension AgentProTab {
     @ViewBuilder
     func destination(for route: AgentRoute) -> some View {
         switch route {
+        case let .agentDetails(snapshot):
+            AgentIdentityDetails(snapshot: snapshot)
         case .skills:
             self.skillsDestination
         case .nodes:
@@ -55,7 +57,8 @@ extension AgentProTab {
         AgentProNodesDestination(
             overview: self.overview,
             gatewayConnected: self.gatewayConnected,
-            agentCount: self.appModel.gatewayAgents.count,
+            agentCount: self.appModel.gatewayAgentRosterLoadState == .loaded
+                ? self.appModel.gatewayAgents.count : nil,
             instancesValue: self.instancesValue,
             instancesDetail: self.instancesDetail,
             instancesColor: self.instancesColor,

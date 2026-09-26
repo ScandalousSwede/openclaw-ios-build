@@ -101,25 +101,20 @@ struct AgentProDreamingDestination: View {
         AgentToolsSummaryCard(icon: icon, title: title, value: value, detail: detail, color: color)
     }
 
-    private var dreamingTotalsCard: some View {
+    var dreamingTotalsCard: some View {
         ProCard {
             VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Memory State")
-                        .font(.headline)
-                    Spacer()
-                    ProValuePill(value: self.dreamingValue, color: self.dreamingColor)
-                }
-                HStack(spacing: 10) {
+                AgentToolsMetricHeading(title: "Memory State", value: self.dreamingValue, color: self.dreamingColor)
+                AgentToolsMetricRow {
                     self.detailMetric(
                         label: "Short-term",
-                        value: Self.compactNumber(self.overview?.dreaming?.shortTermCount ?? 0))
+                        value: (self.overview?.dreaming?.shortTermCount).map(Self.compactNumber) ?? "Unavailable")
                     self.detailMetric(
                         label: "Signals",
-                        value: Self.compactNumber(self.overview?.dreaming?.totalSignalCount ?? 0))
+                        value: (self.overview?.dreaming?.totalSignalCount).map(Self.compactNumber) ?? "Unavailable")
                     self.detailMetric(
                         label: "Promoted",
-                        value: Self.compactNumber(self.overview?.dreaming?.promotedToday ?? 0))
+                        value: (self.overview?.dreaming?.promotedToday).map(Self.compactNumber) ?? "Unavailable")
                 }
                 if let storeError = self.normalized(self.overview?.dreaming?.storeError) {
                     Text(storeError)
@@ -182,6 +177,11 @@ struct AgentProDreamingDestination: View {
     private var dreamDiaryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             ProSectionHeader(title: "Dream Diary")
+            Text("Reflective diary; not authoritative task state.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, OpenClawProMetric.pagePadding)
             ProCard(padding: 0) {
                 if let diary = self.overview?.dreamDiary {
                     if diary.found, let content = self.normalizedMultiline(diary.content) {
@@ -433,18 +433,7 @@ struct AgentProDreamingDestination: View {
     }
 
     private func detailMetric(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        AgentToolsMetricTile(label: label, value: value)
     }
 
     private func dreamingEntryTitle(_ entry: DreamingEntryLite) -> String {
@@ -541,7 +530,7 @@ struct AgentProDreamingDestination: View {
         return date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
     }
 
-    private static func dreamDiaryDays(from content: String) -> [DreamDiaryDay] {
+    static func dreamDiaryDays(from content: String) -> [DreamDiaryDay] {
         let inner = Self.dreamDiaryInnerContent(content)
         let separatorBlocks = inner
             .components(separatedBy: "\n---")
@@ -577,7 +566,11 @@ struct AgentProDreamingDestination: View {
         let id = markerDay ?? Self.dayID(title)
         let bodyLines = rawLines.enumerated().compactMap { offset, line -> String? in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if offset == dateLineIndex { return nil }
+            if offset == dateLineIndex {
+                // Grouping by day must not erase the source entry's original time.
+                // This is its recorded heading, not a receipt or freshness claim.
+                return "Recorded: \(Self.unwrappedEmphasis(line) ?? line)"
+            }
             if trimmed.hasPrefix("<!--") && trimmed.hasSuffix("-->") { return nil }
             if trimmed == "#" || trimmed == "# Dream Diary" { return nil }
             return line
@@ -667,7 +660,7 @@ struct AgentProDreamingDestination: View {
     }
 }
 
-private struct DreamDiaryDay: Identifiable {
+struct DreamDiaryDay: Identifiable {
     let id: String
     let title: String
     let body: String

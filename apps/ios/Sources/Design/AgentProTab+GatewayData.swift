@@ -64,15 +64,7 @@ extension AgentProTab {
     }
 
     func modelLabel(for agent: AgentSummary) -> String? {
-        guard let model = agent.model else { return nil }
-        for key in ["primary", "name", "id", "model"] {
-            if let value = model[key]?.value as? String,
-               let normalized = self.normalized(value)
-            {
-                return normalized
-            }
-        }
-        return nil
+        AgentIdentitySnapshot(agent: agent).model
     }
 
     static func shortModelLabel(_ model: String) -> String {
@@ -163,9 +155,9 @@ extension AgentProTab {
         let loadedUsage = await usage
         let snapshot = AgentOverviewSnapshot(
             skills: loadedSkills,
-            presence: loadedPresence ?? [],
+            presence: loadedPresence,
             cronStatus: loadedCronStatus,
-            cronJobs: loadedCronJobs?.jobs ?? [],
+            cronJobs: loadedCronJobs?.jobs,
             dreaming: loadedDreaming?.dreaming,
             dreamDiary: loadedDreamDiary,
             usage: loadedUsage,
