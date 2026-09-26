@@ -205,18 +205,17 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                             default: valueLabels = ["Reported cost", "Tokens"]
                             }
                             XCTAssertEqual(valueLabels.count, zeroCount)
-                            let readings = try self.metricValueReadings(
-                                image, labels: valueLabels, observations: request.results ?? [])
-                            for (label, reading) in readings {
-                                let range = NSRange(reading.startIndex..<reading.endIndex, in: reading)
-                                XCTAssertEqual(zeros.numberOfMatches(in: reading, range: range), 1,
-                                    "\(name) \(appearance) \(sizeName), \(label): raw field OCR: \(reading)")
+                            let reference = try self.glyphReference("0", size: size, appearance: appearance)
+                            let currencyReference = try self.glyphReference("$", size: size, appearance: appearance)
+                            let readings = try self.metricZeroValueCounts(
+                                image, labels: valueLabels, observations: request.results ?? [],
+                                reference: reference, currencyReference: currencyReference)
+                            for (label, count) in readings {
+                                XCTAssertEqual(count, 1,
+                                    "\(name) \(appearance) \(sizeName), \(label): complete visible zero glyph count \(count)")
                             }
-                            let numericText = readings.map(\.1).joined(separator: " ")
-                            let numericRange = NSRange(numericText.startIndex..<numericText.endIndex, in: numericText)
-                            XCTAssertGreaterThanOrEqual(
-                                zeros.numberOfMatches(in: numericText, range: numericRange), zeroCount,
-                                "\(name) \(appearance) \(sizeName): raw field OCR: \(numericText); label OCR: \(text)")
+                            XCTAssertGreaterThanOrEqual(readings.reduce(0) { $0 + $1.1 }, zeroCount,
+                                "\(name) \(appearance) \(sizeName): every reported zero must be visible")
                         } else {
                             // Counts complete words, even when Vision combines neighboring metric regions.
                             XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), missingCount)
@@ -228,21 +227,23 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         }
     }
 
-    // Values sit below caption labels in the maintained metric tile. Use padded guidance
-    // from a unique complete label; never infer a digit from the fixture/model or normalize O.
-    private func metricValueReadings(
-        _ image: UIImage, labels: [String], observations: [VNRecognizedTextObservation]
-    ) throws -> [(String, String)] {
+    // Vision reliably locates these complete labels but omits even an isolated control "0".
+    // Read the actual field pixels against a separately rendered literal zero instead.
+    // No fixture value/model decides whether a captured component matches the reference.
+    private func metricZeroValueCounts(
+        _ image: UIImage, labels: [String], observations: [VNRecognizedTextObservation],
+        reference: GlyphMask, currencyReference: GlyphMask
+    ) throws -> [(String, Int)] {
         let source = try XCTUnwrap(image.cgImage)
         let width = CGFloat(source.width)
         let height = CGFloat(source.height)
-        var readings: [(String, String)] = []
+        var readings: [(String, Int)] = []
         for label in labels {
             // Exact case keeps the Jobs value separate from the JOBS section heading.
             let anchors = observations.filter { $0.topCandidates(1).first?.string == label }
             XCTAssertEqual(anchors.count, 1, "One complete metric label anchor: \(label)")
             guard let anchor = anchors.first, anchors.count == 1 else {
-                readings.append((label, ""))
+                readings.append((label, 0))
                 continue
             }
             let box = anchor.boundingBox
@@ -254,50 +255,168 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 height: lineHeight * 3)
                 .integral.intersection(CGRect(x: 0, y: 0, width: width, height: height))
             let crop = try XCTUnwrap(source.cropping(to: rect))
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.minimumTextHeight = 0
-            request.recognitionLanguages = ["en-US"]
-            request.usesLanguageCorrection = false
-            try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
-            let reading = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-                .joined(separator: " ")
+            let actual = try self.glyphMasks(crop).sorted { $0.bounds.minX < $1.bounds.minX }
+            let expected = label == "Reported cost" ? [currencyReference, reference] : [reference]
+            // Compare the whole value: a zero within 10/01/80 or $10 is not a reported zero.
+            let completeZero = actual.count == expected.count
+                && zip(actual, expected).allSatisfy { self.matchesGlyph($0.0, reference: $0.1) }
+            let count = completeZero ? 1 : 0
             let attachment = XCTAttachment(image: UIImage(cgImage: crop))
-            attachment.name = "metric-value-field-\(label)-raw-\(reading)"
+            attachment.name = "metric-value-field-\(label)-visible-zero-count-\(count)"
             attachment.lifetime = .keepAlways
             self.add(attachment)
-            readings.append((label, reading))
+            readings.append((label, count))
         }
         return readings
     }
 
+    private struct GlyphMask {
+        let bounds: CGRect
+        let pixels: Set<Int>
+        var aspect: CGFloat { self.bounds.width / self.bounds.height }
+    }
+
+    // Threshold opaque text against the median border color, then retain connected ink.
+    // Components touching a crop edge are incomplete and cannot establish a readable value.
+    private func glyphMasks(_ image: CGImage) throws -> [GlyphMask] {
+        let width = image.width
+        let height = image.height
+        var rgba = [UInt8](repeating: 0, count: width * height * 4)
+        try rgba.withUnsafeMutableBytes { bytes in
+            let context = try XCTUnwrap(CGContext(
+                data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        let gray = stride(from: 0, to: rgba.count, by: 4).map {
+            (Int(rgba[$0]) + Int(rgba[$0 + 1]) + Int(rgba[$0 + 2])) / 3
+        }
+        let border = (0..<width).flatMap { [gray[$0], gray[(height - 1) * width + $0]] }
+            + (0..<height).flatMap { [gray[$0 * width], gray[$0 * width + width - 1]] }
+        let background = border.sorted()[border.count / 2]
+        var remaining = Set(gray.indices.filter { abs(gray[$0] - background) >= 80 })
+        var masks: [GlyphMask] = []
+        while let seed = remaining.first {
+            remaining.remove(seed)
+            var queue = [seed]
+            var points: Set<Int> = [seed]
+            while let point = queue.popLast() {
+                let x = point % width
+                let y = point / width
+                for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                    where nx >= 0 && nx < width && ny >= 0 && ny < height
+                {
+                    let next = ny * width + nx
+                    if remaining.remove(next) != nil {
+                        points.insert(next)
+                        queue.append(next)
+                    }
+                }
+            }
+            guard points.count >= 10 else { continue }
+            let xs = points.map { $0 % width }
+            let ys = points.map { $0 / width }
+            let left = try XCTUnwrap(xs.min())
+            let right = try XCTUnwrap(xs.max())
+            let top = try XCTUnwrap(ys.min())
+            let bottom = try XCTUnwrap(ys.max())
+            guard left > 0, top > 0, right < width - 1, bottom < height - 1 else { continue }
+            let glyphWidth = right - left + 1
+            let glyphHeight = bottom - top + 1
+            var normalized: Set<Int> = []
+            for y in 0..<64 {
+                for x in 0..<32 {
+                    let px = left + Int((Double(x) + 0.5) * Double(glyphWidth) / 32)
+                    let py = top + Int((Double(y) + 0.5) * Double(glyphHeight) / 64)
+                    if points.contains(py * width + px) { normalized.insert(y * 32 + x) }
+                }
+            }
+            masks.append(GlyphMask(
+                bounds: CGRect(x: left, y: top, width: glyphWidth, height: glyphHeight), pixels: normalized))
+        }
+        return masks
+    }
+
+    private func matchesGlyph(_ value: GlyphMask, reference: GlyphMask) -> Bool {
+        guard abs(value.aspect / reference.aspect - 1) <= 0.10 else { return false }
+        // One normalized pixel handles raster phase/antialiasing, not a different character.
+        // Both directions count: extra ink in "8" or missing/clipped ink cannot hide.
+        func nearCount(_ a: Set<Int>, _ b: Set<Int>) -> Int {
+            a.filter { point in
+                let x = point % 32
+                let y = point / 32
+                return (-1...1).contains { dy in
+                    (-1...1).contains { dx in
+                        let nx = x + dx
+                        let ny = y + dy
+                        return nx >= 0 && nx < 32 && ny >= 0 && ny < 64 && b.contains(ny * 32 + nx)
+                    }
+                }
+            }.count
+        }
+        let matched = nearCount(value.pixels, reference.pixels) + nearCount(reference.pixels, value.pixels)
+        let total = value.pixels.count + reference.pixels.count
+        return total > 0 && Double(matched) / Double(total) >= 0.95
+    }
+
+    @MainActor
+    private func glyphReference(_ literal: String, size: DynamicTypeSize, appearance: ColorScheme) throws -> GlyphMask {
+        let image = try self.hostedImage(
+            Text(literal).font(.subheadline.weight(.semibold))
+                .foregroundStyle(appearance == .dark ? Color.white : Color.black)
+                .padding(24).background(appearance == .dark ? Color.black : Color.white)
+                .environment(\.dynamicTypeSize, size).frame(width: 390),
+            userInterfaceStyle: appearance == .dark ? .dark : .light)
+        let masks = try self.glyphMasks(try XCTUnwrap(image.cgImage))
+        XCTAssertEqual(masks.count, 1, "Independent literal reference must render one complete glyph")
+        return try XCTUnwrap(masks.first)
+    }
+
     @MainActor
     func testMetricValueRecognitionDistinguishesZeroFromLetterOtherDigitAndBlank() throws {
-        let zeros = try NSRegularExpression(pattern: "\\b0\\b")
-        for enlarged in [false, true] {
-            for dark in [false, true] {
-                for value in ["0", "O", "8", ""] {
-                    let factor: CGFloat = enlarged ? 2 : 1
-                    let image = UIGraphicsImageRenderer(size: CGSize(width: 240 * factor, height: 120 * factor))
-                        .image { context in
-                            (dark ? UIColor.black : .white).setFill()
-                            context.fill(CGRect(x: 0, y: 0, width: 240 * factor, height: 120 * factor))
-                            let color = dark ? UIColor.white : UIColor.black
-                            ("Value" as NSString).draw(at: CGPoint(x: 16 * factor, y: 16 * factor),
-                                withAttributes: [.font: UIFont.systemFont(ofSize: 16 * factor), .foregroundColor: color])
-                            (value as NSString).draw(at: CGPoint(x: 16 * factor, y: 42 * factor),
-                                withAttributes: [.font: UIFont.systemFont(ofSize: 22 * factor), .foregroundColor: color])
-                        }
+        for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                let reference = try self.glyphReference("0", size: size, appearance: appearance)
+                let currencyReference = try self.glyphReference("$", size: size, appearance: appearance)
+                let values = [
+                    "0", "$0", "O", "1", "2", "3", "4", "5", "6", "7", "8", "9", "",
+                    "10", "01", "80", "00", "0O", "O0", "0 1", "$10", "$01", "$80", "$O",
+                ]
+                for value in values {
+                    let label = value.hasPrefix("$") ? "Reported cost" : "Value"
+                    let root = VStack(alignment: .leading, spacing: 3) {
+                        Text(label).font(.caption2.weight(.medium))
+                        Text(value).font(.subheadline.weight(.semibold))
+                    }
+                    .padding(20)
+                    .foregroundStyle(appearance == .dark ? Color.white : Color.black)
+                    .background(appearance == .dark ? Color.black : Color.white)
+                    .environment(\.dynamicTypeSize, size).frame(width: 390, alignment: .leading)
+                    let image = try self.hostedImage(root,
+                        userInterfaceStyle: appearance == .dark ? .dark : .light)
                     let request = VNRecognizeTextRequest()
                     request.recognitionLevel = .accurate
                     request.recognitionLanguages = ["en-US"]
                     try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
-                    let readings = try self.metricValueReadings(image, labels: ["Value"], observations: request.results ?? [])
-                    let reading = try XCTUnwrap(readings.first).1
-                    let range = NSRange(reading.startIndex..<reading.endIndex, in: reading)
-                    XCTAssertEqual(zeros.numberOfMatches(in: reading, range: range), value == "0" ? 1 : 0,
-                        "Actual value \(value), enlarged \(enlarged), dark \(dark): raw field OCR \(reading)")
+                    let readings = try self.metricZeroValueCounts(
+                        image, labels: [label], observations: request.results ?? [],
+                        reference: reference, currencyReference: currencyReference)
+                    XCTAssertEqual(try XCTUnwrap(readings.first).1, (value == "0" || value == "$0") ? 1 : 0,
+                        "Actual value \(value), \(sizeName), \(appearance)")
                 }
+                // Crop through the rendered zero itself; edge-touching fragments must refuse.
+                let literal = try self.hostedImage(
+                    Text("0").font(.subheadline.weight(.semibold)).padding(24)
+                        .foregroundStyle(Color.black).background(Color.white)
+                        .environment(\.dynamicTypeSize, size).frame(width: 390),
+                    userInterfaceStyle: .light)
+                let cg = try XCTUnwrap(literal.cgImage)
+                let bounds = try XCTUnwrap(self.glyphMasks(cg).first).bounds
+                let clipped = try XCTUnwrap(cg.cropping(to: CGRect(
+                    x: bounds.minX, y: 0, width: floor(bounds.width / 2), height: CGFloat(cg.height))))
+                XCTAssertFalse(try self.glyphMasks(clipped).contains { self.matchesGlyph($0, reference: reference) },
+                    "A cropped zero fragment must not count as a complete readable zero")
             }
         }
     }
