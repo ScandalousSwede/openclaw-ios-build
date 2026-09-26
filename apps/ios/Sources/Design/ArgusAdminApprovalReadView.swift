@@ -69,6 +69,13 @@ struct ArgusAdminApprovalReadView: View {
             if let reviewed {
                 ProCard(radius: SettingsLayout.cardRadius) {
                     VStack(alignment: .leading, spacing: 10) {
+                        Text("Changes since the previous approved version")
+                            .font(.subheadline.weight(.semibold))
+                        Text(reviewed.changes ?? "No previously approved version is recorded. Review the full script below.")
+                            .font(.body.monospaced())
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("argus.adminApprovals.changes")
                         Text("Exact script for \(reviewed.request.issue)")
                             .font(.headline)
                         Text(reviewed.scriptText)
@@ -140,7 +147,7 @@ struct ArgusAdminApprovalReadView: View {
         }
         do {
             self.reviewed = try await client.get(request, in: index)
-            self.status = "Script bytes match this pending request's digest. Read-only review."
+            self.status = "Available script bytes match their recorded digests. Read-only review."
         } catch {
             self.status = "This request changed or its exact script could not be verified. Refresh before reviewing it."
         }

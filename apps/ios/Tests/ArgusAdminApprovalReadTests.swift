@@ -102,4 +102,48 @@ struct ArgusAdminApprovalReadTests {
         ], as: ArgusAdminApprovalIndex.self)
         #expect(throws: ArgusAdminApprovalReadError.self) { try index.validated() }
     }
+
+    @Test func previousApprovedBytesProduceLocalChangesAndMissingOrAlteredBytesRefuse() throws {
+        let (base, script) = try Self.fixture()
+        let old = Data("Write-Output 'old'\r\n".utf8)
+        let oldHash = ArgusAdminApprovalCanonical.sha256(old)
+        let oldCommit = String(repeating: "b", count: 40)
+        var request = base
+        request["previous"] = ["commit": oldCommit, "script_sha256": oldHash]
+        let index = try Self.decode([
+            "broker_id": Self.brokerID, "updated_at": "2026-09-25T22:01:00Z",
+            "pending": [request],
+        ], as: ArgusAdminApprovalIndex.self).validated()
+        let selected = try #require(index.pending.first)
+        let prior: [String: Any] = [
+            "commit": oldCommit, "script_sha256": oldHash,
+            "script_b64": old.base64EncodedString(),
+        ]
+        let exact = try Self.decode([
+            "broker_id": Self.brokerID, "request": request,
+            "script_b64": script.base64EncodedString(), "previous": prior,
+            "diff_b64": Data("relay-controlled text is not the displayed change".utf8).base64EncodedString(),
+        ], as: ArgusAdminApprovalDetail.self)
+        let reviewed = try exact.reviewed(against: index, selected: selected)
+        #expect(reviewed.changes?.contains("− old line 1: Write-Output 'old'␍") == true)
+        #expect(reviewed.changes?.contains("+ new line 1: Write-Output 'ok'␍") == true)
+        #expect(reviewed.changes?.contains("relay-controlled") == false)
+
+        let missing = try Self.decode([
+            "broker_id": Self.brokerID, "request": request,
+            "script_b64": script.base64EncodedString(),
+        ], as: ArgusAdminApprovalDetail.self)
+        #expect(throws: ArgusAdminApprovalReadError.self) {
+            try missing.reviewed(against: index, selected: selected)
+        }
+        var wrong = prior
+        wrong["script_b64"] = Data("Write-Output 'different'\r\n".utf8).base64EncodedString()
+        let altered = try Self.decode([
+            "broker_id": Self.brokerID, "request": request,
+            "script_b64": script.base64EncodedString(), "previous": wrong,
+        ], as: ArgusAdminApprovalDetail.self)
+        #expect(throws: ArgusAdminApprovalCanonical.FormatError.self) {
+            try altered.reviewed(against: index, selected: selected)
+        }
+    }
 }
