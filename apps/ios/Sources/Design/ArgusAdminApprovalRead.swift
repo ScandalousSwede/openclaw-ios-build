@@ -49,6 +49,7 @@ struct ArgusAdminApprovalRequest: Decodable, Equatable, Sendable {
         _ = try ArgusAdminApprovalCanonical.statement(.init(
             requestID: requestId, decision: "deny", scriptPath: scriptPath,
             gitCommit: gitCommit, scriptSHA256: scriptSha256,
+            previousScriptSHA256: previous?.scriptSha256 ?? "FIRST_VERSION",
             argsSHA256: argsSha256, nonce: nonce, expiresAt: expiresAt,
             brokerID: "0123456789abcdef"))
         if let previous {
