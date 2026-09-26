@@ -195,7 +195,24 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                         let range = NSRange(text.startIndex..<text.endIndex, in: text)
                         if reported {
                             XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), 0)
-                            XCTAssertGreaterThanOrEqual(zeros.numberOfMatches(in: text, range: range), zeroCount)
+                            // Keep language correction for complete labels, but inspect numeric glyphs
+                            // with raw recognition. Never normalize an alphabetic O into a reported zero.
+                            let numericRequest = VNRecognizeTextRequest()
+                            numericRequest.recognitionLevel = .accurate
+                            numericRequest.recognitionLanguages = ["en-US"]
+                            numericRequest.usesLanguageCorrection = false
+                            try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:])
+                                .perform([numericRequest])
+                            let numericText = (numericRequest.results ?? [])
+                                .compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                            let numericRange = NSRange(numericText.startIndex..<numericText.endIndex, in: numericText)
+                            let candidates = (numericRequest.results ?? []).map {
+                                $0.topCandidates(3).map(\.string).joined(separator: " / ")
+                            }.joined(separator: " | ")
+                            XCTAssertGreaterThanOrEqual(
+                                zeros.numberOfMatches(in: numericText, range: numericRange), zeroCount,
+                                "\(name) \(appearance) \(sizeName): raw numeric OCR: \(numericText); " +
+                                    "candidates: \(candidates); corrected label OCR: \(text)")
                         } else {
                             // Counts complete words, even when Vision combines neighboring metric regions.
                             XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), missingCount)
