@@ -195,33 +195,108 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                         let range = NSRange(text.startIndex..<text.endIndex, in: text)
                         if reported {
                             XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), 0)
-                            // Keep language correction for complete labels, but inspect numeric glyphs
-                            // with raw recognition. Never normalize an alphabetic O into a reported zero.
-                            let numericRequest = VNRecognizeTextRequest()
-                            // Accurate recognition omitted isolated visible digits in the retained run.
-                            // Use the alternative detector and admit small glyphs; require the same literal counts.
-                            numericRequest.recognitionLevel = .fast
-                            numericRequest.minimumTextHeight = 0
-                            numericRequest.recognitionLanguages = ["en-US"]
-                            numericRequest.usesLanguageCorrection = false
-                            try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:])
-                                .perform([numericRequest])
-                            let numericText = (numericRequest.results ?? [])
-                                .compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                            // Single isolated glyphs were omitted by both whole-card Vision paths.
+                            // Inspect the actual pixels below each recognized metric label instead.
+                            let valueLabels: [String]
+                            switch name {
+                            case "presence": valueLabels = ["Reported", "Agents"]
+                            case "memory": valueLabels = ["Short-term", "Signals", "Promoted"]
+                            case "scheduler": valueLabels = ["Jobs"]
+                            default: valueLabels = ["Reported cost", "Tokens"]
+                            }
+                            XCTAssertEqual(valueLabels.count, zeroCount)
+                            let readings = try self.metricValueReadings(
+                                image, labels: valueLabels, observations: request.results ?? [])
+                            for (label, reading) in readings {
+                                let range = NSRange(reading.startIndex..<reading.endIndex, in: reading)
+                                XCTAssertEqual(zeros.numberOfMatches(in: reading, range: range), 1,
+                                    "\(name) \(appearance) \(sizeName), \(label): raw field OCR: \(reading)")
+                            }
+                            let numericText = readings.map(\.1).joined(separator: " ")
                             let numericRange = NSRange(numericText.startIndex..<numericText.endIndex, in: numericText)
-                            let candidates = (numericRequest.results ?? []).map {
-                                $0.topCandidates(3).map(\.string).joined(separator: " / ")
-                            }.joined(separator: " | ")
                             XCTAssertGreaterThanOrEqual(
                                 zeros.numberOfMatches(in: numericText, range: numericRange), zeroCount,
-                                "\(name) \(appearance) \(sizeName): raw numeric OCR: \(numericText); " +
-                                    "candidates: \(candidates); corrected label OCR: \(text)")
+                                "\(name) \(appearance) \(sizeName): raw field OCR: \(numericText); label OCR: \(text)")
                         } else {
                             // Counts complete words, even when Vision combines neighboring metric regions.
                             XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), missingCount)
                             XCTAssertEqual(zeros.numberOfMatches(in: text, range: range), 0)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Values sit below caption labels in the maintained metric tile. Use padded guidance
+    // from a unique complete label; never infer a digit from the fixture/model or normalize O.
+    private func metricValueReadings(
+        _ image: UIImage, labels: [String], observations: [VNRecognizedTextObservation]
+    ) throws -> [(String, String)] {
+        let source = try XCTUnwrap(image.cgImage)
+        let width = CGFloat(source.width)
+        let height = CGFloat(source.height)
+        var readings: [(String, String)] = []
+        for label in labels {
+            // Exact case keeps the Jobs value separate from the JOBS section heading.
+            let anchors = observations.filter { $0.topCandidates(1).first?.string == label }
+            XCTAssertEqual(anchors.count, 1, "One complete metric label anchor: \(label)")
+            guard let anchor = anchors.first, anchors.count == 1 else {
+                readings.append((label, ""))
+                continue
+            }
+            let box = anchor.boundingBox
+            let lineHeight = box.height * height
+            let rect = CGRect(
+                x: box.minX * width - lineHeight * 0.5,
+                y: (1 - box.minY) * height,
+                width: lineHeight * 5,
+                height: lineHeight * 3)
+                .integral.intersection(CGRect(x: 0, y: 0, width: width, height: height))
+            let crop = try XCTUnwrap(source.cropping(to: rect))
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.minimumTextHeight = 0
+            request.recognitionLanguages = ["en-US"]
+            request.usesLanguageCorrection = false
+            try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
+            let reading = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: " ")
+            let attachment = XCTAttachment(image: UIImage(cgImage: crop))
+            attachment.name = "metric-value-field-\(label)-raw-\(reading)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+            readings.append((label, reading))
+        }
+        return readings
+    }
+
+    @MainActor
+    func testMetricValueRecognitionDistinguishesZeroFromLetterOtherDigitAndBlank() throws {
+        let zeros = try NSRegularExpression(pattern: "\\b0\\b")
+        for enlarged in [false, true] {
+            for dark in [false, true] {
+                for value in ["0", "O", "8", ""] {
+                    let factor: CGFloat = enlarged ? 2 : 1
+                    let image = UIGraphicsImageRenderer(size: CGSize(width: 240 * factor, height: 120 * factor))
+                        .image { context in
+                            (dark ? UIColor.black : .white).setFill()
+                            context.fill(CGRect(x: 0, y: 0, width: 240 * factor, height: 120 * factor))
+                            let color = dark ? UIColor.white : UIColor.black
+                            ("Value" as NSString).draw(at: CGPoint(x: 16 * factor, y: 16 * factor),
+                                withAttributes: [.font: UIFont.systemFont(ofSize: 16 * factor), .foregroundColor: color])
+                            (value as NSString).draw(at: CGPoint(x: 16 * factor, y: 42 * factor),
+                                withAttributes: [.font: UIFont.systemFont(ofSize: 22 * factor), .foregroundColor: color])
+                        }
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                    let readings = try self.metricValueReadings(image, labels: ["Value"], observations: request.results ?? [])
+                    let reading = try XCTUnwrap(readings.first).1
+                    let range = NSRange(reading.startIndex..<reading.endIndex, in: reading)
+                    XCTAssertEqual(zeros.numberOfMatches(in: reading, range: range), value == "0" ? 1 : 0,
+                        "Actual value \(value), enlarged \(enlarged), dark \(dark): raw field OCR \(reading)")
                 }
             }
         }
