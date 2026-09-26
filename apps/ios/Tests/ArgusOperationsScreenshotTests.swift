@@ -13,20 +13,25 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     func testProductionCronControlsAndFullJobNameAtBothTextSizes() throws {
         let job = try AppCoverageTests.cronConfirmationFixture()
         let model = NodeAppModel()
-        let tab = AgentProTab()
+        let snapshot = AgentOverviewSnapshot(
+            skills: nil, presence: nil, cronStatus: nil, cronJobs: [job],
+            dreaming: nil, dreamDiary: nil, usage: nil,
+            activeAgentId: "synthetic-cron-agent", agentSkillFilter: nil,
+            loadedAt: Date(timeIntervalSince1970: 0))
         for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
             for appearance in [ColorScheme.light, .dark] {
                 let root = VStack(alignment: .leading, spacing: 12) {
                     Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
-                    tab.cronJobDetailRow(job)
+                    // Mount the production owner before its environment-dependent rows evaluate.
+                    AgentProTab(initialRoute: .cron, initialOverview: snapshot)
                 }
                 .padding(.vertical)
                 .background { OpenClawProBackground() }
                 .environment(model)
+                .environment(\.scenePhase, .inactive)
                 .environment(\.dynamicTypeSize, size)
                 .environment(\.colorScheme, appearance)
-                .frame(width: 390)
-                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 390, height: 1800)
                 let image = try self.hostedImage(root,
                     userInterfaceStyle: appearance == .dark ? .dark : .light,
                     requiredText: ["Synthetic", "administrative", "follow-through", "Run now", "Enable"])
@@ -68,12 +73,13 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                     .environment(\.colorScheme, appearance)
                     .frame(width: 390, height: 1800)
                     let required = ["Agent details", "Synthetic administrative research and engineering agent",
-                                    "Model reported by gateway", "synthetic-provider", "2026-09-26", "Technical details"]
+                                    "Model reported by gateway", "Technical details"]
                         + (expanded ? ["Agent ID", "Workspace", "Runtime reported by gateway"] : [])
                     let image = try self.hostedImage(root,
                         userInterfaceStyle: appearance == .dark ? .dark : .light,
                         requiredText: required,
-                        forbiddenText: expanded ? [] : [snapshot.id])
+                        forbiddenText: expanded ? [] : [snapshot.id],
+                        requiredWrappedValues: [try XCTUnwrap(snapshot.model)])
                     let attachment = XCTAttachment(image: image)
                     attachment.name = "argus-full-agent-identity-native-synthetic-\(appearance)-\(name)-technical-\(expanded)"
                     attachment.lifetime = .keepAlways
@@ -149,7 +155,9 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             let cards: [(String, AnyView, [String], Int, Int)] = [
                 ("presence", AnyView(nodes.totalsCard), ["Presence", "Reported", "Agents", "Gateway"], 2, 2),
                 ("memory", AnyView(dreaming.dreamingTotalsCard), ["Memory State", "Short-term", "Signals", "Promoted"], 3, 3),
-                ("scheduler", AnyView(tab.cronStatusCard), ["Scheduler", "Jobs", "Next"], 3, 1),
+                // Includes the separate "Cron unavailable" empty-list heading as well as three card values.
+                ("scheduler", AnyView(AgentProTab(initialRoute: .cron, initialOverview: snapshot)
+                    .frame(height: 1800)), ["Scheduler", "Jobs", "Next"], 4, 1),
                 ("usage", AnyView(tab.usageTotalsCard), ["Totals", "Cost", "Tokens", "Cache"], 3, 2),
             ]
             for (name, card, labels, missingCount, zeroCount) in cards {
@@ -162,6 +170,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                         .padding(.vertical)
                         .background { OpenClawProBackground() }
                         .environment(model)
+                        .environment(\.scenePhase, .inactive)
                         .environment(\.dynamicTypeSize, size)
                         .environment(\.colorScheme, appearance)
                         .frame(width: 390)
@@ -1176,7 +1185,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     private func hostedImage(
         _ content: some View, userInterfaceStyle: UIUserInterfaceStyle = .dark,
         selectedProject: String? = nil, artifactNames: [String] = [],
-        requiredText: [String] = [], forbiddenText: [String] = []) throws -> UIImage
+        requiredText: [String] = [], forbiddenText: [String] = [],
+        requiredWrappedValues: [String] = []) throws -> UIImage
     {
         let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
         let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
@@ -1255,12 +1265,34 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 renderedText.localizedCaseInsensitiveContains(phrase),
                 "The production detail must visibly render: \(phrase)")
         }
+        for value in requiredWrappedValues {
+            XCTAssertTrue(Self.containsCompleteWrappedValue(renderedText, value: value),
+                "The complete production value must render across line wraps: \(value)")
+        }
         for phrase in forbiddenText {
             XCTAssertFalse(
                 renderedText.localizedCaseInsensitiveContains(phrase),
                 "The production view must not display a contradictory state: \(phrase)")
         }
         return image
+    }
+
+    // Vision inserts whitespace at visual line breaks, including inside long provider/model IDs.
+    // Preserve every non-whitespace character; a missing hyphen, suffix or different model still fails.
+    private static func containsCompleteWrappedValue(_ text: String, value: String) -> Bool {
+        text.filter { !$0.isWhitespace }.contains(value.filter { !$0.isWhitespace })
+    }
+
+    func testWrappedValueOCRRetainsCompleteModelAndDate() {
+        let model = "synthetic-provider/synthetic-full-model-revision-2026-09-26"
+        XCTAssertTrue(Self.containsCompleteWrappedValue(
+            "synthetic- provider/ synthetic-full- model- revision-2026-09 -26", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-09", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-09-27", value: model))
+        XCTAssertFalse(Self.containsCompleteWrappedValue(
+            "synthetic-provider/synthetic-full-model-revision-2026-0926", value: model))
     }
 
     private static func containsProjectLabel(_ text: String, project: String) -> Bool {
