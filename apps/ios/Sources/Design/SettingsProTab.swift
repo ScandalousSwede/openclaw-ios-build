@@ -66,7 +66,7 @@ struct SettingsProTab: View {
     @State var notificationStatusText = "Checking"
     @State var notificationActionText = "Request Access"
     @State var diagnosticsLastRunText = "Not run"
-    @State var diagnosticsIssueCount: Int?
+    @State var diagnosticsIssues: [SettingsDiagnosticIssue]?
     @State var crashDiagnosticExport: AIESCrashDiagnosticExporter.PreparedExport?
     @State var crashDiagnosticExportStatus: String?
     @State var isPreparingCrashDiagnosticExport = false

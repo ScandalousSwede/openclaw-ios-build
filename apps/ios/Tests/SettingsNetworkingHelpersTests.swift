@@ -11,7 +11,7 @@ import Testing
                 notificationStatusText: "Not Set") == [
                     .gatewayOffline,
                     .discoveryUnavailable,
-                    .notificationsUnavailable,
+                    .notificationsNotRequested,
                 ])
     }
 

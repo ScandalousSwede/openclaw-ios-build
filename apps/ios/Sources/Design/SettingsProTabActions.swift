@@ -38,6 +38,11 @@ extension SettingsProTab {
                     detail: self.diagnosticsLastRunText,
                     value: self.diagnosticsRunValue,
                     color: self.diagnosticsRunColor)
+                if let issues = self.diagnosticsIssues, !issues.isEmpty {
+                    SettingsDiagnosticRunIssues(issues: issues)
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 12)
+                }
                 Divider().padding(.leading, 60)
                 self.diagnosticCheckRow(
                     icon: "antenna.radiowaves.left.and.right",
@@ -48,8 +53,8 @@ extension SettingsProTab {
                 Divider().padding(.leading, 60)
                 self.diagnosticCheckRow(
                     icon: "dot.radiowaves.left.and.right",
-                    title: "Discovery",
-                    detail: self.gatewayController.discoveryStatusText,
+                    title: "Gateway discovery",
+                    detail: self.gatewayController.discoveryStatusText + " · Network-discovered gateways, not agents.",
                     value: "\(self.gatewayController.gateways.count)",
                     color: self.gatewayController.gateways.isEmpty ? .secondary : OpenClawBrand.accent)
                 Divider().padding(.leading, 60)
@@ -100,7 +105,7 @@ extension SettingsProTab {
                 Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             ProValuePill(value: value, color: color)
@@ -162,12 +167,12 @@ extension SettingsProTab {
         let notificationSettings = await UNUserNotificationCenter.current().notificationSettings()
         self.applyNotificationStatus(notificationSettings.authorizationStatus)
 
-        let issueCount = SettingsDiagnostics.issueCount(
+        let issues = SettingsDiagnostics.issues(
             gatewayConnected: self.gatewayDiagnosticConnected,
             discoveredGatewayCount: self.gatewayController.gateways.count,
             talkConfigLoaded: self.gatewayDiagnosticTalkConfigLoaded,
             notificationStatusText: self.notificationStatusText)
-        self.diagnosticsIssueCount = issueCount
+        self.diagnosticsIssues = issues
         self.diagnosticsLastRunText = SettingsDiagnostics.timestamp(Date())
     }
 
@@ -857,6 +862,11 @@ extension SettingsProTab {
         if self.gatewayConnected { return "ready" }
         if self.gatewayController.gateways.isEmpty { return "check" }
         return "partial"
+    }
+
+    // Count and named results share the same completed-run snapshot.
+    var diagnosticsIssueCount: Int? {
+        self.diagnosticsIssues?.count
     }
 
     var diagnosticsRunValue: String {

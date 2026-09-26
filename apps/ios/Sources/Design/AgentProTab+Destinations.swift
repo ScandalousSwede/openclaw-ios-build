@@ -30,6 +30,11 @@ extension AgentProTab {
                         value: self.skillsValue,
                         detail: self.skillsDetail,
                         color: self.gatewayConnected ? OpenClawBrand.accent : .secondary)
+                    Text("Enabled is policy permission, not proof of completed setup or a successful run.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, OpenClawProMetric.pagePadding)
                     self.skillsPolicyControls
                     self.skillsFilterField
                     self.clawHubSearchCard

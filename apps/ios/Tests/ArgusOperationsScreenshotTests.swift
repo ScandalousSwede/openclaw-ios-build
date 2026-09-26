@@ -9,6 +9,42 @@ import XCTest
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
     @MainActor
+    func testSkillStatusAndRecordedDiagnosticIssuesReflow() throws {
+        let report = try AppCoverageTests.skillStatusOverlapFixture()
+        let issues = SettingsDiagnostics.issues(
+            gatewayConnected: true, discoveredGatewayCount: 0,
+            talkConfigLoaded: true, notificationStatusText: "Allowed")
+        for (name, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                let root = VStack(alignment: .leading, spacing: 16) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    AgentProTab().detailSummaryCard(
+                        icon: "sparkles", title: "Skills", value: "\(report.totalCount)",
+                        detail: report.statusSummary(agentSkillFilter: ["synthetic-enabled-setup"]), color: .secondary)
+                    SettingsDiagnosticRunIssues(issues: issues)
+                        .padding(.horizontal, OpenClawProMetric.pagePadding)
+                }
+                .padding(.vertical)
+                .background { OpenClawProBackground() }
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, appearance)
+                .frame(width: 390)
+                .fixedSize(horizontal: false, vertical: true)
+                let image = try self.hostedImage(root,
+                    userInterfaceStyle: appearance == .dark ? .dark : .light,
+                    requiredText: ["4 registered", "1 enabled for this agent", "2 need setup", "3 blocked",
+                                   "Checks needing attention at that run", "Network discovery had no results yet",
+                                   "It may still be searching", "manually configured gateways can remain connected"],
+                    forbiddenText: ["4/4", "All operational", "Gateway connection was unavailable"])
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-status-meaning-native-synthetic-\(appearance)-\(name)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
+    @MainActor
     func testUnsentResultSourceCardAtBothTextSizes() throws {
         let (item, preview) = try ArgusOperationsTests.briefingFixture()
         let request = try ArgusResultAskRequest(item: item, preview: preview,
