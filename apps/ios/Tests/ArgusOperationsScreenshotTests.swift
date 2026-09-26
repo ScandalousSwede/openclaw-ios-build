@@ -1,5 +1,6 @@
 import OpenClawChatUI
 import OpenClawKit
+import OpenClawProtocol
 import SwiftUI
 import UIKit
 import UserNotifications
@@ -8,6 +9,194 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testProductionCronControlsAndFullJobNameAtBothTextSizes() throws {
+        let job = try AppCoverageTests.cronConfirmationFixture()
+        let model = NodeAppModel()
+        let tab = AgentProTab()
+        for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                let root = VStack(alignment: .leading, spacing: 12) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    tab.cronJobDetailRow(job)
+                }
+                .padding(.vertical)
+                .background { OpenClawProBackground() }
+                .environment(model)
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, appearance)
+                .frame(width: 390)
+                .fixedSize(horizontal: false, vertical: true)
+                let image = try self.hostedImage(root,
+                    userInterfaceStyle: appearance == .dark ? .dark : .light,
+                    requiredText: ["Synthetic", "administrative", "follow-through", "Run now", "Enable"])
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-cron-controls-native-synthetic-\(appearance)-\(sizeName)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+            }
+        }
+    }
+
+    @MainActor
+    func testFullAgentIdentityAndTechnicalDisclosureAtBothTextSizes() throws {
+        let snapshot = AgentIdentitySnapshot(agent: AppCoverageTests.agentIdentityFixture())
+        let model = NodeAppModel()
+        model.selectedAgentId = "synthetic-existing-selected-agent"
+        model.focusChatSession("synthetic-existing-chat-session")
+        let route = AgentProTab.AgentRoute.agentDetails(snapshot)
+        // A roster update must not change the identity already opened or select its agent.
+        model.gatewayAgents = [AgentSummary(
+            id: snapshot.id, name: "Synthetic revised roster name", identity: nil,
+            workspace: nil, model: ["primary": AnyCodable("synthetic-provider/different-model")], agentruntime: nil)]
+        for (name, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                for expanded in [false, true] {
+                    let root = VStack(spacing: 0) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                        NavigationStack {
+                            if expanded {
+                                AgentIdentityDetails(snapshot: snapshot, technicalDetailsExpanded: true)
+                            } else {
+                                AgentProTab().destination(for: route)
+                            }
+                        }
+                    }
+                    .background { OpenClawProBackground() }
+                    .environment(model)
+                    .environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, appearance)
+                    .frame(width: 390, height: 1800)
+                    let required = ["Agent details", "Synthetic administrative research and engineering agent",
+                                    "Model reported by gateway", "synthetic-provider", "2026-09-26", "Technical details"]
+                        + (expanded ? ["Agent ID", "Workspace", "Runtime reported by gateway"] : [])
+                    let image = try self.hostedImage(root,
+                        userInterfaceStyle: appearance == .dark ? .dark : .light,
+                        requiredText: required,
+                        forbiddenText: expanded ? [] : [snapshot.id])
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-full-agent-identity-native-synthetic-\(appearance)-\(name)-technical-\(expanded)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    XCTAssertEqual(model.selectedAgentId, "synthetic-existing-selected-agent")
+                    XCTAssertEqual(model.chatSessionKey, "synthetic-existing-chat-session")
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProductionUsageCostCoverageRemainsReadable() throws {
+        let model = NodeAppModel()
+        for (state, missing, expected) in [
+            ("unknown", nil, "Cost coverage not reported"),
+            ("zero", 0, "No entries reported without cost data"),
+            ("partial", 3, "Partial cost"),
+        ] as [(String, Int?, String)] {
+            let snapshot = try AppCoverageTests.usageCostCoverageFixture(missingEntries: missing)
+            let tab = AgentProTab(initialOverview: snapshot)
+            let day = try XCTUnwrap(snapshot.usage?.daily?.first)
+            for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+                for appearance in [ColorScheme.light, .dark] {
+                    let root = VStack(alignment: .leading, spacing: 12) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                        tab.usageTotalsCard
+                        tab.usageDayRow(day)
+                    }
+                    .padding(.vertical)
+                    .background { OpenClawProBackground() }
+                    .environment(model)
+                    .environment(\.dynamicTypeSize, size)
+                    .environment(\.colorScheme, appearance)
+                    .frame(width: 390)
+                    .fixedSize(horizontal: false, vertical: true)
+                    let image = try self.hostedImage(root,
+                        userInterfaceStyle: appearance == .dark ? .dark : .light)
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-usage-native-synthetic-\(state)-\(appearance)-\(sizeName)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                    let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                        .joined(separator: " ")
+                    XCTAssertTrue(text.localizedCaseInsensitiveContains("Reported cost"))
+                    XCTAssertTrue(text.localizedCaseInsensitiveContains(expected))
+                    if missing == 3 {
+                        XCTAssertTrue(text.localizedCaseInsensitiveContains("3 entries have no cost data"))
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testProductionMetricCardsKeepUnavailableAndZeroReadable() throws {
+        let model = NodeAppModel()
+        for reported in [false, true] {
+            let snapshot = try AppCoverageTests.metricAvailabilityFixture(reported: reported)
+            let tab = AgentProTab(initialOverview: snapshot)
+            let nodes = AgentProNodesDestination(
+                overview: snapshot, gatewayConnected: false, agentCount: reported ? 0 : nil,
+                instancesValue: "offline", instancesDetail: "Synthetic report", instancesColor: .secondary,
+                refresh: {})
+            let dreaming = AgentProDreamingDestination(
+                overview: snapshot, gatewayConnected: false, overviewLoading: false,
+                dreamingValue: "offline", dreamingDetail: "Synthetic report", dreamingColor: .secondary,
+                refresh: {})
+            let cards: [(String, AnyView, [String], Int, Int)] = [
+                ("presence", AnyView(nodes.totalsCard), ["Presence", "Reported", "Agents", "Gateway"], 2, 2),
+                ("memory", AnyView(dreaming.dreamingTotalsCard), ["Memory State", "Short-term", "Signals", "Promoted"], 3, 3),
+                ("scheduler", AnyView(tab.cronStatusCard), ["Scheduler", "Jobs", "Next"], 3, 1),
+                ("usage", AnyView(tab.usageTotalsCard), ["Totals", "Cost", "Tokens", "Cache"], 3, 2),
+            ]
+            for (name, card, labels, missingCount, zeroCount) in cards {
+                for (sizeName, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+                    for appearance in [ColorScheme.light, .dark] {
+                        let root = VStack(alignment: .leading, spacing: 12) {
+                            Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                            card
+                        }
+                        .padding(.vertical)
+                        .background { OpenClawProBackground() }
+                        .environment(model)
+                        .environment(\.dynamicTypeSize, size)
+                        .environment(\.colorScheme, appearance)
+                        .frame(width: 390)
+                        .fixedSize(horizontal: false, vertical: true)
+                        let image = try self.hostedImage(root,
+                            userInterfaceStyle: appearance == .dark ? .dark : .light)
+                        let attachment = XCTAttachment(image: image)
+                        attachment.name = "argus-metrics-native-synthetic-\(name)-\(reported ? "zero" : "missing")-\(appearance)-\(sizeName)"
+                        attachment.lifetime = .keepAlways
+                        self.add(attachment)
+                        let request = VNRecognizeTextRequest()
+                        request.recognitionLevel = .accurate
+                        request.recognitionLanguages = ["en-US"]
+                        try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
+                        for label in labels {
+                            XCTAssertTrue(text.localizedCaseInsensitiveContains(label), "Complete metric label: \(label)")
+                        }
+                        let unavailable = try NSRegularExpression(pattern: "(?i)\\bUnavailable\\b")
+                        let zeros = try NSRegularExpression(pattern: "\\b0\\b")
+                        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                        if reported {
+                            XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), 0)
+                            XCTAssertGreaterThanOrEqual(zeros.numberOfMatches(in: text, range: range), zeroCount)
+                        } else {
+                            // Counts complete words, even when Vision combines neighboring metric regions.
+                            XCTAssertEqual(unavailable.numberOfMatches(in: text, range: range), missingCount)
+                            XCTAssertEqual(zeros.numberOfMatches(in: text, range: range), 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     @MainActor
     func testMaintainedOperationsGridKeepsEveryOfflineValueAtBothTextSizes() throws {
         let tiles: [(String, String, String)] = [

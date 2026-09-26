@@ -30,8 +30,10 @@ struct AgentProTab: View {
     @State var clawHubInstallSlug: String?
     @State var cronActionBusyIDs: Set<String> = []
     @State var cronActionStatusText: String?
+    @State var pendingCronAction: CronActionConfirmation?
 
     enum AgentRoute: Hashable {
+        case agentDetails(AgentIdentitySnapshot)
         case skills
         case nodes
         case cron
@@ -120,8 +122,9 @@ struct AgentProTab: View {
         }
     }
 
-    init(initialRoute: AgentRoute? = nil) {
+    init(initialRoute: AgentRoute? = nil, initialOverview: AgentOverviewSnapshot? = nil) {
         self._navigationPath = State(initialValue: initialRoute.map { [$0] } ?? [])
+        self._overview = State(initialValue: initialOverview)
     }
 
     var body: some View {
@@ -150,6 +153,27 @@ struct AgentProTab: View {
         }
         .task(id: self.overviewTaskID) {
             await self.refreshOverview(force: false)
+        }
+        .alert(
+            self.pendingCronAction?.title ?? "Confirm job action",
+            isPresented: Binding(
+                get: { self.pendingCronAction != nil },
+                set: { if !$0 { self.pendingCronAction = nil } }),
+            presenting: self.pendingCronAction)
+        { confirmation in
+            Button(confirmation.buttonTitle) {
+                self.pendingCronAction = nil
+                Task { await self.confirmCronAction(confirmation) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { confirmation in
+            Text(confirmation.message)
+        }
+        .onChange(of: self.navigationPath) { _, _ in
+            self.pendingCronAction = nil
+        }
+        .onChange(of: self.liveGatewayConnected) { _, connected in
+            if !connected { self.pendingCronAction = nil }
         }
         .sheet(item: self.$skillEditorSelection) { selection in
             if let skill = self.skillByKey(selection.id) {
