@@ -131,6 +131,18 @@ final class RealtimeTalkRelaySession {
     private var pendingOutputDone = false
     private var audioSender: RealtimeAudioSender?
     private var isClosed = false
+    private var startupTestHooks: RelayTestHooks?
+
+    // Narrow fixture seam: suspend the actual startup awaits without opening a
+    // microphone, gateway, or provider. Production leaves these hooks unset.
+    struct RelayTestHooks {
+        let create: @MainActor () async throws -> TalkSessionCreateResult
+        let subscribe: @MainActor () async -> AsyncStream<EventFrame>
+        let startCapture: @MainActor () throws -> Void
+        let stopCapture: @MainActor () -> Void
+        let closeRelay: @MainActor (String) async -> Void
+        let request: @MainActor (String, String?, Int) async throws -> Data
+    }
     private var isOutputPlaying = false
     private var outputStartedAtMs: Double?
     private var outputPlaybackExpectedEndMs: Double = 0
@@ -161,7 +173,9 @@ final class RealtimeTalkRelaySession {
     }
 
     func start() async throws {
-        self.isClosed = false
+        // The manager creates a fresh object for another start. Stop is terminal
+        // for this instance, including before an already-scheduled start begins.
+        guard !self.isClosed, !Task.isCancelled else { throw CancellationError() }
         self.onStatus("Connecting realtime…")
         let result = try await self.createRelaySession()
         guard let relaySessionId = result.relaysessionid?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -171,10 +185,20 @@ final class RealtimeTalkRelaySession {
                 NSLocalizedDescriptionKey: "Gateway did not return a realtime relay session",
             ])
         }
+        // Creation can complete after Stop. The newly returned remote relay has
+        // never been bound locally, so this continuation owns its one close request.
+        guard !self.isClosed, !Task.isCancelled else {
+            self.close(sendClose: false)
+            await self.requestRelayClose(relaySessionId)
+            throw CancellationError()
+        }
         self.relaySessionId = relaySessionId
         do {
             self.audioSender = RealtimeAudioSender(gateway: self.gateway, relaySessionId: relaySessionId)
-            let eventStream = await self.gateway.subscribeServerEvents(bufferingNewest: 200)
+            let eventStream = await self.subscribeRelayEvents()
+            // Stop during subscription already retires/closes the bound ID. Never
+            // reopen its event pump or capture after this second suspension point.
+            guard !self.isClosed, !Task.isCancelled else { throw CancellationError() }
             self.startEventPump(stream: eventStream)
             self.configureAudioContract(result.audio)
             try self.startMicrophonePump()
@@ -183,7 +207,7 @@ final class RealtimeTalkRelaySession {
             let createdRelaySessionId = self.relaySessionId
             self.close(sendClose: false)
             if let createdRelaySessionId {
-                await Self.closeRelaySession(gateway: self.gateway, relaySessionId: createdRelaySessionId)
+                await self.requestRelayClose(createdRelaySessionId)
             }
             throw error
         }
@@ -204,12 +228,18 @@ final class RealtimeTalkRelaySession {
         Task { await audioSender?.close() }
         self.stopOutputPlayback()
         if sendClose, let relaySessionId = self.relaySessionId {
-            Task { [gateway] in
-                await Self.closeRelaySession(gateway: gateway, relaySessionId: relaySessionId)
-            }
+            Task { await self.requestRelayClose(relaySessionId) }
         }
         self.relaySessionId = nil
         self.onSpeakingChanged(false)
+    }
+
+    private func requestRelayClose(_ relaySessionId: String) async {
+        if let hooks = self.startupTestHooks {
+            await hooks.closeRelay(relaySessionId)
+        } else {
+            await Self.closeRelaySession(gateway: self.gateway, relaySessionId: relaySessionId)
+        }
     }
 
     private nonisolated static func closeRelaySession(
@@ -243,6 +273,7 @@ final class RealtimeTalkRelaySession {
     }
 
     private func createRelaySession() async throws -> TalkSessionCreateResult {
+        if let hooks = self.startupTestHooks { return try await hooks.create() }
         var payload: [String: Any] = [
             "sessionKey": self.options.sessionKey,
             "mode": "realtime",
@@ -283,6 +314,15 @@ final class RealtimeTalkRelaySession {
             ?? Double(Self.defaultSampleRateHz)
         self.outputSampleRateHz = audio["outputSampleRateHz"]?.doubleValue
             ?? Double(Self.defaultSampleRateHz)
+    }
+
+    private func subscribeRelayEvents() async -> AsyncStream<EventFrame> {
+        if let hooks = self.startupTestHooks { return await hooks.subscribe() }
+        return await self.gateway.subscribeServerEvents(bufferingNewest: 200)
+    }
+
+    private func isCurrentRelay(_ relaySessionId: String) -> Bool {
+        !self.isClosed && !Task.isCancelled && self.relaySessionId == relaySessionId
     }
 
     private func startEventPump(stream: AsyncStream<EventFrame>) {
@@ -402,7 +442,10 @@ final class RealtimeTalkRelaySession {
                     args: payload["args"])
                 return
             }
-            let completionStream = await self.gateway.subscribeServerEvents(bufferingNewest: 200)
+            let completionStream = await self.subscribeRelayEvents()
+            // Subscription can yield across Stop; do not start new agent work from
+            // that retired continuation even if its original event was admitted.
+            guard self.isCurrentRelay(relaySessionId) else { return }
             let args = payload["args"]?.foundationValue ?? [:]
             let startPayload: [String: Any] = [
                 "sessionKey": self.options.sessionKey,
@@ -416,6 +459,7 @@ final class RealtimeTalkRelaySession {
                 payload: startPayload,
                 decodeAs: ToolCallStartResponse.self,
                 timeoutSeconds: 30)
+            guard self.isCurrentRelay(relaySessionId) else { return }
             guard let runId = startResponse.runId ?? startResponse.idempotencyKey else {
                 throw NSError(domain: "RealtimeTalkRelay", code: 3, userInfo: [
                     NSLocalizedDescriptionKey: "Realtime tool call did not return a run id",
@@ -425,15 +469,19 @@ final class RealtimeTalkRelaySession {
                 runId: runId,
                 stream: completionStream,
                 timeoutSeconds: 120)
+            guard self.isCurrentRelay(relaySessionId) else { return }
             let result: [String: Any] = completion.failed
                 ? ["error": "OpenClaw tool call failed"]
                 : ["text": completion.text ?? "OpenClaw finished with no text."]
             try await self.submitToolResult(callId: callId, result: result)
+            guard self.isCurrentRelay(relaySessionId) else { return }
             self.onStatus("Listening (Realtime)")
         } catch {
+            guard self.isCurrentRelay(relaySessionId) else { return }
             try? await self.submitToolResult(callId: callId, result: [
                 "error": error.localizedDescription,
             ])
+            guard self.isCurrentRelay(relaySessionId) else { return }
             self.onStatus("Listening (Realtime)")
         }
     }
@@ -459,10 +507,12 @@ final class RealtimeTalkRelaySession {
             payload: payload,
             decodeAs: AnyCodable.self,
             timeoutSeconds: 30)
+        guard self.isCurrentRelay(relaySessionId) else { return }
         let result = response.dictionaryValue?.mapValues(\.foundationValue) ?? [
             "result": response.foundationValue,
         ]
         try await self.submitToolResult(callId: callId, result: result)
+        guard self.isCurrentRelay(relaySessionId) else { return }
         self.onStatus("Listening (Realtime)")
     }
 
@@ -531,14 +581,20 @@ final class RealtimeTalkRelaySession {
                 NSLocalizedDescriptionKey: "Failed to encode \(method) payload",
             ])
         }
-        let response = try await self.gateway.request(
-            method: method,
-            paramsJSON: json,
-            timeoutSeconds: timeoutSeconds)
+        let response: Data
+        if let hooks = self.startupTestHooks {
+            response = try await hooks.request(method, json, timeoutSeconds)
+        } else {
+            response = try await self.gateway.request(
+                method: method,
+                paramsJSON: json,
+                timeoutSeconds: timeoutSeconds)
+        }
         return try JSONDecoder().decode(type, from: response)
     }
 
     private func startMicrophonePump() throws {
+        if let hooks = self.startupTestHooks { return try hooks.startCapture() }
         self.stopMicrophonePump()
         let input = self.audioEngine.inputNode
         let format = input.inputFormat(forBus: 0)
@@ -628,6 +684,10 @@ final class RealtimeTalkRelaySession {
     }
 
     private func stopMicrophonePump() {
+        if let hooks = self.startupTestHooks {
+            hooks.stopCapture()
+            return
+        }
         self.audioEngine.inputNode.removeTap(onBus: 0)
         self.audioEngine.stop()
     }
@@ -803,6 +863,11 @@ final class RealtimeTalkRelaySession {
 }
 
 extension RealtimeTalkRelaySession {
+    func _test_configureStartup(_ hooks: RelayTestHooks) {
+        precondition(!self.isClosed && self.relaySessionId == nil && self.eventTask == nil)
+        self.startupTestHooks = hooks
+    }
+
     // Exercise the production event and retirement paths without opening a microphone or gateway.
     func _test_bindRelaySession(_ id: String) {
         self.relaySessionId = id
