@@ -576,7 +576,7 @@ describe("talk realtime gateway relay", () => {
       { status: "already_delivered" },
       { suppressResponse: true },
     );
-    expect(bridge.handleBargeIn).toHaveBeenCalledWith({ audioPlaybackActive: true });
+    expect(bridge.handleBargeIn).toHaveBeenCalledWith({ audioPlaybackActive: true, force: true });
     expect(bridge.close).toHaveBeenCalled();
     const inputAudioPayload = findEventPayload(
       events,

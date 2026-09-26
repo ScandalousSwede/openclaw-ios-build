@@ -155,8 +155,17 @@ function formatFallbackWriteFailure(err: unknown): string {
 // be persisted to the human-readable dream diary. When narrative generation
 // fails, always fall back to a generic placeholder so no staging content leaks
 // into DREAMS.md.
-function buildRequestScopedFallbackNarrative(_data: NarrativePhaseData): string {
-  return "A memory trace surfaced, but details were unavailable in this run.";
+const UNAVAILABLE_NARRATIVE = "A memory trace surfaced, but details were unavailable in this run.";
+type NarrativeFallbackCategory = "runtime-unavailable" | "run-incomplete" | "no-text";
+
+function buildFallbackNarrative(params: {
+  phase: NarrativePhaseData["phase"];
+  nowMs: number;
+  category: NarrativeFallbackCategory;
+}): string {
+  // Safe producer facts only: never render reason/error, model, session, or staging text.
+  // recorded is the original invocation time, not a canonical event/run identifier.
+  return `Reflective diary; not authoritative task state. Phase: ${params.phase}; state: unavailable; category: ${params.category}; recorded: ${new Date(params.nowMs).toISOString()}.\n\n${UNAVAILABLE_NARRATIVE}`;
 }
 
 async function appendFallbackNarrativeEntry(params: {
@@ -166,11 +175,16 @@ async function appendFallbackNarrativeEntry(params: {
   timezone?: string;
   logger: Logger;
   reason: string;
+  category: NarrativeFallbackCategory;
 }): Promise<void> {
   try {
     await appendNarrativeEntry({
       workspaceDir: params.workspaceDir,
-      narrative: buildRequestScopedFallbackNarrative(params.data),
+      narrative: buildFallbackNarrative({
+        phase: params.data.phase,
+        nowMs: params.nowMs,
+        category: params.category,
+      }),
       nowMs: params.nowMs,
       timezone: params.timezone,
     });
@@ -268,6 +282,7 @@ async function startNarrativeRunOrFallback(params: {
       timezone: params.timezone,
       logger: params.logger,
       reason: "subagent runtime is request-scoped",
+      category: "runtime-unavailable",
     });
     return null;
   }
@@ -685,6 +700,12 @@ export async function dedupeDreamDiaryEntries(params: {
       let removed = 0;
       for (const block of blocks) {
         const fingerprint = normalizeDiaryBlockFingerprint(block);
+        // Generic fallback prose and minute-level headers cannot prove event identity.
+        // Preserve both legacy and current unavailable entries, even if facts coincide.
+        if (fingerprint.split("\n").includes(UNAVAILABLE_NARRATIVE)) {
+          keptBlocks.push(block);
+          continue;
+        }
         if (seen.has(fingerprint)) {
           removed += 1;
           continue;
@@ -1046,6 +1067,7 @@ export async function generateAndAppendDreamNarrative(params: {
             nowMs,
             timezone: params.timezone,
             logger: params.logger,
+            category: "run-incomplete",
             reason: `the narrative run ended with ${formatNarrativeTerminalStatus({
               status: result.status,
               error: result.error,
@@ -1084,6 +1106,7 @@ export async function generateAndAppendDreamNarrative(params: {
           timezone: params.timezone,
           logger: params.logger,
           reason: "the narrative run produced no text",
+          category: "no-text",
         });
         return;
       }

@@ -56,6 +56,137 @@ describe("session cost usage", () => {
     await suiteRootTracker.cleanup();
   });
 
+  it.each([
+    [
+      "one UTC day",
+      "2026-02-05T00:00:00Z",
+      "2026-02-05T23:59:59.999Z",
+      1,
+      { mode: "utc" as const },
+    ],
+    [
+      "31 UTC days across spring DST",
+      "2026-03-01T00:00:00Z",
+      "2026-03-31T23:59:59.999Z",
+      31,
+      { mode: "utc" as const },
+    ],
+    [
+      "31 UTC days across fall DST",
+      "2026-10-15T00:00:00Z",
+      "2026-11-14T23:59:59.999Z",
+      31,
+      { mode: "utc" as const },
+    ],
+    [
+      "23-hour gateway day",
+      "2026-03-08T00:00:00-07:00",
+      "2026-03-08T23:59:59.999-06:00",
+      1,
+      { mode: "gateway" as const },
+    ],
+    [
+      "25-hour gateway day",
+      "2026-11-01T00:00:00-06:00",
+      "2026-11-01T23:59:59.999-07:00",
+      1,
+      { mode: "gateway" as const },
+    ],
+    [
+      "31 gateway days across spring DST",
+      "2026-03-01T00:00:00-07:00",
+      "2026-03-31T23:59:59.999-06:00",
+      31,
+      { mode: "gateway" as const },
+    ],
+    [
+      "31 gateway days across fall DST",
+      "2026-10-15T00:00:00-06:00",
+      "2026-11-14T23:59:59.999-07:00",
+      31,
+      { mode: "gateway" as const },
+    ],
+    [
+      "one fixed-offset day",
+      "2026-02-05T00:00:00+05:30",
+      "2026-02-05T23:59:59.999+05:30",
+      1,
+      { mode: "specific" as const, utcOffsetMinutes: 330 },
+    ],
+  ])(
+    "counts inclusive calendar days for %s without changing accounting",
+    async (_name, start, end, days, dateInterpretation) => {
+      const root = await makeSessionCostRoot("calendar-days");
+      const sessionsDir = path.join(root, "agents", "main", "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const sessionFile = path.join(sessionsDir, "sess-calendar.jsonl");
+      const startMs = Date.parse(start);
+      const endMs = Date.parse(end);
+      const entry = {
+        type: "message",
+        timestamp: new Date(startMs + 60 * 60 * 1000).toISOString(),
+        message: {
+          role: "assistant",
+          provider: "unknown-provider",
+          model: "unknown-model",
+          usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.03 } },
+        },
+      };
+      const missingCost = {
+        ...entry,
+        timestamp: new Date(endMs - 60 * 60 * 1000).toISOString(),
+        message: { ...entry.message, usage: { input: 10, output: 10, totalTokens: 20 } },
+      };
+      await fs.writeFile(
+        sessionFile,
+        transcriptText("sess-calendar", entry) + JSON.stringify(missingCost) + "\n",
+      );
+      // Future DST fixtures must also satisfy the loader's file-mtime range filter.
+      await fs.utimes(sessionFile, endMs / 1000, endMs / 1000);
+      await withEnvAsync({ OPENCLAW_STATE_DIR: root, TZ: "America/Edmonton" }, async () => {
+        await refreshCostUsageCache();
+        // Make the durable entry partial without adding another usage record.
+        await fs.appendFile(sessionFile, "\n");
+        await fs.utimes(sessionFile, endMs / 1000, endMs / 1000);
+        const range = { startMs, endMs, dateInterpretation };
+        if (dateInterpretation.mode === "utc") {
+          expect((await loadCostUsageSummary({ startMs, endMs })).days).toBe(days);
+          expect(
+            (await loadCostUsageSummaryFromCache({ startMs, endMs, requestRefresh: false })).days,
+          ).toBe(days);
+        }
+        const full = await loadCostUsageSummary(range);
+        const partial = await loadCostUsageSummaryFromCache({ ...range, requestRefresh: false });
+        expect(partial.cacheStatus?.status).toBe("partial");
+        expect(partial.cacheStatus?.pendingFiles).toBe(1);
+        for (const summary of [full, partial]) {
+          expect.soft(summary.days).toBe(days);
+          expect(summary.totals.totalTokens).toBe(50);
+          expect(summary.totals.totalCost).toBeCloseTo(0.03);
+          expect(summary.totals.missingCostEntries).toBe(1);
+        }
+        expect(partial.daily).toEqual(full.daily);
+        expect(partial.totals).toEqual(full.totals);
+      });
+    },
+  );
+
+  it.each(["2026-03-31T12:00:00-06:00", "2026-11-14T12:00:00-07:00"])(
+    "keeps the days-only calendar window at 31 across DST ending %s",
+    async (now) => {
+      const root = await makeSessionCostRoot("calendar-days-only");
+      await withEnvAsync({ OPENCLAW_STATE_DIR: root, TZ: "America/Edmonton" }, async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date(now));
+        try {
+          expect((await loadCostUsageSummary({ days: 31 })).days).toBe(31);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    },
+  );
+
   it("aggregates daily totals with log cost and pricing fallback", async () => {
     const root = await makeSessionCostRoot("cost");
     const sessionsDir = path.join(root, "agents", "main", "sessions");

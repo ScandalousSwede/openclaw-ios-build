@@ -1,8 +1,11 @@
 /**
  * Tests for usage-report gateway methods and aggregation responses.
  */
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
+import { withEnvAsync } from "../../test-utils/env.js";
 
 vi.mock("../../infra/session-cost-usage.js", async () => {
   const actual = await vi.importActual<typeof import("../../infra/session-cost-usage.js")>(
@@ -148,6 +151,74 @@ describe("gateway usage helpers", () => {
     expect(range.endMs).toBe(expectedStart + dayMs - 1);
   });
 
+  it.each([
+    ["America/Edmonton", 2026, 2, 8],
+    ["America/Edmonton", 2026, 2, 9],
+    ["America/Edmonton", 2026, 10, 1],
+    ["America/Edmonton", 2026, 10, 2],
+  ])(
+    "usage.cost selects %s calendar boundaries at %i/%i/%i",
+    async (timezone, year, month, day) => {
+      await withEnvAsync({ TZ: timezone }, async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date(year, month, day, 12));
+        const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        const cases = [
+          [{ startDate: date, endDate: date }, new Date(year, month, day).getTime()],
+          [{ days: 1 }, new Date(year, month, day).getTime()],
+          [{ range: "7d" }, new Date(year, month, day - 6).getTime()],
+          [{ days: 31 }, new Date(year, month, day - 30).getTime()],
+          [{}, new Date(year, month, day - 29).getTime()],
+          [{ range: "all" }, 0],
+        ] as const;
+        for (const [rangeParams, expectedStart] of cases) {
+          testApi.costUsageCache.clear();
+          vi.mocked(loadCostUsageSummaryFromCache).mockClear();
+          const respond = vi.fn();
+          await usageHandlers["usage.cost"]({
+            respond,
+            params: { ...rangeParams, mode: "gateway" },
+            context: { getRuntimeConfig: () => ({}) },
+          } as unknown as Parameters<(typeof usageHandlers)["usage.cost"]>[0]);
+          expect(respond).toHaveBeenCalledWith(true, expect.any(Object), undefined);
+          expect(loadCostUsageSummaryFromCache).toHaveBeenCalledExactlyOnceWith(
+            expect.objectContaining({
+              startMs: expectedStart,
+              endMs: new Date(year, month, day + 1).getTime() - 1,
+              dateInterpretation: { mode: "gateway" },
+            }),
+          );
+        }
+      });
+    },
+  );
+
+  it("resolves skipped Santiago midnight in a process born in that timezone", async () => {
+    // Changing TZ inside a Vitest worker need not change V8's timezone.
+    // Start a real child in the target zone and import the production RPC helper.
+    const source = new URL("./usage.ts", import.meta.url).href;
+    const script = `
+      const { testApi } = await import(process.argv[1]);
+      console.log(JSON.stringify({
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        ranges: ["2026-09-06", "2026-09-07"].map(date =>
+          testApi.parseDateRange({ startDate: date, endDate: date, mode: "gateway" })),
+      }));
+    `;
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "-e", script, source],
+      { env: { ...process.env, TZ: "America/Santiago" }, timeout: 10_000 },
+    );
+    expect(JSON.parse(stdout)).toEqual({
+      timezone: "America/Santiago",
+      ranges: [
+        { startMs: Date.UTC(2026, 8, 6, 4), endMs: Date.UTC(2026, 8, 7, 3) - 1 },
+        { startMs: Date.UTC(2026, 8, 7, 3), endMs: Date.UTC(2026, 8, 8, 3) - 1 },
+      ],
+    });
+  }, 15_000);
+
   it("parseDateRange clamps days to at least 1 and defaults to 30 days", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-02-05T12:34:56.000Z"));
@@ -213,6 +284,43 @@ describe("gateway usage helpers", () => {
     expect(vi.mocked(loadCostUsageSummaryFromCache).mock.calls.at(1)?.[0]).toMatchObject({
       agentId: "research",
     });
+  });
+
+  it.each([
+    [{}, { mode: "utc" }],
+    [{ mode: "gateway" }, { mode: "gateway" }],
+    [
+      { mode: "specific", utcOffset: "UTC+5:30" },
+      { mode: "specific", utcOffsetMinutes: 330 },
+    ],
+  ])(
+    "passes the usage.cost calendar interpretation %j through every agent",
+    async (dateParams, dateInterpretation) => {
+      await usageHandlers["usage.cost"]({
+        respond: vi.fn(),
+        params: { days: 31, agentScope: "all", ...dateParams },
+        context: {
+          getRuntimeConfig: () => ({ agents: { list: [{ id: "main" }, { id: "research" }] } }),
+        },
+      } as unknown as Parameters<(typeof usageHandlers)["usage.cost"]>[0]);
+      expect(vi.mocked(loadCostUsageSummaryFromCache)).toHaveBeenCalledTimes(2);
+      for (const [params] of vi.mocked(loadCostUsageSummaryFromCache).mock.calls) {
+        expect(params.dateInterpretation).toEqual(dateInterpretation);
+      }
+    },
+  );
+
+  it("does not reuse a cost report from another calendar interpretation", async () => {
+    const range = { startMs: Date.UTC(2026, 1, 5), endMs: Date.UTC(2026, 1, 6) - 1, config: {} };
+    await testApi.loadCostUsageSummaryCached(range);
+    await testApi.loadCostUsageSummaryCached({ ...range, dateInterpretation: { mode: "gateway" } });
+    await testApi.loadCostUsageSummaryCached({
+      ...range,
+      dateInterpretation: { mode: "specific", utcOffsetMinutes: 330 },
+    });
+    expect(vi.mocked(loadCostUsageSummaryFromCache)).toHaveBeenCalledTimes(3);
+    await testApi.loadCostUsageSummaryCached(range);
+    expect(vi.mocked(loadCostUsageSummaryFromCache)).toHaveBeenCalledTimes(3);
   });
 
   it("passes usage.cost agentId through to the cost summary loader", async () => {

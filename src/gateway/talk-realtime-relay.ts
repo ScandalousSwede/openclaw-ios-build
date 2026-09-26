@@ -107,6 +107,7 @@ type RelaySession = {
   activeAgentRuns: Map<string, string>;
   activeAgentToolCalls: Map<string, string>;
   completedAgentToolCalls: Set<string>;
+  providerToolCallIds: Set<string>;
   forcedConsults: RealtimeVoiceForcedConsultCoordinator;
   transcript: RealtimeVoiceTranscriptEntry[];
 };
@@ -185,6 +186,7 @@ function buildAlreadyDeliveredToolResult(): Record<string, string> {
 
 function cancelForcedConsults(session: RelaySession): void {
   for (const handle of session.forcedConsults.handles()) {
+    session.completedAgentToolCalls.add(handle.id);
     session.forcedConsults.markCancelled(handle);
   }
 }
@@ -212,6 +214,11 @@ function abortRelayAgentRuns(session: RelaySession, reason: string): void {
     session.completedAgentToolCalls.add(callId);
   }
   session.activeAgentToolCalls.clear();
+  // Emitted calls can still be awaiting the client's consult RPC when Stop arrives.
+  for (const callId of session.providerToolCallIds) {
+    session.completedAgentToolCalls.add(callId);
+  }
+  session.providerToolCallIds.clear();
 }
 
 function pruneInactiveRelayAgentRuns(session: RelaySession): number {
@@ -420,6 +427,16 @@ export function createTalkRealtimeRelaySession(
       },
     },
     onEvent: (event) => {
+      if (event.type === "session.reconnect.scheduled" && event.direction === "client") {
+        const relay = relayRef.current;
+        if (relay) {
+          // The operation may continue, but its old provider call no longer owns this transport.
+          for (const callId of relay.providerToolCallIds) {
+            relay.completedAgentToolCalls.add(callId);
+          }
+          relay.providerToolCallIds.clear();
+        }
+      }
       if (event.direction !== "server") {
         return;
       }
@@ -529,6 +546,7 @@ export function createTalkRealtimeRelaySession(
     },
     onToolCall: (toolCall) => {
       const relay = relayRef.current;
+      relay?.providerToolCallIds.add(toolCall.callId);
       const turnId = relay ? ensureRelayTurn(relay) : undefined;
       if (relay && toolCall.name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME) {
         const forcedConsult = relay.forcedConsults.recordNativeConsult(
@@ -603,6 +621,7 @@ export function createTalkRealtimeRelaySession(
     activeAgentRuns: new Map(),
     activeAgentToolCalls: new Map(),
     completedAgentToolCalls: new Set(),
+    providerToolCallIds: new Set(),
     forcedConsults: createRealtimeVoiceForcedConsultCoordinator(),
     transcript: [],
   };
@@ -847,6 +866,58 @@ export function submitTalkRealtimeRelayToolResult(params: {
   });
 }
 
+/** Binds consult admission to the owning relay/turn before chat.send can await. */
+export function prepareTalkRealtimeRelayAgentRun(params: {
+  relaySessionId: string;
+  connId: string;
+  sessionKey: string;
+  callId: string;
+  runId: string;
+}): (runId: string) => void {
+  // Consult rejection must not close another connection's legitimate relay.
+  if (relaySessions.get(params.relaySessionId)?.connId !== params.connId) {
+    throw new Error("Unknown realtime relay session");
+  }
+  const session = getRelaySession(params.relaySessionId, params.connId);
+  const sessionKey = params.sessionKey.trim();
+  if (session.sessionKey && session.sessionKey !== sessionKey) {
+    throw new Error("Realtime relay session key mismatch");
+  }
+  if (session.completedAgentToolCalls.has(params.callId)) {
+    throw new Error("Realtime relay tool call is retired");
+  }
+  session.sessionKey ??= sessionKey;
+  const turnId = ensureRelayTurn(session);
+  return (runId) => {
+    const retired =
+      relaySessions.get(session.id) !== session ||
+      Date.now() > session.expiresAtMs ||
+      session.talk.activeTurnId !== turnId;
+    const entry = session.context.chatAbortControllers.get(runId);
+    if (retired || session.completedAgentToolCalls.has(params.callId)) {
+      session.completedAgentToolCalls.add(params.callId);
+      // chat.send installs its controller before ACK. Abort only this request's
+      // run on Stop; a deduped run or reconnect-only retirement retains its owner.
+      if (retired && runId === params.runId && entry?.ownerConnId === params.connId) {
+        abortChatRunById(session.context, {
+          runId,
+          sessionKey: entry.sessionKey,
+          stopReason: "relay-consult-retired",
+        });
+      }
+      throw new Error("Realtime relay consult was retired during admission");
+    }
+    if (entry && entry.ownerConnId !== params.connId) {
+      throw new Error("Realtime relay chat run connection mismatch");
+    }
+    registerTalkRealtimeRelayAgentRun({
+      ...params,
+      runId,
+      sessionKey: entry?.sessionKey ?? sessionKey,
+    });
+  };
+}
+
 /** Tracks the chat run started for a realtime agent-consult tool call. */
 export function registerTalkRealtimeRelayAgentRun(params: {
   relaySessionId: string;
@@ -918,7 +989,8 @@ export function cancelTalkRealtimeRelayTurn(params: {
   const turnId = ensureRelayTurn(session);
   const reason = params.reason ?? "client-cancelled";
   cancelForcedConsults(session);
-  session.bridge.handleBargeIn({ audioPlaybackActive: true });
+  // An explicit client stop must bypass the provider's accidental-barge-in window.
+  session.bridge.handleBargeIn({ audioPlaybackActive: true, force: true });
   abortRelayAgentRuns(session, reason);
   const cancelled = session.talk.cancelTurn({
     turnId,

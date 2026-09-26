@@ -441,8 +441,13 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private latestMediaTimestamp = 0;
   private lastAssistantItemId: string | null = null;
   private connectionUrl = "";
-  private toolCallBuffers = new Map<string, { name: string; callId: string; args: string }>();
+  private toolCallBuffers = new Map<
+    string,
+    { name: string; callId: string; args: string; responseId?: string }
+  >();
   private deliveredToolCallKeys = new Set<string>();
+  private currentToolCallIds = new Set<string>();
+  private retiredToolCallIds = new Set<string>();
   private readonly flowId = randomUUID();
   private sessionReadyFired = false;
   private reconnectReason: string | undefined;
@@ -500,6 +505,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     result: unknown,
     options?: RealtimeVoiceToolResultOptions,
   ): void {
+    // A result from a previous provider session cannot complete a call in its replacement.
+    if (this.retiredToolCallIds.has(callId)) {
+      return;
+    }
     this.sendEvent({
       type: "conversation.item.create",
       item: {
@@ -990,13 +999,23 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private handleEvent(event: RealtimeEvent): void {
-    const responseId = event.response_id ?? event.response?.id;
+    const itemId =
+      event.item_id ?? (event.item?.type === "function_call" ? event.item.id : undefined);
+    const responseId =
+      event.response_id ??
+      event.response?.id ??
+      (itemId ? this.toolCallBuffers.get(itemId)?.responseId : undefined);
+    const interruptedToolCall =
+      event.type === "response.function_call_arguments.delta" ||
+      event.type === "response.function_call_arguments.done" ||
+      (event.type === "conversation.item.done" && event.item?.type === "function_call");
     const interruptedOutput =
       (responseId && this.interruptedResponseIds.has(responseId)) ||
-      (event.item_id && this.interruptedItemIds.has(event.item_id));
+      (itemId && this.interruptedItemIds.has(itemId));
     if (
       interruptedOutput &&
-      (event.type === "response.created" ||
+      (interruptedToolCall ||
+        event.type === "response.created" ||
         event.type === "conversation.output_audio.delta" ||
         event.type === "response.audio.delta" ||
         event.type === "response.output_audio.delta" ||
@@ -1008,7 +1027,12 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         event.type === "response.audio_transcript.done" ||
         event.type === "response.output_audio_transcript.done")
     ) {
-      // Drop identified interrupted output before it can replace relay bindings.
+      // Drop identified interrupted output before it can replace relay bindings or dispatch a tool.
+      // Buffered tool identity also covers completion events that omit response_id.
+      if (interruptedToolCall && itemId) {
+        this.interruptedItemIds.add(itemId);
+        this.toolCallBuffers.delete(itemId);
+      }
       // ID-less legacy callbacks keep their existing behavior.
       return;
     }
@@ -1146,6 +1170,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
             name: event.name ?? "",
             callId: event.call_id ?? "",
             args: event.delta ?? "",
+            responseId: event.response_id ?? event.response?.id,
           });
         }
         return;
@@ -1277,6 +1302,8 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
       return;
     }
     this.deliveredToolCallKeys.add(dedupeKey);
+    this.currentToolCallIds.add(callId);
+    this.retiredToolCallIds.delete(callId);
     let args: unknown = {};
     try {
       args = JSON.parse(fields.rawArgs || "{}");
@@ -1326,6 +1353,10 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
     this.lastAssistantItemId = null;
     this.toolCallBuffers.clear();
     this.deliveredToolCallKeys.clear();
+    for (const callId of this.currentToolCallIds) {
+      this.retiredToolCallIds.add(callId);
+    }
+    this.currentToolCallIds.clear();
   }
 
   private sendMark(): void {

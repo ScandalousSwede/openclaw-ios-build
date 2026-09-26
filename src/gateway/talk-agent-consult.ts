@@ -10,12 +10,8 @@ import {
 import { normalizeTalkSection } from "../config/talk.js";
 import { buildRealtimeVoiceAgentConsultChatMessage } from "../talk/agent-consult-tool.js";
 import { chatHandlers } from "./server-methods/chat.js";
-import type {
-  GatewayClient,
-  GatewayRequestContext,
-  GatewayRequestHandlers,
-} from "./server-methods/shared-types.js";
-import { registerTalkRealtimeRelayAgentRun } from "./talk-realtime-relay.js";
+import type { GatewayClient, GatewayRequestContext } from "./server-methods/shared-types.js";
+import { prepareTalkRealtimeRelayAgentRun } from "./talk-realtime-relay.js";
 import { formatForLog } from "./ws-log.js";
 
 /**
@@ -41,8 +37,25 @@ export async function startTalkRealtimeAgentConsult(params: {
     return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err)) };
   }
   const idempotencyKey = `talk-${params.callId}-${randomUUID()}`;
+  let registerRun: ((runId: string) => void) | undefined;
+  if (params.relaySessionId) {
+    try {
+      if (!params.connId) {
+        throw new Error("Realtime relay consult requires a connection");
+      }
+      registerRun = prepareTalkRealtimeRelayAgentRun({
+        relaySessionId: params.relaySessionId,
+        connId: params.connId,
+        sessionKey: params.sessionKey,
+        callId: params.callId,
+        runId: idempotencyKey,
+      });
+    } catch (err) {
+      return { ok: false, error: errorShape(ErrorCodes.INVALID_REQUEST, formatForLog(err)) };
+    }
+  }
   const normalizedTalk = normalizeTalkSection(params.context.getRuntimeConfig().talk);
-  let chatResponse: { ok: true; result: unknown } | { ok: false; error: ErrorShape } | undefined;
+  let chatResponse: { ok: true; runId: string } | { ok: false; error: ErrorShape } | undefined;
   await chatHandlers["chat.send"]({
     req: {
       type: "req",
@@ -64,14 +77,30 @@ export async function startTalkRealtimeAgentConsult(params: {
         : {}),
     },
     respond: (ok: boolean, result?: unknown, error?: ErrorShape) => {
-      chatResponse = ok
-        ? { ok: true, result }
-        : {
-            ok: false,
-            error: error ?? errorShape(ErrorCodes.UNAVAILABLE, "chat.send failed without error"),
-          };
+      if (!ok) {
+        chatResponse = {
+          ok: false,
+          error: error ?? errorShape(ErrorCodes.UNAVAILABLE, "chat.send failed without error"),
+        };
+        return;
+      }
+      const runId =
+        result &&
+        typeof result === "object" &&
+        !Array.isArray(result) &&
+        typeof (result as Record<string, unknown>).runId === "string"
+          ? (result as Record<string, string>).runId
+          : idempotencyKey;
+      try {
+        // Register at ACK, not after the async handler returns: Stop owns the run
+        // immediately, and a Stop during admission aborts before agent dispatch.
+        registerRun?.(runId);
+        chatResponse = { ok: true, runId };
+      } catch (err) {
+        chatResponse = { ok: false, error: errorShape(ErrorCodes.UNAVAILABLE, formatForLog(err)) };
+      }
     },
-  } as Parameters<GatewayRequestHandlers[string]>[0]);
+  });
 
   if (!chatResponse) {
     return {
@@ -82,21 +111,5 @@ export async function startTalkRealtimeAgentConsult(params: {
   if (!chatResponse.ok) {
     return { ok: false, error: chatResponse.error };
   }
-  const result = chatResponse.result;
-  const runId =
-    result && typeof result === "object" && !Array.isArray(result)
-      ? typeof (result as Record<string, unknown>).runId === "string"
-        ? (result as Record<string, string>).runId
-        : idempotencyKey
-      : idempotencyKey;
-  if (params.relaySessionId && params.connId) {
-    registerTalkRealtimeRelayAgentRun({
-      relaySessionId: params.relaySessionId,
-      connId: params.connId,
-      sessionKey: params.sessionKey,
-      runId,
-      callId: params.callId,
-    });
-  }
-  return { ok: true, runId, idempotencyKey };
+  return { ok: true, runId: chatResponse.runId, idempotencyKey };
 }

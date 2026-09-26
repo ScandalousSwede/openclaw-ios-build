@@ -824,6 +824,61 @@ describe("generateAndAppendDreamNarrative", () => {
     expect(exists).toBe(false);
   });
 
+  it.each(["runtime-unavailable", "run-incomplete", "no-text"] as const)(
+    "retains fallback provenance and distinct entries for %s without private fragments",
+    async (category) => {
+      const workspaceDir = await createTempWorkspace("openclaw-dreaming-provenance-");
+      const subagent = createMockSubagent("");
+      if (category === "runtime-unavailable") {
+        subagent.run.mockRejectedValue(new RequestScopedSubagentRuntimeError());
+      } else if (category === "run-incomplete") {
+        subagent.waitForRun.mockResolvedValue({ status: "error", error: "PRIVATE_PROVIDER_ERROR" });
+      }
+      const entries = [
+        { phase: "light", at: "2026-04-05T03:00:00.000Z" },
+        { phase: "deep", at: "2026-04-05T03:00:00.000Z" },
+        { phase: "light", at: "2026-04-05T03:00:01.000Z" },
+      ] as const;
+      for (const entry of entries) {
+        await generateAndAppendDreamNarrative({
+          subagent,
+          workspaceDir,
+          data: { phase: entry.phase, snippets: ["PRIVATE_STAGING_FRAGMENT"] },
+          nowMs: Date.parse(entry.at),
+          timezone: "UTC",
+          logger: createMockLogger(),
+        });
+      }
+      const content = await fs.readFile(path.join(workspaceDir, "DREAMS.md"), "utf-8");
+      for (const entry of entries) {
+        expect(content).toContain(
+          `Reflective diary; not authoritative task state. Phase: ${entry.phase}; state: unavailable; category: ${category}; recorded: ${entry.at}.`,
+        );
+      }
+      expect(content).not.toContain("PRIVATE_PROVIDER_ERROR");
+      expect(content).not.toContain("PRIVATE_STAGING_FRAGMENT");
+      expect(content).not.toContain("dreaming-narrative-");
+      // Exercise maintenance only in this synthetic temporary workspace.
+      expect(await dedupeDreamDiaryEntries({ workspaceDir })).toMatchObject({
+        removed: 0,
+        kept: 3,
+      });
+    },
+  );
+
+  it("keeps unavailable legacy entries without evidence of shared event identity", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-dreaming-provenance-");
+    for (let index = 0; index < 2; index += 1) {
+      await appendNarrativeEntry({
+        workspaceDir,
+        narrative: "A memory trace surfaced, but details were unavailable in this run.",
+        nowMs: Date.parse("2026-04-05T03:00:00Z"),
+        timezone: "UTC",
+      });
+    }
+    expect(await dedupeDreamDiaryEntries({ workspaceDir })).toMatchObject({ removed: 0, kept: 2 });
+  });
+
   it("writes a fallback diary entry when the subagent times out", async () => {
     const workspaceDir = await createTempWorkspace("openclaw-dreaming-narrative-");
     const subagent = createMockSubagent("");

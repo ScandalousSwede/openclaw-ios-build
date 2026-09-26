@@ -477,6 +477,28 @@ function countUsableUsageCostCacheFiles(params: {
   return cachedFiles;
 }
 
+export type CostUsageDateInterpretation =
+  | { mode: "utc" | "gateway" }
+  | { mode: "specific"; utcOffsetMinutes: number };
+
+function countInclusiveCalendarDays(
+  startMs: number,
+  endMs: number,
+  interpretation: CostUsageDateInterpretation = { mode: "utc" },
+): number {
+  const dayMs = 24 * 60 * 60 * 1000;
+  const dayIndex = (ms: number): number => {
+    const date = new Date(
+      ms + (interpretation.mode === "specific" ? interpretation.utcOffsetMinutes * 60 * 1000 : 0),
+    );
+    // Normalize local dates before subtracting so DST never adds/removes a calendar day.
+    return interpretation.mode === "gateway"
+      ? Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / dayMs
+      : Math.floor(date.getTime() / dayMs);
+  };
+  return dayIndex(endMs) - dayIndex(startMs) + 1;
+}
+
 function buildCostUsageSummaryFromCache(params: {
   cache: UsageCostCacheFile;
   files: UsageCostTranscriptFile[];
@@ -484,6 +506,7 @@ function buildCostUsageSummaryFromCache(params: {
   endMs: number;
   pricingFingerprint: string;
   refreshing: boolean;
+  dateInterpretation?: CostUsageDateInterpretation;
 }): CostUsageSummary {
   const dailyMap = new Map<string, CostUsageTotals>();
   const totals = emptyTotals();
@@ -526,7 +549,7 @@ function buildCostUsageSummaryFromCache(params: {
   const daily = Array.from(dailyMap.entries())
     .map(([date, bucket]) => Object.assign({ date }, bucket))
     .toSorted((a, b) => a.date.localeCompare(b.date));
-  const days = Math.ceil((params.endMs - params.startMs) / (24 * 60 * 60 * 1000)) + 1;
+  const days = countInclusiveCalendarDays(params.startMs, params.endMs, params.dateInterpretation);
   const status = params.refreshing
     ? "refreshing"
     : staleFiles.length > 0
@@ -1276,6 +1299,7 @@ export function resolveExistingUsageSessionFile(params: {
 export async function loadCostUsageSummary(params?: {
   startMs?: number;
   endMs?: number;
+  dateInterpretation?: CostUsageDateInterpretation;
   /** @deprecated Use startMs/endMs. */
   days?: number;
   config?: OpenClawConfig;
@@ -1284,12 +1308,14 @@ export async function loadCostUsageSummary(params?: {
   const now = new Date();
   let sinceTime: number;
   let untilTime: number;
+  let dateInterpretation = params?.dateInterpretation;
 
   if (params?.startMs !== undefined && params?.endMs !== undefined) {
     sinceTime = params.startMs;
     untilTime = params.endMs;
   } else {
-    // Fallback to days-based calculation for backwards compatibility
+    // The days-only caller selects dates in the gateway calendar.
+    dateInterpretation = { mode: "gateway" };
     const days = Math.max(1, Math.floor(params?.days ?? 30));
     const since = new Date(now);
     since.setDate(since.getDate() - (days - 1));
@@ -1340,7 +1366,7 @@ export async function loadCostUsageSummary(params?: {
     .toSorted((a, b) => a.date.localeCompare(b.date));
 
   // Calculate days for backwards compatibility in response
-  const days = Math.ceil((untilTime - sinceTime) / (24 * 60 * 60 * 1000)) + 1;
+  const days = countInclusiveCalendarDays(sinceTime, untilTime, dateInterpretation);
 
   return {
     updatedAt: Date.now(),
@@ -1584,6 +1610,7 @@ export async function refreshCostUsageCache(params?: {
 export async function loadCostUsageSummaryFromCache(params: {
   startMs: number;
   endMs: number;
+  dateInterpretation?: CostUsageDateInterpretation;
   config?: OpenClawConfig;
   agentId?: string;
   requestRefresh?: boolean;
@@ -1638,6 +1665,7 @@ export async function loadCostUsageSummaryFromCache(params: {
     endMs: params.endMs,
     pricingFingerprint,
     refreshing: usageCostRefreshes.has(cachePath) || refreshRunning,
+    dateInterpretation: params.dateInterpretation,
   });
 }
 

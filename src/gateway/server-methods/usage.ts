@@ -17,6 +17,7 @@ import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { loadProviderUsageSummary } from "../../infra/provider-usage.js";
 import type {
+  CostUsageDateInterpretation as DateInterpretation,
   CostUsageSummary,
   CostUsageTotals,
   SessionCostSummary,
@@ -64,9 +65,6 @@ const SESSIONS_USAGE_CACHE_READ_CONCURRENCY = 12;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 type DateRange = { startMs: number; endMs: number };
-type DateInterpretation =
-  | { mode: "utc" | "gateway" }
-  | { mode: "specific"; utcOffsetMinutes: number };
 
 type CostUsageCacheEntry = {
   summary?: CostUsageSummary;
@@ -298,6 +296,21 @@ const resolveRangeDays = (raw: unknown): number | "all" | undefined => {
   return undefined;
 };
 
+// Advance local calendar dates rather than elapsed 24-hour periods across DST.
+const shiftCalendarDays = (
+  startMs: number,
+  days: number,
+  interpretation: DateInterpretation,
+): number => {
+  if (interpretation.mode === "gateway") {
+    const date = new Date(startMs);
+    // Resolve each target midnight independently: a skipped midnight may
+    // normalize startMs to 01:00, which setDate would carry to the next day.
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate() + days).getTime();
+  }
+  return startMs + days * DAY_MS;
+};
+
 /**
  * Get date range from params (startDate/endDate or days).
  * Falls back to last 30 days if not provided.
@@ -313,14 +326,14 @@ const parseDateRange = (params: {
   const now = new Date();
   const interpretation = resolveDateInterpretation(params);
   const todayStartMs = getTodayStartMs(now, interpretation);
-  const todayEndMs = todayStartMs + DAY_MS - 1;
+  const todayEndMs = shiftCalendarDays(todayStartMs, 1, interpretation) - 1;
 
   const startMs = parseDateToMs(params.startDate, interpretation);
   const endMs = parseDateToMs(params.endDate, interpretation);
 
   if (startMs !== undefined && endMs !== undefined) {
     // endMs should be end of day
-    return { startMs, endMs: endMs + DAY_MS - 1 };
+    return { startMs, endMs: shiftCalendarDays(endMs, 1, interpretation) - 1 };
   }
 
   const rangeDays = resolveRangeDays(params.range);
@@ -328,19 +341,19 @@ const parseDateRange = (params: {
     return { startMs: 0, endMs: todayEndMs };
   }
   if (rangeDays !== undefined) {
-    const start = todayStartMs - (rangeDays - 1) * DAY_MS;
+    const start = shiftCalendarDays(todayStartMs, 1 - rangeDays, interpretation);
     return { startMs: start, endMs: todayEndMs };
   }
 
   const days = parseDays(params.days);
   if (days !== undefined) {
     const clampedDays = Math.max(1, days);
-    const start = todayStartMs - (clampedDays - 1) * DAY_MS;
+    const start = shiftCalendarDays(todayStartMs, 1 - clampedDays, interpretation);
     return { startMs: start, endMs: todayEndMs };
   }
 
   // Default to last 30 days
-  const defaultStartMs = todayStartMs - 29 * DAY_MS;
+  const defaultStartMs = shiftCalendarDays(todayStartMs, -29, interpretation);
   return { startMs: defaultStartMs, endMs: todayEndMs };
 };
 
@@ -755,11 +768,17 @@ function mergeDailyModelRows(
 async function loadCostUsageSummaryCached(params: {
   startMs: number;
   endMs: number;
+  dateInterpretation?: DateInterpretation;
   config: OpenClawConfig;
   agentId?: string;
   agentScope?: "all";
 }): Promise<CostUsageSummary> {
-  const cacheKey = `${params.agentScope === "all" ? "all" : `agent:${params.agentId ?? "__default__"}`}:${params.startMs}-${params.endMs}`;
+  const interpretation: DateInterpretation = params.dateInterpretation ?? { mode: "utc" };
+  const calendarKey =
+    interpretation.mode === "specific"
+      ? `specific:${interpretation.utcOffsetMinutes}`
+      : interpretation.mode;
+  const cacheKey = `${params.agentScope === "all" ? "all" : `agent:${params.agentId ?? "__default__"}`}:${params.startMs}-${params.endMs}:${calendarKey}`;
   const now = Date.now();
   const cached = costUsageCache.get(cacheKey);
   if (
@@ -784,11 +803,13 @@ async function loadCostUsageSummaryCached(params: {
       ? loadAllAgentCostUsageSummary({
           startMs: params.startMs,
           endMs: params.endMs,
+          dateInterpretation: interpretation,
           config: params.config,
         })
       : loadCostUsageSummaryFromCache({
           startMs: params.startMs,
           endMs: params.endMs,
+          dateInterpretation: interpretation,
           config: params.config,
           agentId: params.agentId,
           requestRefresh: true,
@@ -829,6 +850,7 @@ async function loadCostUsageSummaryCached(params: {
 async function loadAllAgentCostUsageSummary(params: {
   startMs: number;
   endMs: number;
+  dateInterpretation: DateInterpretation;
   config: OpenClawConfig;
 }): Promise<CostUsageSummary> {
   const agentIds = listAgentsForGateway(params.config).agents.map((agent) =>
@@ -839,6 +861,7 @@ async function loadAllAgentCostUsageSummary(params: {
       loadCostUsageSummaryFromCache({
         startMs: params.startMs,
         endMs: params.endMs,
+        dateInterpretation: params.dateInterpretation,
         config: params.config,
         agentId,
         requestRefresh: true,
@@ -935,6 +958,7 @@ export const usageHandlers: GatewayRequestHandlers = {
     const summary = await loadCostUsageSummaryCached({
       startMs,
       endMs,
+      dateInterpretation: resolveDateInterpretation(params ?? {}),
       config,
       agentId,
       agentScope,

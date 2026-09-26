@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   sendTalkRealtimeRelayAudio: vi.fn(),
   cancelTalkRealtimeRelayTurn: vi.fn(),
   stopTalkRealtimeRelaySession: vi.fn(),
+  prepareTalkRealtimeRelayAgentRun: vi.fn(),
   registerTalkRealtimeRelayAgentRun: vi.fn(),
   submitTalkRealtimeRelayToolResult: vi.fn(),
   createTalkTranscriptionRelaySession: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock("../talk-realtime-relay.js", async (importOriginal) => {
     ...actual,
     cancelTalkRealtimeRelayTurn: mocks.cancelTalkRealtimeRelayTurn,
     createTalkRealtimeRelaySession: mocks.createTalkRealtimeRelaySession,
+    prepareTalkRealtimeRelayAgentRun: mocks.prepareTalkRealtimeRelayAgentRun,
     registerTalkRealtimeRelayAgentRun: mocks.registerTalkRealtimeRelayAgentRun,
     sendTalkRealtimeRelayAudio: mocks.sendTalkRealtimeRelayAudio,
     steerTalkRealtimeRelayAgentRun: mocks.steerTalkRealtimeRelayAgentRun,
@@ -1251,6 +1253,9 @@ describe("talk.session unified handlers", () => {
 describe("talk.client.toolCall handler", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.prepareTalkRealtimeRelayAgentRun.mockImplementation((params) => (runId: string) => {
+      mocks.registerTalkRealtimeRelayAgentRun({ ...params, runId });
+    });
     mocks.chatSend.mockImplementation(
       async ({
         respond,
@@ -1346,6 +1351,13 @@ describe("talk.client.toolCall handler", () => {
       } as never,
     });
 
+    expect(mocks.prepareTalkRealtimeRelayAgentRun).toHaveBeenCalledWith({
+      relaySessionId: "relay-1",
+      connId: "conn-1",
+      sessionKey: "main",
+      callId: "call-1",
+      runId: expect.stringMatching(/^talk-call-1-/),
+    });
     expect(mocks.registerTalkRealtimeRelayAgentRun).toHaveBeenCalledWith({
       relaySessionId: "relay-1",
       connId: "conn-1",

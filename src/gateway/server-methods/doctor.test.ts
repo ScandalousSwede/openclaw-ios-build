@@ -1046,6 +1046,26 @@ describe("doctor.memory.dreamDiary", () => {
     }
   });
 
+  it("passes fallback provenance and equal prose through without merging entries", async () => {
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "doctor-dream-provenance-"));
+    const content = [
+      "# Dream Diary",
+      ...["light", "deep"].map(
+        (phase) =>
+          `---\n\n*April 5, 2026, 3:00 AM UTC*\n\nReflective diary; not authoritative task state. Phase: ${phase}; state: unavailable; category: runtime-unavailable; recorded: 2026-04-05T03:00:00.000Z.\n\nA memory trace surfaced, but details were unavailable in this run.`,
+      ),
+    ].join("\n\n");
+    await fs.writeFile(path.join(workspaceDir, "DREAMS.md"), content, "utf-8");
+    resolveAgentWorkspaceDir.mockReturnValue(workspaceDir);
+    const respond = vi.fn();
+    try {
+      await invokeDoctorMemoryDreamDiary(respond);
+      expectRecordFields(respondPayload(respond), { agentId: "main", found: true, content });
+    } finally {
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   it("reads DREAMS.md for the requested agent", async () => {
     const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "doctor-dream-diary-agent-"));
     await fs.writeFile(path.join(workspaceDir, "DREAMS.md"), "## Research Dreams\n", "utf-8");
