@@ -8,6 +8,54 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    @MainActor
+    func testMaintainedOperationsGridKeepsEveryOfflineValueAtBothTextSizes() throws {
+        let tiles: [(String, String, String)] = [
+            ("sparkles", "Skills", "Connect a gateway to load skills."),
+            ("externaldrive.connected.to.line.below", "Instances", "Connect a gateway to load instances."),
+            ("clock.arrow.circlepath", "Cron", "Connect a gateway to load cron."),
+            ("chart.line.uptrend.xyaxis", "Usage", "Connect a gateway to load usage."),
+        ]
+        for (name, size) in [("normal", DynamicTypeSize.large), ("enlarged", .accessibility3)] {
+            for appearance in [ColorScheme.light, .dark] {
+                let root = VStack(alignment: .leading, spacing: 16) {
+                    Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                    AgentToolsOperationsGrid {
+                        ForEach(tiles, id: \.1) { icon, title, detail in
+                            AgentProTab().metricTileContent(
+                                icon: icon, title: title, value: "offline", detail: detail,
+                                color: .secondary, showsChevron: true)
+                        }
+                    }
+                    .padding(.horizontal, OpenClawProMetric.pagePadding)
+                }
+                .padding(.vertical)
+                .background { OpenClawProBackground() }
+                .environment(\.dynamicTypeSize, size)
+                .environment(\.colorScheme, appearance)
+                .frame(width: 390)
+                .fixedSize(horizontal: false, vertical: true)
+                let image = try self.hostedImage(root,
+                    userInterfaceStyle: appearance == .dark ? .dark : .light,
+                    requiredText: ["Skills", "Instances", "Cron", "Usage", "offline"])
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "argus-operation-grid-native-synthetic-\(appearance)-\(name)"
+                attachment.lifetime = .keepAlways
+                self.add(attachment)
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.recognitionLanguages = ["en-US"]
+                try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                let visibleValues = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                    .flatMap { $0.split(whereSeparator: { !$0.isLetter }) }
+                    .filter { $0.lowercased() == "offline" }
+                // Vision may group adjacent pills in one observation. Count complete words;
+                // one complete value elsewhere cannot satisfy all four maintained tiles.
+                XCTAssertEqual(visibleValues.count, 4, "Each tile must retain its complete status at \(appearance)/\(name)")
+            }
+        }
+    }
+
     /// Offline production sheet: no gateway requests, microphone or operational actions.
     @MainActor
     func testActualAgentToolsSheetHeadersAcrossTextSizesAndAppearances() throws {
@@ -21,7 +69,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             ("normal", .large), ("enlarged", .accessibility1), ("largest", .accessibility3),
         ]
         let routes: [(String, AgentProTab.AgentRoute?)] = [
-            ("Agents", nil), ("Cron Jobs", .cron), ("Dreaming", .dreaming),
+            ("Agents", nil), ("Cron Jobs", .cron), ("Dreaming", .dreaming), ("Nodes", .nodes),
         ]
         for (appearanceName, appearance, parentStyle) in appearances {
             for (sizeName, size) in sizes {

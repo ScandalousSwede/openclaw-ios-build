@@ -126,7 +126,7 @@ extension AgentProTab {
     var operationsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             ProSectionHeader(title: "Live Operations")
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            AgentToolsOperationsGrid {
                 self.metricTile(
                     icon: "sparkles",
                     title: "Skills",
@@ -717,5 +717,26 @@ extension AgentProTab {
             }
             .prefix(4)
             .map(\.self)
+    }
+}
+
+/// The same maintained operation tiles reflow vertically when text needs more room.
+struct AgentToolsOperationsGrid<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        LazyVGrid(
+            columns: self.dynamicTypeSize.isAccessibilitySize
+                ? [GridItem(.flexible())]
+                : [GridItem(.flexible()), GridItem(.flexible())],
+            spacing: 10)
+        {
+            self.content
+        }
     }
 }
