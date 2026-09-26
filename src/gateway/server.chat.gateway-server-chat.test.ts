@@ -1682,6 +1682,224 @@ describe("gateway server chat", () => {
     });
   });
 
+  test("binds cancellation and late chunks to their original request across a follow-up", async () => {
+    await withMainSessionStore(async (dir) => {
+      type DispatchParams = Parameters<
+        typeof import("../auto-reply/dispatch.js").dispatchInboundMessage
+      >[0];
+      type ReplyOptions = NonNullable<DispatchParams["replyOptions"]>;
+      const runs = new Map<string, ReplyOptions>();
+      const sessions = new Map<string, string>();
+      const gates = new Map<string, { promise: Promise<void>; release: () => void }>();
+      const oldRunId = "voice-cancelled-request";
+      const currentRunId = "voice-follow-up-request";
+      for (const runId of [oldRunId, currentRunId]) {
+        let release = () => {};
+        const promise = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        gates.set(runId, { promise, release });
+      }
+      dispatchInboundMessageMock.mockImplementation(async (params: DispatchParams) => {
+        const opts = params.replyOptions;
+        if (!opts?.runId) {
+          throw new Error("expected dispatch request binding");
+        }
+        if (typeof params.ctx.SessionKey !== "string") {
+          throw new Error("expected dispatch session binding");
+        }
+        sessions.set(opts.runId, params.ctx.SessionKey);
+        runs.set(opts.runId, opts);
+        opts.onAgentRunStart?.(opts.runId);
+        await gates.get(opts.runId)?.promise;
+        return { queuedFinal: false, counts: params.dispatcher.getQueuedCounts() };
+      });
+      const connectFixtureClient = async (identityFile = "voice-fixture-device.json") => {
+        const client = new WebSocket(`ws://127.0.0.1:${port}`, {
+          headers: { origin: `http://127.0.0.1:${port}` },
+        });
+        trackConnectChallengeNonce(client);
+        await new Promise<void>((resolve) => {
+          client.once("open", resolve);
+        });
+        await connectOk(client, {
+          client: {
+            id: GATEWAY_CLIENT_NAMES.WEBCHAT,
+            version: "fixture",
+            platform: "test",
+            mode: GATEWAY_CLIENT_MODES.WEBCHAT,
+          },
+          scopes: ["operator.read", "operator.write"],
+          deviceIdentityPath: path.join(dir, identityFile),
+        });
+        return client;
+      };
+      let activeWs = await connectFixtureClient();
+      const sendBoundRequest = async (runId: string, message: string) => {
+        const response = await rpcReq(activeWs, "chat.send", {
+          sessionKey: "main",
+          message,
+          idempotencyKey: runId,
+        });
+        expect(response.ok).toBe(true);
+        expect(response.payload?.status).toBe("started");
+        return response;
+      };
+      const chatEvents: Array<Record<string, unknown>> = [];
+      const collectChat = (raw: WebSocket.RawData) => {
+        const bytes = Array.isArray(raw)
+          ? Buffer.concat(raw)
+          : raw instanceof ArrayBuffer
+            ? Buffer.from(raw)
+            : raw;
+        const event = JSON.parse(bytes.toString("utf8")) as {
+          type?: string;
+          event?: string;
+          payload?: Record<string, unknown>;
+        };
+        if (event.type === "event" && event.event === "chat" && event.payload) {
+          chatEvents.push(event.payload);
+        }
+      };
+      activeWs.on("message", collectChat);
+      try {
+        const oldSend = await sendBoundRequest(oldRunId, "first fixture turn");
+        expect(oldSend.payload?.runId).toBe(oldRunId);
+        await vi.waitFor(() => expect(runs.has(oldRunId)).toBe(true));
+        const initialDelta = onceMessage(
+          activeWs,
+          (event) =>
+            event.type === "event" &&
+            event.event === "chat" &&
+            event.payload?.runId === oldRunId &&
+            event.payload?.state === "delta",
+          CHAT_RESPONSE_TIMEOUT_MS,
+        );
+        emitAgentEvent({
+          runId: oldRunId,
+          stream: "assistant",
+          data: { text: "old partial", delta: "old partial" },
+        });
+        await initialDelta;
+        expect(chatEvents).toContainEqual(
+          expect.objectContaining({ runId: oldRunId, state: "delta" }),
+        );
+        const closed = new Promise<void>((resolve) => {
+          activeWs.once("close", () => resolve());
+        });
+        activeWs.off("message", collectChat);
+        activeWs.close();
+        await closed;
+        const foreignWs = await connectFixtureClient("voice-foreign-device.json");
+        try {
+          const foreignAbort = await rpcReq(foreignWs, "chat.abort", {
+            sessionKey: sessions.get(oldRunId),
+            runId: oldRunId,
+          });
+          expect(foreignAbort.ok).toBe(false);
+          expect(foreignAbort.error?.message).toBe("unauthorized");
+          expect(runs.get(oldRunId)?.abortSignal?.aborted).toBe(false);
+        } finally {
+          foreignWs.close();
+        }
+        activeWs = await connectFixtureClient();
+        activeWs.on("message", collectChat);
+        // The original connection is gone. Only the same paired fixture device,
+        // using operator.write (not operator.admin), may cancel the bound run.
+        const abort = await rpcReq(activeWs, "chat.abort", { sessionKey: "main", runId: oldRunId });
+        expect(abort.ok).toBe(true);
+        expect(abort.payload?.aborted).toBe(true);
+        expect(runs.get(oldRunId)?.abortSignal?.aborted).toBe(true);
+        const oldCountAfterAbort = chatEvents.filter((event) => event.runId === oldRunId).length;
+
+        const currentSend = await sendBoundRequest(currentRunId, "ordinary follow-up fixture");
+        expect(currentSend.payload?.runId).toBe(currentRunId);
+        await vi.waitFor(() => expect(runs.has(currentRunId)).toBe(true));
+        expect(runs.get(currentRunId)?.abortSignal?.aborted).toBe(false);
+        expect(sessions.get(currentRunId)).toBe(sessions.get(oldRunId));
+        emitAgentEvent({
+          runId: oldRunId,
+          sessionKey: sessions.get(oldRunId),
+          stream: "assistant",
+          data: { text: "old stale suffix", delta: " stale suffix" },
+        });
+        emitAgentEvent({
+          runId: currentRunId,
+          stream: "assistant",
+          data: { text: "Meet at noon tomorrow", delta: "Meet at noon tomorrow" },
+        });
+        emitAgentEvent({
+          runId: currentRunId,
+          stream: "assistant",
+          data: { text: "Meet at noon", delta: "", replace: true },
+        });
+        emitAgentEvent({
+          runId: currentRunId,
+          stream: "assistant",
+          data: { text: "Meet at noon by the library", delta: " by the library" },
+        });
+        emitAgentEvent({
+          runId: oldRunId,
+          sessionKey: sessions.get(oldRunId),
+          stream: "lifecycle",
+          data: { phase: "end", stopReason: "stop" },
+        });
+        emitAgentEvent({
+          runId: currentRunId,
+          stream: "lifecycle",
+          data: { phase: "end", stopReason: "stop" },
+        });
+        await rpcReq(activeWs, "health", {});
+        expect(chatEvents.filter((event) => event.runId === oldRunId)).toHaveLength(
+          oldCountAfterAbort,
+        );
+        expect(
+          chatEvents.filter((event) => event.runId === oldRunId && event.state === "aborted"),
+        ).toHaveLength(1);
+        expect(
+          chatEvents.filter((event) => event.runId === oldRunId && event.state === "final"),
+        ).toHaveLength(0);
+        expect(
+          chatEvents.filter((event) => event.runId === currentRunId && event.state === "final"),
+        ).toEqual([
+          expect.objectContaining({
+            runId: currentRunId,
+            state: "final",
+            message: expect.objectContaining({
+              content: [{ type: "text", text: "Meet at noon by the library" }],
+            }),
+          }),
+        ]);
+        // Retire the original dispatch only after the follow-up completed, then
+        // deliver one more stale chunk with an explicit source session binding.
+        gates.get(oldRunId)?.release();
+        gates.get(currentRunId)?.release();
+        const settled = await rpcReq(activeWs, "agent.wait", {
+          runId: currentRunId,
+          timeoutMs: 1_000,
+        });
+        expect(settled.ok).toBe(true);
+        expect(settled.payload?.status).toBe("ok");
+        emitAgentEvent({
+          runId: oldRunId,
+          sessionKey: sessions.get(oldRunId),
+          stream: "assistant",
+          data: { text: "old post-settlement chunk", delta: " post-settlement chunk" },
+        });
+        await rpcReq(activeWs, "health", {});
+        expect(chatEvents.filter((event) => event.runId === oldRunId)).toHaveLength(
+          oldCountAfterAbort,
+        );
+      } finally {
+        for (const gate of gates.values()) {
+          gate.release();
+        }
+        activeWs.off("message", collectChat);
+        activeWs.close();
+      }
+    });
+  });
+
   test("agent.wait resolves chat.send runs that finish without lifecycle events", async () => {
     await withMainSessionStore(async () => {
       const runId = "idem-wait-chat-1";
