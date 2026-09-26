@@ -687,6 +687,7 @@ jobs:
             -only-testing:OpenClawTests/ArgusOperationsTests \
             -only-testing:OpenClawTests/ArgusAdminApprovalCanonicalTests \
             -only-testing:OpenClawTests/ArgusAdminApprovalReadTests \
+            -only-testing:OpenClawTests/ArgusAdminApprovalSecureKeyTests \
             -only-testing:OpenClawTests/CommandSessionListStateTests \
             -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ChatReplyNotificationTests \
@@ -1349,6 +1350,7 @@ jobs:
             -only-testing:OpenClawTests/ArgusOperationsTests \
             -only-testing:OpenClawTests/ArgusAdminApprovalCanonicalTests \
             -only-testing:OpenClawTests/ArgusAdminApprovalReadTests \
+            -only-testing:OpenClawTests/ArgusAdminApprovalSecureKeyTests \
             -only-testing:OpenClawTests/CommandSessionListStateTests \
             -only-testing:OpenClawTests/ArgusEvidenceNotificationTests \
             -only-testing:OpenClawTests/ChatReplyNotificationTests \
