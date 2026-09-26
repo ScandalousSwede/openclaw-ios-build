@@ -75,6 +75,8 @@ export type RealtimeVoiceBridgeSessionParams = {
 export function createRealtimeVoiceBridgeSession(
   params: RealtimeVoiceBridgeSessionParams,
 ): RealtimeVoiceBridgeSession {
+  let closed = false;
+  let closeNotified = false;
   const bridgeRef: { current?: RealtimeVoiceBridge } = {};
   const requireBridge = () => {
     if (!bridgeRef.current) {
@@ -89,7 +91,15 @@ export function createRealtimeVoiceBridgeSession(
       return requireBridge();
     },
     acknowledgeMark: () => requireBridge().acknowledgeMark(),
-    close: () => requireBridge().close(),
+    close: () => {
+      const bridge = requireBridge();
+      if (closed) {
+        return;
+      }
+      // Retire the session before close(), which can synchronously invoke provider callbacks.
+      closed = true;
+      bridge.close();
+    },
     connect: () => requireBridge().connect(),
     sendAudio: (audio) => requireBridge().sendAudio(audio),
     sendUserMessage: (text) => requireBridge().sendUserMessage?.(text),
@@ -99,7 +109,7 @@ export function createRealtimeVoiceBridgeSession(
       requireBridge().submitToolResult(callId, result, options),
     triggerGreeting: (instructions) => requireBridge().triggerGreeting?.(instructions),
   };
-  const canSendAudio = () => params.audioSink.isOpen?.() ?? true;
+  const canSendAudio = () => !closed && (params.audioSink.isOpen?.() ?? true);
   const bridge = params.provider.createBridge({
     cfg: params.cfg,
     providerConfig: params.providerConfig,
@@ -132,16 +142,24 @@ export function createRealtimeVoiceBridgeSession(
         params.audioSink.sendMark?.(markName);
       }
     },
-    onTranscript: params.onTranscript,
-    onEvent: params.onEvent,
+    onTranscript: (role, text, isFinal) => {
+      if (!closed) {
+        params.onTranscript?.(role, text, isFinal);
+      }
+    },
+    onEvent: (event) => {
+      if (!closed) {
+        params.onEvent?.(event);
+      }
+    },
     onToolCall: (event) => {
-      if (!bridgeRef.current) {
+      if (closed || !bridgeRef.current) {
         return;
       }
       params.onToolCall?.(event, session);
     },
     onReady: () => {
-      if (!bridgeRef.current) {
+      if (closed || !bridgeRef.current) {
         return;
       }
       if (params.triggerGreetingOnReady) {
@@ -149,8 +167,18 @@ export function createRealtimeVoiceBridgeSession(
       }
       params.onReady?.(session);
     },
-    onError: params.onError,
-    onClose: params.onClose,
+    onError: (error) => {
+      if (!closed) {
+        params.onError?.(error);
+      }
+    },
+    onClose: (reason) => {
+      closed = true;
+      if (!closeNotified) {
+        closeNotified = true;
+        params.onClose?.(reason);
+      }
+    },
   });
   bridgeRef.current = bridge;
 

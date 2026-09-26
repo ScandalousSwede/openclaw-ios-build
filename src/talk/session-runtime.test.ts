@@ -31,6 +31,82 @@ function expectBridgeRequest(
 }
 
 describe("realtime voice bridge session runtime", () => {
+  it.each(["local", "provider"] as const)(
+    "fences callbacks after %s close and notifies once",
+    (origin) => {
+      let request: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
+      const sendAudio = vi.fn(),
+        clearAudio = vi.fn(),
+        sendMark = vi.fn();
+      const onTranscript = vi.fn(),
+        onEvent = vi.fn(),
+        onToolCall = vi.fn();
+      const onReady = vi.fn(),
+        onError = vi.fn(),
+        onClose = vi.fn();
+      const close = vi.fn(() => request?.onClose?.("completed"));
+      const triggerGreeting = vi.fn();
+      const bridge = makeBridge({ close, triggerGreeting });
+      const session = createRealtimeVoiceBridgeSession({
+        provider: {
+          id: "test",
+          label: "Test",
+          isConfigured: () => true,
+          createBridge: (next) => {
+            request = next;
+            return bridge;
+          },
+        },
+        providerConfig: {},
+        audioSink: { isOpen: () => true, sendAudio, clearAudio, sendMark },
+        triggerGreetingOnReady: true,
+        onTranscript,
+        onEvent,
+        onToolCall,
+        onReady,
+        onError,
+        onClose,
+      });
+      const callbacks = expectBridgeRequest(request);
+      callbacks.onTranscript?.("assistant", "complete suffix", true);
+      if (origin === "local") {
+        session.close();
+        session.close();
+      } else {
+        callbacks.onClose?.("completed");
+      }
+      callbacks.onAudio(Buffer.from([1, 2]));
+      callbacks.onClearAudio();
+      callbacks.onMark?.("late-mark");
+      callbacks.onTranscript?.("assistant", "late correction", true);
+      callbacks.onEvent?.({ direction: "server", type: "response.done" });
+      callbacks.onToolCall?.({
+        itemId: "late-item",
+        callId: "late-call",
+        name: "lookup",
+        args: {},
+      });
+      callbacks.onReady?.();
+      callbacks.onError?.(new Error("late error"));
+      callbacks.onClose?.("error");
+      expect(onTranscript.mock.calls).toEqual([["assistant", "complete suffix", true]]);
+      for (const callback of [
+        sendAudio,
+        clearAudio,
+        sendMark,
+        onEvent,
+        onToolCall,
+        onReady,
+        onError,
+        triggerGreeting,
+      ]) {
+        expect(callback).not.toHaveBeenCalled();
+      }
+      expect(onClose.mock.calls).toEqual([["completed"]]);
+      expect(close).toHaveBeenCalledTimes(origin === "local" ? 1 : 0);
+    },
+  );
+
   it("routes provider output through an open audio sink", () => {
     let callbacks: Parameters<RealtimeVoiceProviderPlugin["createBridge"]>[0] | undefined;
     const bridge = makeBridge();
@@ -49,7 +125,7 @@ describe("realtime voice bridge session runtime", () => {
 
     createRealtimeVoiceBridgeSession({
       provider,
-      cfg: { talk: { realtime: { provider: "test" } } } as never,
+      cfg: { talk: { realtime: { provider: "test" } } },
       providerConfig: {},
       audioSink: {
         isOpen: () => true,

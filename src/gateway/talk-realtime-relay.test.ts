@@ -44,6 +44,86 @@ describe("talk realtime gateway relay", () => {
     };
   }
 
+  it("drops retired callbacks while replacement receives complete suffix", async () => {
+    vi.useFakeTimers();
+    const requests: RealtimeVoiceBridgeCreateRequest[] = [];
+    const provider: RealtimeVoiceProviderPlugin = {
+      ...createIdleRelayProvider(),
+      createBridge: (request) => {
+        requests.push(request);
+        return createIdleRelayProvider().createBridge(request);
+      },
+    };
+    const broadcastToConnIds = vi.fn();
+    const create = () =>
+      createTalkRealtimeRelaySession({
+        context: { broadcastToConnIds } as never,
+        connId: "conn-1",
+        provider,
+        providerConfig: {},
+        instructions: "brief",
+        tools: [],
+      });
+    const old = create();
+    const retired = requests[0];
+    retired.onAudio(Buffer.from([1, 2]));
+    stopTalkRealtimeRelaySession({ relaySessionId: old.relaySessionId, connId: "conn-1" });
+    const replacement = create();
+    const current = requests[1];
+    broadcastToConnIds.mockClear();
+    current.onAudio(Buffer.from([3, 4]));
+    setTimeout(() => {
+      retired.onAudio(Buffer.from([5, 6]));
+      retired.onTranscript?.("assistant", "retired correction", true);
+      retired.onReady?.();
+      retired.onError?.(new Error("retired error"));
+      retired.onEvent?.({ direction: "server", type: "response.done", responseId: "old-response" });
+      retired.onClose?.("error");
+    }, 10);
+    setTimeout(() => {
+      current.onAudio(Buffer.from([7, 8]));
+      current.onEvent?.({ direction: "server", type: "response.done", responseId: "new-response" });
+    }, 20);
+    await vi.advanceTimersByTimeAsync(25);
+    const events = broadcastToConnIds.mock.calls.map((call) => call[1]);
+    expect(events.every((event) => event.relaySessionId === replacement.relaySessionId)).toBe(true);
+    expect(
+      events
+        .filter((event) => event.type === "audio")
+        .map((event) => Buffer.from(event.audioBase64, "base64")),
+    ).toEqual([Buffer.from([3, 4]), Buffer.from([7, 8])]);
+    expect(events.filter((event) => event.type === "audioDone")).toHaveLength(1);
+    stopTalkRealtimeRelaySession({ relaySessionId: replacement.relaySessionId, connId: "conn-1" });
+  });
+
+  it("drops a delayed connect rejection after stop", async () => {
+    let rejectConnect: ((error: Error) => void) | undefined;
+    const provider: RealtimeVoiceProviderPlugin = {
+      ...createIdleRelayProvider(),
+      createBridge: (request) => ({
+        ...createIdleRelayProvider().createBridge(request),
+        connect: () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectConnect = reject;
+          }),
+      }),
+    };
+    const broadcastToConnIds = vi.fn();
+    const session = createTalkRealtimeRelaySession({
+      context: { broadcastToConnIds } as never,
+      connId: "conn-1",
+      provider,
+      providerConfig: {},
+      instructions: "brief",
+      tools: [],
+    });
+    stopTalkRealtimeRelaySession({ relaySessionId: session.relaySessionId, connId: "conn-1" });
+    broadcastToConnIds.mockClear();
+    rejectConnect?.(new Error("late connection failure"));
+    await Promise.resolve();
+    expect(broadcastToConnIds).not.toHaveBeenCalled();
+  });
+
   it("rejects session creation when relay expiry would exceed Date range", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(8_640_000_000_000_000));

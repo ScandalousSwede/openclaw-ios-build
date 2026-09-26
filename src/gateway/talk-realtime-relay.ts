@@ -594,11 +594,12 @@ export function createTalkRealtimeRelaySession(
   relay.cleanupTimer.unref?.();
   relaySessions.set(relaySessionId, relay);
   bridge.connect().catch((error: unknown) => {
-    emit({ relaySessionId, type: "error", message: formatError(error) });
     const active = relaySessions.get(relaySessionId);
-    if (active) {
-      closeRelaySession(active, "error");
+    if (!active) {
+      return;
     }
+    emit({ relaySessionId, type: "error", message: formatError(error) });
+    closeRelaySession(active, "error");
   });
 
   return {
