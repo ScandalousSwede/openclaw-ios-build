@@ -198,7 +198,10 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                             // Keep language correction for complete labels, but inspect numeric glyphs
                             // with raw recognition. Never normalize an alphabetic O into a reported zero.
                             let numericRequest = VNRecognizeTextRequest()
-                            numericRequest.recognitionLevel = .accurate
+                            // Accurate recognition omitted isolated visible digits in the retained run.
+                            // Use the alternative detector and admit small glyphs; require the same literal counts.
+                            numericRequest.recognitionLevel = .fast
+                            numericRequest.minimumTextHeight = 0
                             numericRequest.recognitionLanguages = ["en-US"]
                             numericRequest.usesLanguageCorrection = false
                             try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:])
