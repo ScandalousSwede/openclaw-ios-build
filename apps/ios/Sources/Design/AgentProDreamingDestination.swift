@@ -98,21 +98,7 @@ struct AgentProDreamingDestination: View {
         detail: String,
         color: Color) -> some View
     {
-        ProCard {
-            HStack(spacing: 12) {
-                ProIconBadge(systemName: icon, color: color)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.headline)
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                ProValuePill(value: value, color: color)
-            }
-        }
-        .padding(.horizontal, OpenClawProMetric.pagePadding)
+        AgentToolsSummaryCard(icon: icon, title: title, value: value, detail: detail, color: color)
     }
 
     private var dreamingTotalsCard: some View {

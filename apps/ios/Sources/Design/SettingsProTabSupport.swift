@@ -69,6 +69,38 @@ enum SettingsDiagnosticIssue: String, Equatable, CaseIterable {
     case discoveryUnavailable
     case talkConfigMissing
     case notificationsUnavailable
+    case notificationsNotRequested
+    case notificationsUnknown
+
+    var summary: String {
+        switch self {
+        case .gatewayOffline: "Gateway connection was unavailable."
+        case .discoveryUnavailable:
+            "Network discovery had no results yet at this check. It may still be searching; manually configured gateways can remain connected."
+        case .talkConfigMissing: "Voice configuration was unavailable from the connected gateway."
+        case .notificationsUnavailable: "Notification permission was denied."
+        case .notificationsNotRequested: "Notification permission had not been requested."
+        case .notificationsUnknown: "Notification permission could not be determined."
+        }
+    }
+}
+
+struct SettingsDiagnosticRunIssues: View {
+    let issues: [SettingsDiagnosticIssue]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Checks needing attention at that run")
+                .font(.caption.weight(.semibold))
+            ForEach(self.issues, id: \.rawValue) { issue in
+                Text(issue.summary)
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.secondary)
+    }
 }
 
 enum SettingsDiagnostics {
@@ -82,7 +114,12 @@ enum SettingsDiagnostics {
         if !gatewayConnected { issues.append(.gatewayOffline) }
         if discoveredGatewayCount == 0 { issues.append(.discoveryUnavailable) }
         if gatewayConnected, !talkConfigLoaded { issues.append(.talkConfigMissing) }
-        if notificationStatusText != "Allowed" { issues.append(.notificationsUnavailable) }
+        switch notificationStatusText {
+        case "Allowed": break
+        case "Not Allowed": issues.append(.notificationsUnavailable)
+        case "Not Set": issues.append(.notificationsNotRequested)
+        default: issues.append(.notificationsUnknown)
+        }
         return issues
     }
 

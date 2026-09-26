@@ -30,6 +30,11 @@ extension AgentProTab {
                         value: self.skillsValue,
                         detail: self.skillsDetail,
                         color: self.gatewayConnected ? OpenClawBrand.accent : .secondary)
+                    Text("Enabled is policy permission, not proof of completed setup or a successful run.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, OpenClawProMetric.pagePadding)
                     self.skillsPolicyControls
                     self.skillsFilterField
                     self.clawHubSearchCard
@@ -129,20 +134,55 @@ extension AgentProTab {
         detail: String,
         color: Color) -> some View
     {
-        ProCard(radius: AgentLayout.cardRadius) {
-            HStack(spacing: 12) {
-                ProIconBadge(systemName: icon, color: color)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title)
-                        .font(.headline)
-                    Text(detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        AgentToolsSummaryCard(
+            icon: icon, title: title, value: value, detail: detail, color: color,
+            radius: AgentLayout.cardRadius)
+    }
+}
+
+/// Destination summaries keep the title and explanation full-width at accessibility sizes.
+struct AgentToolsSummaryCard: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let icon: String
+    let title: String
+    let value: String
+    let detail: String
+    let color: Color
+    var radius: CGFloat = OpenClawProMetric.cardRadius
+
+    var body: some View {
+        ProCard(radius: self.radius) {
+            if self.dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        ProIconBadge(systemName: self.icon, color: self.color)
+                        Spacer(minLength: 8)
+                        ProValuePill(value: self.value, color: self.color)
+                    }
+                    self.summaryText
                 }
-                Spacer(minLength: 8)
-                ProValuePill(value: value, color: color)
+            } else {
+                HStack(spacing: 12) {
+                    ProIconBadge(systemName: self.icon, color: self.color)
+                    self.summaryText
+                    Spacer(minLength: 8)
+                    ProValuePill(value: self.value, color: self.color)
+                }
             }
         }
         .padding(.horizontal, OpenClawProMetric.pagePadding)
+    }
+
+    private var summaryText: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(self.title)
+                .font(.headline)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(self.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

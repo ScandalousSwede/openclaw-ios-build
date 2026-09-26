@@ -32,21 +32,9 @@ struct AgentProNodesDestination: View {
     }
 
     private var summaryCard: some View {
-        ProCard {
-            HStack(spacing: 12) {
-                ProIconBadge(systemName: "display", color: self.instancesColor)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Nodes")
-                        .font(.headline)
-                    Text(self.instancesDetail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                ProValuePill(value: self.instancesValue, color: self.instancesColor)
-            }
-        }
-        .padding(.horizontal, OpenClawProMetric.pagePadding)
+        AgentToolsSummaryCard(
+            icon: "display", title: "Nodes", value: self.instancesValue,
+            detail: self.instancesDetail, color: self.instancesColor)
     }
 
     private var totalsCard: some View {
@@ -149,21 +137,10 @@ struct AgentProNodesDestination: View {
             OpenClawProBackground()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    ProCard {
-                        HStack(spacing: 12) {
-                            ProIconBadge(systemName: Self.presenceIcon(entry), color: Self.presenceColor(entry))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(Self.presenceLabel(entry) ?? "Node")
-                                    .font(.headline)
-                                Text(Self.presenceDetail(entry))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 8)
-                            ProValuePill(value: Self.presenceState(entry), color: Self.presenceColor(entry))
-                        }
-                    }
-                    .padding(.horizontal, OpenClawProMetric.pagePadding)
+                    AgentToolsSummaryCard(
+                        icon: Self.presenceIcon(entry), title: Self.presenceLabel(entry) ?? "Node",
+                        value: Self.presenceState(entry), detail: Self.presenceDetail(entry),
+                        color: Self.presenceColor(entry))
 
                     ProCard {
                         VStack(spacing: 0) {

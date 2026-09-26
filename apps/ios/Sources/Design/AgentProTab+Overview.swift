@@ -126,7 +126,7 @@ extension AgentProTab {
     var operationsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             ProSectionHeader(title: "Live Operations")
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+            AgentToolsOperationsGrid {
                 self.metricTile(
                     icon: "sparkles",
                     title: "Skills",
@@ -443,12 +443,12 @@ extension AgentProTab {
                     Text(detail)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: AgentLayout.metricTileHeight, alignment: .topLeading)
+            .frame(minHeight: AgentLayout.metricTileHeight, alignment: .topLeading)
         }
     }
 
@@ -594,7 +594,7 @@ extension AgentProTab {
         guard let skills = self.overview?.skills else {
             return self.overviewLoading ? "..." : "live"
         }
-        return "\(skills.enabledCount)/\(skills.totalCount)"
+        return "\(skills.totalCount)"
     }
 
     var skillsDetail: String {
@@ -602,13 +602,7 @@ extension AgentProTab {
         guard let skills = self.overview?.skills else {
             return self.overviewLoading ? "Loading skill status." : "Skill status is available from the gateway."
         }
-        if skills.blockedCount > 0 {
-            return "\(skills.enabledCount) enabled, \(skills.blockedCount) blocked"
-        }
-        if skills.missingRequirementCount > 0 {
-            return "\(skills.enabledCount) enabled, \(skills.missingRequirementCount) need setup"
-        }
-        return "\(skills.enabledCount) enabled, \(skills.totalCount) installed"
+        return skills.statusSummary(agentSkillFilter: self.agentSkillFilter)
     }
 
     var instancesValue: String {
@@ -723,5 +717,26 @@ extension AgentProTab {
             }
             .prefix(4)
             .map(\.self)
+    }
+}
+
+/// The same maintained operation tiles reflow vertically when text needs more room.
+struct AgentToolsOperationsGrid<Content: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        LazyVGrid(
+            columns: self.dynamicTypeSize.isAccessibilitySize
+                ? [GridItem(.flexible())]
+                : [GridItem(.flexible()), GridItem(.flexible())],
+            spacing: 10)
+        {
+            self.content
+        }
     }
 }

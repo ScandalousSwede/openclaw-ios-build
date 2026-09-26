@@ -249,17 +249,23 @@ extension AgentProTab {
     }
 
     func matchesSkillStatusFilter(_ skill: SkillStatusEntryLite) -> Bool {
-        switch self.skillStatusFilter {
+        Self.matchesSkillStatusFilter(skill, filter: self.skillStatusFilter, agentSkillFilter: self.agentSkillFilter)
+    }
+
+    static func matchesSkillStatusFilter(
+        _ skill: SkillStatusEntryLite, filter: SkillStatusFilter, agentSkillFilter: Set<String>? = nil) -> Bool
+    {
+        switch filter {
         case .all:
             true
         case .enabled:
-            self.skillStatus(skill).text == "enabled"
+            skill.isEnabled(agentSkillFilter: agentSkillFilter)
         case .off:
-            !self.isSkillAllowed(skill) || skill.blockedByAgentFilter == true
+            !skill.isEnabled(agentSkillFilter: agentSkillFilter)
         case .setup:
             skill.hasMissingRequirements
         case .blocked:
-            skill.blockedByAllowlist == true
+            skill.isBlocked(agentSkillFilter: agentSkillFilter)
         }
     }
 

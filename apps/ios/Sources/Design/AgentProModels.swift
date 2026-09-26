@@ -56,6 +56,14 @@ struct SkillStatusReportLite: Decodable {
         self.skills.count
     }
 
+    /// Counts describe independent report flags. Enabled and setup-required can overlap.
+    func statusSummary(agentSkillFilter: Set<String>?) -> String {
+        let enabled = self.skills.count { $0.isEnabled(agentSkillFilter: agentSkillFilter) }
+        let blocked = self.skills.count { $0.isBlocked(agentSkillFilter: agentSkillFilter) }
+        return "\(self.totalCount) registered · \(enabled) enabled for this agent · "
+            + "\(self.missingRequirementCount) need setup · \(blocked) blocked"
+    }
+
     var enabledCount: Int {
         self.skills.count {
             $0.isEnabled
@@ -112,9 +120,20 @@ struct SkillStatusEntryLite: Decodable {
             && self.blockedByAgentFilter != true
     }
 
+    func isBlocked(agentSkillFilter: Set<String>?) -> Bool {
+        self.blockedByAllowlist == true
+            || self.blockedByAgentFilter == true
+            || agentSkillFilter.map { !$0.contains(self.name) } == true
+    }
+
+    func isEnabled(agentSkillFilter: Set<String>?) -> Bool {
+        self.disabled != true && !self.isBlocked(agentSkillFilter: agentSkillFilter)
+    }
+
     var hasMissingRequirements: Bool {
         guard let missing else { return false }
         return !missing.bins.isEmpty
+            || !(missing.anyBins ?? []).isEmpty
             || !missing.env.isEmpty
             || !missing.config.isEmpty
             || !missing.os.isEmpty
@@ -122,8 +141,10 @@ struct SkillStatusEntryLite: Decodable {
 
     var missingSummary: String? {
         guard let missing else { return nil }
+        let alternatives = missing.anyBins ?? []
         let values = [
             missing.bins,
+            alternatives.isEmpty ? [] : ["one of: " + alternatives.joined(separator: " or ")],
             missing.env,
             missing.config,
             missing.os,
@@ -206,6 +227,8 @@ struct CronUpdateParams: Encodable {
 
 struct SkillStatusMissingLite: Decodable {
     let bins: [String]
+    // Optional for older reports; a present list is one alternative requirement.
+    let anyBins: [String]?
     let env: [String]
     let config: [String]
     let os: [String]
