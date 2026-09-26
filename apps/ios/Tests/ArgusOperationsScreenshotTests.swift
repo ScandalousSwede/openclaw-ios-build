@@ -8,6 +8,87 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    /// Offline production sheet: no gateway requests, microphone or operational actions.
+    @MainActor
+    func testActualAgentToolsSheetHeadersAcrossTextSizesAndAppearances() throws {
+        let appearances: [(String, AppAppearancePreference, UIUserInterfaceStyle)] = [
+            ("system-light", .system, .light),
+            ("system-dark", .system, .dark),
+            ("selected-light-on-dark", .light, .dark),
+            ("selected-dark-on-light", .dark, .light),
+        ]
+        let sizes: [(String, DynamicTypeSize)] = [
+            ("normal", .large), ("enlarged", .accessibility1), ("largest", .accessibility3),
+        ]
+        let routes: [(String, AgentProTab.AgentRoute?)] = [
+            ("Agents", nil), ("Cron Jobs", .cron), ("Dreaming", .dreaming),
+        ]
+        for (appearanceName, appearance, parentStyle) in appearances {
+            for (sizeName, size) in sizes {
+                for (title, route) in routes {
+                    let model = NodeAppModel()
+                    let root = VStack(spacing: 0) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
+                            .font(.caption2.bold())
+                        AgentToolsSheet(appearance: appearance, initialRoute: route, close: {})
+                    }
+                    .environment(model)
+                    .environment(\.scenePhase, .inactive)
+                    .environment(\.dynamicTypeSize, size)
+                    .tint(OpenClawBrand.accent)
+                    .frame(width: 390, height: 844)
+                    let image = try self.hostedImage(root, userInterfaceStyle: parentStyle)
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-agent-tools-native-synthetic-\(title)-\(appearanceName)-\(sizeName)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                    let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
+                        guard let text = observation.topCandidates(1).first?.string else { return nil }
+                        return (text, observation.boundingBox)
+                    }
+                    let close = try XCTUnwrap(Self.agentToolsCloseBounds(in: words),
+                        "Complete close label must remain visible: \(title)/\(appearanceName)/\(sizeName)")
+                    let heading = try XCTUnwrap(words.filter { $0.0 == title }.max { $0.1.maxY < $1.1.maxY })
+                    // Vision coordinates start at the bottom. This fails the old top inset
+                    // even when the title remains readable in a nominal-size render.
+                    XCTAssertLessThan(close.maxY, 0.25, "Close belongs below navigation content")
+                    XCTAssertGreaterThan(heading.1.minY, 0.65, "Destination heading must remain visible at the top")
+                    XCTAssertFalse(close.intersects(heading.1), "Close must never overlap the destination title")
+                }
+            }
+        }
+    }
+
+    private static func agentToolsCloseBounds(in words: [(String, CGRect)]) -> CGRect? {
+        guard let first = words.first(where: { $0.0.localizedCaseInsensitiveContains("Close agent") }) else {
+            return nil
+        }
+        if first.0.localizedCaseInsensitiveContains("Close agent tools") { return first.1 }
+        // Native accessibility3 capture wraps the complete label over two lines.
+        // Require the suffix immediately below the prefix, never accept a clipped label.
+        guard let suffix = words.first(where: {
+            $0.0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "tools"
+                && $0.1.maxY <= first.1.minY
+                && first.1.minY - $0.1.maxY < 0.08
+                && abs(first.1.midX - $0.1.midX) < 0.2
+        }) else { return nil }
+        return first.1.union(suffix.1)
+    }
+
+    func testAgentToolsCloseOCRRequiresCompleteSingleOrWrappedLabel() {
+        let prefix = CGRect(x: 0.2, y: 0.1, width: 0.5, height: 0.04)
+        let suffix = CGRect(x: 0.35, y: 0.05, width: 0.2, height: 0.04)
+        XCTAssertEqual(Self.agentToolsCloseBounds(in: [("Close agent tools", prefix)]), prefix)
+        XCTAssertEqual(Self.agentToolsCloseBounds(in: [("Close agent", prefix), ("tools", suffix)]),
+                       prefix.union(suffix))
+        XCTAssertNil(Self.agentToolsCloseBounds(in: [("Close agent", prefix)]))
+        XCTAssertNil(Self.agentToolsCloseBounds(in: [("Close agent", prefix), ("tools", prefix)]))
+    }
+
     @MainActor
     func testSkillStatusAndRecordedDiagnosticIssuesReflow() throws {
         let report = try AppCoverageTests.skillStatusOverlapFixture()
