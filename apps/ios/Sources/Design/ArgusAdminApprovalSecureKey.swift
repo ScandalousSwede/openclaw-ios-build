@@ -14,6 +14,16 @@ enum ArgusAdminApprovalSecureKey {
         case keyStorageFailed
     }
 
+    enum Decision: String {
+        case approve
+        case deny
+    }
+
+    enum ReviewError: Error {
+        case changedReview
+        case expired
+    }
+
     struct PublicIdentity: Equatable {
         let keyID: String
         let publicKeyX963Base64: String
@@ -22,6 +32,38 @@ enum ArgusAdminApprovalSecureKey {
 
     private static let service = "ai.openclaw.admin-approval-key"
     private static let account = "secure-enclave-p256-v1"
+
+    // Build only from the exact detail that passed list/get byte verification.
+    // Recheck the displayed bytes and expiry immediately before a future Face ID
+    // prompt; stale navigation state must not become a signed decision.
+    static func preparedStatement(
+        for reviewed: ArgusAdminApprovalReviewedDetail,
+        in index: ArgusAdminApprovalIndex,
+        decision: Decision,
+        now: Date) throws -> Data
+    {
+        _ = try index.validated()
+        let request = reviewed.request
+        guard index.pending.contains(request),
+              (request.previous == nil) == (reviewed.changes == nil) else {
+            throw ReviewError.changedReview
+        }
+        _ = try ArgusAdminApprovalCanonical.reviewedScript(
+            Data(reviewed.scriptText.utf8), expectedSHA256: request.scriptSha256)
+        _ = try ArgusAdminApprovalCanonical.reviewedArguments(
+            request.args, expectedSHA256: request.argsSha256)
+        let formatter = ISO8601DateFormatter()
+        guard let expiry = formatter.date(from: request.expiresAt), now < expiry else {
+            throw ReviewError.expired
+        }
+        return try ArgusAdminApprovalCanonical.statement(.init(
+            requestID: request.requestId, decision: decision.rawValue,
+            scriptPath: request.scriptPath, gitCommit: request.gitCommit,
+            scriptSHA256: request.scriptSha256,
+            previousScriptSHA256: request.previous?.scriptSha256 ?? "FIRST_VERSION",
+            argsSHA256: request.argsSha256, nonce: request.nonce,
+            expiresAt: request.expiresAt, brokerID: index.brokerId))
+    }
 
     // This only prepares a local, device-bound key. Trust still requires Ethan
     // to compare its fingerprint and confirm enrolment on the broker's TOTP page.
