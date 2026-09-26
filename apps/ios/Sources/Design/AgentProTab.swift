@@ -6,6 +6,7 @@ struct AgentProTab: View {
     @Environment(NodeAppModel.self) var appModel
     @Environment(\.colorScheme) var colorScheme
     @Environment(\.scenePhase) var scenePhase
+    @State private var navigationPath: [AgentRoute]
     @State var overview: AgentOverviewSnapshot?
     @State var overviewErrorText: String?
     @State var overviewLoading: Bool = false
@@ -119,8 +120,12 @@ struct AgentProTab: View {
         }
     }
 
+    init(initialRoute: AgentRoute? = nil) {
+        self._navigationPath = State(initialValue: initialRoute.map { [$0] } ?? [])
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: self.$navigationPath) {
             ZStack {
                 OpenClawProBackground()
                 ScrollView {

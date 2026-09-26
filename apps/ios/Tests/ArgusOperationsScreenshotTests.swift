@@ -8,6 +8,60 @@ import XCTest
 @testable import OpenClaw
 
 final class ArgusOperationsScreenshotTests: XCTestCase {
+    /// Offline production sheet: no gateway requests, microphone or operational actions.
+    @MainActor
+    func testActualAgentToolsSheetHeadersAcrossTextSizesAndAppearances() throws {
+        let appearances: [(String, AppAppearancePreference, UIUserInterfaceStyle)] = [
+            ("system-light", .system, .light),
+            ("system-dark", .system, .dark),
+            ("selected-light-on-dark", .light, .dark),
+            ("selected-dark-on-light", .dark, .light),
+        ]
+        let sizes: [(String, DynamicTypeSize)] = [
+            ("normal", .large), ("enlarged", .accessibility1), ("largest", .accessibility3),
+        ]
+        let routes: [(String, AgentProTab.AgentRoute?)] = [
+            ("Agents", nil), ("Cron Jobs", .cron), ("Dreaming", .dreaming),
+        ]
+        for (appearanceName, appearance, parentStyle) in appearances {
+            for (sizeName, size) in sizes {
+                for (title, route) in routes {
+                    let model = NodeAppModel()
+                    let root = VStack(spacing: 0) {
+                        Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE")
+                            .font(.caption2.bold())
+                        AgentToolsSheet(appearance: appearance, initialRoute: route, close: {})
+                    }
+                    .environment(model)
+                    .environment(\.scenePhase, .inactive)
+                    .environment(\.dynamicTypeSize, size)
+                    .tint(OpenClawBrand.accent)
+                    .frame(width: 390, height: 844)
+                    let image = try self.hostedImage(root, userInterfaceStyle: parentStyle)
+                    let attachment = XCTAttachment(image: image)
+                    attachment.name = "argus-agent-tools-native-synthetic-\(title)-\(appearanceName)-\(sizeName)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.recognitionLanguages = ["en-US"]
+                    try VNImageRequestHandler(cgImage: try XCTUnwrap(image.cgImage), options: [:]).perform([request])
+                    let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
+                        guard let text = observation.topCandidates(1).first?.string else { return nil }
+                        return (text, observation.boundingBox)
+                    }
+                    let close = try XCTUnwrap(words.first { $0.0.localizedCaseInsensitiveContains("Close agent tools") })
+                    let heading = try XCTUnwrap(words.filter { $0.0 == title }.max { $0.1.maxY < $1.1.maxY })
+                    // Vision coordinates start at the bottom. This fails the old top inset
+                    // even when the title remains readable in a nominal-size render.
+                    XCTAssertLessThan(close.1.maxY, 0.25, "Close belongs below navigation content")
+                    XCTAssertGreaterThan(heading.1.minY, 0.65, "Destination heading must remain visible at the top")
+                    XCTAssertFalse(close.1.intersects(heading.1), "Close must never overlap the destination title")
+                }
+            }
+        }
+    }
+
     @MainActor
     func testUnsentResultSourceCardAtBothTextSizes() throws {
         let (item, preview) = try ArgusOperationsTests.briefingFixture()
