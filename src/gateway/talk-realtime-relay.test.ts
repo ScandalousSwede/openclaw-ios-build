@@ -96,6 +96,96 @@ describe("talk realtime gateway relay", () => {
     stopTalkRealtimeRelaySession({ relaySessionId: replacement.relaySessionId, connId: "conn-1" });
   });
 
+  it.each(["response.audio.done", "response.done", "response.cancelled", "item-only"])(
+    "keeps follow-up audio identity when interrupted response sends late %s",
+    (lateType) => {
+      let callbacks: RealtimeVoiceBridgeCreateRequest | undefined;
+      const provider: RealtimeVoiceProviderPlugin = {
+        ...createIdleRelayProvider(),
+        createBridge: (request) => {
+          callbacks = request;
+          return createIdleRelayProvider().createBridge(request);
+        },
+      };
+      const { session, broadcastToConnIds } = createAbortableRelayRunFixture(provider);
+      if (!callbacks) {
+        throw new Error("Expected provider callbacks");
+      }
+      const binding = { relaySessionId: session.relaySessionId, connId: "conn-1" };
+      callbacks.onEvent?.({
+        direction: "server",
+        type: "response.audio.delta",
+        responseId: "response-old",
+        itemId: "item-old",
+      });
+      callbacks.onAudio(Buffer.from([1, 2]));
+      cancelTalkRealtimeRelayTurn({ ...binding, reason: "barge-in" });
+      sendTalkRealtimeRelayAudio({
+        ...binding,
+        audioBase64: Buffer.from([3, 4]).toString("base64"),
+      });
+      broadcastToConnIds.mockClear();
+      callbacks.onEvent?.({
+        direction: "server",
+        type: "response.audio.delta",
+        responseId: "response-new",
+        itemId: "item-new",
+      });
+      callbacks.onAudio(Buffer.from([5, 6]));
+      callbacks.onEvent?.({
+        direction: "server",
+        type: lateType === "item-only" ? "response.audio.done" : lateType,
+        ...(lateType === "item-only" ? {} : { responseId: "response-old" }),
+        itemId: "item-old",
+      });
+      // A complete suffix must still carry the new response/item binding.
+      callbacks.onAudio(Buffer.from([7, 8]));
+      callbacks.onEvent?.({
+        direction: "server",
+        type: "response.audio.done",
+        responseId: "response-new",
+        itemId: "item-new",
+      });
+      const events = broadcastToConnIds.mock.calls.map((call) => call[1]);
+      const audio = events.filter((event) => event.type === "audio");
+      expect(
+        audio.map((event) => ({
+          responseId: event.responseId,
+          itemId: event.itemId,
+          bytes: Buffer.from(event.audioBase64, "base64"),
+        })),
+      ).toEqual([
+        { responseId: "response-new", itemId: "item-new", bytes: Buffer.from([5, 6]) },
+        { responseId: "response-new", itemId: "item-new", bytes: Buffer.from([7, 8]) },
+      ]);
+      expect(events.filter((event) => event.type === "audioDone")).toEqual([
+        expect.objectContaining({ responseId: "response-new", itemId: "item-new" }),
+      ]);
+    },
+  );
+
+  it("retains completion for provider output without response or item IDs", () => {
+    let callbacks: RealtimeVoiceBridgeCreateRequest | undefined;
+    const provider: RealtimeVoiceProviderPlugin = {
+      ...createIdleRelayProvider(),
+      createBridge: (request) => {
+        callbacks = request;
+        return createIdleRelayProvider().createBridge(request);
+      },
+    };
+    const { broadcastToConnIds } = createAbortableRelayRunFixture(provider);
+    if (!callbacks) {
+      throw new Error("Expected provider callbacks");
+    }
+    callbacks.onAudio(Buffer.from([1, 2]));
+    callbacks.onEvent?.({ direction: "server", type: "response.audio.done" });
+    const events = broadcastToConnIds.mock.calls.map((call) => call[1]);
+    expect(events.filter((event) => event.type === "audio")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "audioDone")).toEqual([
+      expect.objectContaining({ type: "audioDone" }),
+    ]);
+  });
+
   it("drops a delayed connect rejection after stop", async () => {
     let rejectConnect: ((error: Error) => void) | undefined;
     const provider: RealtimeVoiceProviderPlugin = {

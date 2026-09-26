@@ -439,6 +439,17 @@ export function createTalkRealtimeRelaySession(
         event.type === "response.done" ||
         event.type === "response.cancelled"
       ) {
+        // A delayed completion for interrupted output must not finish the newer
+        // output span or clear its binding. Providers without IDs retain the
+        // existing unbound completion behavior.
+        if (
+          (event.responseId &&
+            currentOutputResponseId &&
+            event.responseId !== currentOutputResponseId) ||
+          (event.itemId && currentOutputItemId && event.itemId !== currentOutputItemId)
+        ) {
+          return;
+        }
         emit({
           relaySessionId,
           type: "audioDone",
