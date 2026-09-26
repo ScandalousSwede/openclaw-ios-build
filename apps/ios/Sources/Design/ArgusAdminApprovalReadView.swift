@@ -71,7 +71,7 @@ struct ArgusAdminApprovalReadView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Changes since the previous approved version")
                             .font(.subheadline.weight(.semibold))
-                        Text(reviewed.changes ?? "No previously approved version is recorded. Review the full script below.")
+                        Text(reviewed.changes ?? "The relay supplied no previous approved version. Review the full script below; approval is unavailable.")
                             .font(.body.monospaced())
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
