@@ -431,6 +431,9 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   private markQueue: string[] = [];
   private responseStartTimestamp: number | null = null;
   private responseActive = false;
+  private currentResponseId: string | undefined;
+  private interruptedResponseIds = new Set<string>();
+  private interruptedItemIds = new Set<string>();
   private responseCreateInFlight = false;
   private responseCancelInFlight = false;
   private responseCreatePending = false;
@@ -987,6 +990,28 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private handleEvent(event: RealtimeEvent): void {
+    const responseId = event.response_id ?? event.response?.id;
+    const interruptedOutput =
+      (responseId && this.interruptedResponseIds.has(responseId)) ||
+      (event.item_id && this.interruptedItemIds.has(event.item_id));
+    if (
+      interruptedOutput &&
+      (event.type === "response.created" ||
+        event.type === "conversation.output_audio.delta" ||
+        event.type === "response.audio.delta" ||
+        event.type === "response.output_audio.delta" ||
+        event.type === "conversation.output_transcript.delta" ||
+        event.type === "response.output_text.delta" ||
+        event.type === "response.audio_transcript.delta" ||
+        event.type === "response.output_audio_transcript.delta" ||
+        event.type === "response.output_text.done" ||
+        event.type === "response.audio_transcript.done" ||
+        event.type === "response.output_audio_transcript.done")
+    ) {
+      // Drop identified interrupted output before it can replace relay bindings.
+      // ID-less legacy callbacks keep their existing behavior.
+      return;
+    }
     const emitServerEvent = () =>
       this.config.onEvent?.({
         direction: "server",
@@ -1036,6 +1061,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         return;
 
       case "response.created":
+        this.currentResponseId = responseId;
         this.responseActive = true;
         this.responseCreateInFlight = false;
         return;
@@ -1047,6 +1073,7 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
         if (!audioDelta) {
           return;
         }
+        this.currentResponseId = responseId ?? this.currentResponseId;
         const audio = base64ToBuffer(audioDelta);
         this.config.onAudio(audio);
         if (event.item_id && event.item_id !== this.lastAssistantItemId) {
@@ -1101,10 +1128,12 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
 
       case "response.cancelled":
       case "response.done":
-        this.responseActive = false;
-        this.responseCreateInFlight = false;
-        this.responseCancelInFlight = false;
-        this.flushPendingResponseCreate();
+        if (!responseId || !this.currentResponseId || responseId === this.currentResponseId) {
+          this.responseActive = false;
+          this.responseCreateInFlight = false;
+          this.responseCancelInFlight = false;
+          this.flushPendingResponseCreate();
+        }
         return;
 
       case "response.function_call_arguments.delta": {
@@ -1196,6 +1225,14 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
       });
       return;
     }
+    if (shouldInterruptProvider || (options?.audioPlaybackActive === true && this.responseActive)) {
+      if (this.currentResponseId) {
+        this.interruptedResponseIds.add(this.currentResponseId);
+      }
+      if (assistantItemId) {
+        this.interruptedItemIds.add(assistantItemId);
+      }
+    }
     if (
       options?.audioPlaybackActive === true &&
       this.responseActive &&
@@ -1276,6 +1313,9 @@ class OpenAIRealtimeVoiceBridge implements RealtimeVoiceBridge {
   }
 
   private resetRealtimeSessionState(): void {
+    this.currentResponseId = undefined;
+    this.interruptedResponseIds.clear();
+    this.interruptedItemIds.clear();
     this.markQueue = [];
     this.responseStartTimestamp = null;
     this.responseActive = false;

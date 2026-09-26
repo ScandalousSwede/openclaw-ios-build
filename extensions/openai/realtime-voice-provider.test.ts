@@ -1281,6 +1281,129 @@ describe("buildOpenAIRealtimeVoiceProvider", () => {
     ]);
   });
 
+  it.each([
+    "item-only",
+    "conversation.output_audio.delta",
+    "response.audio.delta",
+    "response.output_audio.delta",
+    "conversation.output_transcript.delta",
+    "response.output_text.delta",
+    "response.audio_transcript.done",
+    "response.output_audio_transcript.done",
+  ])("drops interrupted identified output %s while keeping follow-up suffix", async (lateType) => {
+    const provider = buildOpenAIRealtimeVoiceProvider();
+    const onAudio = vi.fn();
+    const onTranscript = vi.fn();
+    const onEvent = vi.fn();
+    const bridge = provider.createBridge({
+      providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
+      onAudio,
+      onTranscript,
+      onEvent,
+      onClearAudio: vi.fn(),
+    });
+    const connecting = bridge.connect();
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.emit("open");
+    const emit = (event: Record<string, unknown>) =>
+      socket.emit("message", Buffer.from(JSON.stringify(event)));
+    emit({ type: "session.updated" });
+    await connecting;
+    bridge.setMediaTimestamp(1000);
+    emit({ type: "response.created", response: { id: "response-old" } });
+    emit({
+      type: "response.audio.delta",
+      response_id: "response-old",
+      item_id: "item-old",
+      delta: Buffer.from("old prefix").toString("base64"),
+    });
+    bridge.setMediaTimestamp(1400);
+    bridge.handleBargeIn?.({ audioPlaybackActive: true });
+    onAudio.mockClear();
+    onTranscript.mockClear();
+    onEvent.mockClear();
+    const late = {
+      type: lateType === "item-only" ? "response.audio.delta" : lateType,
+      ...(lateType === "item-only" ? {} : { response_id: "response-old" }),
+      item_id: "item-old",
+      delta:
+        lateType === "item-only" || lateType.includes("audio.delta")
+          ? Buffer.from("retired audio").toString("base64")
+          : "retired text",
+      transcript: "retired final",
+    };
+    emit(late);
+    emit({ type: "response.done", response: { id: "response-old" } });
+    emit({ type: "response.created", response: { id: "response-new" } });
+    emit({
+      type: "response.output_audio.delta",
+      response_id: "response-new",
+      item_id: "item-new",
+      delta: Buffer.from("new prefix").toString("base64"),
+    });
+    emit(late);
+    emit({
+      type: "response.output_audio.delta",
+      response_id: "response-new",
+      item_id: "item-new",
+      delta: Buffer.from("complete suffix").toString("base64"),
+    });
+    emit({
+      type: "response.output_audio_transcript.done",
+      response_id: "response-new",
+      item_id: "item-new",
+      transcript: "new complete answer",
+    });
+    expect(onAudio.mock.calls.map((call) => call[0])).toEqual([
+      Buffer.from("new prefix"),
+      Buffer.from("complete suffix"),
+    ]);
+    expect(onTranscript.mock.calls).toEqual([["assistant", "new complete answer", true]]);
+    expect(
+      onEvent.mock.calls.some(
+        (call) => call[0].type === late.type && call[0].itemId === "item-old",
+      ),
+    ).toBe(false);
+    bridge.close();
+  });
+
+  it.each(["response.done", "response.cancelled"])(
+    "late %s does not release a follow-up response's pending tool answer",
+    async (lateType) => {
+      const provider = buildOpenAIRealtimeVoiceProvider();
+      const bridge = provider.createBridge({
+        providerConfig: { apiKey: "sk-test" }, // pragma: allowlist secret
+        onAudio: vi.fn(),
+        onClearAudio: vi.fn(),
+      });
+      const connecting = bridge.connect();
+      const socket = FakeWebSocket.instances[0];
+      socket.readyState = FakeWebSocket.OPEN;
+      socket.emit("open");
+      const emit = (event: Record<string, unknown>) =>
+        socket.emit("message", Buffer.from(JSON.stringify(event)));
+      emit({ type: "session.updated" });
+      await connecting;
+      emit({ type: "response.created", response: { id: "response-old" } });
+      emit({ type: "response.done", response: { id: "response-old" } });
+      emit({ type: "response.created", response: { id: "response-new" } });
+      bridge.submitToolResult("call-new", { text: "complete answer" });
+      const createdBefore = parseSent(socket).filter(
+        (event) => event.type === "response.create",
+      ).length;
+      emit({ type: lateType, response: { id: "response-old" } });
+      expect(parseSent(socket).filter((event) => event.type === "response.create")).toHaveLength(
+        createdBefore,
+      );
+      emit({ type: "response.done", response: { id: "response-new" } });
+      expect(parseSent(socket).filter((event) => event.type === "response.create")).toHaveLength(
+        createdBefore + 1,
+      );
+      bridge.close();
+    },
+  );
+
   it("forwards current realtime output audio events", async () => {
     const provider = buildOpenAIRealtimeVoiceProvider();
     const onAudio = vi.fn();
