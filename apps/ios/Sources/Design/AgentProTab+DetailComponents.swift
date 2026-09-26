@@ -79,3 +79,68 @@ struct AgentToolsMetricTile: View {
         .background(Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
+
+/// Enlarged job content uses the full card width instead of a column between icon and status.
+struct AgentToolsCronJobRow<Actions: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let name: String
+    let detail: String
+    let schedule: String
+    let state: String
+    let enabled: Bool
+    let busy: Bool
+    @ViewBuilder let actions: () -> Actions
+
+    var body: some View {
+        Group {
+            if self.dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top) {
+                        self.icon
+                        Spacer(minLength: 8)
+                        self.status
+                    }
+                    self.content
+                }
+            } else {
+                HStack(alignment: .top, spacing: 12) {
+                    self.icon
+                    self.content
+                    Spacer(minLength: 8)
+                    self.status
+                }
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+    }
+
+    private var icon: some View {
+        ProIconBadge(systemName: self.enabled ? "clock.arrow.circlepath" : "pause.circle",
+                     color: self.enabled ? OpenClawBrand.accent : .secondary)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(self.name)
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(self.detail).font(.caption).foregroundStyle(.secondary)
+                .lineLimit(self.dynamicTypeSize.isAccessibilitySize ? nil : 2)
+            Text(self.schedule).font(.caption2).foregroundStyle(.secondary)
+                .lineLimit(self.dynamicTypeSize.isAccessibilitySize ? nil : 1)
+            self.actions()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private var status: some View {
+        if self.busy {
+            ProgressView().progressViewStyle(.circular).controlSize(.small)
+        } else {
+            Text(self.state).font(.caption2.weight(.semibold))
+                .foregroundStyle(self.enabled ? OpenClawBrand.accent : .secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}

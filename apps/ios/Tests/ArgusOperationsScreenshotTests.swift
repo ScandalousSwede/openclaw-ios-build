@@ -34,7 +34,8 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 .frame(width: 390, height: 1800)
                 let image = try self.hostedImage(root,
                     userInterfaceStyle: appearance == .dark ? .dark : .light,
-                    requiredText: ["Synthetic", "administrative", "follow-through", "Run now", "Enable"])
+                    requiredText: ["Run now", "Enable"],
+                    requiredWrappedValues: [job.name])
                 let attachment = XCTAttachment(image: image)
                 attachment.name = "argus-cron-controls-native-synthetic-\(appearance)-\(sizeName)"
                 attachment.lifetime = .keepAlways
@@ -189,7 +190,7 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                         for label in labels {
                             XCTAssertTrue(text.localizedCaseInsensitiveContains(label), "Complete metric label: \(label)")
                         }
-                        let unavailable = try NSRegularExpression(pattern: "(?i)\\bUnavailable\\b")
+                        let unavailable = try NSRegularExpression(pattern: "(?i)\\bUnavail(?:-\\s*|\\s*)able\\b")
                         let zeros = try NSRegularExpression(pattern: "\\b0\\b")
                         let range = NSRange(text.startIndex..<text.endIndex, in: text)
                         if reported {
@@ -1281,6 +1282,15 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
     // Preserve every non-whitespace character; a missing hyphen, suffix or different model still fails.
     private static func containsCompleteWrappedValue(_ text: String, value: String) -> Bool {
         text.filter { !$0.isWhitespace }.contains(value.filter { !$0.isWhitespace })
+    }
+
+    func testUnavailableOCRRequiresTheCompleteWrappedWord() throws {
+        let pattern = try NSRegularExpression(pattern: "(?i)\\bUnavail(?:-\\s*|\\s*)able\\b")
+        for (text, count) in [("Unavailable", 1), ("Unavail- able", 1), ("Unavail able", 1),
+                              ("Unavail", 0), ("Available", 0), ("UnavailableX", 0),
+                              ("Unavail- able Unavailable", 2)] {
+            XCTAssertEqual(pattern.numberOfMatches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)), count)
+        }
     }
 
     func testWrappedValueOCRRetainsCompleteModelAndDate() {

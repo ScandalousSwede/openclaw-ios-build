@@ -73,38 +73,11 @@ extension AgentProTab {
 
     func cronJobDetailRow(_ job: CronJob) -> some View {
         let busy = self.cronActionBusyIDs.contains(job.id)
-        return HStack(alignment: .top, spacing: 12) {
-            ProIconBadge(
-                systemName: job.enabled ? "clock.arrow.circlepath" : "pause.circle",
-                color: job.enabled ? OpenClawBrand.accent : .secondary)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(job.name)
-                    .font(.subheadline.weight(.semibold))
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(self.cronJobDetail(job))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Text(self.cronScheduleSummary(job))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        return AgentToolsCronJobRow(
+            name: job.name, detail: self.cronJobDetail(job), schedule: self.cronScheduleSummary(job),
+            state: self.cronJobState(job), enabled: job.enabled, busy: busy) {
                 self.cronJobActionButtons(job, busy: busy)
             }
-            Spacer(minLength: 8)
-            if busy {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .controlSize(.small)
-            } else {
-                Text(self.cronJobState(job))
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(job.enabled ? OpenClawBrand.accent : .secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 14)
     }
 
     func cronJobActionButtons(_ job: CronJob, busy: Bool) -> some View {
@@ -112,12 +85,14 @@ extension AgentProTab {
             self.pendingCronAction = CronActionConfirmation(job: job, kind: .run)
         } label: {
             Label("Run now", systemImage: "play.fill")
+                .fixedSize(horizontal: true, vertical: true)
                 .frame(minWidth: 44, minHeight: 44)
         }
         let scheduleButton = Button {
             self.pendingCronAction = CronActionConfirmation(job: job, kind: job.enabled ? .pause : .enable)
         } label: {
             Label(job.enabled ? "Pause" : "Enable", systemImage: job.enabled ? "pause.fill" : "checkmark")
+                .fixedSize(horizontal: true, vertical: true)
                 .frame(minWidth: 44, minHeight: 44)
         }
         return ViewThatFits(in: .horizontal) {
