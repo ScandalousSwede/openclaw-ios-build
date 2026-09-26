@@ -164,8 +164,9 @@ describe("talk realtime gateway relay", () => {
         },
       ],
     ]);
+    const broadcastToConnIds = vi.fn();
     const context = {
-      broadcastToConnIds: vi.fn(),
+      broadcastToConnIds,
       broadcast,
       nodeSendToSession,
       chatAbortControllers: new Map([
@@ -219,6 +220,7 @@ describe("talk realtime gateway relay", () => {
     return {
       abortController,
       broadcast,
+      broadcastToConnIds,
       nodeSendToSession,
       removeChatRun,
       agentDeltaSentAt,
@@ -1102,6 +1104,66 @@ describe("talk realtime gateway relay", () => {
     expect(bufferedAgentEvents.has("run-1:assistant")).toBe(false);
     expectChatAbortPayload(broadcast, "barge-in");
     expectNodeAbortPayload(nodeSendToSession);
+  });
+
+  it("ignores cancelled consult results while a follow-up remains deliverable", () => {
+    const submitToolResult = vi.fn();
+    const provider: RealtimeVoiceProviderPlugin = {
+      ...createIdleRelayProvider(),
+      createBridge: (request) => ({
+        ...createIdleRelayProvider().createBridge(request),
+        submitToolResult,
+      }),
+    };
+    const { abortController, broadcastToConnIds, session } =
+      createAbortableRelayRunFixture(provider);
+    const binding = { relaySessionId: session.relaySessionId, connId: "conn-1" };
+    cancelTalkRealtimeRelayTurn({ ...binding, reason: "barge-in" });
+    expect(abortController.signal.aborted).toBe(true);
+    broadcastToConnIds.mockClear();
+
+    // The asynchronous client consult can settle after cancellation. Its old
+    // call ID must not create output or a new turn, even before the follow-up.
+    submitTalkRealtimeRelayToolResult({
+      ...binding,
+      callId: "call-1",
+      result: { answer: "cancelled answer" },
+    });
+    expect(submitToolResult).not.toHaveBeenCalled();
+    expect(broadcastToConnIds).not.toHaveBeenCalled();
+
+    sendTalkRealtimeRelayAudio({
+      ...binding,
+      audioBase64: Buffer.from([1, 2]).toString("base64"),
+    });
+    registerTalkRealtimeRelayAgentRun({
+      ...binding,
+      sessionKey: "main",
+      runId: "run-2",
+      callId: "call-2",
+    });
+    broadcastToConnIds.mockClear();
+    submitTalkRealtimeRelayToolResult({
+      ...binding,
+      callId: "call-1",
+      result: { status: "working" },
+      options: { willContinue: true },
+    });
+    submitTalkRealtimeRelayToolResult({
+      ...binding,
+      callId: "call-2",
+      result: { answer: "complete follow-up suffix" },
+    });
+    expect(submitToolResult.mock.calls).toEqual([
+      ["call-2", { answer: "complete follow-up suffix" }, undefined],
+    ]);
+    const events = broadcastToConnIds.mock.calls.map((call) => call[1]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: "toolResult",
+      callId: "call-2",
+      talkEvent: { turnId: "turn-2", final: true },
+    });
   });
 
   it("clears linked agent consult runs after the final tool result", () => {

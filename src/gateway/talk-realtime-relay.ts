@@ -206,6 +206,11 @@ function abortRelayAgentRuns(session: RelaySession, reason: string): void {
     });
   }
   session.activeAgentRuns.clear();
+  // Client-side consult completion can arrive after abort. Retain the call IDs
+  // in the existing terminal fence before dropping their run associations.
+  for (const callId of session.activeAgentToolCalls.keys()) {
+    session.completedAgentToolCalls.add(callId);
+  }
   session.activeAgentToolCalls.clear();
 }
 
