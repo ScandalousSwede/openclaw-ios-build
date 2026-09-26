@@ -292,8 +292,15 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         let gray = stride(from: 0, to: rgba.count, by: 4).map {
             (Int(rgba[$0]) + Int(rgba[$0 + 1]) + Int(rgba[$0 + 2])) / 3
         }
-        let border = (0..<width).flatMap { [gray[$0], gray[(height - 1) * width + $0]] }
-            + (0..<height).flatMap { [gray[$0 * width], gray[$0 * width + width - 1]] }
+        var border: [Int] = []
+        for x in 0..<width {
+            border.append(gray[x])
+            border.append(gray[(height - 1) * width + x])
+        }
+        for y in 0..<height {
+            border.append(gray[y * width])
+            border.append(gray[y * width + width - 1])
+        }
         let background = border.sorted()[border.count / 2]
         var remaining = Set(gray.indices.filter { abs(gray[$0] - background) >= 80 })
         var masks: [GlyphMask] = []
