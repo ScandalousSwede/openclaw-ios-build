@@ -8,7 +8,7 @@ extension AgentProTab {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Agents")
-                        .font(.system(size: 28, weight: .bold))
+                        .font(.title.weight(.bold))
                     Text(self.appModel.gatewayAgentRosterSummaryText)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -92,7 +92,7 @@ extension AgentProTab {
                             self.agentRosterFilter = .all
                             self.agentSearchText = ""
                         })
-                        .frame(width: AgentLayout.filterHeight, height: AgentLayout.filterHeight)
+                        .frame(width: 44, height: 44)
                 }
             }
             .padding(.horizontal, OpenClawProMetric.pagePadding)
@@ -304,7 +304,7 @@ extension AgentProTab {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.subheadline.weight(.semibold))
-                .frame(width: AgentLayout.filterHeight, height: AgentLayout.filterHeight)
+                .frame(width: 44, height: 44)
                 .background {
                     Circle()
                         .fill(self.iconButtonFill)
@@ -313,6 +313,7 @@ extension AgentProTab {
                         }
                 }
         }
+        .contentShape(Rectangle())
         .buttonStyle(.plain)
         .accessibilityLabel(label)
     }

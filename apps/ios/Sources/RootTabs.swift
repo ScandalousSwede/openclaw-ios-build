@@ -412,15 +412,9 @@ struct RootTabs: View {
     private func rootPresentation(_ content: some View) -> some View {
         content
             .sheet(isPresented: self.$showAgentTools) {
-                AgentProTab()
-                    .safeAreaInset(edge: .top) {
-                        HStack {
-                            Spacer()
-                            Button("Close agent tools") { self.showAgentTools = false }
-                        }
-                        .padding()
-                    }
-                    .preferredColorScheme(self.appearancePreference.colorScheme)
+                AgentToolsSheet(appearance: self.appearancePreference) {
+                    self.showAgentTools = false
+                }
             }
             .gatewayActionsDialog(
                 isPresented: self.$showGatewayActions,
@@ -785,5 +779,30 @@ private struct RootCameraFlashOverlay: View {
                 self.task?.cancel()
                 self.task = nil
             }
+    }
+}
+
+/// Shared by the presented production sheet and native layout fixtures.
+struct AgentToolsSheet: View {
+    var appearance: AppAppearancePreference
+    var initialRoute: AgentProTab.AgentRoute? = nil
+    var close: () -> Void
+
+    var body: some View {
+        AgentProTab(initialRoute: self.initialRoute)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                Button(action: self.close) {
+                    Label("Close agent tools", systemImage: "xmark")
+                        .font(.body.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("agent-tools-close")
+                .padding(.horizontal, OpenClawProMetric.pagePadding)
+                .padding(.vertical, 8)
+                .background(.regularMaterial)
+            }
+            .preferredColorScheme(self.appearance.colorScheme)
     }
 }
