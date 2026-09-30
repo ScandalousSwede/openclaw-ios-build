@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import SwiftUI
 import Testing
 import UserNotifications
 @testable import OpenClaw
@@ -229,6 +230,86 @@ struct ArgusEvidenceNotificationTests {
         #expect(resolved.requested.eventId == original.reference.eventId)
         #expect(resolved.requested.artifacts[0].sha256 == original.reference.artifactSha256)
         #expect(!resolved.ownerAccepted)
+    }
+
+    @Test func `foreground return retries the exact notification and retains verified detail during a transient read failure`() throws {
+        let (detail, _) = Self.fixture()
+        let model = NodeAppModel()
+        let client = ArgusOperationsClient(session: model.operatorSession, gatewayID: Self.owner)
+        var state = ArgusEvidenceNotificationReadState()
+        state.publish(detail, using: client)
+
+        let before = ArgusEvidenceNotificationTaskID(
+            gatewayOwnerID: Self.owner, connected: true, routeAdmissionGeneration: 1,
+            scenePhase: .background, retry: 0)
+        let resumed = ArgusEvidenceNotificationTaskID(
+            gatewayOwnerID: Self.owner, connected: true, routeAdmissionGeneration: 1,
+            scenePhase: .active, retry: 0)
+        #expect(before != resumed)
+        state.fail(ArgusOperationsError.unavailable)
+        #expect(state.resolved?.requested.id == detail.requested.id)
+        #expect(state.resolved?.requested.eventId == detail.requested.eventId)
+        #expect(state.client != nil)
+        #expect(state.error != nil)
+        #expect(state.canRetryRetainedDetail)
+
+        state.publish(detail, using: client)
+        #expect(state.error == nil)
+        #expect(!state.canRetryRetainedDetail)
+        state.fail(ArgusOperationsError.invalidResponse)
+        #expect(state.resolved == nil && state.client == nil)
+        #expect(!state.canRetryRetainedDetail)
+    }
+
+    @Test func `replacement route retries exact evidence without accepting the old completion`() async throws {
+        let (detail, _) = Self.fixture()
+        let reference = try #require(ArgusEvidenceNotificationReference.parse(
+            actionIdentifier: UNNotificationDefaultActionIdentifier,
+            userInfo: self.payload(for: detail)))
+        let model = NodeAppModel()
+        let client = ArgusOperationsClient(session: model.operatorSession, gatewayID: Self.owner)
+        var state = ArgusEvidenceNotificationReadState()
+        var routeGeneration: UInt64 = 7
+        let before = ArgusEvidenceNotificationTaskID(
+            gatewayOwnerID: Self.owner, connected: true, routeAdmissionGeneration: routeGeneration,
+            scenePhase: .active, retry: 0)
+
+        var oldDetailReturned = false
+        do {
+            let stale = try await reference.resolve(
+                identity: { .init(deviceId: Self.gateway) },
+                detail: { _ in
+                    oldDetailReturned = true
+                    routeGeneration = 8 // A qualified route replaces the old one while connectivity remains true.
+                    return detail
+                },
+                stillCurrent: { routeGeneration == 7 })
+            state.publish(stale, using: client)
+            Issue.record("Retired-route evidence was published")
+        } catch ArgusOperationsError.unavailable {
+            // The old completion was rejected after its route retired.
+        } catch {
+            Issue.record("Retired-route read failed for an unrelated reason: \(error)")
+        }
+        #expect(oldDetailReturned)
+        #expect(state.resolved == nil)
+
+        let replacement = ArgusEvidenceNotificationTaskID(
+            gatewayOwnerID: Self.owner, connected: true, routeAdmissionGeneration: routeGeneration,
+            scenePhase: .active, retry: 0)
+        #expect(replacement.connected == before.connected)
+        #expect(replacement.gatewayOwnerID == before.gatewayOwnerID)
+        #expect(replacement != before)
+        let current = try await reference.resolve(
+            identity: { .init(deviceId: Self.gateway) },
+            detail: { parameters in
+                #expect(parameters == ["operation_id": detail.requested.id, "event_id": detail.requested.eventId])
+                return detail
+            },
+            stillCurrent: { routeGeneration == 8 })
+        state.publish(current, using: client)
+        #expect(state.resolved?.requested.id == reference.operationId)
+        #expect(state.resolved?.requested.eventId == reference.eventId)
     }
 
     @Test func `reopen does not rebind a previous notification after switching gateways`() async throws {
