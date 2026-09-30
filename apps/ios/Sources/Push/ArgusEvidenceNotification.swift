@@ -129,13 +129,52 @@ struct ArgusEvidenceResumeButton: View {
     }
 }
 
+struct ArgusEvidenceNotificationTaskID: Equatable {
+    let gatewayOwnerID: String?
+    let connected: Bool
+    let routeAdmissionGeneration: UInt64
+    let scenePhase: ScenePhase
+    let retry: Int
+}
+
+struct ArgusEvidenceNotificationReadState {
+    private(set) var resolved: ArgusOperationDetail?
+    private(set) var client: ArgusOperationsClient?
+    private(set) var error: String?
+    var canRetryRetainedDetail: Bool {
+        self.resolved != nil && self.client != nil && self.error != nil
+    }
+
+    mutating func publish(_ detail: ArgusOperationDetail, using client: ArgusOperationsClient) {
+        self.resolved = detail
+        self.client = client
+        self.error = nil
+    }
+
+    mutating func invalidate(_ message: String) {
+        self.resolved = nil
+        self.client = nil
+        self.error = message
+    }
+
+    mutating func fail(_ failure: Error) {
+        if let sourceError = failure as? ArgusOperationsError,
+           case .invalidResponse = sourceError {
+            self.invalidate("The exact evidence reference did not match this gateway.")
+        } else if self.resolved != nil && self.client != nil {
+            self.error = "Showing last verified evidence. Reconnect to check for updates."
+        } else {
+            self.error = "The exact evidence reference is unavailable. Retry after reconnecting."
+        }
+    }
+}
+
 struct ArgusEvidenceNotificationView: View {
     @Environment(NodeAppModel.self) private var appModel
+    @Environment(\.scenePhase) private var scenePhase
     let request: ArgusEvidenceNotificationRequest
     @State private var boundGatewayID: String?
-    @State private var resolved: ArgusOperationDetail?
-    @State private var client: ArgusOperationsClient?
-    @State private var error: String?
+    @State private var readState = ArgusEvidenceNotificationReadState()
     @State private var retry = 0
     @State private var generation = 0
 
@@ -146,22 +185,36 @@ struct ArgusEvidenceNotificationView: View {
 
     var body: some View {
         Group {
-            if let resolved, let client, self.boundGatewayID == self.appModel.chatOutboxGatewayOwnerID {
+            if let resolved = self.readState.resolved, let client = self.readState.client,
+               self.boundGatewayID == self.appModel.chatOutboxGatewayOwnerID {
                 ArgusOperationDetailView(
                     operation: resolved.requested,
                     client: client,
                     initialDetail: resolved,
                     initialArtifactSHA: self.request.reference.artifactSha256)
                     .safeAreaInset(edge: .top, spacing: 0) {
-                        if self.isAutomaticallyRecovering {
-                            ArgusEvidenceRecoveryNotice(retainsDetail: true)
-                                .padding()
+                        VStack(spacing: 0) {
+                            if self.isAutomaticallyRecovering {
+                                ArgusEvidenceRecoveryNotice(retainsDetail: true)
+                                    .padding()
+                            }
+                            if let warning = self.readState.error {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(warning).font(.subheadline)
+                                    if self.readState.canRetryRetainedDetail {
+                                        Button("Retry evidence check") { self.retry += 1 }
+                                            .disabled(!self.appModel.isOperatorGatewayConnected)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal)
+                            }
                         }
                     }
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Work evidence").font(.headline)
-                    if let error {
+                    if let error = self.readState.error {
                         Text(error)
                     } else if self.isAutomaticallyRecovering {
                         ArgusEvidenceRecoveryNotice(retainsDetail: false)
@@ -190,11 +243,13 @@ struct ArgusEvidenceNotificationView: View {
             }
         }
         .navigationTitle("Evidence")
-        .task(
-            id: """
-            \(self.appModel.chatOutboxGatewayOwnerID ?? "none")|\
-            \(self.appModel.isOperatorGatewayConnected)|\(self.retry)
-            """) {
+        .task(id: ArgusEvidenceNotificationTaskID(
+            gatewayOwnerID: self.appModel.chatOutboxGatewayOwnerID,
+            connected: self.appModel.isOperatorGatewayConnected,
+            routeAdmissionGeneration: self.appModel.operatorRouteAdmissionGeneration,
+            scenePhase: self.scenePhase,
+            retry: self.retry)) {
+                guard self.scenePhase == .active else { return }
                 await self.load()
         }
     }
@@ -209,21 +264,21 @@ struct ArgusEvidenceNotificationView: View {
             configuredOwner: self.appModel.activeGatewayConnectConfig?.effectiveStableID,
             currentOwner: self.appModel.chatOutboxGatewayOwnerID,
             boundOwner: self.boundGatewayID,
-            hasError: self.error != nil)
+            hasError: self.readState.resolved == nil && self.readState.error != nil)
     }
 
     private func load() async {
         self.generation += 1
         let generation = self.generation
+        guard !Task.isCancelled, self.appModel.argusEvidenceNotificationRequest == self.request else { return }
         guard !self.appModel.isAppleReviewDemoModeEnabled else {
-            self.error = "Notification evidence is unavailable in demo mode."
+            self.readState.invalidate("Notification evidence is unavailable in demo mode.")
             return
         }
         guard let gatewayID = self.appModel.chatOutboxGatewayOwnerID else { return }
         if let boundGatewayID, boundGatewayID != gatewayID {
-            self.resolved = nil
-            self.client = nil
-            self.error = "The paired gateway changed. This notification cannot open evidence from another gateway."
+            self.readState.invalidate(
+                "The paired gateway changed. This notification cannot open evidence from another gateway.")
             return
         }
         self.boundGatewayID = gatewayID
@@ -254,17 +309,10 @@ struct ArgusEvidenceNotificationView: View {
             guard await session.isCurrentRoute(route), !Task.isCancelled, self.generation == generation,
                   self.appModel.argusEvidenceNotificationRequest == self.request,
                   self.appModel.chatOutboxGatewayOwnerID == gatewayID else { return }
-            self.resolved = response
-            self.client = client
-            self.error = nil
+            self.readState.publish(response, using: client)
         } catch {
             guard !Task.isCancelled, self.generation == generation else { return }
-            self.resolved = nil
-            self.client = nil
-            self.error = """
-            The exact evidence reference is unavailable or did not match this gateway. \
-            Retry after reconnecting.
-            """
+            self.readState.fail(error)
         }
     }
 }
