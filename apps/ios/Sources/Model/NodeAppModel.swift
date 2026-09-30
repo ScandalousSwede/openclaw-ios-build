@@ -326,6 +326,7 @@ final class NodeAppModel {
     var isOperatorGatewayConnected: Bool {
         self.operatorConnected
     }
+    private(set) var operatorRouteAdmissionGeneration: UInt64 = 0
 
     var mobileSetupComplete: Bool {
         if self.isAppleReviewDemoModeEnabled {
@@ -4023,6 +4024,7 @@ extension NodeAppModel {
                                       !self.isAppleReviewDemoModeEnabled
                                 else { return false }
                                 self.setOperatorConnected(true)
+                                self.operatorRouteAdmissionGeneration = admittedRoute.diagnosticRouteGeneration
                                 self.clearOperatorGatewayConnectionProblemIfCurrent()
                                 self.forceOperatorTalkPermissionUpgradeRequest = false
                                 self.talkMode.updateGatewayConnected(true)
