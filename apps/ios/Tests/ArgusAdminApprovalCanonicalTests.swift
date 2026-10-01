@@ -22,13 +22,16 @@ struct ArgusAdminApprovalCanonicalTests {
             scriptPath: "scripts/windows/elevated/pc3-nic-config.ps1",
             gitCommit: String(repeating: "a", count: 40),
             scriptSHA256: scriptHash,
+            previousScriptSHA256: "FIRST_VERSION",
             argsSHA256: ArgusAdminApprovalCanonical.sha256(args),
             nonce: String(repeating: "0", count: 32),
             expiresAt: "2026-09-26T22:00:00Z",
             brokerID: "0123456789abcdef"))
         #expect(statement.last == 10)
+        #expect(String(data: statement, encoding: .utf8)?.contains(
+            "\nprevious_script_sha256:FIRST_VERSION\n") == true)
         #expect(ArgusAdminApprovalCanonical.sha256(statement)
-            == "b0012171958597ac076af9a5facd5a5da66ad63bf139ea16c00a8ddbb8b8768e")
+            == "c67d572554b6b2c457468edd0b99221afe4ede05e3af47f10286092cc91d2d34")
     }
 
     @Test func invalidOrAmbiguousInputsRefuseToFormat() throws {
@@ -47,6 +50,7 @@ struct ArgusAdminApprovalCanonicalTests {
             scriptPath: "scripts/windows/elevated/pc3-nic-config.ps1",
             gitCommit: String(repeating: "a", count: 40),
             scriptSHA256: String(repeating: "b", count: 64),
+            previousScriptSHA256: "FIRST_VERSION",
             argsSHA256: String(repeating: "c", count: 64),
             nonce: String(repeating: "0", count: 32),
             expiresAt: "2026-09-26T22:00:00Z",
@@ -56,9 +60,28 @@ struct ArgusAdminApprovalCanonicalTests {
                 requestID: valid.requestID, decision: valid.decision,
                 scriptPath: "scripts/windows/elevated/pc3-nic-config.ps1\napprove",
                 gitCommit: valid.gitCommit, scriptSHA256: valid.scriptSHA256,
+                previousScriptSHA256: valid.previousScriptSHA256,
                 argsSHA256: valid.argsSHA256, nonce: valid.nonce,
                 expiresAt: valid.expiresAt, brokerID: valid.brokerID))
         }
+        #expect(throws: ArgusAdminApprovalCanonical.FormatError.self) {
+            try ArgusAdminApprovalCanonical.statement(.init(
+                requestID: valid.requestID, decision: valid.decision,
+                scriptPath: valid.scriptPath, gitCommit: valid.gitCommit,
+                scriptSHA256: valid.scriptSHA256, previousScriptSHA256: "FIRST_VERSION\nargs_sha256:bad",
+                argsSHA256: valid.argsSHA256, nonce: valid.nonce,
+                expiresAt: valid.expiresAt, brokerID: valid.brokerID))
+        }
+        let withPrevious = try ArgusAdminApprovalCanonical.statement(.init(
+            requestID: valid.requestID, decision: valid.decision,
+            scriptPath: valid.scriptPath, gitCommit: valid.gitCommit,
+            scriptSHA256: valid.scriptSHA256,
+            previousScriptSHA256: String(repeating: "d", count: 64),
+            argsSHA256: valid.argsSHA256, nonce: valid.nonce,
+            expiresAt: valid.expiresAt, brokerID: valid.brokerID))
+        #expect(String(data: withPrevious, encoding: .utf8)?.contains(
+            "\nprevious_script_sha256:\(String(repeating: "d", count: 64))\n") == true)
+        #expect(try ArgusAdminApprovalCanonical.statement(valid) != withPrevious)
     }
 
     @Test func onlyExactDisplayablePendingBytesCanBeReviewed() throws {
