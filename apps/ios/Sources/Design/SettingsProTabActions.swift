@@ -602,6 +602,7 @@ extension SettingsProTab {
         case .gateway: "Gateway"
         case .approvals: "Gateway approvals"
         case .adminApprovals: "Admin approvals"
+        case .routinesAndPermissions: "Routines & permissions"
         case .permissions: "Permissions"
         case .voice: "Voice & Talk"
         case .diagnostics: "Diagnostics"

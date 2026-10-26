@@ -5,6 +5,7 @@ enum SettingsRoute: Hashable {
     case gateway
     case approvals
     case adminApprovals
+    case routinesAndPermissions
     case permissions
     case voice
     case diagnostics

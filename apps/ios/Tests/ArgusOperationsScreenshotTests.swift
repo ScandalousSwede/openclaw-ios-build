@@ -1407,6 +1407,36 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         self.add(attachment)
     }
 
+    @MainActor
+    func testMorningRoutinePermissionStateReflowsWithoutInventingAuthority() throws {
+        let presentation = ArgusRoutinePermissionPresentation.morningBriefing
+        XCTAssertEqual(presentation.status, "Not yet authorized · illustrative")
+        XCTAssertEqual(presentation.selectedOption, "Always allow this routine")
+        XCTAssertEqual(presentation.fields.count, 6)
+        XCTAssertTrue(presentation.fields.allSatisfy { $0.value == "Not loaded" })
+
+        for (name, size) in [("standard", DynamicTypeSize.large), ("accessibility", .accessibility3)] {
+            let root = VStack(alignment: .leading, spacing: 12) {
+                Text("SIMULATOR FIXTURE — NOT LIVE EVIDENCE").font(.caption.bold())
+                ArgusRoutinePermissionView(presentation: presentation)
+            }
+            .padding(.vertical)
+            .background { OpenClawProBackground() }
+            .environment(\.dynamicTypeSize, size)
+            .environment(\.colorScheme, .dark)
+            .frame(width: 390)
+            .fixedSize(horizontal: false, vertical: true)
+            let image = try self.hostedImage(root, requiredText: [
+                "Not yet authorized", "Always allow this routine", "Schedule and timezone",
+                "Not loaded", "Authorize this routine", "Quiet hours",
+            ], forbiddenText: ["Standing · Active", "Last delivery verified"])
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "argus-morning-routine-permission-synthetic-\(name)"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+        }
+    }
+
     /// ImageRenderer replaces UIKit-backed menu controls with placeholders. Keep the
     /// production control and capture its real hosted view hierarchy instead.
     @MainActor

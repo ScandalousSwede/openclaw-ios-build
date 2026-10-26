@@ -155,6 +155,12 @@ extension SettingsProTab {
                 detail: "Read pending elevated requests",
                 route: .adminApprovals)
             self.settingsListRow(
+                icon: "sun.horizon",
+                title: "Routines & permissions",
+                detail: "Morning briefing · Not yet authorized",
+                route: .routinesAndPermissions,
+                color: OpenClawBrand.warn)
+            self.settingsListRow(
                 icon: "person.2",
                 title: "Permissions",
                 detail: self.permissionsDetail,
@@ -202,10 +208,11 @@ extension SettingsProTab {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.subheadline.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(detail)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
                 if let badgeValue {
@@ -234,6 +241,8 @@ extension SettingsProTab {
                         self.approvalsDestination
                     case .adminApprovals:
                         ArgusAdminApprovalReadView()
+                    case .routinesAndPermissions:
+                        ArgusRoutinePermissionView()
                     case .permissions:
                         self.permissionsDestination
                     case .voice:
