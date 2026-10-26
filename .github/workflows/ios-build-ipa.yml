@@ -613,6 +613,11 @@ jobs:
           swift package --package-path "${shared_package}" resolve
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
             --repo-root "${AIES_BUILD_ROOT}" \
+            materialize-scoped-resolved \
+            --scope openclawkit \
+            --resolved "${shared_package}/Package.resolved"
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${AIES_BUILD_ROOT}" \
             validate-scoped-resolved \
             --scope openclawkit \
             --resolved "${shared_package}/Package.resolved" \
@@ -1273,6 +1278,11 @@ jobs:
           git -C "${shared_root}" checkout --quiet --detach "${GITHUB_SHA}"
           shared_package="${shared_root}/apps/shared/OpenClawKit"
           swift package --package-path "${shared_package}" resolve
+          python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
+            --repo-root "${AIES_BUILD_ROOT}" \
+            materialize-scoped-resolved \
+            --scope openclawkit \
+            --resolved "${shared_package}/Package.resolved"
           python3 "${AIES_BUILD_ROOT}/apps/ios/Tools/aies_package_authority.py" \
             --repo-root "${AIES_BUILD_ROOT}" \
             validate-scoped-resolved \
@@ -2474,6 +2484,9 @@ jobs:
           package="${GITHUB_WORKSPACE}/apps/shared/OpenClawKit"
           swift package --package-path "${package}" resolve
           python3 apps/ios/Tools/aies_package_authority.py \
+            --repo-root "${GITHUB_WORKSPACE}" materialize-scoped-resolved \
+            --scope openclawkit --resolved "${package}/Package.resolved"
+          python3 apps/ios/Tools/aies_package_authority.py \
             --repo-root "${GITHUB_WORKSPACE}" validate-scoped-resolved \
             --scope openclawkit --resolved "${package}/Package.resolved" \
             --output "${RUNNER_TEMP}/diagnostic-recorder-probe/package-resolution.json"
@@ -2482,6 +2495,9 @@ jobs:
           set -euo pipefail
           probe="${GITHUB_WORKSPACE}/apps/ios/Tools/DiagnosticRecorderProbe"
           swift package --package-path "${probe}" resolve
+          python3 apps/ios/Tools/aies_package_authority.py \
+            --repo-root "${GITHUB_WORKSPACE}" materialize-scoped-resolved \
+            --scope openclawkit --resolved "${probe}/Package.resolved"
           python3 apps/ios/Tools/aies_package_authority.py \
             --repo-root "${GITHUB_WORKSPACE}" validate-scoped-resolved \
             --scope openclawkit --resolved "${probe}/Package.resolved" \

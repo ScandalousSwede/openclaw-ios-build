@@ -666,6 +666,65 @@ class AIESPackageAuthorityTests(unittest.TestCase):
                 ],
             )
 
+    def test_materialize_openclawkit_scope_restores_authorized_transitive_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            payload = authority.concrete_payload(self.repo_root, self.manifest)
+            payload["pins"] = [
+                pin
+                for pin in payload["pins"]
+                if pin["identity"] in authority.SCOPED_PIN_IDENTITIES["openclawkit"]
+            ]
+            drifted = next(
+                pin
+                for pin in payload["pins"]
+                if pin["identity"] == "swift-concurrency-extras"
+            )
+            drifted["state"] = {
+                "revision": "8a4260f7373493435bd21194585c95b72bfdd401",
+                "version": "1.4.3",
+            }
+            resolved = root / "Package.resolved"
+            resolved.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+            report = authority.materialize_scoped_resolved(
+                self.manifest, resolved, "openclawkit"
+            )
+
+            self.assertEqual(report["status"], "valid")
+            self.assertEqual(report["pinCount"], 5)
+            restored = next(
+                pin
+                for pin in report["pins"]
+                if pin["identity"] == "swift-concurrency-extras"
+            )
+            self.assertEqual(restored["version"], "1.4.1")
+            self.assertEqual(
+                restored["revision"], "5fa253428866f2360c3754e88537f700ed2656b5"
+            )
+            self.assertEqual(report["originHash"], payload["originHash"])
+
+    def test_materialize_openclawkit_scope_refuses_identity_drift_without_write(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            payload = authority.concrete_payload(self.repo_root, self.manifest)
+            payload["pins"] = [
+                pin
+                for pin in payload["pins"]
+                if pin["identity"] in authority.SCOPED_PIN_IDENTITIES["openclawkit"]
+                and pin["identity"] != "textual"
+            ]
+            resolved = root / "Package.resolved"
+            resolved.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            original = resolved.read_bytes()
+
+            with self.assertRaisesRegex(authority.AuthorityError, "missing=.*textual"):
+                authority.materialize_scoped_resolved(
+                    self.manifest, resolved, "openclawkit"
+                )
+
+            self.assertEqual(resolved.read_bytes(), original)
+
     def test_openclawkit_scoped_graph_rejects_extra_aggregate_pin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

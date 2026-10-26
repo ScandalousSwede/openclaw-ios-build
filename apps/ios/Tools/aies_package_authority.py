@@ -22,6 +22,15 @@ SCHEMA = "aies.ios.aggregate-package-authority.v2"
 DEFAULT_MANIFEST = "apps/ios/PackageAuthority/aggregate-package-graph.json"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
+SCOPED_PIN_IDENTITIES = {
+    "openclawkit": {
+        "elevenlabskit",
+        "grdb.swift",
+        "swift-concurrency-extras",
+        "swiftui-math",
+        "textual",
+    }
+}
 SEMANTIC_VERSION = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -628,24 +637,22 @@ def compare_semantic_pins(
     )
 
 
-def concrete_payload(root: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]:
-    def resolved_state(pin: dict[str, Any]) -> dict[str, Any]:
-        state = {"revision": pin["revision"]}
-        if pin["version"] is not None:
-            state["version"] = pin["version"]
-        return state
+def resolved_pin_from_manifest(pin: dict[str, Any]) -> dict[str, Any]:
+    state = {"revision": pin["revision"]}
+    if pin["version"] is not None:
+        state["version"] = pin["version"]
+    return {
+        "identity": pin["identity"],
+        "kind": pin["kind"],
+        "location": pin["location"],
+        "state": state,
+    }
 
+
+def concrete_payload(root: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "originHash": compute_origin_hash(root, manifest),
-        "pins": [
-            {
-                "identity": pin["identity"],
-                "kind": pin["kind"],
-                "location": pin["location"],
-                "state": resolved_state(pin),
-            }
-            for pin in manifest["pins"]
-        ],
+        "pins": [resolved_pin_from_manifest(pin) for pin in manifest["pins"]],
         "version": manifest["resolvedFileSchemaVersion"],
     }
 
@@ -727,16 +734,7 @@ def validate_concrete(
 def validate_scoped_resolved(
     manifest: dict[str, Any], resolved_path: pathlib.Path, scope: str
 ) -> dict[str, Any]:
-    scopes = {
-        "openclawkit": {
-            "elevenlabskit",
-            "grdb.swift",
-            "swift-concurrency-extras",
-            "swiftui-math",
-            "textual",
-        }
-    }
-    if scope not in scopes:
+    if scope not in SCOPED_PIN_IDENTITIES:
         raise AuthorityError(f"unsupported resolved graph scope: {scope!r}")
     payload = load_json(resolved_path)
     _require_exact_keys(payload, {"originHash", "pins", "version"}, f"{scope} resolved file")
@@ -749,7 +747,7 @@ def validate_scoped_resolved(
     expected = [
         pin
         for pin in semantic_pins_from_manifest(manifest)
-        if pin["identity"] in scopes[scope]
+        if pin["identity"] in SCOPED_PIN_IDENTITIES[scope]
     ]
     compare_semantic_pins(observed, expected, scope)
     semantic = {
@@ -768,6 +766,59 @@ def validate_scoped_resolved(
         "pinCount": len(observed),
         "pins": observed,
     }
+
+
+def materialize_scoped_resolved(
+    manifest: dict[str, Any], resolved_path: pathlib.Path, scope: str
+) -> dict[str, Any]:
+    if scope not in SCOPED_PIN_IDENTITIES:
+        raise AuthorityError(f"unsupported resolved graph scope: {scope!r}")
+    payload = load_json(resolved_path)
+    _require_exact_keys(
+        payload, {"originHash", "pins", "version"}, f"{scope} resolved file"
+    )
+    if payload["version"] != manifest["resolvedFileSchemaVersion"]:
+        raise AuthorityError(f"unsupported resolved-file schema version: {payload['version']!r}")
+    origin_hash = payload["originHash"]
+    if not isinstance(origin_hash, str) or HEX64.fullmatch(origin_hash) is None:
+        raise AuthorityError(f"{scope} resolved file lacks a valid originHash")
+
+    observed = semantic_pins_from_resolved(payload, scope)
+    observed_identities = {pin["identity"] for pin in observed}
+    expected_pins = [
+        pin
+        for pin in manifest["pins"]
+        if pin["identity"] in SCOPED_PIN_IDENTITIES[scope]
+    ]
+    expected_identities = {pin["identity"] for pin in expected_pins}
+    if observed_identities != expected_identities:
+        raise AuthorityError(
+            f"{scope} graph identities differ from semantic authority: "
+            f"missing={sorted(expected_identities - observed_identities)}, "
+            f"extra={sorted(observed_identities - expected_identities)}"
+        )
+
+    materialized = {
+        "originHash": origin_hash,
+        "pins": [resolved_pin_from_manifest(pin) for pin in expected_pins],
+        "version": payload["version"],
+    }
+    encoded = json.dumps(materialized, indent=2) + "\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="\n",
+        dir=resolved_path.parent,
+        prefix=".Package.resolved.",
+        delete=False,
+    ) as temporary:
+        temporary.write(encoded)
+        temporary_path = pathlib.Path(temporary.name)
+    try:
+        os.replace(temporary_path, resolved_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return validate_scoped_resolved(manifest, resolved_path, scope)
 
 
 def validate_workspace_state(
@@ -1018,6 +1069,9 @@ def parser() -> argparse.ArgumentParser:
     scoped.add_argument("--scope", required=True, choices=["openclawkit"])
     scoped.add_argument("--resolved", required=True)
     scoped.add_argument("--output")
+    scoped_materialize = subparsers.add_parser("materialize-scoped-resolved")
+    scoped_materialize.add_argument("--scope", required=True, choices=["openclawkit"])
+    scoped_materialize.add_argument("--resolved", required=True)
     return result
 
 
@@ -1110,6 +1164,11 @@ def main(argv: list[str] | None = None) -> int:
                 manifest, pathlib.Path(args.resolved).resolve(), args.scope
             )
             write_report(report, args.output)
+        elif args.command == "materialize-scoped-resolved":
+            report = materialize_scoped_resolved(
+                manifest, pathlib.Path(args.resolved).resolve(), args.scope
+            )
+            write_report(report, None)
         else:  # pragma: no cover - argparse enforces the command set.
             raise AuthorityError(f"unsupported command: {args.command}")
     except (AuthorityError, OSError, subprocess.CalledProcessError) as error:
