@@ -1484,7 +1484,9 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 2
+        // drawHierarchy uses the render server's texture path. Keep tall enlarged-text
+        // fixtures below its 4096-pixel edge so the complete hierarchy is not returned blank.
+        format.scale = host.view.bounds.height * 2 > 4096 ? 1 : 2
         var rendered = false
         let image = UIGraphicsImageRenderer(bounds: host.view.bounds, format: format).image { _ in
             rendered = host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
