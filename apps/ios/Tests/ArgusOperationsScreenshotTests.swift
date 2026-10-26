@@ -1484,14 +1484,21 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
-        // drawHierarchy uses the render server's texture path. Keep tall enlarged-text
-        // fixtures below its 4096-pixel edge so the complete hierarchy is not returned blank.
-        format.scale = host.view.bounds.height * 2 > 4096 ? 1 : 2
+        format.scale = 2
+        // drawHierarchy uses the render server's texture path. Render tall enlarged-text
+        // fixtures locally at full OCR resolution instead of asking that server for a
+        // bitmap whose long edge exceeds 4096 pixels.
+        let requiresLayerRenderer = host.view.bounds.height * format.scale > 4096
         var renderedHierarchy = false
         var renderedLayerFallback = false
         let image = UIGraphicsImageRenderer(bounds: host.view.bounds, format: format).image { context in
-            renderedHierarchy = host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
-            if !renderedHierarchy {
+            if requiresLayerRenderer {
+                host.view.layer.render(in: context.cgContext)
+                renderedLayerFallback = true
+            } else {
+                renderedHierarchy = host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            if !requiresLayerRenderer && !renderedHierarchy {
                 // The simulator render server can reject very tall accessibility fixtures.
                 // CALayer rendering stays local and the OCR assertions below still require
                 // every user-visible field before this capture can pass.
