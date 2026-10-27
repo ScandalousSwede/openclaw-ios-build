@@ -1510,10 +1510,11 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
             renderedHierarchy || renderedLayerFallback,
             "The complete UIKit hierarchy must render")
         let cgImage = try XCTUnwrap(image.cgImage)
+        let customWords = selectedProject.map { [$0] } ?? artifactNames
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["en-US"]
-        request.customWords = selectedProject.map { [$0] } ?? artifactNames
+        request.customWords = customWords
         try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
         let words = (request.results ?? []).compactMap { observation -> (String, CGRect)? in
             guard let text = observation.topCandidates(1).first?.string else { return nil }
@@ -1536,7 +1537,35 @@ final class ArgusOperationsScreenshotTests: XCTestCase {
                 words.contains { Self.containsProjectLabel($0.0, project: name) },
                 "Each corresponding artifact filename must render: \(name)")
         }
-        let renderedText = words.map(\.0).joined(separator: " ")
+        var renderedText = words.map(\.0).joined(separator: " ")
+        if cgImage.height > 4096 {
+            // Vision can omit low-contrast text when it scales one extreme-aspect image.
+            // Re-read bounded overlapping tiles for content assertions while retaining the
+            // full-image observations above for assertions that depend on spatial position.
+            let tileHeight = 2048
+            let tileOverlap = 160
+            var tileOriginY = 0
+            while tileOriginY < cgImage.height {
+                let remainingHeight = cgImage.height - tileOriginY
+                let currentHeight = min(tileHeight, remainingHeight)
+                let crop = CGRect(
+                    x: 0, y: CGFloat(tileOriginY),
+                    width: CGFloat(cgImage.width), height: CGFloat(currentHeight))
+                if let tile = cgImage.cropping(to: crop) {
+                    let tileRequest = VNRecognizeTextRequest()
+                    tileRequest.recognitionLevel = .accurate
+                    tileRequest.recognitionLanguages = ["en-US"]
+                    tileRequest.customWords = customWords
+                    try VNImageRequestHandler(cgImage: tile, options: [:]).perform([tileRequest])
+                    let tileText = (tileRequest.results ?? []).compactMap {
+                        $0.topCandidates(1).first?.string
+                    }.joined(separator: " ")
+                    renderedText += " " + tileText
+                }
+                if currentHeight == remainingHeight { break }
+                tileOriginY += tileHeight - tileOverlap
+            }
+        }
         for phrase in requiredText {
             XCTAssertTrue(
                 renderedText.localizedCaseInsensitiveContains(phrase),
