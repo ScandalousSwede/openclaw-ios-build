@@ -296,14 +296,13 @@ final class RealtimeTalkRelaySession {
     }
 
     private func handleGatewayEvent(_ event: EventFrame) async {
-        guard event.event == "talk.event",
-              let payload = event.payload?.dictionaryValue
+        // Retirement clears the binding. A nil ID must refuse late events, not disable filtering.
+        guard !self.isClosed,
+              let relaySessionId = self.relaySessionId,
+              event.event == "talk.event",
+              let payload = event.payload?.dictionaryValue,
+              payload["relaySessionId"]?.stringValue == relaySessionId
         else { return }
-        if let relaySessionId,
-           payload["relaySessionId"]?.stringValue != relaySessionId
-        {
-            return
-        }
         guard let type = payload["type"]?.stringValue else { return }
         switch type {
         case "ready":
@@ -804,6 +803,19 @@ final class RealtimeTalkRelaySession {
 }
 
 extension RealtimeTalkRelaySession {
+    // Exercise the production event and retirement paths without opening a microphone or gateway.
+    func _test_bindRelaySession(_ id: String) {
+        self.relaySessionId = id
+    }
+
+    func _test_retireRelaySession() {
+        self.close(sendClose: false)
+    }
+
+    func _test_handleGatewayEvent(_ event: EventFrame) async {
+        await self.handleGatewayEvent(event)
+    }
+
     func _test_markOutputAudioStarted(nowMs: Double) {
         self.markOutputAudioStarted(byteCount: 4800, nowMs: nowMs)
     }
