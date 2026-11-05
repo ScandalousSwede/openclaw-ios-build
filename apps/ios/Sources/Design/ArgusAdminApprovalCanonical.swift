@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-// Pure, offline formatting for the broker's ARGUS-APPROVAL-V1 statement.
+// Pure, offline formatting for the broker's ARGUS-APPROVAL-V2 statement.
 // No call site should sign until the broker has proved trusted script provenance.
 enum ArgusAdminApprovalCanonical {
     enum Value: Equatable, Sendable {
@@ -23,6 +23,7 @@ enum ArgusAdminApprovalCanonical {
         let scriptPath: String
         let gitCommit: String
         let scriptSHA256: String
+        let previousScriptSHA256: String
         let argsSHA256: String
         let nonce: String
         let expiresAt: String
@@ -83,6 +84,8 @@ enum ArgusAdminApprovalCanonical {
               matches(input.scriptPath, "^scripts/windows/elevated/[A-Za-z0-9][A-Za-z0-9._-]*[.]ps1$"),
               matches(input.gitCommit, "^[0-9a-f]{40}$"),
               matches(input.scriptSHA256, "^[0-9a-f]{64}$"),
+              (input.previousScriptSHA256 == "FIRST_VERSION" ||
+                  matches(input.previousScriptSHA256, "^[0-9a-f]{64}$")),
               matches(input.argsSHA256, "^[0-9a-f]{64}$"),
               matches(input.nonce, "^[0-9a-f]{32}$"),
               matches(input.expiresAt, "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"),
@@ -90,12 +93,13 @@ enum ArgusAdminApprovalCanonical {
             throw FormatError.invalidStatement
         }
         let lines = [
-            "ARGUS-APPROVAL-V1",
+            "ARGUS-APPROVAL-V2",
             "request_id:\(input.requestID)",
             "decision:\(input.decision)",
             "script_path:\(input.scriptPath)",
             "git_commit:\(input.gitCommit)",
             "script_sha256:\(input.scriptSHA256)",
+            "previous_script_sha256:\(input.previousScriptSHA256)",
             "args_sha256:\(input.argsSHA256)",
             "nonce:\(input.nonce)",
             "expires_at:\(input.expiresAt)",
