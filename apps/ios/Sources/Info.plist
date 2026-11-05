@@ -60,6 +60,8 @@
 	<string>OpenClaw can capture photos or short video clips when requested via the gateway.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>OpenClaw uses your contacts so you can search and reference people while using the assistant.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Argus uses Face ID to protect the device key for admin approvals.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>OpenClaw discovers and connects to your OpenClaw gateway on the local network.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>

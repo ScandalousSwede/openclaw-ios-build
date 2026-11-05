@@ -9,7 +9,7 @@
   "sourceDeclarations": [
     {
       "path": "apps/ios/project.yml",
-      "sha256": "1790fbbfd5545b01e0277094a8199e11f1912548dca746f50198776d008ee777"
+      "sha256": "8f84c5fa550ce7be6164c8b266936494100fbad1f2afc3e385b34ef025289920"
     },
     {
       "path": "apps/shared/OpenClawKit/Package.swift",
