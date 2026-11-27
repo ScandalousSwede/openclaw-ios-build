@@ -8,7 +8,7 @@
     "@copilotkit/aimock": "1.27.3",
     "@modelcontextprotocol/sdk": "1.29.0",
     "playwright-core": "1.60.0",
-    "yaml": "2.9.0",
+    "yaml": "2.9.1",
     "zod": "4.4.3"
   },
   "devDependencies": {
